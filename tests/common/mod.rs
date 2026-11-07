@@ -1,5 +1,4 @@
-//! Hermetic harness: every `dot` and `git` invocation runs inside a temp root
-//! with its own HOME and XDG dirs, and the process environment is never mutated.
+//! Hermetic harness: per-command environment only, never `set_var`.
 #![allow(dead_code)]
 // reason: test-only helpers; clippy.toml exempts expect only inside #[test] fns, not shared helpers.
 #![allow(clippy::expect_used)]
@@ -15,7 +14,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use xxhash_rust::xxh3::xxh3_128;
 
-/// Kind of a filesystem entry recorded by [`tree_checksum`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
     File,
@@ -23,7 +21,6 @@ pub enum Kind {
     Symlink,
 }
 
-/// One entry of a [`tree_checksum`] map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub kind: Kind,
@@ -31,11 +28,9 @@ pub struct Entry {
     pub mode: u32,
     /// xxh3-128 of the file bytes as 32 hex chars (files only).
     pub hash: Option<String>,
-    /// Link target (symlinks only).
     pub target: Option<PathBuf>,
 }
 
-/// An isolated device: HOME, XDG dirs and a bare remote under one temp root.
 pub struct TestEnv {
     root: Arc<TempDir>,
     /// Owner of `remote.git`; differs from `root` on a second device.
@@ -44,7 +39,6 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    /// Create a fresh root with HOME, XDG dirs, `.gitconfig` and a bare `remote.git`.
     pub fn new() -> Self {
         let root = Arc::new(TempDir::new().expect("create temp root"));
         let env = Self {
@@ -65,7 +59,6 @@ impl TestEnv {
         env
     }
 
-    /// A new device with its own HOME and XDG dirs that shares this `remote.git`.
     pub fn second_device(&self) -> Self {
         let env = Self {
             root: Arc::new(TempDir::new().expect("create temp root")),
@@ -92,37 +85,31 @@ impl TestEnv {
         .expect("write .gitconfig");
     }
 
-    /// Temp root directory.
     pub fn root(&self) -> &Path {
         self.root.path()
     }
 
-    /// Device HOME.
     pub fn home(&self) -> PathBuf {
         self.root().join("home")
     }
 
-    /// `XDG_CONFIG_HOME`.
     pub fn xdg_config(&self) -> PathBuf {
         self.root().join("xdg/config")
     }
 
-    /// `XDG_STATE_HOME`.
     pub fn xdg_state(&self) -> PathBuf {
         self.root().join("xdg/state")
     }
 
-    /// `XDG_DATA_HOME`.
     pub fn xdg_data(&self) -> PathBuf {
         self.root().join("xdg/data")
     }
 
-    /// Path of the shared bare remote.
     pub fn remote_path(&self) -> PathBuf {
         self.remote_owner.path().join("remote.git")
     }
 
-    /// Put `dir` in front of PATH for later `dot()` and `git()` calls (stub binaries).
+    /// Put `dir` in front of PATH (for stub binaries).
     pub fn prepend_path(&mut self, dir: impl Into<PathBuf>) {
         self.path_prepend.insert(0, dir.into());
     }
@@ -150,7 +137,6 @@ impl TestEnv {
         vars
     }
 
-    /// The `dot` binary with this device's environment, running in HOME.
     pub fn dot(&self) -> Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("dot");
         cmd.env_clear();
@@ -171,7 +157,6 @@ impl TestEnv {
         cmd
     }
 
-    /// Run `git` with this device's environment in HOME; returns stdout, panics on failure.
     pub fn git(&self, args: &[&str]) -> String {
         let out = self.git_command().args(args).output().expect("run git");
         assert!(
@@ -201,7 +186,6 @@ impl TestEnv {
         unix_symlink(target, full).expect("create symlink");
     }
 
-    /// Output of `git ls-remote` against the shared remote.
     pub fn remote_refs(&self) -> String {
         self.git(&["ls-remote", &self.remote_path().to_string_lossy()])
     }
@@ -213,7 +197,7 @@ impl Default for TestEnv {
     }
 }
 
-/// Map of relative path to kind, mode, xxh3-128 and link target. Symlinks are not followed.
+/// Symlinks are not followed.
 pub fn tree_checksum(dir: &Path) -> BTreeMap<String, Entry> {
     let mut map = BTreeMap::new();
     walk(dir, dir, &mut map).expect("walk tree");

@@ -1,5 +1,3 @@
-//! Smoke test for the hermetic harness in `tests/common`.
-
 mod common;
 
 use common::{Entry, Kind, TestEnv, tree_checksum};
