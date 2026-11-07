@@ -4,12 +4,14 @@
 #![allow(clippy::expect_used)]
 
 use assert_cmd::Command;
+use dotman::repo_config::RepoConfig;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{PermissionsExt, symlink as unix_symlink};
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::sync::Arc;
 use tempfile::TempDir;
 use xxhash_rust::xxh3::xxh3_128;
@@ -186,6 +188,80 @@ impl TestEnv {
         unix_symlink(target, full).expect("create symlink");
     }
 
+    /// The dotman repo under the default `XDG_DATA_HOME`.
+    pub fn repo(&self) -> PathBuf {
+        self.xdg_data().join("dotman")
+    }
+
+    pub fn state_dir(&self) -> PathBuf {
+        self.xdg_state().join("dotman")
+    }
+
+    pub fn run(&self, args: &[&str]) -> Output {
+        self.dot().args(args).output().expect("run dot")
+    }
+
+    /// Runs `dot`, asserts exit 0 and returns stderr.
+    pub fn ok(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert!(
+            out.status.success(),
+            "dot {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    /// Runs `dot`, asserts exit 1 and returns stderr.
+    pub fn fails(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert_eq!(out.status.code(), Some(1), "dot {args:?} should exit 1");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    /// Parses the `<token>\t<key>\0` records of `dot <command> --porcelain`.
+    pub fn porcelain(&self, command: &str) -> Vec<(String, String)> {
+        let out = self.run(&[command, "--porcelain"]);
+        assert!(out.status.success());
+        out.stdout
+            .split(|b| *b == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                let text = String::from_utf8_lossy(record).into_owned();
+                let (token, key) = text.split_once('\t').expect("tab in record");
+                (token.to_owned(), key.to_owned())
+            })
+            .collect()
+    }
+
+    pub fn token_of(&self, command: &str, key: &str) -> Option<String> {
+        self.porcelain(command)
+            .into_iter()
+            .find(|(_, k)| k == key)
+            .map(|(token, _)| token)
+    }
+
+    pub fn repo_config(&self) -> RepoConfig {
+        RepoConfig::load(&self.repo().join(".dotman.toml")).expect("load .dotman.toml")
+    }
+
+    /// Checksums of home, repo, state dir and remote; a missing directory counts as empty.
+    pub fn four_trees(&self) -> [BTreeMap<String, Entry>; 4] {
+        [
+            self.home(),
+            self.repo(),
+            self.state_dir(),
+            self.remote_path(),
+        ]
+        .map(|dir| {
+            if dir.exists() {
+                tree_checksum(&dir)
+            } else {
+                BTreeMap::new()
+            }
+        })
+    }
+
     pub fn remote_refs(&self) -> String {
         self.git(&["ls-remote", &self.remote_path().to_string_lossy()])
     }
@@ -195,6 +271,15 @@ impl Default for TestEnv {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Permission bits of `path` itself; a symlink is not followed.
+pub fn mode_of(path: &Path) -> u32 {
+    fs::symlink_metadata(path)
+        .expect("stat")
+        .permissions()
+        .mode()
+        & 0o7777
 }
 
 /// Symlinks are not followed.

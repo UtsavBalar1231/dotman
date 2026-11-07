@@ -6,12 +6,15 @@
 #![allow(clippy::missing_errors_doc)]
 
 pub mod cli;
+pub mod commands;
 pub mod config;
+pub mod context;
 pub mod engine;
 pub mod git;
 pub mod lock;
 pub mod output;
 pub mod paths;
+pub mod prompt;
 pub mod repo_config;
 pub mod state;
 #[allow(unsafe_code)]

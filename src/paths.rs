@@ -267,6 +267,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         .with_context(|| format!("cannot fsync {}", dir.display()))
 }
 
+/// Expands a leading `~` and joins a relative path onto `cwd`, without resolving anything.
+#[must_use]
+pub fn absolute_input(input: &Path, cwd: &Path, home: &Path) -> PathBuf {
+    let expanded = input
+        .strip_prefix("~")
+        .map_or_else(|_| input.to_path_buf(), |rest| home.join(rest));
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
+}
+
 /// Derives the `$HOME`-relative key for a user-supplied path (absolute, `~`-prefixed or relative to `cwd`).
 ///
 /// The derivation is lexical: the target is never resolved, so a symlink at the target stays a
@@ -277,14 +290,7 @@ pub fn derive_key(
     home: &Path,
     home_real: Option<&Path>,
 ) -> Result<String> {
-    let expanded = input
-        .strip_prefix("~")
-        .map_or_else(|_| input.to_path_buf(), |rest| home.join(rest));
-    let absolute = if expanded.is_absolute() {
-        expanded
-    } else {
-        cwd.join(expanded)
-    };
+    let absolute = absolute_input(input, cwd, home);
     ensure!(
         !absolute.components().any(|c| c == Component::ParentDir),
         "{} contains `..`",

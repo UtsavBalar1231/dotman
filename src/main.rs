@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
+use dotman::commands::{add, forget, init, list, status};
 use dotman::output::{self, Verbosity};
 use dotman::{paths, sys};
 use std::io;
@@ -37,11 +38,21 @@ fn main() {
         std::process::exit(1);
     }
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut io::stdout());
+            Ok(())
         }
+        Commands::Init(args) => init::run(&args),
+        Commands::Add(args) => add::run(&args),
+        Commands::Forget(args) => forget::run(&args),
+        Commands::List(args) => list::run(&args),
+        Commands::Status(args) => status::run(&args),
+    };
+    if let Err(e) = result {
+        output::error(&format!("{e:#}"));
+        std::process::exit(1);
     }
 }
