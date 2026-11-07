@@ -3,7 +3,7 @@
 //! Planning reads `$HOME` and changes nothing, so a refused path leaves the repo untouched.
 
 use crate::cli::AddArgs;
-use crate::context::{Context, TEMP_PREFIX};
+use crate::context::{Context, TEMP_PREFIX, is_real_dir};
 use crate::engine::status::{Source, Worktree};
 use crate::engine::{Node, parents, portable_link_target, read_node};
 use crate::lock::Lock;
@@ -25,11 +25,18 @@ use walkdir::WalkDir;
 
 // Binary detection looks at this many leading bytes, as git does.
 const SNIFF_BYTES: u64 = 8192;
+// A new file over this size is probably a download, a cache or a database, not a config.
+const HOLD_BYTES: u64 = 1_048_576;
 const LARGEST_SHOWN: usize = 5;
 const MATCH: MatchOptions = MatchOptions {
     case_sensitive: true,
     require_literal_separator: true,
     require_literal_leading_dot: false,
+};
+// A guard that `.ENV` or `Credentials.json` slipped past would defeat its purpose.
+const MATCH_SECRET: MatchOptions = MatchOptions {
+    case_sensitive: false,
+    ..MATCH
 };
 
 #[derive(Clone, Copy)]
@@ -50,6 +57,7 @@ impl Leaf {
 enum Found {
     Leaf(Leaf),
     Dir,
+    Dangling,
     Skip(String),
 }
 
@@ -58,6 +66,7 @@ struct DirPlan {
     key: String,
     items: BTreeMap<String, Leaf>,
     skipped: Vec<String>,
+    dangling: Vec<String>,
 }
 
 #[derive(Default)]
@@ -66,6 +75,8 @@ struct Plan {
     dirs: Vec<DirPlan>,
     skipped: Vec<String>,
 }
+
+const DANGLING: &str = "dangling symlink";
 
 struct Ignore {
     any: Vec<Pattern>,
@@ -188,6 +199,114 @@ pub fn run(args: &AddArgs) -> Result<()> {
     Ok(())
 }
 
+/// Why a new file waits for an explicit `dot add`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hold {
+    Large,
+    Binary,
+    SecretName,
+}
+
+impl Hold {
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::Large => "over 1 MiB",
+            Self::Binary => "binary: NUL in the first 8 KiB",
+            Self::SecretName => "name matches [guard] secret_names",
+        }
+    }
+}
+
+/// Candidates under the `[dirs]` entries that no key and no ignore pattern covers.
+#[derive(Default)]
+pub(crate) struct Scan {
+    pub new: BTreeMap<String, Kind>,
+    pub held: BTreeMap<String, Hold>,
+    /// Dangling links and case or normalization collisions: reported, never captured.
+    pub notes: Vec<String>,
+}
+
+/// Walks every `[dirs]` entry with `add <dir>`'s walker. `known` is every key that has an R or an S.
+pub(crate) fn scan_dirs(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    known: &BTreeSet<String>,
+) -> Result<Scan> {
+    let secrets = repo_config
+        .guard
+        .secret_names
+        .iter()
+        .map(|text| {
+            Pattern::new(text)
+                .with_context(|| format!("bad [guard] pattern `{text}` in .dotman.toml"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let planner = Planner {
+        ctx,
+        ignore: Ignore::compile(&repo_config.ignore.patterns)?,
+        cwd: PathBuf::new(),
+        out: Plan::default(),
+    };
+    let mut found: BTreeMap<String, Leaf> = BTreeMap::new();
+    let mut dangling = BTreeSet::new();
+    for dir in &repo_config.dirs.paths {
+        // The entry comes from a tracked file, so it is checked like a user-supplied path.
+        let plain = validate_key(dir).is_ok()
+            && parents(dir)
+                .chain(std::iter::once(dir.as_str()))
+                .all(|part| is_real_dir(&ctx.paths.home.join(part)));
+        if !plain {
+            continue;
+        }
+        let walked = planner.walk(dir);
+        found.extend(walked.items);
+        dangling.extend(walked.dangling);
+    }
+    found.retain(|key, _| !known.contains(key));
+    dangling.retain(|key| !known.contains(key));
+
+    let mut scan = Scan {
+        notes: dangling
+            .into_iter()
+            .map(|key| format!("{key}: {DANGLING}"))
+            .collect(),
+        ..Scan::default()
+    };
+    let colliding = find_collisions(
+        known
+            .iter()
+            .map(String::as_str)
+            .chain(found.keys().map(String::as_str)),
+    );
+    for key in colliding.iter().flat_map(|(a, b)| [a, b]) {
+        if found.remove(key).is_some() {
+            scan.notes.push(format!(
+                "{key}: differs only in case or normalization from another path"
+            ));
+        }
+    }
+    for (key, leaf) in found {
+        let hold = if secrets.iter().any(|p| p.matches_with(&key, MATCH_SECRET)) {
+            Some(Hold::SecretName)
+        } else {
+            match leaf {
+                Leaf::File { size, .. } if size > HOLD_BYTES => Some(Hold::Large),
+                Leaf::File { binary: true, .. } => Some(Hold::Binary),
+                _ => None,
+            }
+        };
+        match hold {
+            Some(hold) => {
+                scan.held.insert(key, hold);
+            }
+            None => {
+                scan.new.insert(key, leaf.kind());
+            }
+        }
+    }
+    Ok(scan)
+}
+
 struct Planner<'a> {
     ctx: &'a Context,
     ignore: Ignore,
@@ -239,6 +358,7 @@ impl Planner<'_> {
                 let dir = self.walk(&key);
                 self.out.dirs.push(dir);
             }
+            Found::Dangling => self.out.skipped.push(format!("{key}: {DANGLING}")),
             Found::Skip(reason) => self.out.skipped.push(format!("{key}: {reason}")),
         }
         Ok(())
@@ -254,9 +374,7 @@ impl Planner<'_> {
         if file_type.is_symlink() {
             match fs::metadata(&path) {
                 Ok(_) => Found::Leaf(Leaf::Link),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    Found::Skip("dangling symlink".to_owned())
-                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Found::Dangling,
                 Err(e) => Found::Skip(format!("symlink cannot be resolved: {e}")),
             }
         } else if file_type.is_dir() {
@@ -319,6 +437,10 @@ impl Planner<'_> {
                 Ok(key) => match self.inspect(&key) {
                     Found::Leaf(leaf) => {
                         dir.items.insert(key, leaf);
+                    }
+                    Found::Dangling => {
+                        dir.skipped.push(format!("{key}: {DANGLING}"));
+                        dir.dangling.push(key);
                     }
                     Found::Skip(reason) => dir.skipped.push(format!("{key}: {reason}")),
                     Found::Dir => {}

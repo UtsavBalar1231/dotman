@@ -1,6 +1,7 @@
 //! `dot status`: each managed key's row in the three-way model.
 
 use crate::cli::StatusArgs;
+use crate::commands::add::{self, Hold};
 use crate::context::{Context, is_under};
 use crate::engine::status::{Row, Source, Worktree, classify};
 use crate::engine::{Tuple, observe_portable};
@@ -52,11 +53,13 @@ pub fn run(args: &StatusArgs) -> Result<()> {
 
     let mut keys: BTreeSet<String> = ctx.managed()?.into_keys().collect();
     keys.extend(state.files.keys().cloned());
+    let scan = add::scan_dirs(&ctx, &repo_config, &keys)?;
+    let in_scope = |key: &str| filters.is_empty() || filters.iter().any(|f| is_under(key, f));
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
 
     let mut rows = Vec::new();
     for key in keys {
-        if !filters.is_empty() && !filters.iter().any(|f| is_under(&key, f)) {
+        if !in_scope(&key) {
             continue;
         }
         let r = worktree.get(&key);
@@ -72,6 +75,14 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         rows.push((label, key));
     }
 
+    let new: Vec<&String> = scan.new.keys().filter(|k| in_scope(k)).collect();
+    let held: Vec<(&String, Hold)> = scan
+        .held
+        .iter()
+        .filter(|(k, _)| in_scope(k))
+        .map(|(k, h)| (k, *h))
+        .collect();
+
     let mut out = std::io::stdout().lock();
     for (label, key) in &rows {
         if args.porcelain {
@@ -83,13 +94,47 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         }
         .context("cannot write to stdout")?;
     }
-    if !args.porcelain {
+    if args.porcelain {
+        for key in &new {
+            write!(out, "new\t{key}\0").context("cannot write to stdout")?;
+        }
+        for (key, _) in &held {
+            write!(out, "held\t{key}\0").context("cannot write to stdout")?;
+        }
+    } else {
+        list_new(&mut out, &new, &held).context("cannot write to stdout")?;
+        for note in &scan.notes {
+            output::warning(note);
+        }
         let dirty = rows.iter().filter(|(label, _)| *label != "clean").count();
         output::info(&format!(
             "{} managed, {} clean, {dirty} to look at",
             rows.len(),
             rows.len().saturating_sub(dirty)
         ));
+    }
+    Ok(())
+}
+
+fn list_new(
+    out: &mut impl Write,
+    new: &[&String],
+    held: &[(&String, Hold)],
+) -> std::io::Result<()> {
+    if !new.is_empty() {
+        writeln!(out, "\nnew files, which `dot sync` captures:")?;
+        for key in new {
+            writeln!(out, "  {key}")?;
+        }
+    }
+    if !held.is_empty() {
+        writeln!(
+            out,
+            "\nheld back; `dot add <file>` keeps one, or add an [ignore] pattern to .dotman.toml:"
+        )?;
+        for (key, hold) in held {
+            writeln!(out, "  {key} ({})", hold.reason())?;
+        }
     }
     Ok(())
 }

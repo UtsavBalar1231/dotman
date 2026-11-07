@@ -2,8 +2,9 @@
 //! category, never per file unless the user picks that; a run that cannot ask leaves them alone.
 
 use crate::cli::{ApplyArgs, Decisions};
+use crate::commands::add::{self, Scan};
 use crate::commands::status::token;
-use crate::commands::{Outcome, add, diff, forget};
+use crate::commands::{Outcome, diff, forget};
 use crate::context::Context;
 use crate::engine::status::{Content, Row, Source, SourceEntry, Worktree, classify};
 use crate::engine::write::{
@@ -71,6 +72,12 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     let mut state = ctx.state(&repo_id)?;
     let mut keys: BTreeSet<String> = ctx.managed()?.into_keys().collect();
     keys.extend(state.files.keys().cloned());
+    // Only a whole-repo capture looks for new files; `apply <path>` has no R for them.
+    let scan = if opts.pass == Pass::Capture && inputs.is_empty() {
+        add::scan_dirs(ctx, &repo_config, &keys)?
+    } else {
+        Scan::default()
+    };
     let mut keys = ctx.select(inputs, keys)?;
     keys.retain(|key| !opts.skip.contains(key));
 
@@ -96,6 +103,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
             run.execute(item, action, &mut state, &mut repo_config);
         }
     }
+    run.capture_new(&scan, &mut state, &mut repo_config);
 
     let repo_saved = if opts.dry_run || (run.forget.is_empty() && run.captured.is_empty()) {
         Ok(())
@@ -445,7 +453,10 @@ impl Run<'_> {
                 self.announce("forget", key);
                 self.forget.insert(key.clone());
             }
-            Action::Capture => self.capture(item, state, repo_config),
+            Action::Capture => {
+                let Home::Present(h) = &item.raw else { return };
+                self.capture(key, h.kind, state, repo_config);
+            }
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };
                 let done = match action {
@@ -463,25 +474,36 @@ impl Run<'_> {
         }
     }
 
-    fn capture(&mut self, item: &Item, state: &mut State, repo_config: &mut RepoConfig) {
-        let key = &item.key;
+    /// Captures the new files and lists the held ones, which keep the run at exit 3.
+    fn capture_new(&mut self, scan: &Scan, state: &mut State, repo_config: &mut RepoConfig) {
+        for (key, kind) in &scan.new {
+            self.capture(key, *kind, state, repo_config);
+        }
+        for note in &scan.notes {
+            output::warning(note);
+        }
+        if !scan.held.is_empty() {
+            self.attention = true;
+            output::warning(&format!(
+                "{} new files held back; `dot add <file>` keeps one, an [ignore] pattern in .dotman.toml silences it:",
+                scan.held.len()
+            ));
+            for (key, hold) in &scan.held {
+                output::warning(&format!("  {key} ({})", hold.reason()));
+            }
+        }
+    }
+
+    fn capture(&mut self, key: &str, kind: Kind, state: &mut State, repo_config: &mut RepoConfig) {
         self.announce("capture", key);
         if self.opts.dry_run {
-            self.captured.insert(key.clone());
+            self.captured.insert(key.to_owned());
             return;
         }
-        let Home::Present(h) = &item.raw else { return };
-        let done = add::commit_one(
-            self.ctx,
-            repo_config,
-            state,
-            &mut self.dir_modes,
-            key,
-            h.kind,
-        );
+        let done = add::commit_one(self.ctx, repo_config, state, &mut self.dir_modes, key, kind);
         match done {
             Ok(()) => {
-                self.captured.insert(key.clone());
+                self.captured.insert(key.to_owned());
             }
             Err(e) => {
                 self.failed = self.failed.saturating_add(1);
