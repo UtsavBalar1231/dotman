@@ -83,7 +83,12 @@ fn a_local_edit_is_template_drift_and_is_never_captured() {
 
     assert_eq!(token(&env, KEY).as_deref(), Some("template-drift"));
     let err = exits(&env.run(&["apply"]), 3);
-    assert!(err.contains("dot edit .config/kitty/kitty.conf"), "{err}");
+    assert!(
+        err.contains(
+            "template-drift; edit the template: dot edit .config/kitty/kitty.conf, or discard the local change: dot apply --take-repo .config/kitty/kitty.conf"
+        ),
+        "{err}"
+    );
     exits(&env.run(&["sync"]), 3);
     assert_eq!(
         fs::read(env.repo().join(SOURCE)).unwrap(),
@@ -193,14 +198,76 @@ fn add_never_overwrites_a_template_with_its_rendering() {
     );
 }
 
-#[test]
-fn drift_stays_drift_after_an_edit_that_does_not_match_the_local_file() {
+/// A kitty template applied once, then edited locally.
+fn drifted() -> TestEnv {
     let env = kitty("font_size {{ vars.font }}\n");
     exits(&env.run(&["apply"]), 0);
     env.write(KEY, b"font_size 99\n", 0o644);
+    env
+}
+
+#[test]
+fn an_edit_that_changes_the_source_replaces_the_drifted_file_after_a_backup() {
+    let env = drifted();
     let editor = stub_editor(&env, 0);
     let vars = [("EDITOR", editor.to_str().unwrap())];
-    let err = exits(&env.run_with(&vars, &["edit", KEY]), 3);
+    exits(&env.run_with(&vars, &["edit", KEY]), 0);
+    assert_eq!(env.read(KEY), b"font_size 14\n# edited\n");
+    assert_eq!(token(&env, KEY).as_deref(), Some("clean"));
+    assert_eq!(env.backups(KEY), [(b"font_size 99\n".to_vec(), 0o600)]);
+}
+
+#[test]
+fn an_edit_that_changes_nothing_leaves_the_drift_alone() {
+    let env = drifted();
+    let err = exits(&env.run_with(&[("EDITOR", "true")], &["edit", KEY]), 3);
     assert!(err.contains("template-drift"), "{err}");
     assert_eq!(env.read(KEY), b"font_size 99\n");
+    assert_eq!(env.backups(KEY), []);
+    assert_eq!(token(&env, KEY).as_deref(), Some("template-drift"));
+}
+
+#[test]
+fn take_repo_answers_template_drift() {
+    let env = drifted();
+    let before = env.four_trees();
+    exits(&env.run(&["apply", "--take-repo", "--dry-run"]), 0);
+    assert_eq!(env.four_trees(), before);
+
+    exits(&env.run(&["apply", "--take-repo"]), 0);
+    assert_eq!(env.read(KEY), b"font_size 14\n");
+    assert_eq!(env.backups(KEY), [(b"font_size 99\n".to_vec(), 0o600)]);
+    assert_eq!(token(&env, KEY).as_deref(), Some("clean"));
+}
+
+#[test]
+fn sync_take_repo_writes_the_drifted_file_once_and_captures_nothing() {
+    let env = kitty("font_size {{ vars.font }}\n");
+    exits(&env.run(&["init", "--remote", &env.remote_url()]), 0);
+    exits(&env.run(&["apply"]), 0);
+    exits(&env.run(&["sync"]), 0);
+    let head = env.git(&["-C", &env.repo().to_string_lossy(), "rev-parse", "HEAD"]);
+    env.write(KEY, b"font_size 99\n", 0o644);
+
+    exits(&env.run(&["sync", "--take-repo"]), 0);
+    assert_eq!(env.read(KEY), b"font_size 14\n");
+    assert_eq!(env.backups(KEY), [(b"font_size 99\n".to_vec(), 0o600)]);
+    assert_eq!(
+        env.git(&["-C", &env.repo().to_string_lossy(), "rev-parse", "HEAD"]),
+        head
+    );
+    assert!(!env.repo().join(KEY).exists());
+}
+
+#[test]
+fn restore_keeps_a_copy_of_the_uncommitted_source_it_replaces() {
+    let env = kitty("font_size {{ vars.font }}\n");
+    exits(&env.run(&["apply"]), 0);
+    exits(&env.run(&["sync"]), 0);
+    env.write_repo(SOURCE, b"font_size {{ vars.font }}\nbold yes\n");
+    exits(&env.run(&["sync"]), 0);
+    env.write_repo(SOURCE, b"font_size 1\n");
+
+    exits(&env.run(&["restore", KEY, "--from", "HEAD~1"]), 0);
+    assert_eq!(env.backups(SOURCE), [(b"font_size 1\n".to_vec(), 0o600)]);
 }

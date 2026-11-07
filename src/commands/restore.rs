@@ -78,11 +78,12 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
         output::info(&format!("{key}: already matches {short}"));
         return Ok(());
     }
+    let backups = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
     if restore_source {
         let opts = WriteOptions {
             dry_run,
             in_place: false,
-            backup: None,
+            backup: Some(&backups),
             expected: &source_now,
             modes: &repo_config.modes,
         };
@@ -95,7 +96,6 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
             WriteOutcome::Skipped(skip) => bail!("{source}: {skip}"),
         }
     }
-    let backups = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
     let opts = WriteOptions {
         dry_run,
         in_place: false,

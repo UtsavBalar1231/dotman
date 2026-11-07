@@ -36,6 +36,7 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
         bail!("{source} is not a regular file, so there is nothing to open");
     }
 
+    let before = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
     let (program, rest) = editor_command()?;
     let status = Command::new(&program)
         .args(rest)
@@ -48,8 +49,14 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
 
     let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
     ctx.guard()?;
-    apply::apply(&ctx, std::slice::from_ref(&args.path), &Options::default())
-        .map(|applied| applied.outcome)
+    // Opening the editor to look must never replace a locally edited file, so drift is answered
+    // only when the source changed.
+    let after = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
+    let opts = Options {
+        take_drift: before != after,
+        ..Options::default()
+    };
+    apply::apply(&ctx, std::slice::from_ref(&args.path), &opts).map(|applied| applied.outcome)
 }
 
 /// `$VISUAL`, else `$EDITOR`, else `vi`, split like a shell would.

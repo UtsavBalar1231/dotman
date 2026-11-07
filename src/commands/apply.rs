@@ -47,6 +47,8 @@ pub(crate) enum Pass {
     Capture,
 }
 
+// reason: independent switches, not a state machine
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 pub(crate) struct Options {
     pub dry_run: bool,
@@ -55,6 +57,8 @@ pub(crate) struct Options {
     /// Print how many paths are in each row before anything else.
     pub summary: bool,
     pub pass: Pass,
+    /// Answers template drift like `--take-repo`, for a caller that has just changed the template.
+    pub take_drift: bool,
     /// Keys left alone, because an earlier pass already reported them undecided.
     pub skip: BTreeSet<String>,
 }
@@ -450,17 +454,20 @@ impl Run<'_> {
 
     /// The action for rows that need no question, with their reports.
     fn direct(&mut self, item: &Item) -> Option<Action> {
-        if self.opts.pass == Pass::Capture && item.row != Row::TemplateDrift {
+        let take_drift = self.opts.decisions.take_repo || self.opts.take_drift;
+        let reports_drift = item.row == Row::TemplateDrift && !take_drift;
+        if self.opts.pass == Pass::Capture && !reports_drift {
             return (item.row == Row::ChangedLocally).then_some(Action::Capture);
         }
         let key = &item.key;
         match item.row {
+            Row::TemplateDrift if take_drift => Some(Action::Write),
             Row::TemplateDrift => {
                 self.attention = true;
                 // `sync` reports it in its capture pass; the pass after the pull leaves it alone.
                 self.undecided.insert(key.clone());
                 output::warning(&format!(
-                    "{key}: template-drift; edit the template: dot edit {key}"
+                    "{key}: template-drift; edit the template: dot edit {key}, or discard the local change: dot apply --take-repo {key}"
                 ));
                 None
             }
