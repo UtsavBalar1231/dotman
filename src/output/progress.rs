@@ -3,29 +3,18 @@
 use colored::Colorize;
 use std::io::{self, IsTerminal, Write};
 
-/// A progress bar that updates in place on TTY terminals.
-///
-/// Shows completion percentage and current/total counts in git style:
-/// "Processing commits: 100% (6/6), done."
+/// In-place progress bar on a TTY, silent otherwise; renders as "Title: 100% (6/6), done."
 pub struct Progress {
-    /// Title displayed before the progress bar
     title: String,
-    /// Total number of items to process
     total: usize,
-    /// Current number of items processed
     current: usize,
-    /// Whether stderr is a TTY (enables inline updating)
     is_tty: bool,
-    /// Last displayed percentage (to avoid redundant updates)
     last_percent: u8,
-    /// Whether progress display has started
     started: bool,
 }
 
 impl Progress {
-    /// Creates a new progress bar with the given title and total items.
-    ///
-    /// If stderr is a TTY, progress will update inline. Otherwise, it's silent.
+    /// Creates a progress bar for `total` items.
     #[must_use]
     pub fn new(title: &str, total: usize) -> Self {
         let is_tty = io::stderr().is_terminal();
@@ -47,24 +36,11 @@ impl Progress {
         progress
     }
 
-    /// Updates the progress bar to the given current position.
-    ///
-    /// Only redraws if the percentage has changed (to avoid excessive writes).
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    /// Moves to `current` (clamped to the total); redraws only when the percentage changes.
     pub fn update(&mut self, current: usize) {
         self.current = current.min(self.total);
 
-        let percent = if self.total > 0 {
-            ((self.current as f64 / self.total as f64) * 100.0) as u8
-        } else {
-            0
-        };
-
-        // Always update percentage for testing, but only display on TTY
+        let percent = self.percent();
         if percent != self.last_percent {
             self.last_percent = percent;
             if self.is_tty {
@@ -73,9 +49,8 @@ impl Progress {
         }
     }
 
-    /// Completes the progress bar and displays final "done" message.
-    ///
-    /// Consumes self to prevent further updates.
+    /// Prints the final "done" line.
+    // reason: skips Drop, which would print a newline after the completed bar
     #[allow(clippy::mem_forget)]
     pub fn finish(mut self) {
         self.current = self.total;
@@ -88,29 +63,29 @@ impl Progress {
         std::mem::forget(self);
     }
 
-    /// Displays the current progress state (percentage and count).
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    /// Whole-number percentage; 0 when the total is 0.
+    fn percent(&self) -> u8 {
+        self.current
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(self.total))
+            .map_or(0, |p| u8::try_from(p.min(100)).unwrap_or(100))
+    }
+
     fn display(&self) {
         if !self.is_tty || self.total == 0 {
             return;
         }
 
-        let percent = (self.current as f64 / self.total as f64) * 100.0;
         eprint!(
             "\r{}: {}% ({}/{})",
             self.title.dimmed(),
-            (percent as u8).to_string().dimmed(),
+            self.percent().to_string().dimmed(),
             self.current,
             self.total
         );
         let _ = io::stderr().flush();
     }
 
-    /// Displays the final completion message with "done" suffix.
     fn display_final(&self) {
         eprintln!(
             "\r{}: 100% ({}/{}), done.",

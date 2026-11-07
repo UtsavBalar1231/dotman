@@ -1,10 +1,4 @@
-//! Output formatting, styling, and progress display for dotman CLI.
-//!
-//! This module provides a modern, git-style output system with:
-//! - Dimmed colors for routine messages
-//! - Bold colors for warnings and errors
-//! - Progress bars for long operations
-//! - Verbosity control (quiet, normal, verbose)
+//! Styled status output on stderr, gated by a global verbosity level.
 
 mod progress;
 
@@ -24,7 +18,6 @@ pub enum Verbosity {
     Verbose = 2,
 }
 
-/// Global verbosity setting (default: Normal).
 static VERBOSITY: AtomicU8 = AtomicU8::new(1);
 
 /// Sets the global verbosity level for all output functions.
