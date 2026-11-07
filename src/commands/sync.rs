@@ -48,9 +48,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         dry_run,
         never_ask: false,
     };
-    if first.failed > 0 {
-        return apply::finish(&ctx, &first, policy);
-    }
+    // A failed path never stops the sync; the failure is reported after the push.
+    let (first_failed, uncaptured) = (first.failed, first.uncaptured);
     let mut attention = first.outcome == Outcome::Attention;
     commit(&ctx, args, &first.captured)?;
     let written = first.written;
@@ -81,6 +80,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
             },
         )?;
         second.written.extend(written);
+        second.failed = second.failed.saturating_add(uncaptured);
         let outcome = apply::finish(&ctx, &second, policy)?;
         return Ok(finish(attention || outcome == Outcome::Attention));
     };
@@ -88,7 +88,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         output::info(&format!(
             "would pull {REMOTE} {branch}, apply what arrived and push"
         ));
-        hooks::run(&ctx, &written, policy)?;
+        let hooked = hooks::run(&ctx, &written, policy);
+        apply::check_failed(first_failed).and(hooked)?;
         return Ok(finish(attention));
     }
 
@@ -97,6 +98,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         && let PullOutcome::Conflict { paths } = ctx.git.pull_rebase(REMOTE, &branch)?
     {
         report_conflict(&ctx, &paths);
+        apply::check_failed(first_failed)?;
         return Ok(Outcome::Conflict);
     }
 
@@ -112,14 +114,14 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     attention |= second.outcome == Outcome::Attention;
     second.written.extend(written);
     let hooked = hooks::run(&ctx, &second.written, policy);
-    second.check()?;
+    let failed = apply::check_failed(second.failed.saturating_add(uncaptured));
 
     // A repo with no commit has nothing to push.
     if ctx.git.head()?.is_some() {
         ctx.git.push_set_upstream(REMOTE, &branch)?;
         output::success(&format!("{REMOTE}/{branch} is up to date"));
     }
-    hooked?;
+    failed.and(hooked)?;
     Ok(finish(attention))
 }
 

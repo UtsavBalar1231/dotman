@@ -152,6 +152,28 @@ fn a_dry_run_runs_nothing_even_with_the_flag() {
 }
 
 #[test]
+fn a_dry_run_says_whether_the_hook_would_run() {
+    let env = hooked();
+    set_hooks(&env, &append(&env));
+    let err = exits(&env, 0, &["apply", "--dry-run"]);
+    assert!(
+        err.contains("hook not approved on this machine, would be skipped:"),
+        "{err}"
+    );
+    assert!(!err.contains("would run hook"), "{err}");
+
+    exits(&env, 0, &["apply", "--approve-hooks"]);
+    env.write_repo(A, b"a2\n");
+    let err = exits(&env, 0, &["apply", "--dry-run"]);
+    assert!(err.contains("would run hook:"), "{err}");
+
+    set_hooks(&env, &format!("{}; true", append(&env)));
+    let err = exits(&env, 0, &["apply", "--dry-run", "--approve-hooks"]);
+    assert!(err.contains("would run hook:"), "{err}");
+    assert_eq!(runs(&env), 1);
+}
+
+#[test]
 fn approve_and_no_hooks_conflict() {
     let env = hooked();
     for command in ["apply", "sync"] {

@@ -36,20 +36,28 @@ pub(crate) fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> 
         return Ok(());
     }
     let due = due(&table, changed)?;
+    let hash = table_hash(&table);
+    let mut state = ctx.state(&ctx.repo_id()?)?;
+    let recorded = state.hooks.approved.as_deref() == Some(hash.as_str());
+    let mut approved = policy.approve || recorded;
     if policy.dry_run {
+        let would_ask = !approved && !policy.never_ask && prompt::interactive();
         for command in due {
-            output::info(&format!("would run hook: {command}"));
+            output::info(&if approved {
+                format!("would run hook: {command}")
+            } else if would_ask {
+                format!("would ask before running hook: {command}")
+            } else {
+                format!("hook not approved on this machine, would be skipped: {command}")
+            });
         }
         return Ok(());
     }
 
-    let hash = table_hash(&table);
-    let mut state = ctx.state(&ctx.repo_id()?)?;
-    let mut approved = policy.approve || state.hooks.approved.as_deref() == Some(hash.as_str());
     if !approved && !due.is_empty() && !policy.never_ask && prompt::interactive() {
         approved = ask(&table)?;
     }
-    if approved && state.hooks.approved.as_deref() != Some(hash.as_str()) {
+    if approved && !recorded {
         state.hooks.approved = Some(hash);
         state.save(&ctx.paths.state_file(), false)?;
     }

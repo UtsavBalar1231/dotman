@@ -89,19 +89,24 @@ pub(crate) struct Applied {
     /// Paths that could not be applied or captured. The caller reports them with `check`, after
     /// it has run the hooks for what was written.
     pub failed: usize,
+    /// The part of `failed` that a later pass cannot clear: captures that did not happen.
+    pub uncaptured: usize,
 }
 
 impl Applied {
     pub(crate) fn check(&self) -> Result<()> {
-        if self.failed > 0 {
-            bail!(
-                "{} {} could not be applied",
-                self.failed,
-                if self.failed == 1 { "path" } else { "paths" }
-            );
-        }
-        Ok(())
+        check_failed(self.failed)
     }
+}
+
+pub(crate) fn check_failed(failed: usize) -> Result<()> {
+    if failed > 0 {
+        bail!(
+            "{failed} {} could not be applied",
+            if failed == 1 { "path" } else { "paths" }
+        );
+    }
+    Ok(())
 }
 
 /// Applies the keys under `inputs` (every key when empty). The caller holds the lock.
@@ -128,6 +133,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         backups: backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?,
         attention: false,
         failed: 0,
+        uncaptured: 0,
         forget: BTreeSet::new(),
         undecided: BTreeSet::new(),
         captured: BTreeSet::new(),
@@ -173,6 +179,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         captured: run.captured,
         written: run.written,
         failed: run.failed,
+        uncaptured: run.uncaptured,
     })
 }
 
@@ -324,6 +331,7 @@ struct Run<'a> {
     backups: PathBuf,
     attention: bool,
     failed: usize,
+    uncaptured: usize,
     forget: BTreeSet<String>,
     undecided: BTreeSet<String>,
     captured: BTreeSet<String>,
@@ -688,6 +696,7 @@ impl Run<'_> {
             }
             Err(e) => {
                 self.failed = self.failed.saturating_add(1);
+                self.uncaptured = self.uncaptured.saturating_add(1);
                 output::warning(&format!("{key}: cannot be captured: {e:#}"));
             }
         }

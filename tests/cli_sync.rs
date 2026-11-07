@@ -405,3 +405,59 @@ fn keep_local_captures_a_path_changed_on_both_sides_and_take_repo_backs_it_up() 
     assert_eq!(b.read(".a"), b"theirs again\n");
     assert_eq!(b.backups(".a"), [(b"mine again\n".to_vec(), 0o600)]);
 }
+
+const BROKEN: &str = ".config/app/t{tmpl}.conf";
+const RENDERED: &str = ".config/app/t.conf";
+
+#[test]
+fn a_path_that_fails_to_render_still_lets_sync_commit_and_push() {
+    let env = first_device(&[(".a", b"base\n", 0o644)]);
+    env.write_repo(BROKEN, b"x {{ vars.missing }}\n");
+    env.write(".a", b"changed\n", 0o644);
+    let before = env.remote_refs();
+
+    let err = exits(&env, 1, &["sync"]);
+    assert!(err.contains("t{tmpl}.conf"), "{err}");
+    assert!(err.contains("1 path could not be applied"), "{err}");
+    assert_ne!(env.remote_refs(), before, "{err}");
+    assert_eq!(remote_file(&env, ".a"), "changed\n");
+    assert!(!env.home().join(RENDERED).exists());
+}
+
+#[test]
+fn a_template_that_cannot_render_here_does_not_block_the_upstream_fix() {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write_machine_config("[vars]\nnewvar = \"1\"\n");
+    a.write_repo(BROKEN, b"v {{ vars.newvar }}\n");
+    exits(&a, 0, &["sync"]);
+    assert_eq!(a.read(RENDERED), b"v 1\n");
+
+    let err = exits(&b, 1, &["sync"]);
+    assert!(err.contains("vars.newvar"), "{err}");
+    assert!(!b.home().join(RENDERED).exists());
+
+    a.write_repo(BROKEN, b"v fixed\n");
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(RENDERED), b"v fixed\n");
+}
+
+#[test]
+fn failed_paths_do_not_stop_a_sync_without_a_remote_or_a_dry_run() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"base\n", 0o644);
+    env.ok(&["add", ".a"]);
+    env.write_repo(BROKEN, b"x {{ vars.missing }}\n");
+    env.write(".a", b"changed\n", 0o644);
+
+    let err = exits(&env, 1, &["sync", "--dry-run"]);
+    assert!(err.contains("would commit"), "{err}");
+    assert!(err.contains("1 path could not be applied"), "{err}");
+
+    let err = exits(&env, 1, &["sync"]);
+    assert!(err.contains("committed"), "{err}");
+    assert!(err.contains("1 path could not be applied"), "{err}");
+    let log = env.git(&["-C", &repo_path(&env), "show", "HEAD:.a"]);
+    assert_eq!(log, "changed\n");
+}
