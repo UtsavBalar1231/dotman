@@ -1278,6 +1278,7 @@ mod tests {
             overlay: None,
             include_missing: false,
             render_templates: false,
+            swap: false,
             yes,
             dry_run,
         };

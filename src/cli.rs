@@ -251,7 +251,7 @@ pub struct RestoreArgs {
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct ImportArgs {
-    /// Legacy dotman repo, chezmoi source, yadm, bare or vcsh repo, or git URL to convert; found in $HOME when omitted
+    /// Legacy dotman repo, chezmoi source, symlink-farm directory, yadm, bare or vcsh repo, or git URL to convert; found in $HOME when omitted
     #[arg(value_name = "SOURCE", conflicts_with = "overlay")]
     pub source: Option<OsString>,
     /// Add what SOURCE has and the repo lacks as one commit: modes, and with `--include-missing` files
@@ -263,6 +263,12 @@ pub struct ImportArgs {
     /// For a chezmoi source, run its templates and import this host's rendering
     #[arg(long, conflicts_with = "overlay")]
     pub render_templates: bool,
+    /// Replace the symlinks of an imported farm with real files holding the same bytes
+    #[arg(
+        long,
+        conflicts_with_all = ["source", "overlay", "include_missing", "render_templates"]
+    )]
+    pub swap: bool,
     /// Do not ask before writing
     #[arg(long)]
     pub yes: bool,

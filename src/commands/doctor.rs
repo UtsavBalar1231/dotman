@@ -369,10 +369,17 @@ fn warnings(ctx: Option<&Context>, git: &Git, git_ok: bool) -> Vec<Check> {
             ));
         }
     }
-    for var in ["DOTMAN_SYSTEM_ROOT", "DOTMAN_NIX_STORE"] {
-        if std::env::var_os(var).is_some() {
-            checks.push(warn(var, "is set; it exists for tests only"));
-        }
+    if std::env::var_os("DOTMAN_SYSTEM_ROOT").is_some() {
+        checks.push(warn(
+            "DOTMAN_SYSTEM_ROOT",
+            "is set; it exists for tests only",
+        ));
+    }
+    if std::env::var_os("DOTMAN_NIX_STORE").is_some() {
+        checks.push(warn(
+            "DOTMAN_NIX_STORE",
+            "is set; it exists for tests only, and on a real machine links into /nix/store are always report-only",
+        ));
     }
     checks
 }

@@ -44,7 +44,7 @@ const MATCH_SECRET: MatchOptions = MatchOptions {
 };
 
 #[derive(Clone, Copy)]
-enum Leaf {
+pub(crate) enum Leaf {
     File { mode: u32, size: u64, binary: bool },
     Link,
 }
@@ -66,11 +66,11 @@ enum Found {
 }
 
 #[derive(Default)]
-struct DirPlan {
-    key: String,
-    items: BTreeMap<String, Leaf>,
-    skipped: Vec<String>,
-    dangling: Vec<String>,
+pub(crate) struct DirPlan {
+    pub(crate) key: String,
+    pub(crate) items: BTreeMap<String, Leaf>,
+    pub(crate) skipped: Vec<String>,
+    pub(crate) dangling: Vec<String>,
 }
 
 #[derive(Default)]
@@ -80,8 +80,8 @@ struct Plan {
     skipped: Vec<String>,
 }
 
-const DANGLING: &str = "dangling symlink";
-const BLOCK_NAME: &str =
+pub(crate) const DANGLING: &str = "dangling symlink";
+pub(crate) const BLOCK_NAME: &str =
     "the name holds a variant block, so dotman would read it as a variant of another file";
 
 pub(crate) struct Ignore {
@@ -419,13 +419,9 @@ pub(crate) struct Scan {
     pub notes: Vec<String>,
 }
 
-/// Walks every `[dirs]` entry with `add <dir>`'s walker. `known` is every key that has an R or an S.
-pub(crate) fn scan_dirs(
-    ctx: &Context,
-    repo_config: &RepoConfig,
-    known: &BTreeSet<String>,
-) -> Result<Scan> {
-    let secrets = repo_config
+/// The `[guard] secret_names` patterns, compiled.
+pub(crate) fn secret_patterns(repo_config: &RepoConfig) -> Result<Vec<Pattern>> {
+    repo_config
         .guard
         .secret_names
         .iter()
@@ -433,7 +429,36 @@ pub(crate) fn scan_dirs(
             Pattern::new(text)
                 .with_context(|| format!("bad [guard] pattern `{text}` in .dotman.toml"))
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
+
+/// The holds that need only the name and size of a new file. A name that matches `secrets` wins
+/// over everything else.
+pub(crate) fn hold_by_name_and_size(secrets: &[Pattern], key: &str, size: u64) -> Option<Hold> {
+    if secrets.iter().any(|p| p.matches_with(key, MATCH_SECRET)) {
+        Some(Hold::SecretName)
+    } else {
+        (size > HOLD_BYTES).then_some(Hold::Large)
+    }
+}
+
+/// The holds that need the bytes of a file that passed [`hold_by_name_and_size`].
+pub(crate) fn hold_by_content(bytes: &[u8]) -> Option<Hold> {
+    let sniffed = usize::try_from(SNIFF_BYTES).unwrap_or(8192);
+    if bytes.iter().take(sniffed).any(|b| *b == 0) {
+        Some(Hold::Binary)
+    } else {
+        secrets::holds_secret_key(bytes).then_some(Hold::SecretKey)
+    }
+}
+
+/// Walks every `[dirs]` entry with `add <dir>`'s walker. `known` is every key that has an R or an S.
+pub(crate) fn scan_dirs(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    known: &BTreeSet<String>,
+) -> Result<Scan> {
+    let secrets = secret_patterns(repo_config)?;
     let planner = Planner {
         ctx,
         ignore: Ignore::compile(&repo_config.ignore.patterns)?,
@@ -479,15 +504,14 @@ pub(crate) fn scan_dirs(
         }
     }
     for (key, leaf) in found {
-        let hold = if secrets.iter().any(|p| p.matches_with(&key, MATCH_SECRET)) {
-            Some(Hold::SecretName)
-        } else {
-            match leaf {
-                Leaf::File { size, .. } if size > HOLD_BYTES => Some(Hold::Large),
-                Leaf::File { binary: true, .. } => Some(Hold::Binary),
-                Leaf::File { .. } if holds_key(&ctx.paths.home, &key) => Some(Hold::SecretKey),
-                _ => None,
-            }
+        let hold = match leaf {
+            Leaf::File { size, binary, .. } => hold_by_name_and_size(&secrets, &key, size)
+                .or_else(|| binary.then_some(Hold::Binary))
+                .or_else(|| holds_key(&ctx.paths.home, &key).then_some(Hold::SecretKey)),
+            Leaf::Link => secrets
+                .iter()
+                .any(|p| p.matches_with(&key, MATCH_SECRET))
+                .then_some(Hold::SecretName),
         };
         match hold {
             Some(hold) => {
@@ -710,7 +734,7 @@ fn refuse_collisions(existing: &Sources, plan: &Plan) -> Result<()> {
     }
 }
 
-fn preview(dir: &DirPlan) {
+pub(crate) fn preview(dir: &DirPlan) {
     let mut sized: Vec<(u64, &str)> = Vec::new();
     let (mut binary, mut private) = (0usize, 0usize);
     for (key, leaf) in &dir.items {

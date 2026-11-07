@@ -1,7 +1,7 @@
 //! The only path that writes into `$HOME`: no write through a symlink, a backup before local
 //! changes are replaced, and a temp file renamed into place after re-reading the target.
 
-use super::{Home, Node, Obstacle, parents, read_node, recorded_mode, safe_mode};
+use super::{Home, Node, Obstacle, Tuple, parents, read_node, recorded_mode, safe_mode};
 use crate::paths::create_private_dir;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::BTreeMap;
@@ -13,6 +13,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempPath;
+use walkdir::WalkDir;
 
 const TEMP_PREFIX: &str = ".dotman-tmp-";
 // Under `.dotman/`, a reserved root name, so no key's backup can land on the record.
@@ -134,6 +135,265 @@ pub fn backup_run_dir(backups: &Path, now: SystemTime) -> Result<PathBuf> {
         .as_secs();
     let stamp = utc_stamp(secs).ok_or_else(|| anyhow!("the system clock is out of range"))?;
     Ok(backups.join(format!("{stamp}-{}", std::process::id())))
+}
+
+/// Appends `key<TAB>target` to `<dir>/.dotman/links.txt`, the record a restore reads, and returns
+/// the file.
+pub(crate) fn record_link(dir: &Path, key: &str, target: &Path) -> Result<PathBuf> {
+    back_up(dir, key, &Node::Symlink(target.to_path_buf()), false)?
+        .ok_or_else(|| anyhow!("nothing to record for {key}"))
+}
+
+/// One entry of a tree that takes the place of a link to a directory, keyed by its path below it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Member {
+    /// A regular file.
+    File {
+        /// Its content.
+        bytes: Vec<u8>,
+        /// Its mode before special bits are masked off.
+        mode: u32,
+    },
+    /// A symlink, stored verbatim.
+    Link(PathBuf),
+}
+
+/// What a restore found at the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Restored {
+    /// The link is back.
+    Back,
+    /// The link was never replaced.
+    Untouched,
+    /// Something other than what the swap wrote is there, so it was left alone.
+    Kept,
+}
+
+fn expect_link(home: &Path, key: &str, expected: &Path) -> Result<()> {
+    match read_node(home, key)? {
+        Node::Symlink(target) if target == expected => Ok(()),
+        _ => bail!("{key} changed since it was checked; left alone"),
+    }
+}
+
+fn parent_of(path: &Path) -> Result<&Path> {
+    path.parent()
+        .ok_or_else(|| anyhow!("{} has no parent", path.display()))
+}
+
+/// Replaces the symlink at `key` that has the target text `expected` with a regular file. The
+/// rename deliberately lands on the link itself: it replaces the link and never writes through it.
+pub(crate) fn replace_link_with_file(
+    home: &Path,
+    key: &str,
+    expected: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<()> {
+    expect_link(home, key, expected)?;
+    let path = home.join(key);
+    let dir = parent_of(&path)?;
+    let temp = make_temp(
+        dir,
+        New::File {
+            bytes,
+            mode: safe_mode(mode),
+        },
+    )?;
+    expect_link(home, key, expected)?;
+    temp.persist(&path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("cannot replace {}", path.display()))?;
+    sync_dir(dir)
+}
+
+/// Replaces the symlink at `key` that has the target text `expected` with a directory holding
+/// `members`. `modes` gives the modes of the directories, which are 0755 where it is silent.
+pub(crate) fn replace_link_with_dir(
+    home: &Path,
+    key: &str,
+    expected: &Path,
+    members: &BTreeMap<String, Member>,
+    modes: &BTreeMap<String, String>,
+) -> Result<()> {
+    expect_link(home, key, expected)?;
+    let path = home.join(key);
+    let dir = parent_of(&path)?;
+    let temp = tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir_in(dir)
+        .with_context(|| format!("cannot create a temp dir in {}", dir.display()))?;
+    let staged = temp.path().to_path_buf();
+    populate(&staged, key, members, modes)?;
+    expect_link(home, key, expected)?;
+
+    // rename(2) cannot replace a non-directory with a directory, so the link goes aside first.
+    let aside = aside_path(&path)?;
+    fs::rename(&path, &aside).with_context(|| format!("cannot move {} aside", path.display()))?;
+    let staged = temp.keep();
+    if let Err(e) = fs::rename(&staged, &path) {
+        let _ = fs::rename(&aside, &path);
+        let _ = fs::remove_dir_all(&staged);
+        return Err(e)
+            .with_context(|| format!("cannot move the new directory to {}", path.display()));
+    }
+    // The tree is in place; a leftover aside link is only clutter.
+    let _ = fs::remove_file(&aside);
+    sync_dir(dir)
+}
+
+fn aside_path(path: &Path) -> Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} has no name", path.display()))?;
+    let mut aside = name.to_os_string();
+    aside.push(format!(".dotman-swap-{}", std::process::id()));
+    Ok(parent_of(path)?.join(aside))
+}
+
+fn populate(
+    root: &Path,
+    key: &str,
+    members: &BTreeMap<String, Member>,
+    modes: &BTreeMap<String, String>,
+) -> Result<()> {
+    // Directories stay 0700 until everything is in, so a recorded 0555 cannot block its own files.
+    let mut dirs: BTreeMap<String, u32> = BTreeMap::new();
+    dirs.insert(
+        String::new(),
+        safe_mode(recorded_mode(modes, &format!("{key}/"))?.unwrap_or(0o755)),
+    );
+    for (rel, member) in members {
+        for parent in parents(rel) {
+            if !dirs.contains_key(parent) {
+                fs::create_dir(root.join(parent))
+                    .with_context(|| format!("cannot create {key}/{parent}"))?;
+                let mode = recorded_mode(modes, &format!("{key}/{parent}/"))?.unwrap_or(0o755);
+                dirs.insert(parent.to_owned(), safe_mode(mode));
+            }
+        }
+        let path = root.join(rel);
+        match member {
+            Member::File { bytes, mode } => {
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&path)
+                    .with_context(|| format!("cannot create {key}/{rel}"))?;
+                file.write_all(bytes)?;
+                file.set_permissions(Permissions::from_mode(safe_mode(*mode)))?;
+                file.sync_all()?;
+            }
+            Member::Link(target) => symlink(target, &path)
+                .with_context(|| format!("cannot create the symlink {key}/{rel}"))?,
+        }
+    }
+    for (rel, mode) in dirs.iter().rev() {
+        let dir = if rel.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(rel)
+        };
+        sync_dir(&dir)?;
+        fs::set_permissions(&dir, Permissions::from_mode(*mode))?;
+    }
+    Ok(())
+}
+
+/// Puts the symlink `target` back at `key`, over the file the swap wrote there. A file that is
+/// not exactly what the swap wrote is left alone.
+pub(crate) fn restore_file_link(
+    home: &Path,
+    key: &str,
+    target: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<Restored> {
+    match read_node(home, key)? {
+        Node::Symlink(now) if now == target => return Ok(Restored::Untouched),
+        Node::File { .. } => {}
+        _ => return Ok(Restored::Kept),
+    }
+    let expected = Home::Present(Tuple::of_file(bytes, safe_mode(mode)));
+    let modes = BTreeMap::new();
+    let opts = WriteOptions {
+        dry_run: false,
+        in_place: false,
+        backup: None,
+        expected: &expected,
+        modes: &modes,
+    };
+    Ok(match safe_symlink(home, key, target, &opts)? {
+        WriteOutcome::Written(_) => Restored::Back,
+        WriteOutcome::Skipped(_) => Restored::Kept,
+    })
+}
+
+/// Puts the symlink `target` back at `key`, over the directory the swap wrote there. A directory
+/// that holds anything other than `members` is left alone.
+pub(crate) fn restore_dir_link(
+    home: &Path,
+    key: &str,
+    target: &Path,
+    members: &BTreeMap<String, Member>,
+) -> Result<Restored> {
+    match read_node(home, key)? {
+        Node::Symlink(now) if now == target => return Ok(Restored::Untouched),
+        Node::Dir => {}
+        _ => return Ok(Restored::Kept),
+    }
+    let path = home.join(key);
+    if !holds_exactly(&path, members) {
+        return Ok(Restored::Kept);
+    }
+    let dir = parent_of(&path)?;
+    let link = tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .make_in(dir, |temp| symlink(target, temp))
+        .with_context(|| format!("cannot create a temp link in {}", dir.display()))?
+        .into_temp_path();
+    let aside = aside_path(&path)?;
+    fs::rename(&path, &aside).with_context(|| format!("cannot move {} aside", path.display()))?;
+    if let Err(e) = link.persist(&path) {
+        let _ = fs::rename(&aside, &path);
+        return Err(e.error).with_context(|| format!("cannot restore {}", path.display()));
+    }
+    fs::remove_dir_all(&aside)
+        .with_context(|| format!("the link is back, but {} is left", aside.display()))?;
+    sync_dir(dir)?;
+    Ok(Restored::Back)
+}
+
+/// Whether the tree at `dir` holds the files and links of `members` and nothing else.
+pub(crate) fn holds_exactly(dir: &Path, members: &BTreeMap<String, Member>) -> bool {
+    let mut seen = 0usize;
+    for entry in WalkDir::new(dir).follow_links(false).min_depth(1) {
+        let Ok(entry) = entry else { return false };
+        let file_type = entry.file_type();
+        if file_type.is_dir() {
+            continue;
+        }
+        let Some(rel) = entry.path().strip_prefix(dir).ok().and_then(Path::to_str) else {
+            return false;
+        };
+        let same = match (members.get(rel), file_type.is_symlink()) {
+            (Some(Member::Link(target)), true) => {
+                fs::read_link(entry.path()).is_ok_and(|now| now == *target)
+            }
+            (Some(Member::File { bytes, .. }), false) if file_type.is_file() => {
+                fs::read(entry.path()).is_ok_and(|now| now == *bytes)
+            }
+            _ => false,
+        };
+        if !same {
+            return false;
+        }
+        seen = seen.saturating_add(1);
+    }
+    seen == members.len()
 }
 
 #[derive(Clone, Copy)]
@@ -870,5 +1130,107 @@ mod tests {
         symlink(&path, f.home.join("link")).unwrap();
         assert!(rewrite_in_place(&f.home.join("link"), b"x", 0o644).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"new");
+    }
+
+    fn members(files: &[(&str, &[u8])]) -> BTreeMap<String, Member> {
+        files
+            .iter()
+            .map(|(rel, bytes)| {
+                (
+                    (*rel).to_owned(),
+                    Member::File {
+                        bytes: bytes.to_vec(),
+                        mode: 0o644,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_link_is_replaced_by_a_file_and_the_target_is_never_written() {
+        let f = fixture();
+        fs::write(f.tmp.path().join("farm"), b"farm").unwrap();
+        symlink("../farm", f.home.join(".rc")).unwrap();
+        // The link text no longer matches, as if the link had been swapped for another.
+        assert!(replace_link_with_file(&f.home, ".rc", Path::new("other"), b"x", 0o644).is_err());
+        assert!(
+            fs::symlink_metadata(f.home.join(".rc"))
+                .unwrap()
+                .is_symlink()
+        );
+
+        replace_link_with_file(&f.home, ".rc", Path::new("../farm"), b"new", 0o4755).unwrap();
+        assert_eq!(fs::read(f.home.join(".rc")).unwrap(), b"new");
+        assert_eq!(mode_of(&f.home.join(".rc")), 0o755);
+        assert_eq!(fs::read(f.tmp.path().join("farm")).unwrap(), b"farm");
+        assert_eq!(names(&f.home), [".rc"]);
+        assert!(replace_link_with_file(&f.home, ".rc", Path::new("../farm"), b"x", 0o644).is_err());
+    }
+
+    #[test]
+    fn a_file_is_restored_to_its_link_only_while_it_is_what_the_swap_wrote() {
+        let f = fixture();
+        let target = Path::new("../farm");
+        symlink(target, f.home.join(".rc")).unwrap();
+        assert_eq!(
+            restore_file_link(&f.home, ".rc", target, b"new", 0o644).unwrap(),
+            Restored::Untouched
+        );
+        replace_link_with_file(&f.home, ".rc", target, b"new", 0o644).unwrap();
+        fs::write(f.home.join(".rc"), b"edited").unwrap();
+        assert_eq!(
+            restore_file_link(&f.home, ".rc", target, b"new", 0o644).unwrap(),
+            Restored::Kept
+        );
+        assert_eq!(fs::read(f.home.join(".rc")).unwrap(), b"edited");
+
+        fs::write(f.home.join(".rc"), b"new").unwrap();
+        fs::set_permissions(f.home.join(".rc"), Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            restore_file_link(&f.home, ".rc", target, b"new", 0o644).unwrap(),
+            Restored::Back
+        );
+        assert_eq!(fs::read_link(f.home.join(".rc")).unwrap(), target);
+        assert_eq!(names(&f.home), [".rc"]);
+    }
+
+    #[test]
+    fn a_link_to_a_directory_becomes_a_tree_and_comes_back_only_if_it_is_unchanged() {
+        let f = fixture();
+        let target = Path::new("../farm/nvim");
+        symlink(target, f.home.join("nvim")).unwrap();
+        let tree_of = members(&[("init.lua", b"one"), ("lua/opts.lua", b"two")]);
+        let modes = BTreeMap::from([("nvim/lua/".to_owned(), "0700".to_owned())]);
+
+        assert!(replace_link_with_dir(&f.home, "nvim", Path::new("x"), &tree_of, &modes).is_err());
+        replace_link_with_dir(&f.home, "nvim", target, &tree_of, &modes).unwrap();
+        assert_eq!(fs::read(f.home.join("nvim/lua/opts.lua")).unwrap(), b"two");
+        assert_eq!(mode_of(&f.home.join("nvim")), 0o755);
+        assert_eq!(mode_of(&f.home.join("nvim/lua")), 0o700);
+        assert_eq!(names(&f.home), ["nvim"]);
+        assert!(holds_exactly(&f.home.join("nvim"), &tree_of));
+
+        fs::write(f.home.join("nvim/extra"), b"mine").unwrap();
+        assert_eq!(
+            restore_dir_link(&f.home, "nvim", target, &tree_of).unwrap(),
+            Restored::Kept
+        );
+        fs::remove_file(f.home.join("nvim/extra")).unwrap();
+        assert_eq!(
+            restore_dir_link(&f.home, "nvim", target, &tree_of).unwrap(),
+            Restored::Back
+        );
+        assert_eq!(fs::read_link(f.home.join("nvim")).unwrap(), target);
+        assert_eq!(names(&f.home), ["nvim"]);
+    }
+
+    #[test]
+    fn a_link_record_keeps_the_exact_target_text() {
+        let f = fixture();
+        let file = record_link(&f.run_dir, "a\tb", Path::new("t\narget")).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "a\\tb\tt\\narget\n");
+        assert_eq!(mode_of(&file), 0o600);
+        assert_eq!(mode_of(file.parent().unwrap()), 0o700);
     }
 }

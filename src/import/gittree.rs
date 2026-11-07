@@ -10,6 +10,7 @@
 //! different files for their target, are reported too and not counted as converted.
 
 use super::chezmoi;
+use super::farm;
 use super::yadm::{self, Alternate, Machine};
 use super::{
     EditedConfig, Item, Report, Source, author_email, count, find_legacy, homes, legacy, proceed,
@@ -61,7 +62,7 @@ pub(super) struct Candidate {
     pub(super) path: PathBuf,
 }
 
-fn is_git_dir(dir: &Path) -> bool {
+pub(super) fn is_git_dir(dir: &Path) -> bool {
     dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
 }
 
@@ -73,7 +74,8 @@ fn git_at(dir: &Path) -> Git {
     Git::new(dir, "import")
 }
 
-/// Legacy, yadm, bare dot-directories of `$HOME`, vcsh, then chezmoi, in the order `find` reports them.
+/// Legacy, yadm, bare dot-directories of `$HOME`, vcsh, chezmoi, then symlink farms, in the order
+/// `find` reports them.
 pub(super) fn candidates(ctx: &Context) -> Result<Vec<Candidate>> {
     let home = &ctx.paths.home;
     let mut found = Vec::new();
@@ -112,6 +114,10 @@ pub(super) fn candidates(ctx: &Context) -> Result<Vec<Candidate>> {
     }));
     found.extend(chezmoi::candidates(ctx).into_iter().map(|path| Candidate {
         label: "chezmoi source",
+        path,
+    }));
+    found.extend(farm::candidates(ctx).into_iter().map(|path| Candidate {
+        label: "symlink farm",
         path,
     }));
     Ok(found)
@@ -195,7 +201,7 @@ pub(super) fn find(ctx: &Context) -> Result<ControlFlow<Outcome, Source>> {
     let found = candidates(ctx)?;
     match found.as_slice() {
         [] => bail!(
-            "no source given and none found: looked for a legacy dotman repo in {home}/.dotman, a yadm repo, bare repos directly under {home}, vcsh repos in {vcsh} and a chezmoi source; run `dot import <source>` with a path or a git URL",
+            "no source given and none found: looked for a legacy dotman repo in {home}/.dotman, a yadm repo, bare repos directly under {home}, vcsh repos in {vcsh}, a chezmoi source, and links in {home} that resolve under one directory; run `dot import <source>` with a path or a git URL",
             home = ctx.paths.home.display(),
             vcsh = vcsh_dir(ctx).display()
         ),
@@ -215,17 +221,17 @@ pub(super) fn find(ctx: &Context) -> Result<ControlFlow<Outcome, Source>> {
 }
 
 /// The source's clone, in a directory that is removed when this is dropped.
-struct Staging {
+pub(super) struct Staging {
     _dir: TempDir,
-    repo: PathBuf,
-    git: Git,
+    pub(super) repo: PathBuf,
+    pub(super) git: Git,
 }
 
 impl Staging {
     /// Beside the dotman repo for an import, so that moving it into place is a rename, and in
     /// the system temp directory otherwise, so that nothing is created in the dotman repo's
     /// parent.
-    fn new(ctx: &Context, beside_repo: bool) -> Result<Self> {
+    pub(super) fn new(ctx: &Context, beside_repo: bool) -> Result<Self> {
         let base = if beside_repo {
             let parent =
                 ctx.paths.repo.parent().ok_or_else(|| {
@@ -699,7 +705,7 @@ fn convert(git: &Git, repo: &Path, found: &Analysis) -> Result<()> {
 
 /// The repo directory can be replaced by the staging clone when it holds nothing but a `.git`
 /// without commits and a `.dotman.toml`.
-fn check_target(repo: &Path) -> Result<()> {
+pub(super) fn check_target(repo: &Path) -> Result<()> {
     let entries = match fs::read_dir(repo) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -754,6 +760,25 @@ fn install(
     fs::rename(&staging.repo, repo)
         .with_context(|| format!("cannot move the import into {}", repo.display()))?;
     Ok(prior_origin)
+}
+
+/// [`install`], then the `origin` that `dot init` had set when the import brings none.
+pub(super) fn install_keeping_origin(
+    ctx: &Context,
+    staging: &Staging,
+    edited: Option<&EditedConfig>,
+) -> Result<()> {
+    let prior_origin = install(ctx, staging, edited)?;
+    if let Some(url) = prior_origin
+        && ctx.git.remote_url("origin")?.is_none()
+    {
+        ctx.git.set_remote_url("origin", &url)?;
+        output::info(&format!(
+            "origin is {} again, as `dot init` set it",
+            redact_credentials(&url)
+        ));
+    }
+    Ok(())
 }
 
 /// The machine config with yadm's `local.*` settings in it, and what was left alone.
@@ -862,7 +887,7 @@ fn home_notes(ctx: &Context, found: &Analysis) -> Vec<String> {
     let mut notes = Vec::new();
     if !links.is_empty() {
         notes.push(format!(
-            "yadm's alternate links in $HOME ({}) block the converted files until `dot import --swap`, coming in the same release, replaces them: {}",
+            "yadm's alternate links in $HOME ({}) block the converted files until `dot import --swap` replaces them: {}",
             links.len(),
             shown(&links)
         ));
@@ -1063,16 +1088,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         return Ok(Outcome::Done);
     }
     convert(&staging.git, &staging.repo, &found)?;
-    let prior_origin = install(ctx, &staging, edited.as_ref())?;
-    if let Some(url) = prior_origin
-        && ctx.git.remote_url("origin")?.is_none()
-    {
-        ctx.git.set_remote_url("origin", &url)?;
-        output::info(&format!(
-            "origin is {} again, as `dot init` set it",
-            redact_credentials(&url)
-        ));
-    }
+    install_keeping_origin(ctx, &staging, edited.as_ref())?;
     if let Some(machine) = setup.machine {
         machine.save(&ctx.paths.config_file, false)?;
     }

@@ -5,6 +5,7 @@
 //! or listed as needing action.
 
 mod chezmoi;
+mod farm;
 mod gittree;
 mod legacy;
 mod yadm;
@@ -73,6 +74,14 @@ impl Report {
             self.converted,
             self.needs_action.len()
         ));
+        self.print_items();
+        for note in &self.notes {
+            output::info(note);
+        }
+    }
+
+    /// Prints the entries that need action, grouped by reason.
+    pub fn print_items(&self) {
         let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for item in &self.needs_action {
             groups
@@ -85,9 +94,6 @@ impl Report {
             for detail in details {
                 output::warning(&format!("  {detail}"));
             }
-        }
-        for note in &self.notes {
-            output::info(note);
         }
     }
 }
@@ -156,6 +162,9 @@ fn is_url(text: &str) -> bool {
 
 /// Runs `dot import`. The caller holds the lock and has run the in-progress guard.
 pub fn run(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
+    if args.swap {
+        return farm::swap(ctx, args);
+    }
     // Not a clap `requires`: clap skips it whenever the positional source, which conflicts with
     // `--overlay`, is present.
     if args.include_missing && args.overlay.is_none() {
@@ -187,6 +196,14 @@ pub fn run(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
                 "--overlay does not take a chezmoi source; import it into a fresh repo with `dot import`"
             );
             return chezmoi::import(ctx, path, args);
+        }
+        // A farm is usually a git checkout too, so it is told apart by the links that point into it.
+        if args.overlay.is_none() && farm::is_source(ctx, path) {
+            ensure!(
+                !args.render_templates,
+                "--render-templates only applies to a chezmoi source"
+            );
+            return farm::import(ctx, path, args);
         }
     }
     ensure!(
