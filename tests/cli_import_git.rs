@@ -337,13 +337,10 @@ fn yadm_encrypt_patterns_and_bootstrap_are_reported() {
 
 #[test]
 fn an_imported_yadm_repo_applies() {
-    if !cfg!(target_os = "linux") {
-        return;
-    }
     let env = TestEnv::new();
     let _source = yadm_fixture(&env);
     env.run(&["import"]);
-    env.write_machine_config("[template]\nenv = [\"EDITOR\"]\n");
+    env.write_machine_config("[identity]\nos = \"linux\"\n\n[template]\nenv = [\"EDITOR\"]\n");
     env.ok_with(&[("EDITOR", "ed")], &["apply"]);
     assert_eq!(env.read(".bashrc"), b"bash\n");
     assert_eq!(env.read(".toolrc"), b"[core]\neditor = vim\n# ed\n");

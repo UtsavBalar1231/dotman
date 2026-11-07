@@ -637,6 +637,7 @@ fn files_other_tools_keep_in_a_farm_are_reported_and_never_run() {
 fn a_yadm_link_to_a_double_hash_file_is_swapped() {
     let env = TestEnv::new();
     env.ok(&["init"]);
+    env.write_machine_config("[identity]\nos = \"linux\"\n");
     env.write_repo(".zshrc{os=linux}", b"linux zshrc\n");
     env.write(".zshrc##o.Linux", b"linux zshrc\n", 0o644);
     env.symlink(".zshrc", ".zshrc##o.Linux");
