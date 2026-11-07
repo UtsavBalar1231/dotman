@@ -120,11 +120,17 @@ impl State {
     /// treated as empty. A file written for another repo keeps only its identity snapshot, so
     /// every entry counts as absent.
     pub fn load(path: &Path, repo_id: &str) -> Result<Self> {
+        Ok(Self::for_repo(
+            Self::read(path)?.unwrap_or_default(),
+            repo_id,
+        ))
+    }
+
+    /// The file as written, whatever repo it belongs to; `None` when it does not exist.
+    pub fn read(path: &Path) -> Result<Option<Self>> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(Self::for_repo(Self::default(), repo_id));
-            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
         let state = std::str::from_utf8(&bytes)
@@ -137,7 +143,7 @@ impl State {
                 &format!("version {} is not supported", state.version)
             ));
         }
-        Ok(Self::for_repo(state, repo_id))
+        Ok(Some(state))
     }
 
     fn for_repo(state: Self, repo_id: &str) -> Self {

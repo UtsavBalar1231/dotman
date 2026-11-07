@@ -3,6 +3,7 @@
 pub mod add;
 pub mod apply;
 pub mod diff;
+pub mod doctor;
 pub mod forget;
 pub mod git;
 pub mod init;

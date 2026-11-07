@@ -57,6 +57,8 @@ pub enum Commands {
     Restore(RestoreArgs),
     /// Run git in the repo
     Git(GitArgs),
+    /// Check the environment and the repo for problems
+    Doctor(DoctorArgs),
     /// Generate shell completion scripts
     Completion {
         /// Shell to generate completions for
@@ -205,6 +207,14 @@ pub struct RestoreArgs {
     /// Show what would be written and change nothing
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments of `dot doctor`.
+#[derive(Args)]
+pub struct DoctorArgs {
+    /// Also ask the remote with `git ls-remote`
+    #[arg(long)]
+    pub online: bool,
 }
 
 /// Arguments of `dot git`.
