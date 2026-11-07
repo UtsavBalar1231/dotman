@@ -130,7 +130,11 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     state.save(&ctx.paths.state_file(), opts.dry_run)?;
     repo_saved?;
     if run.failed > 0 {
-        bail!("{} paths could not be applied", run.failed);
+        bail!(
+            "{} {} could not be applied",
+            run.failed,
+            if run.failed == 1 { "path" } else { "paths" }
+        );
     }
     Ok(Applied {
         outcome: if run.attention {
@@ -329,7 +333,7 @@ impl Run<'_> {
                     }
                 }
                 Err(e) => {
-                    output::warning(&format!("{key}: cannot be read: {e:#}"));
+                    output::warning(&format!("{key}: skipped: {e:#}"));
                     self.failed = self.failed.saturating_add(1);
                 }
             }

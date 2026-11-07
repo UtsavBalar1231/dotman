@@ -71,14 +71,15 @@ pub fn render(source: &str, text: &str, vars: &Vars) -> Result<String> {
 
 fn explain(source: &str, text: &str, e: &Error) -> anyhow::Error {
     let line = e.line().map(|line| format!(":{line}")).unwrap_or_default();
-    let expression = e
-        .range()
-        .and_then(|range| text.get(range))
-        .map(|expression| format!(" in `{expression}`"))
-        .unwrap_or_default();
     let detail = e
         .detail()
         .map_or_else(|| e.kind().to_string(), str::to_owned);
+    let expression = e
+        .range()
+        .and_then(|range| text.get(range))
+        .filter(|expression| !detail.contains(expression))
+        .map(|expression| format!(" in `{expression}`"))
+        .unwrap_or_default();
     anyhow!("{source}{line}: {detail}{expression}")
 }
 
@@ -125,6 +126,8 @@ mod tests {
             assert!(err.contains("dir/a{tmpl}.conf"), "{err}");
             assert!(err.contains(name), "{err}");
         }
+        let err = format!("{:#}", render_str("{{ vars.size }}", &[]).unwrap_err());
+        assert_eq!(err.matches("vars.size").count(), 1, "{err}");
     }
 
     #[test]
