@@ -275,6 +275,30 @@ fn a_missing_git_identity_exits_1_with_the_fix_and_commits_nothing() {
 }
 
 #[test]
+fn a_git_identity_from_the_environment_is_enough_to_commit() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok(&["add", ".a"]);
+    fs::remove_file(env.home().join(".gitconfig")).expect("remove the identity");
+    let identity = [
+        ("GIT_AUTHOR_NAME", "Ci"),
+        ("GIT_AUTHOR_EMAIL", "ci@example.invalid"),
+        ("GIT_COMMITTER_NAME", "Ci"),
+        ("GIT_COMMITTER_EMAIL", "ci@example.invalid"),
+    ];
+    let out = env.run_with(&identity, &["sync"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = env.git(&["-C", &repo_path(&env), "log", "--format=%an <%ae>"]);
+    assert_eq!(log.trim(), "Ci <ci@example.invalid>");
+}
+
+#[test]
 fn without_a_remote_sync_commits_and_prints_the_hint() {
     let env = TestEnv::new();
     env.ok(&["init"]);

@@ -505,14 +505,16 @@ impl Git {
         self.run(&["remote", verb, name, url]).map(drop)
     }
 
-    /// Both `user.name` and `user.email` must be set; an empty value counts as unset.
+    /// Whether git can name both an author and a committer from config or the environment. With
+    /// `useConfigOnly`, an identity guessed from the host name does not count.
     pub fn identity_configured(&self) -> Result<bool> {
-        for key in ["user.name", "user.email"] {
-            if self
-                .optional(&["config", "--get", key])?
-                .is_none_or(|v| v.is_empty())
-            {
-                return Ok(false);
+        for role in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
+            let args = ["-c", "user.useConfigOnly=true", "var", role];
+            let out = self.probe(&args)?;
+            match out.status.code() {
+                Some(0) => {}
+                Some(128) => return Ok(false),
+                _ => return Err(failure(&args, &out)),
             }
         }
         Ok(true)
