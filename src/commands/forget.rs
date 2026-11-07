@@ -23,7 +23,7 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
-    let managed = ctx.managed()?;
+    let sources = ctx.sources()?;
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
 
     // Every input is resolved before anything changes, so a typo leaves the repo as it was.
@@ -34,7 +34,12 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
         let key = derive_key(input, &cwd, &ctx.paths.home, ctx.paths.home_real.as_deref())?;
         inputs.push(key.clone());
         let before = (gone.len(), dirs.len());
-        gone.extend(managed.keys().filter(|k| is_under(k, &key)).cloned());
+        gone.extend(
+            sources
+                .keys()
+                .filter(|k| is_under(k, &key))
+                .map(str::to_owned),
+        );
         gone.extend(state.files.keys().filter(|k| is_under(k, &key)).cloned());
         dirs.extend(
             repo_config
@@ -61,7 +66,7 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
 
     repo_config.dirs.paths.retain(|d| !dirs.contains(d));
     for key in &inputs {
-        let is_key = gone.contains(key) || managed.contains_key(key);
+        let is_key = gone.contains(key) || sources.contains(key);
         if !is_key && !dirs.contains(key) && under_dirs(&repo_config, key) {
             ignore_forgotten(
                 &mut repo_config,
@@ -78,21 +83,28 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
     Ok(())
 }
 
-/// Removes `keys` from the worktree, `[modes]` and the state, then drops `dir/` modes that no
-/// remaining key lies under. `$HOME` is left alone. A key under a remaining `[dirs]` entry gets an
-/// `[ignore]` pattern, because the scan would capture the file that stays in `$HOME` again.
+/// Removes `keys`, every variant included, from the worktree, `[modes]` and the state, then drops
+/// `dir/` modes that no remaining key lies under. `$HOME` is left alone. A key under a remaining
+/// `[dirs]` entry gets an `[ignore]` pattern, because the scan would capture the file that stays
+/// in `$HOME` again.
 pub(crate) fn remove_keys(
     ctx: &Context,
     repo_config: &mut RepoConfig,
     state: &mut State,
     keys: &BTreeSet<String>,
 ) -> Result<()> {
+    let sources = ctx.sources()?;
     for key in keys {
-        let path = ctx.paths.repo.join(key);
-        match fs::remove_file(&path) {
-            Ok(()) => remove_empty_parents(&ctx.paths.repo, &path),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("cannot remove {}", path.display())),
+        for source in sources.sources_of(key) {
+            let path = ctx.paths.repo.join(source);
+            match fs::remove_file(&path) {
+                Ok(()) => remove_empty_parents(&ctx.paths.repo, &path),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| format!("cannot remove {}", path.display()));
+                }
+            }
+            repo_config.modes.remove(source);
         }
         repo_config.modes.remove(key);
         state.files.remove(key);

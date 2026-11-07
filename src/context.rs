@@ -2,11 +2,14 @@
 
 use crate::config::Config;
 use crate::git::{Git, Operation};
+use crate::identity;
 use crate::paths::{Env, Paths, derive_key, validate_key};
 use crate::repo_config::RepoConfig;
-use crate::state::{Kind, State};
+use crate::state::{IdentitySnapshot, Kind, State};
 use crate::sys;
+use crate::variant::Sources;
 use anyhow::{Context as _, Result, bail};
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
@@ -44,6 +47,9 @@ pub struct Context {
     pub paths: Paths,
     /// Git in the repo.
     pub git: Git,
+    /// The machine config, already applied to `paths`.
+    pub machine: Config,
+    identity: OnceCell<IdentitySnapshot>,
 }
 
 impl Context {
@@ -52,8 +58,29 @@ impl Context {
         let paths = Paths::resolve(&Env::from_process(), sys::geteuid())?;
         let machine = Config::load(&paths.config_file)?;
         let paths = paths.apply_config(&machine)?;
-        let git = Git::new(paths.repo.clone(), dot_command);
-        Ok(Self { paths, git })
+        Ok(Self::new(paths, machine, dot_command))
+    }
+
+    /// A context whose git runs in `paths.repo`; `machine` must be the config `paths` came from.
+    #[must_use]
+    pub fn new(paths: Paths, machine: Config, dot_command: &'static str) -> Self {
+        Self {
+            git: Git::new(paths.repo.clone(), dot_command),
+            paths,
+            machine,
+            identity: OnceCell::new(),
+        }
+    }
+
+    /// Detected once per run, because on macOS it runs `scutil`.
+    pub fn identity(&self) -> &IdentitySnapshot {
+        self.identity
+            .get_or_init(|| identity::current(&self.machine))
+    }
+
+    /// [`Context::managed`] grouped by target key, so variants of one file share a key.
+    pub fn sources(&self) -> Result<Sources> {
+        Ok(Sources::group(self.managed()?.keys().map(String::as_str)))
     }
 
     /// Fails with [`InProgress`] while a rebase or merge is unfinished in the repo. Every command
@@ -97,7 +124,8 @@ impl Context {
     }
 
     /// Every regular file and symlink in the worktree outside `.git` and the reserved root
-    /// names, with its kind. A symlink to a directory is one entry, never followed.
+    /// names, with its kind. A symlink to a directory is one entry, never followed. Keyed by repo
+    /// path, which for a variant is not the key it targets.
     pub fn managed(&self) -> Result<BTreeMap<String, Kind>> {
         let root = &self.paths.repo;
         let mut found = BTreeMap::new();

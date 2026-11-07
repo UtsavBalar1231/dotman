@@ -2,9 +2,9 @@
 
 use crate::cli::StatusArgs;
 use crate::commands::add::{self, Hold};
+use crate::commands::apply::{Classified, classify_key};
 use crate::context::{Context, is_under};
-use crate::engine::status::{Row, Source, Worktree, classify};
-use crate::engine::{Tuple, observe_portable};
+use crate::engine::status::{Row, Variants, Worktree};
 use crate::output;
 use crate::paths::derive_key;
 use anyhow::{Context as _, Result};
@@ -51,26 +51,25 @@ pub fn run(args: &StatusArgs) -> Result<()> {
             .collect::<Result<Vec<_>>>()?
     };
 
-    let mut keys: BTreeSet<String> = ctx.managed()?.into_keys().collect();
+    let sources = ctx.sources()?;
+    let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
     let scan = add::scan_dirs(&ctx, &repo_config, &keys)?;
     let in_scope = |key: &str| filters.is_empty() || filters.iter().any(|f| is_under(key, f));
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
+    let variants = Variants::new(worktree, &sources, ctx.identity());
 
     let mut rows = Vec::new();
     for key in keys {
         if !in_scope(&key) {
             continue;
         }
-        let r = worktree.get(&key);
-        let h = observe_portable(&ctx.paths.home, ctx.paths.home_real.as_deref(), &key);
-        let s = state.files.get(&key).map(Tuple::from_entry).transpose();
-        let label = match (&r, &h, &s) {
-            (Ok(r), Ok(h), Ok(s)) => match classify(r.as_ref().map(|e| &e.tuple), h, s.as_ref()) {
-                Some(row) => token(row),
-                None => continue,
-            },
-            _ => UNREADABLE,
+        let label = match classify_key(&ctx, &variants, &state, &key) {
+            Ok(Classified::Unmanaged) => continue,
+            Ok(Classified::Item(item)) => item.token(),
+            Ok(Classified::Ambiguous(_)) => "ambiguous",
+            Ok(Classified::Invalid(_)) => "invalid",
+            Err(_) => UNREADABLE,
         };
         rows.push((label, key));
     }

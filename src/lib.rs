@@ -11,6 +11,7 @@ pub mod config;
 pub mod context;
 pub mod engine;
 pub mod git;
+pub mod identity;
 pub mod lock;
 pub mod output;
 pub mod paths;
@@ -19,6 +20,7 @@ pub mod repo_config;
 pub mod state;
 #[allow(unsafe_code)]
 pub mod sys;
+pub mod variant;
 
 /// Crate version from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

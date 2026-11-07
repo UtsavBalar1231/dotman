@@ -41,6 +41,28 @@ pub fn hostname() -> Option<String> {
     Some(String::from_utf8_lossy(buf.get(..end)?).into_owned())
 }
 
+/// The hardware name `uname -m` prints, such as `x86_64`, or `arm64` on Apple silicon. `None`
+/// when the call fails.
+#[must_use]
+pub fn machine() -> Option<String> {
+    let mut name = MaybeUninit::<libc::utsname>::zeroed();
+    // SAFETY: `name` is writable for a whole `utsname` and outlives the call.
+    if unsafe { libc::uname(name.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: zeroed memory is a valid `utsname`, which holds only `c_char` arrays, and `uname`
+    // succeeded, so the fields hold its strings.
+    let name = unsafe { name.assume_init() };
+    // `c_char` is `i8` on x86_64 and `u8` on aarch64 Linux.
+    let bytes: Vec<u8> = name
+        .machine
+        .iter()
+        .map(|c| u8::from_ne_bytes(c.to_ne_bytes()))
+        .collect();
+    let end = bytes.iter().position(|b| *b == 0)?;
+    Some(String::from_utf8_lossy(bytes.get(..end)?).into_owned())
+}
+
 /// A passwd database entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Passwd {
@@ -194,6 +216,18 @@ mod tests {
             .expect("run uname");
         assert_eq!(
             hostname().as_deref(),
+            Some(String::from_utf8_lossy(&uname.stdout).trim())
+        );
+    }
+
+    #[test]
+    fn machine_matches_uname() {
+        let uname = std::process::Command::new("uname")
+            .arg("-m")
+            .output()
+            .expect("run uname");
+        assert_eq!(
+            machine().as_deref(),
             Some(String::from_utf8_lossy(&uname.stdout).trim())
         );
     }

@@ -10,7 +10,6 @@ use crate::context::Context;
 use crate::git::PullOutcome;
 use crate::lock::Lock;
 use crate::output;
-use crate::sys;
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -120,7 +119,7 @@ fn commit(ctx: &Context, args: &SyncArgs, captured: &BTreeSet<String>) -> Result
     let message = args
         .message
         .clone()
-        .unwrap_or_else(|| default_message(&changed));
+        .unwrap_or_else(|| default_message(&ctx.identity().host, &changed));
     if args.dry_run {
         output::info(&format!("would commit: {message}"));
         return Ok(());
@@ -135,13 +134,8 @@ fn commit(ctx: &Context, args: &SyncArgs, captured: &BTreeSet<String>) -> Result
 }
 
 /// `sync(<host>): a/b, c/d, e/f (+N more)`, naming the first three paths in sorted order.
-fn default_message(changed: &BTreeSet<String>) -> String {
-    let host = sys::hostname().unwrap_or_default();
-    let host = host
-        .split('.')
-        .next()
-        .filter(|name| !name.is_empty())
-        .unwrap_or("unknown");
+fn default_message(host: &str, changed: &BTreeSet<String>) -> String {
+    let host = if host.is_empty() { "unknown" } else { host };
     let named: Vec<&str> = changed.iter().take(LISTED).map(|p| tail(p)).collect();
     let more = changed.len().saturating_sub(LISTED);
     let rest = if more > 0 {
@@ -202,9 +196,10 @@ mod tests {
     #[test]
     fn the_message_names_three_paths_and_counts_the_rest() {
         let set = |keys: &[&str]| keys.iter().map(|k| (*k).to_owned()).collect();
-        let three = default_message(&set(&["x/a", "x/b", "x/c"]));
-        assert!(three.ends_with("): x/a, x/b, x/c"), "{three}");
-        let five = default_message(&set(&["x/e", "x/a", "x/d", "x/b", "x/c"]));
-        assert!(five.ends_with("): x/a, x/b, x/c (+2 more)"), "{five}");
+        let three = default_message("box", &set(&["x/a", "x/b", "x/c"]));
+        assert_eq!(three, "sync(box): x/a, x/b, x/c");
+        let five = default_message("box", &set(&["x/e", "x/a", "x/d", "x/b", "x/c"]));
+        assert_eq!(five, "sync(box): x/a, x/b, x/c (+2 more)");
+        assert!(default_message("", &set(&["a"])).starts_with("sync(unknown): "));
     }
 }

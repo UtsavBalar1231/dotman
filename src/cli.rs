@@ -104,6 +104,9 @@ pub struct Decisions {
     /// Write files deleted locally back from the repo
     #[arg(long)]
     pub restore_deleted: bool,
+    /// Accept a changed machine identity and use the variants it selects
+    #[arg(long)]
+    pub accept_identity: bool,
 }
 
 /// Arguments of `dot apply`.
@@ -149,6 +152,10 @@ pub struct AddArgs {
     /// Files, symlinks or directories under $HOME
     #[arg(required = true)]
     pub paths: Vec<PathBuf>,
+    /// Add the files as variants that apply only where these `+`-joined conditions hold, such as
+    /// `host=laptop+os!=macos`
+    #[arg(long = "for", value_name = "CONDITIONS")]
+    pub for_conditions: Option<String>,
     /// Do not ask before adding directories
     #[arg(long)]
     pub yes: bool,

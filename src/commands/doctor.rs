@@ -6,6 +6,7 @@ use crate::git::Git;
 use crate::lock::Lock;
 use crate::state::State;
 use crate::sys;
+use crate::variant::Selection;
 use anyhow::{Context as _, Result};
 use std::fs;
 use std::io::Write;
@@ -113,6 +114,7 @@ fn collect(online: bool) -> Vec<Check> {
                 checks.push(remote(&git, online));
             }
             checks.extend(repo_health(ctx));
+            checks.extend(variants(ctx));
         } else {
             checks.push(fail(
                 "repo",
@@ -246,6 +248,39 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
             "run dot git rebase --continue or dot git rebase --abort",
         )),
         None => checks.push(pass("no git operation in progress")),
+    }
+    checks
+}
+
+// Ambiguity depends on this machine's identity; an invalid block is invalid everywhere.
+fn variants(ctx: &Context) -> Vec<Check> {
+    let sources = match ctx.sources() {
+        Ok(sources) => sources,
+        Err(e) => return vec![warn("variants", &format!("{e:#}"))],
+    };
+    let mut checks = Vec::new();
+    for key in sources.keys() {
+        match sources.select(key, ctx.identity()) {
+            Selection::Ambiguous(tied) => checks.push(warn(
+                "variants",
+                &format!(
+                    "{key}: {} are equally specific here and none is applied; remove one",
+                    tied.join(", ")
+                ),
+            )),
+            Selection::Invalid(problems) => {
+                for (source, reason) in problems {
+                    checks.push(warn(
+                        "variants",
+                        &format!("{source}: {reason}; {key} is not applied"),
+                    ));
+                }
+            }
+            Selection::None | Selection::Winner(_) => {}
+        }
+    }
+    if checks.is_empty() {
+        checks.push(pass("variants"));
     }
     checks
 }

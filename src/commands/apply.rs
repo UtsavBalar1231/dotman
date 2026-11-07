@@ -6,16 +6,18 @@ use crate::commands::add::{self, Scan};
 use crate::commands::status::token;
 use crate::commands::{Outcome, diff, forget};
 use crate::context::Context;
-use crate::engine::status::{Content, Row, Source, SourceEntry, Worktree, classify};
+use crate::engine::status::{Content, Row, Source, SourceEntry, Variants, Worktree, classify};
 use crate::engine::write::{
     Skip, WriteOptions, WriteOutcome, backup_run_dir, safe_symlink, safe_write,
 };
 use crate::engine::{Home, Tuple, observe, observe_portable};
+use crate::identity;
 use crate::lock::Lock;
 use crate::output;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
-use crate::state::{Kind, State};
+use crate::state::{IdentitySnapshot, Kind, State};
+use crate::variant::{Selection, Sources};
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -70,7 +72,8 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
-    let mut keys: BTreeSet<String> = ctx.managed()?.into_keys().collect();
+    let sources = ctx.sources()?;
+    let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
     // Only a whole-repo capture looks for new files; `apply <path>` has no R for them.
     let scan = if opts.pass == Pass::Capture && inputs.is_empty() {
@@ -92,11 +95,13 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         undecided: BTreeSet::new(),
         captured: BTreeSet::new(),
         dir_modes: BTreeMap::new(),
+        accepted: false,
     };
-    let items = run.classify(&state, &keys);
+    let mut items = run.classify(&sources, &state, &keys);
     if opts.summary {
         summarize(&items);
     }
+    run.decide_identity(&mut items, state.identity.as_ref())?;
     let actions = run.plan(&items)?;
     for (item, action) in items.iter().zip(actions) {
         if let Some(action) = action {
@@ -115,6 +120,9 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         };
         removed.and_then(|()| repo_config.save(&ctx.repo_config_file(), false))
     };
+    if !opts.dry_run && (state.identity.is_none() || run.accepted) {
+        state.identity = Some(ctx.identity().clone());
+    }
     state.save(&ctx.paths.state_file(), opts.dry_run)?;
     repo_saved?;
     if run.failed > 0 {
@@ -131,7 +139,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     })
 }
 
-struct Item {
+pub(crate) struct Item {
     key: String,
     row: Row,
     r: Option<SourceEntry>,
@@ -140,6 +148,26 @@ struct Item {
     raw: Home,
     /// H differs from S, so replacing it needs a backup first.
     local_changes: bool,
+    /// The identity change since the snapshot moved this key to another source. Until the change
+    /// is accepted, the key is left alone.
+    identity: bool,
+}
+
+impl Item {
+    pub(crate) const fn token(&self) -> &'static str {
+        if self.identity {
+            "identity-changed"
+        } else {
+            token(self.row)
+        }
+    }
+}
+
+pub(crate) enum Classified {
+    Unmanaged,
+    Item(Item),
+    Ambiguous(Vec<String>),
+    Invalid(Vec<(String, &'static str)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,16 +291,34 @@ struct Run<'a> {
     undecided: BTreeSet<String>,
     captured: BTreeSet<String>,
     dir_modes: BTreeMap<String, u32>,
+    accepted: bool,
 }
 
 impl Run<'_> {
-    fn classify(&mut self, state: &State, keys: &BTreeSet<String>) -> Vec<Item> {
+    fn classify(&mut self, sources: &Sources, state: &State, keys: &BTreeSet<String>) -> Vec<Item> {
         let worktree = Worktree::new(&self.ctx.paths.repo, &self.modes);
+        let variants = Variants::new(worktree, sources, self.ctx.identity());
         let mut items = Vec::new();
         for key in keys {
-            match classify_key(self.ctx, &worktree, state, key) {
-                Ok(Some(item)) => items.push(item),
-                Ok(None) => {}
+            match classify_key(self.ctx, &variants, state, key) {
+                Ok(Classified::Item(item)) => items.push(item),
+                Ok(Classified::Unmanaged) => {}
+                // Reported by the pass that applies, like the rows that are only reported.
+                Ok(Classified::Ambiguous(_) | Classified::Invalid(_))
+                    if self.opts.pass == Pass::Capture => {}
+                Ok(Classified::Ambiguous(tied)) => {
+                    self.attention = true;
+                    output::warning(&format!(
+                        "{key}: {} are equally specific here; skipped until one is removed",
+                        tied.join(", ")
+                    ));
+                }
+                Ok(Classified::Invalid(problems)) => {
+                    self.attention = true;
+                    for (source, reason) in problems {
+                        output::warning(&format!("{key}: skipped, {source}: {reason}"));
+                    }
+                }
                 Err(e) => {
                     output::warning(&format!("{key}: cannot be read: {e:#}"));
                     self.failed = self.failed.saturating_add(1);
@@ -282,13 +328,73 @@ impl Run<'_> {
         items
     }
 
+    /// Asked before every other category, because accepting turns some of these paths into
+    /// conflicts. A path still waiting on it takes no part in any later category.
+    fn decide_identity(
+        &mut self,
+        items: &mut [Item],
+        snapshot: Option<&IdentitySnapshot>,
+    ) -> Result<()> {
+        let pending: Vec<String> = items
+            .iter()
+            .filter(|item| item.identity)
+            .map(|item| item.key.clone())
+            .collect();
+        let change = snapshot
+            .map(|old| identity::describe_change(old, self.ctx.identity()))
+            .unwrap_or_default();
+        let accepted = if self.opts.decisions.accept_identity {
+            true
+        } else if pending.is_empty() || self.opts.dry_run || !prompt::interactive() {
+            false
+        } else {
+            output::info(&format!(
+                "the machine identity changed ({change}), which gives {} paths another source:",
+                pending.len()
+            ));
+            for key in &pending {
+                output::info(&format!("  {key}"));
+            }
+            prompt::confirm("accept the new identity? [y/N]")?
+        };
+        if accepted {
+            self.accepted = true;
+            for item in items.iter_mut() {
+                item.identity = false;
+            }
+            return Ok(());
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.attention = true;
+        output::warning(&format!(
+            "identity changed ({change}): {} paths left undecided; answer with --accept-identity:",
+            pending.len()
+        ));
+        for key in pending {
+            output::warning(&format!("  {key}"));
+            self.undecided.insert(key);
+        }
+        Ok(())
+    }
+
     fn plan(&mut self, items: &[Item]) -> Result<Vec<Option<Action>>> {
-        let mut actions: Vec<Option<Action>> = items.iter().map(|item| self.direct(item)).collect();
+        let mut actions: Vec<Option<Action>> = items
+            .iter()
+            .map(|item| {
+                if item.identity {
+                    None
+                } else {
+                    self.direct(item)
+                }
+            })
+            .collect();
         for question in &QUESTIONS {
             let (indices, members): (Vec<usize>, Vec<&Item>) = items
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| (question.rows)(item.row))
+                .filter(|(_, item)| !item.identity && (question.rows)(item.row))
                 .unzip();
             let choices = self.decide(question, &members, (question.flag)(self.opts.decisions))?;
             let mut undecided = Vec::new();
@@ -455,7 +561,8 @@ impl Run<'_> {
             }
             Action::Capture => {
                 let Home::Present(h) = &item.raw else { return };
-                self.capture(key, h.kind, state, repo_config);
+                let source = item.r.as_ref().map_or(key.as_str(), |r| r.source.as_str());
+                self.capture(key, source, h.kind, state, repo_config);
             }
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };
@@ -477,7 +584,7 @@ impl Run<'_> {
     /// Captures the new files and lists the held ones, which keep the run at exit 3.
     fn capture_new(&mut self, scan: &Scan, state: &mut State, repo_config: &mut RepoConfig) {
         for (key, kind) in &scan.new {
-            self.capture(key, *kind, state, repo_config);
+            self.capture(key, key, *kind, state, repo_config);
         }
         for note in &scan.notes {
             output::warning(note);
@@ -494,15 +601,32 @@ impl Run<'_> {
         }
     }
 
-    fn capture(&mut self, key: &str, kind: Kind, state: &mut State, repo_config: &mut RepoConfig) {
+    fn capture(
+        &mut self,
+        key: &str,
+        source: &str,
+        kind: Kind,
+        state: &mut State,
+        repo_config: &mut RepoConfig,
+    ) {
         self.announce("capture", key);
         if self.opts.dry_run {
             self.captured.insert(key.to_owned());
             return;
         }
-        let done = add::commit_one(self.ctx, repo_config, state, &mut self.dir_modes, key, kind);
+        let done = add::commit_one(
+            self.ctx,
+            repo_config,
+            &mut self.dir_modes,
+            key,
+            source,
+            kind,
+        );
         match done {
-            Ok(()) => {
+            Ok(entry) => {
+                state
+                    .files
+                    .insert(key.to_owned(), entry.tuple.entry(&entry.source));
                 self.captured.insert(key.to_owned());
             }
             Err(e) => {
@@ -572,19 +696,35 @@ impl Run<'_> {
     }
 }
 
-fn classify_key(
+/// R, H and S of `key` and its row, once variants and the identity snapshot are taken into account.
+pub(crate) fn classify_key(
     ctx: &Context,
-    worktree: &Worktree<'_>,
+    variants: &Variants<'_>,
     state: &State,
     key: &str,
-) -> Result<Option<Item>> {
-    let home = &ctx.paths.home;
-    let r = worktree.get(key)?;
-    let h = observe_portable(home, ctx.paths.home_real.as_deref(), key)?;
-    let s = state.files.get(key).map(Tuple::from_entry).transpose()?;
-    let Some(row) = classify(r.as_ref().map(|e| &e.tuple), &h, s.as_ref()) else {
-        return Ok(None);
+) -> Result<Classified> {
+    let r = match variants.get(key)? {
+        Selection::None => None,
+        Selection::Winner(entry) => Some(entry),
+        Selection::Ambiguous(tied) => return Ok(Classified::Ambiguous(tied)),
+        Selection::Invalid(problems) => return Ok(Classified::Invalid(problems)),
     };
+    let home = &ctx.paths.home;
+    let h = observe_portable(home, ctx.paths.home_real.as_deref(), key)?;
+    let recorded = state.files.get(key);
+    let s = recorded.map(Tuple::from_entry).transpose()?;
+    let Some(row) = classify(r.as_ref().map(|e| &e.tuple), &h, s.as_ref()) else {
+        return Ok(Classified::Unmanaged);
+    };
+    let winner = r.as_ref().map(|r| r.source.as_str());
+    let switched = recorded.is_some_and(|s| Some(s.source.as_str()) != winner);
+    // A switch that a commit caused, such as a new variant upstream, follows the rows directly.
+    let identity = switched
+        && state
+            .identity
+            .as_ref()
+            .is_some_and(|old| old != ctx.identity() && variants.winner_under(key, old) != winner);
+    let row = if switched { row.switched() } else { row };
     let local_changes = match (&h, &s) {
         (Home::Present(h), Some(s)) => h != s,
         (Home::Present(_), None) => true,
@@ -594,19 +734,20 @@ fn classify_key(
         Home::Present(tuple) if tuple.kind == Kind::Symlink => observe(home, key)?,
         _ => h,
     };
-    Ok(Some(Item {
+    Ok(Classified::Item(Item {
         key: key.to_owned(),
         row,
         r,
         raw,
         local_changes,
+        identity,
     }))
 }
 
 fn summarize(items: &[Item]) {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for item in items {
-        let count = counts.entry(token(item.row)).or_insert(0);
+        let count = counts.entry(item.token()).or_insert(0);
         *count = count.saturating_add(1);
     }
     let parts: Vec<String> = counts.iter().map(|(t, n)| format!("{n} {t}")).collect();

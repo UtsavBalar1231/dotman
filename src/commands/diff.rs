@@ -5,11 +5,12 @@
 
 use crate::cli::DiffArgs;
 use crate::context::Context;
-use crate::engine::status::{Content, Source, SourceEntry, Worktree};
+use crate::engine::status::{Content, Source, SourceEntry, Variants, Worktree};
 use crate::engine::{Home, Node, observe_portable, read_node};
 use crate::git::Git;
 use crate::output;
 use crate::paths::private_temp_dir;
+use crate::variant::Selection;
 use anyhow::{Context as _, Result, bail};
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -22,12 +23,19 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     ctx.guard()?;
     ctx.repo_id()?;
     let repo_config = ctx.repo_config()?;
-    let keys = ctx.select(&args.paths, ctx.managed()?.into_keys().collect())?;
+    let sources = ctx.sources()?;
+    let keys = ctx.select(&args.paths, sources.keys().map(str::to_owned).collect())?;
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
+    let variants = Variants::new(worktree, &sources, ctx.identity());
     let mut entries = Vec::new();
     for key in keys {
-        if let Some(r) = worktree.get(&key)? {
-            entries.push((key, r));
+        match variants.get(&key)? {
+            Selection::Winner(r) => entries.push((key, r)),
+            Selection::None => {}
+            Selection::Ambiguous(_) => output::warning(&format!("{key}: ambiguous, not compared")),
+            Selection::Invalid(_) => {
+                output::warning(&format!("{key}: has an invalid variant, not compared"));
+            }
         }
     }
     let refs: Vec<(&str, &SourceEntry)> = entries.iter().map(|(k, r)| (k.as_str(), r)).collect();

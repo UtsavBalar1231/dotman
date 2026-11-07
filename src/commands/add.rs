@@ -4,7 +4,7 @@
 
 use crate::cli::AddArgs;
 use crate::context::{Context, TEMP_PREFIX, is_real_dir};
-use crate::engine::status::{Source, Worktree};
+use crate::engine::status::{SourceEntry, Worktree};
 use crate::engine::{Node, parents, portable_link_target, read_node};
 use crate::lock::Lock;
 use crate::output;
@@ -13,7 +13,8 @@ use crate::paths::{
 };
 use crate::prompt;
 use crate::repo_config::RepoConfig;
-use crate::state::{Kind, State};
+use crate::state::{IdentitySnapshot, Kind, State};
+use crate::variant::{self, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
 use glob::{MatchOptions, Pattern};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +78,8 @@ struct Plan {
 }
 
 const DANGLING: &str = "dangling symlink";
+const BLOCK_NAME: &str =
+    "the name holds a variant block, so dotman would read it as a variant of another file";
 
 pub(crate) struct Ignore {
     any: Vec<Pattern>,
@@ -127,7 +130,15 @@ pub fn run(args: &AddArgs) -> Result<()> {
         out: Plan::default(),
     }
     .plan(&args.paths)?;
-    refuse_collisions(&ctx, &plan)?;
+    let managed: Vec<String> = ctx.managed()?.into_keys().collect();
+    let targets = Targets {
+        sources: Sources::group(managed.iter().map(String::as_str)),
+        managed,
+        identity: ctx.identity(),
+        conditions: args.for_conditions.as_deref(),
+    };
+    refuse_collisions(&targets.sources, &plan)?;
+    targets.check(&plan)?;
 
     for line in &plan.skipped {
         output::warning(&format!("skipped {line}"));
@@ -138,7 +149,10 @@ pub fn run(args: &AddArgs) -> Result<()> {
     let in_dirs: usize = plan.dirs.iter().map(|d| d.items.len()).sum();
     if dry_run {
         for key in plan.files.keys() {
-            output::action("would add", key);
+            match targets.source_for(key) {
+                Ok(source) => output::action("would add", &shown(key, &source)),
+                Err(e) => output::warning(&format!("could not add {key}: {e:#}")),
+            }
         }
         if in_dirs > 0 {
             output::info(&format!("would add {in_dirs} files from directories"));
@@ -168,19 +182,19 @@ pub fn run(args: &AddArgs) -> Result<()> {
     let mut failed = 0usize;
     let mut dir_modes = BTreeMap::new();
     for (key, leaf) in &items {
-        let one = commit_one(
+        let kind = leaf.kind();
+        match targets.commit(
             &ctx,
             &mut repo_config,
             &mut state,
             &mut dir_modes,
             key,
-            leaf.kind(),
-        );
-        match one {
-            Ok(()) => {
+            kind,
+        ) {
+            Ok(source) => {
                 added = added.saturating_add(1);
                 if announced.contains(key) {
-                    output::action("add", key);
+                    output::action("add", &shown(key, &source));
                 }
             }
             Err(e) => {
@@ -190,6 +204,9 @@ pub fn run(args: &AddArgs) -> Result<()> {
         }
     }
 
+    if state.identity.is_none() {
+        state.identity = Some(targets.identity.clone());
+    }
     repo_config.save(&ctx.repo_config_file(), false)?;
     state.save(&ctx.paths.state_file(), false)?;
     if failed > 0 {
@@ -197,6 +214,96 @@ pub fn run(args: &AddArgs) -> Result<()> {
     }
     output::success(&format!("added {added} paths"));
     Ok(())
+}
+
+struct Targets<'a> {
+    managed: Vec<String>,
+    sources: Sources,
+    identity: &'a IdentitySnapshot,
+    conditions: Option<&'a str>,
+}
+
+impl Targets<'_> {
+    fn check(&self, plan: &Plan) -> Result<()> {
+        let Some(conditions) = self.conditions else {
+            return Ok(());
+        };
+        if !plan.dirs.is_empty() {
+            bail!("--for takes files and symlinks, not directories");
+        }
+        for key in plan.files.keys() {
+            variant::variant_source(key, conditions)?;
+        }
+        Ok(())
+    }
+
+    // Capture goes into the source this machine applies, which may be a variant.
+    fn source_for(&self, key: &str) -> Result<String> {
+        if let Some(conditions) = self.conditions {
+            return variant::variant_source(key, conditions);
+        }
+        match self.sources.select(key, self.identity) {
+            Selection::None => Ok(key.to_owned()),
+            Selection::Winner(source) => Ok(source.to_owned()),
+            Selection::Ambiguous(tied) => bail!(
+                "{} are equally specific here; remove one first",
+                tied.join(", ")
+            ),
+            Selection::Invalid(problems) => bail!(
+                "{}",
+                problems
+                    .iter()
+                    .map(|(source, reason)| format!("{source}: {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        }
+    }
+
+    fn commit(
+        &self,
+        ctx: &Context,
+        repo_config: &mut RepoConfig,
+        state: &mut State,
+        dir_modes: &mut BTreeMap<String, u32>,
+        key: &str,
+        kind: Kind,
+    ) -> Result<String> {
+        let source = self.source_for(key)?;
+        let entry = commit_one(ctx, repo_config, dir_modes, key, &source, kind)?;
+        if self.applies(key, &source) {
+            state
+                .files
+                .insert(key.to_owned(), entry.tuple.entry(&source));
+        } else {
+            output::info(&format!(
+                "{key}: this machine does not apply {source}, so it keeps its current source"
+            ));
+        }
+        Ok(source)
+    }
+
+    // A `--for` variant may be meant for other machines; S follows only what this one applies.
+    fn applies(&self, key: &str, source: &str) -> bool {
+        if self.conditions.is_none() {
+            return true;
+        }
+        let after = self
+            .managed
+            .iter()
+            .map(String::as_str)
+            .filter(|path| *path != source)
+            .chain([source]);
+        Sources::group(after).select(key, self.identity).winner() == Some(&source)
+    }
+}
+
+fn shown(key: &str, source: &str) -> String {
+    if key == source {
+        key.to_owned()
+    } else {
+        format!("{key} as {source}")
+    }
 }
 
 /// Why a new file waits for an explicit `dot add`.
@@ -352,6 +459,9 @@ impl Planner<'_> {
         }
         match self.inspect(&key) {
             Found::Leaf(leaf) => {
+                if !key.rsplit('/').next().is_some_and(variant::is_literal) {
+                    bail!("{key}: {BLOCK_NAME}");
+                }
                 self.out.files.insert(key, leaf);
             }
             Found::Dir => {
@@ -463,6 +573,9 @@ impl Planner<'_> {
             .to_str()
             .ok_or_else(|| Some(format!("{} is not valid UTF-8", path.display())))?;
         validate_key(key).map_err(|e| Some(format!("{key}: {e}")))?;
+        if !is_dir && !key.rsplit('/').next().is_some_and(variant::is_literal) {
+            return Err(Some(format!("{key}: {BLOCK_NAME}")));
+        }
         if paths.refuse_protected(path).is_err() {
             return Err(Some(format!("{key}: dotman's own files are never managed")));
         }
@@ -488,20 +601,14 @@ fn has_nul_in_head(path: &Path) -> io::Result<bool> {
     Ok(head.contains(&0))
 }
 
-fn refuse_collisions(ctx: &Context, plan: &Plan) -> Result<()> {
+fn refuse_collisions(existing: &Sources, plan: &Plan) -> Result<()> {
     let new: BTreeSet<&str> = plan
         .files
         .keys()
         .chain(plan.dirs.iter().flat_map(|d| d.items.keys()))
         .map(String::as_str)
         .collect();
-    let existing = ctx.managed()?;
-    let pairs = find_collisions(
-        existing
-            .keys()
-            .map(String::as_str)
-            .chain(new.iter().copied()),
-    );
+    let pairs = find_collisions(existing.keys().chain(new.iter().copied()));
     match pairs
         .iter()
         .find(|(a, b)| new.contains(a.as_str()) || new.contains(b.as_str()))
@@ -546,31 +653,32 @@ fn preview(dir: &DirPlan) {
     }
 }
 
-/// Copies H of `key` into the repo worktree, records its mode in `repo_config` and sets S to the
-/// result. `expected` is the kind the caller saw, and a different kind now is an error. The caller
-/// saves `repo_config` and `state`.
+/// Copies H of `key` into the repo at `source`, which is `key` or one of its variants, and records
+/// the mode under `source`, so each variant keeps its own. `expected` is the kind the caller saw,
+/// and a different kind now is an error. The caller records S and saves `repo_config`.
 pub(crate) fn commit_one(
     ctx: &Context,
     repo_config: &mut RepoConfig,
-    state: &mut State,
     dir_modes: &mut BTreeMap<String, u32>,
     key: &str,
+    source: &str,
     expected: Kind,
-) -> Result<()> {
+) -> Result<SourceEntry> {
+    validate_key(source)?;
     let home = &ctx.paths.home;
     let repo = &ctx.paths.repo;
-    let target = repo.join(key);
-    ensure_worktree_parents(repo, key)?;
+    let target = repo.join(source);
+    ensure_worktree_parents(repo, source)?;
     match (expected, read_node(home, key)?) {
         (Kind::File, Node::File { bytes, mode, .. }) => {
             let stored = if mode & 0o111 == 0 { 0o644 } else { 0o755 };
             write_atomic(&target, &bytes, stored)?;
-            record_mode(repo_config, key, mode & 0o777, stored);
+            record_mode(repo_config, source, mode & 0o777, stored);
         }
         (Kind::Symlink, Node::Symlink(link)) => {
             let relative = portable_link_target(&link, key, home, ctx.paths.home_real.as_deref());
             replace_with_symlink(&target, &relative)?;
-            repo_config.modes.remove(key);
+            repo_config.modes.remove(source);
         }
         _ => bail!("it changed while being added"),
     }
@@ -578,11 +686,9 @@ pub(crate) fn commit_one(
         let mode = dir_mode(dir_modes, home, parent)?;
         record_mode(repo_config, &format!("{parent}/"), mode, 0o755);
     }
-    let entry = Worktree::new(repo, &repo_config.modes)
-        .get(key)?
-        .ok_or_else(|| anyhow!("{key} is not in the repo after being written"))?;
-    state.files.insert(key.to_owned(), entry.tuple.entry(key));
-    Ok(())
+    Worktree::new(repo, &repo_config.modes)
+        .get(source)?
+        .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))
 }
 
 fn dir_mode(cache: &mut BTreeMap<String, u32>, home: &Path, parent: &str) -> Result<u32> {

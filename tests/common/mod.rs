@@ -249,7 +249,16 @@ impl TestEnv {
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
-        self.dot().args(args).output().expect("run dot")
+        self.run_with(&[], args)
+    }
+
+    /// Like [`TestEnv::run`], with extra environment variables such as `DOTMAN_HOST`.
+    pub fn run_with(&self, vars: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut cmd = self.dot();
+        for (name, value) in vars {
+            cmd.env(name, value);
+        }
+        cmd.args(args).output().expect("run dot")
     }
 
     /// Runs `dot`, asserts exit 0 and returns stderr.
@@ -272,7 +281,11 @@ impl TestEnv {
 
     /// Parses the `<token>\t<key>\0` records of `dot <command> --porcelain`.
     pub fn porcelain(&self, command: &str) -> Vec<(String, String)> {
-        let out = self.run(&[command, "--porcelain"]);
+        self.porcelain_with(&[], command)
+    }
+
+    pub fn porcelain_with(&self, vars: &[(&str, &str)], command: &str) -> Vec<(String, String)> {
+        let out = self.run_with(vars, &[command, "--porcelain"]);
         assert!(out.status.success());
         out.stdout
             .split(|b| *b == 0)
@@ -324,13 +337,13 @@ impl Default for TestEnv {
     }
 }
 
-/// `uname -n`, cut at the first `.`, as `sync` puts it in its commit message.
+/// `uname -n`, cut at the first `.` and lowercased, as identity reports it for `sync`'s message.
 pub fn short_host() -> String {
     let out = std::process::Command::new("uname")
         .arg("-n")
         .output()
         .expect("run uname");
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
     name.split('.').next().unwrap_or_default().to_owned()
 }
 

@@ -3,7 +3,6 @@
 use crate::cli::{Decisions, InitArgs};
 use crate::commands::{Outcome, apply};
 use crate::context::Context;
-use crate::git::Git;
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::private_temp_dir;
@@ -96,10 +95,7 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let tmp = private_temp_dir("dotman-init-", &std::env::temp_dir())?;
     let mut paths = ctx.paths.clone();
     paths.repo = tmp.path().join("repo");
-    let clone = Context {
-        git: Git::new(paths.repo.clone(), "init"),
-        paths,
-    };
+    let clone = Context::new(paths, ctx.machine.clone(), "init");
     clone.git.clone_from(source)?;
     output::info(&format!("would clone {source} into {}", repo.display()));
     apply::apply(&clone, &[], &opts).map(|applied| applied.outcome)

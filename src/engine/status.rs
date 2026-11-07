@@ -1,7 +1,8 @@
 //! The three-way status model: each key's R, H and S tuples decide its row and prompt category.
 
 use super::{Home, Node, Tuple, read_node, recorded_mode, safe_mode};
-use crate::state::Kind;
+use crate::state::{IdentitySnapshot, Kind};
+use crate::variant::{Selection, Sources};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -94,6 +95,18 @@ impl Row {
             | Self::ChangedInRepo => None,
         }
     }
+
+    /// The row when S was applied from another source than R's. H was edited against the old
+    /// source, so it is never captured into the new one, and S takes the new source even when the
+    /// tuples agree.
+    #[must_use]
+    pub const fn switched(self) -> Self {
+        match self {
+            Self::ChangedLocally => Self::BothChanged,
+            Self::Clean { .. } => Self::Clean { update_state: true },
+            other => other,
+        }
+    }
 }
 
 /// Classifies one key. `None` when neither R nor S exists, so the key is not managed.
@@ -155,11 +168,11 @@ pub enum Content {
 
 /// Produces R for a key.
 pub trait Source {
-    /// `None` when the repo has no file or symlink for `key`.
-    fn get(&self, key: &str) -> Result<Option<SourceEntry>>;
+    /// The winning entry, whose `source` is the repo path it came from.
+    fn get(&self, key: &str) -> Result<Selection<SourceEntry>>;
 }
 
-/// The repo worktree as-is: a key's R is the file or symlink at that path.
+/// Single repo paths, as-is: the R of a path is the file or symlink there.
 #[derive(Debug, Clone, Copy)]
 pub struct Worktree<'a> {
     root: &'a Path,
@@ -172,11 +185,10 @@ impl<'a> Worktree<'a> {
     pub const fn new(root: &'a Path, modes: &'a BTreeMap<String, String>) -> Self {
         Self { root, modes }
     }
-}
 
-impl Source for Worktree<'_> {
-    // A worktree path under a symlinked directory is not an entry, so it reads as missing.
-    fn get(&self, key: &str) -> Result<Option<SourceEntry>> {
+    /// `None` when nothing is at `key`. A path under a symlinked directory is not an entry, so
+    /// it reads as missing.
+    pub fn get(&self, key: &str) -> Result<Option<SourceEntry>> {
         let (tuple, content) = match read_node(self.root, key)? {
             Node::File {
                 bytes,
@@ -196,6 +208,50 @@ impl Source for Worktree<'_> {
             tuple,
             content,
         }))
+    }
+}
+
+/// The worktree with variants resolved for one machine identity.
+#[derive(Debug, Clone, Copy)]
+pub struct Variants<'a> {
+    worktree: Worktree<'a>,
+    sources: &'a Sources,
+    identity: &'a IdentitySnapshot,
+}
+
+impl<'a> Variants<'a> {
+    /// `sources` groups the worktree's paths; `identity` picks among them.
+    #[must_use]
+    pub const fn new(
+        worktree: Worktree<'a>,
+        sources: &'a Sources,
+        identity: &'a IdentitySnapshot,
+    ) -> Self {
+        Self {
+            worktree,
+            sources,
+            identity,
+        }
+    }
+
+    /// The source `identity` would pick, such as the recorded snapshot rather than this run's.
+    #[must_use]
+    pub fn winner_under(&self, key: &str, identity: &IdentitySnapshot) -> Option<&'a str> {
+        self.sources.select(key, identity).winner().copied()
+    }
+}
+
+impl Source for Variants<'_> {
+    fn get(&self, key: &str) -> Result<Selection<SourceEntry>> {
+        Ok(match self.sources.select(key, self.identity) {
+            Selection::None => Selection::None,
+            Selection::Winner(source) => self
+                .worktree
+                .get(source)?
+                .map_or(Selection::None, Selection::Winner),
+            Selection::Ambiguous(sources) => Selection::Ambiguous(sources),
+            Selection::Invalid(problems) => Selection::Invalid(problems),
+        })
     }
 }
 
@@ -468,5 +524,49 @@ mod tests {
 
         let bad = BTreeMap::from([(".plain".to_owned(), "rwx".to_owned())]);
         assert!(Worktree::new(&repo, &bad).get(".plain").is_err());
+    }
+
+    #[test]
+    fn variants_read_the_winning_source_with_its_own_mode() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        fs::write(repo.join("a.conf"), b"plain").unwrap();
+        fs::write(repo.join("a{host=x}.conf"), b"x").unwrap();
+        let modes = BTreeMap::from([("a{host=x}.conf".to_owned(), "0600".to_owned())]);
+        let sources = Sources::group(["a.conf", "a{host=x}.conf"]);
+        let x = IdentitySnapshot {
+            host: "x".to_owned(),
+            ..IdentitySnapshot::default()
+        };
+        let variants = Variants::new(Worktree::new(repo, &modes), &sources, &x);
+        let Selection::Winner(entry) = variants.get("a.conf").unwrap() else {
+            unreachable!("a.conf has a winner on host x");
+        };
+        assert_eq!(entry.source, "a{host=x}.conf");
+        assert_eq!(entry.tuple, Tuple::of_file(b"x", 0o600));
+        assert_eq!(entry.content, Content::Bytes(b"x".to_vec()));
+        let other = IdentitySnapshot::default();
+        assert_eq!(variants.winner_under("a.conf", &other), Some("a.conf"));
+        assert_eq!(variants.get("missing").unwrap(), Selection::None);
+    }
+
+    #[test]
+    fn a_source_switch_never_captures_and_records_the_new_source() {
+        assert_eq!(Row::ChangedLocally.switched(), Row::BothChanged);
+        assert_eq!(
+            Row::Clean {
+                update_state: false
+            }
+            .switched(),
+            Row::Clean { update_state: true }
+        );
+        for row in [
+            Row::ChangedInRepo,
+            Row::BothChanged,
+            Row::Forgotten,
+            Row::DeletedLocally,
+        ] {
+            assert_eq!(row.switched(), row);
+        }
     }
 }
