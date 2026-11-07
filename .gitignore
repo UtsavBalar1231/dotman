@@ -7,9 +7,3 @@ flamegraph.svg
 perf.data
 perf.data.old
 target/
-
-# CLAUDE Code file
-CLAUDE.md
-
-# Extras
-DISCOVERED_BUGS.md
