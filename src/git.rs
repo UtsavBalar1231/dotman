@@ -1,0 +1,1103 @@
+//! Git CLI wrapper that ignores the user's global git configuration where it would change stored content.
+//!
+//! Every fallible method returns an error naming the failing git arguments and its stderr.
+#![allow(clippy::missing_errors_doc)]
+// reason: every fallible method fails the same way, stated once in the module doc above.
+
+use anyhow::{Context, Result, anyhow, bail};
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
+use xxhash_rust::xxh3::xxh3_128;
+
+const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding\n";
+
+const MIN_VERSION: (u32, u32) = (2, 25);
+
+/// `core.excludesFile=` must stay empty: otherwise the user's global ignore file hides files from `git status`.
+/// `core.hooksPath=/dev/null` makes every hook lookup fail, so no hook runs.
+const ISOLATION: [&str; 14] = [
+    "-c",
+    "core.excludesFile=",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.autocrlf=false",
+    "-c",
+    "core.safecrlf=false",
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "color.ui=false",
+];
+
+/// Variables that make git ignore `-C`, as when `dot` runs inside a git hook.
+const LOCAL_REPO_ENV: [&str; 7] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+];
+
+/// A git repository driven through the `git` binary with config isolation.
+#[derive(Debug)]
+pub struct Git {
+    repo: PathBuf,
+    dot_command: &'static str,
+    env: Vec<(OsString, OsString)>,
+    version_checked: OnceLock<()>,
+}
+
+/// Result of [`Git::pull_rebase`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum PullOutcome {
+    /// The pull and rebase finished.
+    Ok,
+    /// The rebase hit conflicts and was aborted; the working tree is as before the pull.
+    Conflict {
+        /// Repo-relative, as git reports them.
+        paths: Vec<PathBuf>,
+    },
+}
+
+/// Which `git status --porcelain=v2` record an entry came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    /// A changed tracked path (`1` record).
+    Ordinary,
+    /// A renamed or copied path (`2` record).
+    Renamed,
+    /// A path with unresolved conflicts (`u` record).
+    Unmerged,
+    /// A path git does not track (`?` record).
+    Untracked,
+}
+
+/// One parsed `git status --porcelain=v2 -z` record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusEntry {
+    /// The record type this entry was parsed from.
+    pub kind: StatusKind,
+    /// Two-letter staged/unstaged code such as `M.`; `??` for untracked.
+    pub xy: String,
+    /// Relative to the repo root; raw bytes, not necessarily UTF-8.
+    pub path: PathBuf,
+    /// Set only for [`StatusKind::Renamed`].
+    pub orig_path: Option<PathBuf>,
+}
+
+/// One commit from [`Git::log`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    /// Full commit hash.
+    pub oid: String,
+    /// Author time, seconds since the Unix epoch.
+    pub time: i64,
+    /// First line of the message.
+    pub subject: String,
+}
+
+impl Git {
+    /// A handle on `repo`. `dot_command` names the dotman command in the missing-git error.
+    #[must_use]
+    pub fn new(repo: impl Into<PathBuf>, dot_command: &'static str) -> Self {
+        Self {
+            repo: repo.into(),
+            dot_command,
+            env: Vec::new(),
+            version_checked: OnceLock::new(),
+        }
+    }
+
+    /// Adds environment variables to every git process; a later pair overrides an earlier one.
+    #[must_use]
+    pub fn with_env<K, V>(mut self, vars: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        self.env
+            .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+
+    /// The path given to [`Git::new`], not canonicalised.
+    #[must_use]
+    pub fn repo(&self) -> &Path {
+        &self.repo
+    }
+
+    /// A `git -C <repo>` command with the isolation flags, for callers that spawn it themselves.
+    /// It does not check the git version.
+    #[must_use]
+    pub fn command(&self) -> Command {
+        self.command_in(&self.repo)
+    }
+
+    fn command_in(&self, dir: &Path) -> Command {
+        let mut cmd = self.base();
+        cmd.arg("-C").arg(dir);
+        cmd
+    }
+
+    fn base(&self) -> Command {
+        let mut cmd = Command::new("git");
+        for var in LOCAL_REPO_ENV {
+            cmd.env_remove(var);
+        }
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        cmd.args(ISOLATION);
+        cmd
+    }
+
+    /// Fails unless the installed git is at least 2.25. Checked once per handle.
+    pub fn check_version(&self) -> Result<()> {
+        if self.version_checked.get().is_some() {
+            return Ok(());
+        }
+        let mut cmd = self.base();
+        cmd.arg("--version");
+        let out = self.spawn(cmd)?;
+        if !out.status.success() {
+            return Err(failure(&["--version"], &out));
+        }
+        check_version_text(&String::from_utf8_lossy(&out.stdout))?;
+        let _ = self.version_checked.set(());
+        Ok(())
+    }
+
+    fn spawn(&self, mut cmd: Command) -> Result<Output> {
+        cmd.stdin(Stdio::null());
+        cmd.output().map_err(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                anyhow!(
+                    "`dot {}` needs git, but no `git` executable was found in PATH. Install it with: {}",
+                    self.dot_command,
+                    install_hint(cfg!(target_os = "macos"), read_os_release().as_deref())
+                )
+            } else {
+                anyhow!(err).context("failed to run git")
+            }
+        })
+    }
+
+    fn output<S: AsRef<OsStr>>(&self, mut cmd: Command, args: &[S]) -> Result<Output> {
+        self.check_version()?;
+        cmd.args(args);
+        self.spawn(cmd)
+    }
+
+    fn run_with<S: AsRef<OsStr>>(&self, cmd: Command, args: &[S]) -> Result<Output> {
+        let out = self.output(cmd, args)?;
+        if out.status.success() {
+            Ok(out)
+        } else {
+            Err(failure(args, &out))
+        }
+    }
+
+    fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output> {
+        self.run_with(self.command(), args)
+    }
+
+    fn probe<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output> {
+        self.output(self.command(), args)
+    }
+
+    /// Stdout of a command whose exit status 1 means "no answer".
+    fn optional<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
+        let out = self.probe(args)?;
+        match out.status.code() {
+            Some(0) => Ok(Some(text(&out))),
+            Some(1) => Ok(None),
+            _ => Err(failure(args, &out)),
+        }
+    }
+
+    /// Creates the repo with `main` as the unborn branch. Safe to rerun: an existing branch and
+    /// repo id are kept.
+    pub fn init(&self) -> Result<()> {
+        fs::create_dir_all(&self.repo)
+            .with_context(|| format!("failed to create {}", self.repo.display()))?;
+        self.run(&["init", "-q"])?;
+        if self.head()?.is_none() {
+            self.run(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
+        }
+        self.write_metadata()
+    }
+
+    /// Clones `src` into this handle's repo path and populates the working tree.
+    ///
+    /// Attributes are written before checkout so a tracked `.gitattributes` cannot transform
+    /// content. A local `src` with an `origin` remote passes that URL on as the clone's `origin`.
+    pub fn clone_from(&self, src: &str) -> Result<()> {
+        let src_origin = if Path::new(src).is_dir() {
+            let out = self.output(
+                self.command_in(Path::new(src)),
+                &["config", "--get", "remote.origin.url"],
+            )?;
+            out.status.success().then(|| text(&out))
+        } else {
+            None
+        };
+        self.run_with(
+            self.base(),
+            &[
+                OsStr::new("clone"),
+                OsStr::new("-q"),
+                OsStr::new("--no-checkout"),
+                OsStr::new(src),
+                self.repo.as_os_str(),
+            ],
+        )?;
+        self.write_metadata()?;
+        if let Some(url) = src_origin {
+            self.set_remote_url("origin", &url)?;
+        }
+        if self.head()?.is_some() {
+            self.run(&["checkout", "-q", "-f", "HEAD"])?;
+        }
+        Ok(())
+    }
+
+    fn write_metadata(&self) -> Result<()> {
+        let git_dir = self.repo.join(".git");
+        let info = git_dir.join("info");
+        fs::create_dir_all(&info)
+            .with_context(|| format!("failed to create {}", info.display()))?;
+        fs::write(info.join("attributes"), ATTRIBUTES)
+            .context("failed to write .git/info/attributes")?;
+        let id_path = git_dir.join("dotman-id");
+        if !id_path.exists() {
+            fs::write(&id_path, self.new_repo_id()?).context("failed to write .git/dotman-id")?;
+        }
+        Ok(())
+    }
+
+    fn new_repo_id(&self) -> Result<String> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before the Unix epoch")?
+            .as_nanos();
+        let mut bytes = self.repo.as_os_str().as_bytes().to_vec();
+        bytes.extend_from_slice(&nanos.to_le_bytes());
+        bytes.extend_from_slice(&std::process::id().to_le_bytes());
+        Ok(format!("{:032x}", xxh3_128(&bytes)))
+    }
+
+    /// Stages every change, including paths ignored by `.gitignore`.
+    pub fn stage_all(&self) -> Result<()> {
+        self.run(&["add", "-A", "-f", "--", "."]).map(drop)
+    }
+
+    /// Commits the staged changes; `None` when nothing is staged.
+    pub fn commit(&self, message: &str) -> Result<Option<String>> {
+        let args = ["diff", "--cached", "--quiet", "--no-ext-diff"];
+        let staged = self.probe(&args)?;
+        match staged.status.code() {
+            Some(0) => return Ok(None),
+            Some(1) => {}
+            _ => return Err(failure(&args, &staged)),
+        }
+        self.run(&["commit", "-q", "-m", message])?;
+        self.head()
+    }
+
+    /// Parsed `git status --porcelain=v2`, including every untracked file.
+    pub fn status(&self) -> Result<Vec<StatusEntry>> {
+        let out = self.run(&["status", "--porcelain=v2", "-z", "--untracked-files=all"])?;
+        parse_status(&out.stdout)
+    }
+
+    /// The commit `HEAD` points at; `None` on an unborn branch.
+    pub fn head(&self) -> Result<Option<String>> {
+        self.optional(&["rev-parse", "--verify", "-q", "HEAD"])
+    }
+
+    /// Raw bytes of `path` as stored in `rev`, with no filters or text conversion.
+    pub fn show_blob(&self, rev: &str, path: impl AsRef<Path>) -> Result<Vec<u8>> {
+        let mut spec = OsString::from(rev);
+        spec.push(":");
+        spec.push(path.as_ref());
+        let out = self.run(&[OsStr::new("cat-file"), OsStr::new("blob"), &spec])?;
+        Ok(out.stdout)
+    }
+
+    /// Commits reachable from `HEAD`, newest first, touching `paths` when given.
+    pub fn log(&self, paths: &[&str], limit: Option<usize>) -> Result<Vec<LogEntry>> {
+        if self.head()?.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut args = vec![
+            "log".to_owned(),
+            "--no-color".to_owned(),
+            "--no-ext-diff".to_owned(),
+            "-z".to_owned(),
+            "--format=%H%x00%at%x00%s".to_owned(),
+        ];
+        if let Some(limit) = limit {
+            args.push(format!("--max-count={limit}"));
+        }
+        args.push("HEAD".to_owned());
+        args.push("--".to_owned());
+        args.extend(paths.iter().map(|p| (*p).to_owned()));
+        let out = self.run(&args)?;
+        parse_log(&out.stdout)
+    }
+
+    /// The newest commit on `HEAD` committed before `date`; `None` if there is none.
+    pub fn rev_before(&self, date: &str) -> Result<Option<String>> {
+        if self.head()?.is_none() {
+            return Ok(None);
+        }
+        let out = self.run(&["rev-list", "-1", &format!("--before={date}"), "HEAD"])?;
+        let oid = text(&out);
+        Ok((!oid.is_empty()).then_some(oid))
+    }
+
+    /// True after `clone --depth`: history older than the cut is absent.
+    pub fn is_shallow(&self) -> Result<bool> {
+        let out = self.run(&["rev-parse", "--is-shallow-repository"])?;
+        Ok(text(&out) == "true")
+    }
+
+    /// `git pull --rebase --autostash`. On conflict the rebase is aborted and the paths returned.
+    pub fn pull_rebase(&self, remote: &str, branch: &str) -> Result<PullOutcome> {
+        let args = ["pull", "--rebase", "--autostash", remote, branch];
+        let out = self.probe(&args)?;
+        if out.status.success() {
+            return Ok(PullOutcome::Ok);
+        }
+        if !self.operation_in_progress() {
+            return Err(failure(&args, &out));
+        }
+        let paths = self
+            .status()?
+            .into_iter()
+            .filter(|e| e.kind == StatusKind::Unmerged)
+            .map(|e| e.path)
+            .collect();
+        self.run(&["rebase", "--abort"])?;
+        Ok(PullOutcome::Conflict { paths })
+    }
+
+    /// Looks for `rebase-merge`, `rebase-apply` and `MERGE_HEAD` under `.git`.
+    #[must_use]
+    pub fn operation_in_progress(&self) -> bool {
+        let git_dir = self.repo.join(".git");
+        ["rebase-merge", "rebase-apply", "MERGE_HEAD"]
+            .iter()
+            .any(|name| git_dir.join(name).exists())
+    }
+
+    /// Fails if the remote has commits `branch` lacks; pull first.
+    pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
+        self.run(&["push", remote, branch]).map(drop)
+    }
+
+    /// The URL of remote `name` exactly as written in the config, without `insteadOf` rewriting.
+    pub fn remote_url(&self, name: &str) -> Result<Option<String>> {
+        self.optional(&["config", "--get", &format!("remote.{name}.url")])
+    }
+
+    /// Points remote `name` at `url`, adding the remote if needed.
+    pub fn set_remote_url(&self, name: &str, url: &str) -> Result<()> {
+        let verb = if self.remote_url(name)?.is_some() {
+            "set-url"
+        } else {
+            "add"
+        };
+        self.run(&["remote", verb, name, url]).map(drop)
+    }
+
+    /// Both `user.name` and `user.email` must be set; an empty value counts as unset.
+    pub fn identity_configured(&self) -> Result<bool> {
+        for key in ["user.name", "user.email"] {
+            if self
+                .optional(&["config", "--get", key])?
+                .is_none_or(|v| v.is_empty())
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether `url` answers `git ls-remote` with no credentials and no prompt.
+    /// Has no timeout; the caller bounds it.
+    pub fn ls_remote_anonymous(&self, url: &str) -> Result<bool> {
+        let mut cmd = self.base();
+        cmd.args(["-c", "credential.helper="]);
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        let out = self.output(cmd, &["ls-remote", url, "HEAD"])?;
+        Ok(out.status.success())
+    }
+}
+
+fn text(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn failure<S: AsRef<OsStr>>(args: &[S], out: &Output) -> anyhow::Error {
+    let label = args
+        .iter()
+        .map(|a| redact_credentials(&a.as_ref().to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    anyhow!(
+        "git {label} failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
+}
+
+/// Hides `user:password@` in URLs so tokens do not reach error messages.
+fn redact_credentials(arg: &str) -> String {
+    let Some((scheme, rest)) = arg.split_once("://") else {
+        return arg.to_owned();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    rest.get(..authority_end)
+        .and_then(|authority| authority.rfind('@'))
+        .map_or_else(
+            || arg.to_owned(),
+            |at| {
+                format!(
+                    "{scheme}://***@{}",
+                    rest.get(at.saturating_add(1)..).unwrap_or("")
+                )
+            },
+        )
+}
+
+/// Parses the `git --version` line, e.g. `git version 2.39.5 (Apple Git-154)`.
+fn parse_version(line: &str) -> Option<(u32, u32, u32)> {
+    let token = line
+        .trim()
+        .strip_prefix("git version ")?
+        .split_whitespace()
+        .next()?;
+    let mut parts = token.split('.').map(|p| {
+        let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().ok()
+    });
+    let major = parts.next()??;
+    let minor = parts.next()??;
+    let patch = parts.next().flatten().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+fn check_version_text(line: &str) -> Result<()> {
+    let (major, minor, patch) = parse_version(line)
+        .ok_or_else(|| anyhow!("could not read the git version from {:?}", line.trim()))?;
+    if (major, minor) < MIN_VERSION {
+        bail!(
+            "git {major}.{minor}.{patch} is too old; dotman needs git {}.{} or newer",
+            MIN_VERSION.0,
+            MIN_VERSION.1
+        );
+    }
+    Ok(())
+}
+
+fn read_os_release() -> Option<String> {
+    ["/etc/os-release", "/usr/lib/os-release"]
+        .iter()
+        .find_map(|p| fs::read_to_string(p).ok())
+}
+
+/// Reads `ID` and `ID_LIKE` by parsing, never by sourcing the file.
+fn install_hint(macos: bool, os_release: Option<&str>) -> String {
+    if macos {
+        return "xcode-select --install".to_owned();
+    }
+    let mut ids = Vec::new();
+    for line in os_release.unwrap_or_default().lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+        match key.trim() {
+            "ID" => ids.insert(0, value.to_owned()),
+            "ID_LIKE" => ids.extend(value.split_whitespace().map(str::to_owned)),
+            _ => {}
+        }
+    }
+    for id in &ids {
+        match id.as_str() {
+            "arch" => return "pacman -S git".to_owned(),
+            "debian" | "ubuntu" => return "apt install git".to_owned(),
+            "fedora" | "rhel" => return "dnf install git".to_owned(),
+            "alpine" => return "apk add git".to_owned(),
+            _ => {}
+        }
+    }
+    "pacman -S git (Arch), apt install git (Debian, Ubuntu), dnf install git (Fedora, RHEL), \
+     apk add git (Alpine), xcode-select --install (macOS)"
+        .to_owned()
+}
+
+fn path_from(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+fn parse_status(raw: &[u8]) -> Result<Vec<StatusEntry>> {
+    let mut records = raw.split(|b| *b == 0);
+    let mut entries = Vec::new();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let (kind, field_count) = match record.first() {
+            Some(b'1') => (StatusKind::Ordinary, 9),
+            Some(b'2') => (StatusKind::Renamed, 10),
+            Some(b'u') => (StatusKind::Unmerged, 11),
+            Some(b'?') => (StatusKind::Untracked, 2),
+            _ => bail!(
+                "unexpected git status record: {}",
+                String::from_utf8_lossy(record)
+            ),
+        };
+        let fields: Vec<&[u8]> = record.splitn(field_count, |b| *b == b' ').collect();
+        let (true, Some(xy), Some(path)) =
+            (fields.len() == field_count, fields.get(1), fields.last())
+        else {
+            bail!(
+                "malformed git status record: {}",
+                String::from_utf8_lossy(record)
+            );
+        };
+        let xy = if kind == StatusKind::Untracked {
+            "??".to_owned()
+        } else {
+            String::from_utf8_lossy(xy).into_owned()
+        };
+        let orig_path = if kind == StatusKind::Renamed {
+            let orig = records
+                .next()
+                .ok_or_else(|| anyhow!("git status rename record has no source path"))?;
+            Some(path_from(orig))
+        } else {
+            None
+        };
+        entries.push(StatusEntry {
+            kind,
+            xy,
+            path: path_from(path),
+            orig_path,
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_log(raw: &[u8]) -> Result<Vec<LogEntry>> {
+    let fields: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|f| !f.is_empty()).collect();
+    fields
+        .chunks(3)
+        .map(|chunk| match chunk {
+            [oid, time, subject] => Ok(LogEntry {
+                oid: String::from_utf8_lossy(oid).into_owned(),
+                time: String::from_utf8_lossy(time)
+                    .parse()
+                    .context("git log printed a bad author time")?,
+                subject: String::from_utf8_lossy(subject).into_owned(),
+            }),
+            _ => Err(anyhow!("git log output ended mid-record")),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    struct Sandbox {
+        dir: TempDir,
+    }
+
+    impl Sandbox {
+        fn new() -> Self {
+            let dir = TempDir::new().expect("tempdir");
+            let home = dir.path().join("home");
+            fs::create_dir_all(home.join(".config")).expect("mkdir");
+            fs::write(
+                home.join(".gitconfig"),
+                "[user]\n\tname = Test User\n\temail = test@example.invalid\n",
+            )
+            .expect("gitconfig");
+            Self { dir }
+        }
+
+        fn env(&self) -> Vec<(OsString, OsString)> {
+            let home = self.dir.path().join("home");
+            vec![
+                ("HOME".into(), home.clone().into()),
+                ("XDG_CONFIG_HOME".into(), home.join(".config").into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ]
+        }
+
+        fn git(&self, name: &str) -> Git {
+            Git::new(self.dir.path().join(name), "test").with_env(self.env())
+        }
+
+        /// Un-isolated git, run the way a user would run it.
+        fn raw(&self, dir: &Path, args: &[&str]) -> Output {
+            let mut cmd = Command::new("git");
+            for var in LOCAL_REPO_ENV {
+                cmd.env_remove(var);
+            }
+            cmd.envs(self.env()).arg("-C").arg(dir).args(args);
+            cmd.output().expect("spawn git")
+        }
+
+        fn raw_ok(&self, dir: &Path, args: &[&str]) -> String {
+            let out = self.raw(dir, args);
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            text(&out)
+        }
+
+        fn bare_remote(&self) -> PathBuf {
+            let path = self.dir.path().join("remote.git");
+            fs::create_dir_all(&path).expect("mkdir");
+            self.raw_ok(&path, &["init", "-q", "--bare"]);
+            self.raw_ok(&path, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+            path
+        }
+    }
+
+    fn utf8(path: &Path) -> &str {
+        path.to_str().expect("utf8 path")
+    }
+
+    fn write(repo: &Git, rel: &str, bytes: &[u8]) {
+        fs::write(repo.repo().join(rel), bytes).expect("write");
+    }
+
+    fn commit_file(repo: &Git, rel: &str, bytes: &[u8], msg: &str) -> String {
+        write(repo, rel, bytes);
+        repo.stage_all().expect("stage");
+        repo.commit(msg).expect("commit").expect("a commit")
+    }
+
+    #[test]
+    fn parses_distro_and_apple_version_strings() {
+        assert_eq!(parse_version("git version 2.25.1\n"), Some((2, 25, 1)));
+        assert_eq!(
+            parse_version("git version 2.39.5 (Apple Git-154)"),
+            Some((2, 39, 5))
+        );
+        assert_eq!(parse_version("git version 2.56.0"), Some((2, 56, 0)));
+        assert_eq!(parse_version("not git"), None);
+    }
+
+    #[test]
+    fn version_floor_is_2_25() {
+        assert!(check_version_text("git version 2.25.0").is_ok());
+        assert!(check_version_text("git version 3.0.0").is_ok());
+        let err = check_version_text("git version 2.24.0").expect_err("too old");
+        assert!(err.to_string().contains("2.24.0"), "{err}");
+        assert!(check_version_text("garbage").is_err());
+    }
+
+    #[test]
+    fn install_hint_follows_os_release() {
+        let hint = |text: &str| install_hint(false, Some(text));
+        assert_eq!(hint("ID=arch\n"), "pacman -S git");
+        assert_eq!(
+            hint("NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n"),
+            "apt install git"
+        );
+        assert_eq!(hint("ID=\"fedora\""), "dnf install git");
+        assert_eq!(
+            hint("ID=rocky\nID_LIKE=\"rhel centos fedora\""),
+            "dnf install git"
+        );
+        assert_eq!(hint("ID=alpine"), "apk add git");
+        assert_eq!(hint("ID=manjaro\nID_LIKE=arch"), "pacman -S git");
+        assert_eq!(install_hint(true, None), "xcode-select --install");
+        let unknown = install_hint(false, Some("ID=plan9"));
+        for needle in ["pacman", "apt", "dnf", "apk", "xcode-select"] {
+            assert!(unknown.contains(needle), "{unknown}");
+        }
+    }
+
+    #[test]
+    fn missing_git_error_names_the_command() {
+        let sb = Sandbox::new();
+        let empty = sb.dir.path().join("empty-path");
+        fs::create_dir_all(&empty).expect("mkdir");
+        let git = sb.git("repo").with_env([("PATH", empty.as_os_str())]);
+        let err = git.status().expect_err("git is not on PATH");
+        let msg = err.to_string();
+        assert!(msg.contains("`dot test` needs git"), "{msg}");
+        assert!(msg.contains("Install it with:"), "{msg}");
+    }
+
+    #[test]
+    fn failure_names_command_and_stderr_and_hides_credentials() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        commit_file(&git, "a", b"a", "one");
+        let err = git.push("nope", "main").expect_err("no such remote");
+        let msg = err.to_string();
+        assert!(msg.contains("git push nope main failed"), "{msg}");
+        assert!(msg.contains("'nope' does not appear"), "{msg}");
+        assert_eq!(
+            redact_credentials("https://user:s3cret@host/a@b"),
+            "https://***@host/a@b"
+        );
+        assert_eq!(redact_credentials("git@host:x/y.git"), "git@host:x/y.git");
+    }
+
+    #[test]
+    fn init_sets_main_attributes_and_stable_id() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        assert_eq!(
+            sb.raw_ok(git.repo(), &["symbolic-ref", "HEAD"]),
+            "refs/heads/main"
+        );
+        let git_dir = git.repo().join(".git");
+        assert_eq!(
+            fs::read_to_string(git_dir.join("info/attributes")).expect("attributes"),
+            ATTRIBUTES
+        );
+        let id = fs::read_to_string(git_dir.join("dotman-id")).expect("id");
+        assert_eq!(id.len(), 32);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+
+        commit_file(&git, "a", b"a", "one");
+        sb.raw_ok(git.repo(), &["branch", "-m", "other"]);
+        git.init().expect("rerun");
+        assert_eq!(
+            fs::read_to_string(git_dir.join("dotman-id")).expect("id"),
+            id
+        );
+        assert_eq!(
+            sb.raw_ok(git.repo(), &["symbolic-ref", "HEAD"]),
+            "refs/heads/other"
+        );
+    }
+
+    #[test]
+    fn ignored_crlf_and_text_auto_content_survives_commit_and_clone() {
+        let sb = Sandbox::new();
+        let src = sb.git("src");
+        src.init().expect("init");
+        let files: [(&str, &[u8]); 3] = [
+            (".gitignore", b"*.conf\n"),
+            (".gitattributes", b"* text=auto\n"),
+            ("kitty.conf", b"font_size 11\r\nbold_font auto\r\n"),
+        ];
+        for (name, bytes) in files {
+            write(&src, name, bytes);
+        }
+        src.stage_all().expect("stage");
+        src.commit("init").expect("commit").expect("a commit");
+        assert_eq!(
+            src.show_blob("HEAD", "kitty.conf").expect("blob"),
+            files[2].1
+        );
+
+        let dst = sb.git("dst");
+        dst.clone_from(utf8(src.repo())).expect("clone");
+        for (name, bytes) in files {
+            assert_eq!(
+                fs::read(dst.repo().join(name)).expect("read"),
+                bytes,
+                "{name}"
+            );
+        }
+        assert_eq!(dst.status().expect("status"), Vec::new());
+        let src_id = fs::read_to_string(src.repo().join(".git/dotman-id")).expect("id");
+        let dst_id = fs::read_to_string(dst.repo().join(".git/dotman-id")).expect("id");
+        assert_eq!(dst_id.len(), 32);
+        assert_ne!(src_id, dst_id);
+    }
+
+    #[test]
+    fn user_global_excludes_do_not_hide_files() {
+        let sb = Sandbox::new();
+        let ignore_dir = sb.dir.path().join("home/.config/git");
+        fs::create_dir_all(&ignore_dir).expect("mkdir");
+        fs::write(ignore_dir.join("ignore"), "x.conf\n").expect("ignore");
+
+        let git = sb.git("repo");
+        git.init().expect("init");
+        write(&git, "x.conf", b"secret-ish\n");
+        let plain = sb.raw(git.repo(), &["check-ignore", "x.conf"]);
+        assert!(plain.status.success(), "plain git must ignore x.conf");
+        assert_eq!(text(&plain), "x.conf");
+        let listed: Vec<_> = git
+            .status()
+            .expect("status")
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        assert_eq!(listed, [PathBuf::from("x.conf")]);
+
+        git.stage_all().expect("stage");
+        git.commit("add").expect("commit").expect("a commit");
+        let tree = sb.raw_ok(git.repo(), &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert_eq!(tree, "x.conf");
+    }
+
+    #[test]
+    fn names_with_space_and_nfc_accent_round_trip() {
+        let sb = Sandbox::new();
+        let src = sb.git("src");
+        src.init().expect("init");
+        let names = ["my file.conf", "caf\u{e9}.conf"];
+        for name in names {
+            write(&src, name, name.as_bytes());
+        }
+        let mut seen: Vec<_> = src
+            .status()
+            .expect("status")
+            .into_iter()
+            .inspect(|e| assert_eq!(e.kind, StatusKind::Untracked))
+            .map(|e| e.path)
+            .collect();
+        seen.sort();
+        let mut want: Vec<_> = names.iter().map(PathBuf::from).collect();
+        want.sort();
+        assert_eq!(seen, want);
+
+        src.stage_all().expect("stage");
+        src.commit("names").expect("commit").expect("a commit");
+        let dst = sb.git("dst");
+        dst.clone_from(utf8(src.repo())).expect("clone");
+        for name in names {
+            assert_eq!(
+                fs::read(dst.repo().join(name)).expect("read"),
+                name.as_bytes()
+            );
+            assert_eq!(dst.show_blob("HEAD", name).expect("blob"), name.as_bytes());
+        }
+    }
+
+    #[test]
+    fn status_reports_renamed_paths() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        commit_file(&git, "old name.txt", b"some long enough content\n", "one");
+        fs::rename(
+            git.repo().join("old name.txt"),
+            git.repo().join("new name.txt"),
+        )
+        .expect("rename");
+        git.stage_all().expect("stage");
+        let entries = git.status().expect("status");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = entries.first().expect("one entry");
+        assert_eq!(entry.kind, StatusKind::Renamed);
+        assert_eq!(entry.path, Path::new("new name.txt"));
+        assert_eq!(entry.orig_path.as_deref(), Some(Path::new("old name.txt")));
+    }
+
+    #[test]
+    fn commit_returns_none_when_nothing_changed() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        assert_eq!(git.head().expect("head"), None);
+        assert_eq!(git.commit("empty").expect("commit"), None);
+        let oid = commit_file(&git, "a", b"a", "one");
+        assert_eq!(git.head().expect("head"), Some(oid));
+        git.stage_all().expect("stage");
+        assert_eq!(git.commit("again").expect("commit"), None);
+    }
+
+    #[test]
+    fn identity_requires_name_and_email() {
+        let sb = Sandbox::new();
+        let a = sb.git("a");
+        a.init().expect("init");
+        assert!(a.identity_configured().expect("check"));
+        let bare_home = sb.dir.path().join("bare-home");
+        fs::create_dir_all(&bare_home).expect("mkdir");
+        let git = sb
+            .git("a")
+            .with_env([("HOME", &bare_home), ("XDG_CONFIG_HOME", &bare_home)]);
+        assert!(!git.identity_configured().expect("check"));
+    }
+
+    #[test]
+    fn log_rev_before_and_shallow() {
+        let sb = Sandbox::new();
+        let at = |date: &'static str| {
+            sb.git("repo")
+                .with_env([("GIT_AUTHOR_DATE", date), ("GIT_COMMITTER_DATE", date)])
+        };
+        let old = at("2020-01-01T00:00:00+0000");
+        old.init().expect("init");
+        let first = commit_file(&old, "a.txt", b"1", "first");
+        let new = at("2024-01-01T00:00:00+0000");
+        let second = commit_file(&new, "b.txt", b"2", "second");
+
+        let all = new.log(&[], None).expect("log");
+        let subjects: Vec<_> = all.iter().map(|e| e.subject.as_str()).collect();
+        assert_eq!(subjects, ["second", "first"]);
+        assert_eq!(all.first().map(|e| e.oid.as_str()), Some(second.as_str()));
+        assert_eq!(all.last().map(|e| e.time), Some(1_577_836_800));
+        assert_eq!(new.log(&["a.txt"], None).expect("log").len(), 1);
+        assert_eq!(new.log(&[], Some(1)).expect("log").len(), 1);
+
+        assert_eq!(new.rev_before("2022-01-01").expect("rev"), Some(first));
+        assert_eq!(new.rev_before("2019-01-01").expect("rev"), None);
+        assert!(!new.is_shallow().expect("shallow"));
+
+        let url = format!("file://{}", new.repo().display());
+        sb.raw_ok(
+            sb.dir.path(),
+            &["clone", "-q", "--depth", "1", &url, "shallow"],
+        );
+        assert!(sb.git("shallow").is_shallow().expect("shallow"));
+        let unborn = sb.git("unborn");
+        unborn.init().expect("init");
+        assert_eq!(unborn.log(&[], None).expect("log"), Vec::new());
+    }
+
+    #[test]
+    fn clone_passes_on_origin_of_local_source() {
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        commit_file(&a, "f", b"f", "one");
+        assert_eq!(a.remote_url("origin").expect("url"), None);
+
+        let no_origin = sb.git("no-origin");
+        no_origin.clone_from(utf8(a.repo())).expect("clone");
+        assert_eq!(
+            no_origin.remote_url("origin").expect("url").as_deref(),
+            Some(utf8(a.repo()))
+        );
+
+        a.set_remote_url("origin", utf8(&remote)).expect("add");
+        let b = sb.git("b");
+        b.clone_from(utf8(a.repo())).expect("clone");
+        assert_eq!(
+            b.remote_url("origin").expect("url").as_deref(),
+            Some(utf8(&remote))
+        );
+        assert_eq!(fs::read(b.repo().join("f")).expect("read"), b"f");
+
+        b.set_remote_url("origin", "/elsewhere").expect("set-url");
+        assert_eq!(
+            b.remote_url("origin").expect("url").as_deref(),
+            Some("/elsewhere")
+        );
+    }
+
+    #[test]
+    fn clone_of_empty_repo_leaves_unborn_head() {
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let dst = sb.git("dst");
+        dst.clone_from(utf8(&remote)).expect("clone");
+        assert_eq!(dst.head().expect("head"), None);
+        assert!(dst.repo().join(".git/dotman-id").exists());
+    }
+
+    #[test]
+    fn pull_rebase_fast_forwards_and_reports_conflicts() {
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        commit_file(&a, "shared.txt", b"base\n", "base");
+        a.set_remote_url("origin", utf8(&remote)).expect("remote");
+        a.push("origin", "main").expect("push");
+
+        let b = sb.git("b");
+        b.clone_from(utf8(a.repo())).expect("clone");
+
+        commit_file(&a, "other.txt", b"o\n", "other");
+        a.push("origin", "main").expect("push");
+        assert_eq!(
+            b.pull_rebase("origin", "main").expect("pull"),
+            PullOutcome::Ok
+        );
+        assert!(b.repo().join("other.txt").exists());
+
+        commit_file(&a, "shared.txt", b"from a\n", "a edits");
+        a.push("origin", "main").expect("push");
+        let mine = commit_file(&b, "shared.txt", b"from b\n", "b edits");
+        let outcome = b.pull_rebase("origin", "main").expect("pull");
+        assert_eq!(
+            outcome,
+            PullOutcome::Conflict {
+                paths: vec![PathBuf::from("shared.txt")]
+            }
+        );
+        assert!(!b.operation_in_progress());
+        assert_eq!(b.head().expect("head"), Some(mine));
+        assert_eq!(
+            fs::read(b.repo().join("shared.txt")).expect("read"),
+            b"from b\n"
+        );
+    }
+
+    #[test]
+    fn operation_in_progress_sees_rebase_and_merge_markers() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        assert!(!git.operation_in_progress());
+        for marker in ["rebase-merge", "rebase-apply"] {
+            let dir = git.repo().join(".git").join(marker);
+            fs::create_dir(&dir).expect("mkdir");
+            assert!(git.operation_in_progress(), "{marker}");
+            fs::remove_dir(&dir).expect("rmdir");
+        }
+        fs::write(git.repo().join(".git/MERGE_HEAD"), "x").expect("write");
+        assert!(git.operation_in_progress());
+    }
+
+    #[test]
+    fn ls_remote_anonymous_reports_reachability() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        assert!(git.ls_remote_anonymous(utf8(git.repo())).expect("ls"));
+        let missing = sb.dir.path().join("missing");
+        assert!(!git.ls_remote_anonymous(utf8(&missing)).expect("ls"));
+    }
+
+    #[test]
+    fn repo_hooks_do_not_run() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        let hook = git.repo().join(".git/hooks/pre-commit");
+        fs::create_dir_all(hook.parent().expect("parent")).expect("mkdir");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").expect("hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod");
+        sb.raw_ok(git.repo(), &["config", "core.hooksPath", ".git/hooks"]);
+        commit_file(&git, "a", b"a", "one");
+    }
+}

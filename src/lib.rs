@@ -4,6 +4,7 @@
 #![deny(unsafe_code)]
 
 pub mod cli;
+pub mod git;
 pub mod output;
 #[allow(unsafe_code)]
 pub mod sys;
