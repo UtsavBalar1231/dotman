@@ -859,7 +859,7 @@ fn dir_mode(cache: &mut BTreeMap<String, u32>, home: &Path, parent: &str) -> Res
     Ok(mode)
 }
 
-fn record_mode(repo_config: &mut RepoConfig, key: &str, mode: u32, default: u32) {
+pub(crate) fn record_mode(repo_config: &mut RepoConfig, key: &str, mode: u32, default: u32) {
     if mode == default {
         repo_config.modes.remove(key);
     } else {

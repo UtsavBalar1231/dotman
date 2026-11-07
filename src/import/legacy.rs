@@ -1277,6 +1277,7 @@ mod tests {
             source: None,
             overlay: None,
             include_missing: false,
+            render_templates: false,
             yes,
             dry_run,
         };

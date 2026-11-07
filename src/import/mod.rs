@@ -4,6 +4,7 @@
 //! reads its source without changing it, and every entry of the source ends up either converted
 //! or listed as needing action.
 
+mod chezmoi;
 mod gittree;
 mod legacy;
 mod yadm;
@@ -179,7 +180,19 @@ pub fn run(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
                 legacy::import(ctx, path, args)
             };
         }
+        // Before the git importer: a chezmoi source is usually a git checkout too.
+        if chezmoi::is_source(path) {
+            ensure!(
+                args.overlay.is_none(),
+                "--overlay does not take a chezmoi source; import it into a fresh repo with `dot import`"
+            );
+            return chezmoi::import(ctx, path, args);
+        }
     }
+    ensure!(
+        !args.render_templates,
+        "--render-templates only applies to a chezmoi source"
+    );
     if args.overlay.is_some() {
         gittree::overlay(ctx, &source, args)
     } else {

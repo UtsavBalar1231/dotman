@@ -9,6 +9,7 @@
 //! file) or reported. Entries that stay in the repo but need a look, because yadm and dotman pick
 //! different files for their target, are reported too and not counted as converted.
 
+use super::chezmoi;
 use super::yadm::{self, Alternate, Machine};
 use super::{
     EditedConfig, Item, Report, Source, author_email, count, find_legacy, homes, legacy, proceed,
@@ -72,7 +73,7 @@ fn git_at(dir: &Path) -> Git {
     Git::new(dir, "import")
 }
 
-/// Legacy, yadm, bare dot-directories of `$HOME`, then vcsh, in the order `find` reports them.
+/// Legacy, yadm, bare dot-directories of `$HOME`, vcsh, then chezmoi, in the order `find` reports them.
 pub(super) fn candidates(ctx: &Context) -> Result<Vec<Candidate>> {
     let home = &ctx.paths.home;
     let mut found = Vec::new();
@@ -107,6 +108,10 @@ pub(super) fn candidates(ctx: &Context) -> Result<Vec<Candidate>> {
     );
     found.extend(vcsh_repos(ctx).into_iter().map(|path| Candidate {
         label: "vcsh repo",
+        path,
+    }));
+    found.extend(chezmoi::candidates(ctx).into_iter().map(|path| Candidate {
+        label: "chezmoi source",
         path,
     }));
     Ok(found)
@@ -190,7 +195,7 @@ pub(super) fn find(ctx: &Context) -> Result<ControlFlow<Outcome, Source>> {
     let found = candidates(ctx)?;
     match found.as_slice() {
         [] => bail!(
-            "no source given and none found: looked for a legacy dotman repo in {home}/.dotman, a yadm repo, bare repos directly under {home} and vcsh repos in {vcsh}; run `dot import <source>` with a path or a git URL",
+            "no source given and none found: looked for a legacy dotman repo in {home}/.dotman, a yadm repo, bare repos directly under {home}, vcsh repos in {vcsh} and a chezmoi source; run `dot import <source>` with a path or a git URL",
             home = ctx.paths.home.display(),
             vcsh = vcsh_dir(ctx).display()
         ),
@@ -601,7 +606,7 @@ fn precedence(found: &Analysis, identity: &IdentitySnapshot) -> BTreeMap<String,
     reports
 }
 
-fn shown(items: &[String]) -> String {
+pub(super) fn shown(items: &[String]) -> String {
     let mut text = items
         .iter()
         .take(SHOWN)
