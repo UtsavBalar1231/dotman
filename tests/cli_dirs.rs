@@ -181,3 +181,85 @@ fn nested_git_dirs_are_never_listed_and_an_ignore_pattern_hides_a_file() {
         "{tree:?}"
     );
 }
+
+#[test]
+fn a_forgotten_file_under_a_managed_dir_stays_out_of_the_repo() {
+    let a = device();
+    a.write(".config/nvim/a.lua", b"-- a\n", 0o644);
+    a.ok(&["add", ".config/nvim/a.lua"]);
+    a.ok(&["forget", ".config/nvim/a.lua"]);
+    exits(&a, 0, &["sync"]);
+
+    assert!(
+        a.porcelain("status")
+            .iter()
+            .all(|(_, key)| key != ".config/nvim/a.lua")
+    );
+    assert_eq!(a.read(".config/nvim/a.lua"), b"-- a\n");
+    assert!(!remote_tree(&a).contains(&".config/nvim/a.lua".to_owned()));
+    assert!(
+        a.repo_config()
+            .ignore
+            .patterns
+            .contains(&".config/nvim/a.lua".to_owned())
+    );
+}
+
+#[test]
+fn a_forget_does_not_bounce_back_from_the_other_device() {
+    let a = device();
+    a.write(".config/nvim/a.lua", b"-- a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    assert_eq!(b.read(".config/nvim/a.lua"), b"-- a\n");
+
+    a.ok(&["forget", ".config/nvim/a.lua"]);
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".config/nvim/a.lua"), b"-- a\n");
+    assert!(
+        b.porcelain("status")
+            .iter()
+            .all(|(_, key)| key != ".config/nvim/a.lua")
+    );
+    exits(&a, 0, &["sync"]);
+    assert!(!remote_tree(&a).contains(&".config/nvim/a.lua".to_owned()));
+}
+
+#[test]
+fn forgetting_a_subdirectory_ignores_it_and_odd_names_are_escaped() {
+    let a = device();
+    a.write(".config/nvim/old/x.lua", b"x\n", 0o644);
+    let odd = ".config/nvim/we{ir}d*[1]?.lua";
+    a.write(odd, b"odd\n", 0o644);
+    let twin = ".config/nvim/weird.lua";
+    a.write(twin, b"twin\n", 0o644);
+    // Matches `odd` if its glob characters were left unescaped.
+    let lookalike = ".config/nvim/we{ir}dabc1Z.lua";
+    a.write(lookalike, b"look\n", 0o644);
+    a.ok(&["add", odd, twin, lookalike]);
+    exits(&a, 0, &["sync"]);
+
+    a.ok(&["forget", ".config/nvim/old", odd]);
+    let patterns = a.repo_config().ignore.patterns;
+    assert!(
+        patterns.contains(&".config/nvim/old/**".to_owned()),
+        "{patterns:?}"
+    );
+    exits(&a, 0, &["sync"]);
+
+    let keys: Vec<String> = a
+        .porcelain("status")
+        .into_iter()
+        .map(|(_, key)| key)
+        .collect();
+    assert!(
+        !keys.iter().any(|key| key.contains("old/") || key == odd),
+        "{keys:?}"
+    );
+    for kept in [twin, lookalike] {
+        assert!(keys.contains(&kept.to_owned()), "{keys:?}");
+    }
+    assert_eq!(a.read(".config/nvim/old/x.lua"), b"x\n");
+}

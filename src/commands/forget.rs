@@ -1,6 +1,7 @@
 //! `dot forget`: stop managing a path. Only the repo and the state change, never `$HOME`.
 
 use crate::cli::ForgetArgs;
+use crate::commands::add::Ignore;
 use crate::context::{Context, is_real_dir, is_under};
 use crate::lock::Lock;
 use crate::output;
@@ -8,6 +9,7 @@ use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
 use crate::state::State;
 use anyhow::{Context as _, Result, bail};
+use glob::Pattern;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -27,8 +29,10 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
     // Every input is resolved before anything changes, so a typo leaves the repo as it was.
     let mut gone: BTreeSet<String> = BTreeSet::new();
     let mut dirs: BTreeSet<String> = BTreeSet::new();
+    let mut inputs: Vec<String> = Vec::new();
     for input in &args.paths {
         let key = derive_key(input, &cwd, &ctx.paths.home, ctx.paths.home_real.as_deref())?;
+        inputs.push(key.clone());
         let before = (gone.len(), dirs.len());
         gone.extend(managed.keys().filter(|k| is_under(k, &key)).cloned());
         gone.extend(state.files.keys().filter(|k| is_under(k, &key)).cloned());
@@ -55,8 +59,19 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
         return Ok(());
     }
 
-    remove_keys(&ctx, &mut repo_config, &mut state, &gone)?;
     repo_config.dirs.paths.retain(|d| !dirs.contains(d));
+    for key in &inputs {
+        let is_key = gone.contains(key) || managed.contains_key(key);
+        if !is_key && !dirs.contains(key) && under_dirs(&repo_config, key) {
+            ignore_forgotten(
+                &mut repo_config,
+                &format!("{}/**", Pattern::escape(key)),
+                key,
+                true,
+            )?;
+        }
+    }
+    remove_keys(&ctx, &mut repo_config, &mut state, &gone)?;
 
     repo_config.save(&ctx.repo_config_file(), false)?;
     state.save(&ctx.paths.state_file(), false)?;
@@ -64,7 +79,8 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
 }
 
 /// Removes `keys` from the worktree, `[modes]` and the state, then drops `dir/` modes that no
-/// remaining key lies under. `[dirs]` entries and `$HOME` are left alone.
+/// remaining key lies under. `$HOME` is left alone. A key under a remaining `[dirs]` entry gets an
+/// `[ignore]` pattern, because the scan would capture the file that stays in `$HOME` again.
 pub(crate) fn remove_keys(
     ctx: &Context,
     repo_config: &mut RepoConfig,
@@ -80,11 +96,37 @@ pub(crate) fn remove_keys(
         }
         repo_config.modes.remove(key);
         state.files.remove(key);
+        if under_dirs(repo_config, key) {
+            ignore_forgotten(repo_config, &Pattern::escape(key), key, false)?;
+        }
     }
     let remaining = ctx.managed()?;
     repo_config.modes.retain(|key, _| {
         !key.ends_with('/') || remaining.keys().any(|k| k.starts_with(key.as_str()))
     });
+    Ok(())
+}
+
+fn under_dirs(repo_config: &RepoConfig, key: &str) -> bool {
+    repo_config
+        .dirs
+        .paths
+        .iter()
+        .any(|dir| dir != key && is_under(key, dir))
+}
+
+/// Appends `pattern` to `[ignore]` unless a pattern already hides `key`.
+fn ignore_forgotten(
+    repo_config: &mut RepoConfig,
+    pattern: &str,
+    key: &str,
+    is_dir: bool,
+) -> Result<()> {
+    let patterns = &mut repo_config.ignore.patterns;
+    let hidden = Ignore::compile(patterns)?.matches(key, is_dir);
+    if !hidden && !patterns.iter().any(|p| p == pattern) {
+        patterns.push(pattern.to_owned());
+    }
     Ok(())
 }
 

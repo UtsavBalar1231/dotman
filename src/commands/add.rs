@@ -78,13 +78,13 @@ struct Plan {
 
 const DANGLING: &str = "dangling symlink";
 
-struct Ignore {
+pub(crate) struct Ignore {
     any: Vec<Pattern>,
     dirs_only: Vec<Pattern>,
 }
 
 impl Ignore {
-    fn compile(patterns: &[String]) -> Result<Self> {
+    pub(crate) fn compile(patterns: &[String]) -> Result<Self> {
         let mut ignore = Self {
             any: Vec::new(),
             dirs_only: Vec::new(),
@@ -104,7 +104,7 @@ impl Ignore {
         Ok(ignore)
     }
 
-    fn matches(&self, key: &str, is_dir: bool) -> bool {
+    pub(crate) fn matches(&self, key: &str, is_dir: bool) -> bool {
         self.any.iter().any(|p| p.matches_with(key, MATCH))
             || (is_dir && self.dirs_only.iter().any(|p| p.matches_with(key, MATCH)))
     }
