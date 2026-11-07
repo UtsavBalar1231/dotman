@@ -249,12 +249,12 @@ pub struct RestoreArgs {
 /// Arguments of `dot import`.
 #[derive(Args)]
 pub struct ImportArgs {
-    /// Legacy dotman repo to convert; `$HOME/.dotman` when omitted
+    /// Legacy dotman repo, yadm, bare or vcsh repo, or git URL to convert; found in $HOME when omitted
     #[arg(value_name = "SOURCE", conflicts_with = "overlay")]
-    pub source: Option<PathBuf>,
-    /// Add the modes, and with `--include-missing` the files, that SOURCE has and the repo lacks, as one commit
+    pub source: Option<OsString>,
+    /// Add what SOURCE has and the repo lacks as one commit: modes, and with `--include-missing` files
     #[arg(long, value_name = "SOURCE")]
-    pub overlay: Option<PathBuf>,
+    pub overlay: Option<OsString>,
     /// With `--overlay`, add the files the repo lacks without asking
     #[arg(long)]
     pub include_missing: bool,

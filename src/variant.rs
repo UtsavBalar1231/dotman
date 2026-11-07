@@ -199,6 +199,15 @@ pub fn variant_source(key: &str, conditions: &str) -> Result<String> {
     Ok(insert_block(key, conditions))
 }
 
+/// `key` with `block`, a `+`-joined list of conditions and at most one flag such as
+/// `os=linux+tmpl`, placed where `--for` puts it.
+pub fn with_block(key: &str, block: &str) -> Result<String> {
+    if !matches!(parse_block(block), Some(Ok(_))) {
+        bail!("`{block}` is not a block such as `host=laptop+os=linux+tmpl`");
+    }
+    Ok(insert_block(key, block))
+}
+
 /// `source` with the `age` flag: `a{host=x}.conf` gives `a{host=x+age}.conf`, and a name with no
 /// block gets `{age}` where `--for` would put its block.
 pub fn with_age(source: &str) -> Result<String> {

@@ -816,7 +816,7 @@ fn compare(ctx: &Context, root: &Path, include_missing: bool) -> Result<Overlay>
 /// Whether to add the files the repo lacks: yes with `--include-missing`, which `compare` has
 /// already applied, or when an interactive run is asked once and says yes. `--yes`, `--dry-run`
 /// and a non-interactive run never ask, so the files stay out.
-fn add_missing(args: &ImportArgs, missing: &[String]) -> Result<bool> {
+pub(super) fn add_missing(args: &ImportArgs, missing: &[String]) -> Result<bool> {
     if missing.is_empty() || args.yes || args.dry_run || !prompt::interactive() {
         return Ok(false);
     }

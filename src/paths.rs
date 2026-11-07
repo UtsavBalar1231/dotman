@@ -66,6 +66,10 @@ pub struct Paths {
     pub home: PathBuf,
     /// `realpath($HOME)` when it differs from `home` (Fedora Silverblue links `/home` to `/var/home`).
     pub home_real: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME`, or `$HOME/.config`.
+    pub config_home: PathBuf,
+    /// `$XDG_DATA_HOME`, or `$HOME/.local/share`.
+    pub data_home: PathBuf,
     /// Root of the git repo, which maps to `$HOME`. Precedence: `DOTMAN_REPO_PATH`, then the
     /// machine config's `repo`, then `$XDG_DATA_HOME/dotman`.
     pub repo: PathBuf,
@@ -120,6 +124,8 @@ impl Paths {
             config_file: config_override.unwrap_or_else(|| config_home.join("dotman/config.toml")),
             state_dir: state_home.join("dotman"),
             age_identity: config_home.join("dotman/age-identity.txt"),
+            config_home,
+            data_home,
             age_key_file,
         })
     }
@@ -362,8 +368,10 @@ pub fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-// Case-insensitive because APFS and other case-insensitive filesystems resolve `.GIT` to `.git`.
-fn is_reserved_root_name(name: &str) -> bool {
+/// Whether a root-level name is one dotman never applies. Case-insensitive because APFS and other
+/// case-insensitive filesystems resolve `.GIT` to `.git`.
+#[must_use]
+pub fn is_reserved_root_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(
         lower.as_str(),

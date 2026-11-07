@@ -488,3 +488,27 @@ fn walk(base: &Path, dir: &Path, map: &mut BTreeMap<String, Entry>) -> io::Resul
     }
     Ok(())
 }
+
+/// `(entries, converted, need action)` from the summary line.
+pub fn accounting(stderr: &str) -> (usize, usize, usize) {
+    assert!(
+        stderr.contains(" entries: "),
+        "no summary line in:\n{stderr}"
+    );
+    let line = stderr
+        .lines()
+        .find(|line| line.contains(" entries: "))
+        .expect("a summary line");
+    let numbers: Vec<usize> = line
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().expect("a number"))
+        .collect();
+    let [entries, converted, needs]: [usize; 3] = numbers.try_into().expect("three numbers");
+    assert_eq!(
+        entries,
+        converted.saturating_add(needs),
+        "N = C + R in: {line}"
+    );
+    (entries, converted, needs)
+}

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Entry, TestEnv, mode_of, tree_checksum};
+use common::{Entry, TestEnv, accounting, mode_of, tree_checksum};
 use dotman::repo_config::RepoConfig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -90,32 +90,6 @@ fn commits(env: &TestEnv) -> usize {
         .trim()
         .parse()
         .expect("a count")
-}
-
-// reason: clippy.toml exempts expect only inside #[test] fns
-#[allow(clippy::expect_used)]
-/// `(entries, converted, need action)` from the summary line.
-fn accounting(stderr: &str) -> (usize, usize, usize) {
-    assert!(
-        stderr.contains(" entries: "),
-        "no summary line in:\n{stderr}"
-    );
-    let line = stderr
-        .lines()
-        .find(|line| line.contains(" entries: "))
-        .expect("a summary line");
-    let numbers: Vec<usize> = line
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.parse().expect("a number"))
-        .collect();
-    let [entries, converted, needs]: [usize; 3] = numbers.try_into().expect("three numbers");
-    assert_eq!(
-        entries,
-        converted.saturating_add(needs),
-        "N = C + R in: {line}"
-    );
-    (entries, converted, needs)
 }
 
 fn mode_table(entries: &[(&str, &str)]) -> BTreeMap<String, String> {

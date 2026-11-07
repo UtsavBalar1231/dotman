@@ -114,6 +114,15 @@ pub struct StatusEntry {
     pub orig_path: Option<PathBuf>,
 }
 
+/// One blob, symlink or gitlink from [`Git::ls_tree`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// `100644`, `100755`, `120000`, or `160000` for a submodule.
+    pub mode: String,
+    /// Relative to the tree root; raw bytes, not necessarily UTF-8.
+    pub path: PathBuf,
+}
+
 /// One commit from [`Git::log`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
@@ -515,6 +524,51 @@ impl Git {
         }
     }
 
+    /// Every file, symlink and gitlink of `rev`, in git's order.
+    pub fn ls_tree(&self, rev: &str) -> Result<Vec<TreeEntry>> {
+        let out = self.run(&["ls-tree", "-r", "-z", rev])?;
+        Ok(out
+            .stdout
+            .split(|b| *b == 0)
+            .filter_map(|record| {
+                let (meta, path) =
+                    record.split_at_checked(record.iter().position(|b| *b == b'\t')?)?;
+                let mode = meta.split(|b| *b == b' ').next()?;
+                Some(TreeEntry {
+                    mode: String::from_utf8_lossy(mode).into_owned(),
+                    path: PathBuf::from(OsStr::from_bytes(path.get(1..)?)),
+                })
+            })
+            .collect())
+    }
+
+    /// Every value of `key` in the config file `file`, which need not belong to a repo. A
+    /// missing key or file gives no values.
+    pub fn config_values(&self, file: &Path, key: &str) -> Result<Vec<String>> {
+        let args = [
+            OsStr::new("config"),
+            OsStr::new("--file"),
+            file.as_os_str(),
+            OsStr::new("--get-all"),
+            OsStr::new(key),
+        ];
+        let out = self.output(self.base(), &args)?;
+        match out.status.code() {
+            Some(0) => Ok(String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect()),
+            Some(1) => Ok(Vec::new()),
+            _ if !file.exists() => Ok(Vec::new()),
+            _ => Err(failure(&args, &out)),
+        }
+    }
+
+    /// Removes remote `name` and its remote-tracking refs.
+    pub fn remove_remote(&self, name: &str) -> Result<()> {
+        self.run(&["remote", "remove", name]).map(drop)
+    }
+
     /// The URL of remote `name` exactly as written in the config, without `insteadOf` rewriting.
     pub fn remote_url(&self, name: &str) -> Result<Option<String>> {
         self.optional(&["config", "--get", &format!("remote.{name}.url")])
@@ -598,7 +652,7 @@ fn parse_ident_email(ident: &str) -> Option<String> {
 }
 
 /// Hides `user:password@` in URLs so tokens do not reach error messages.
-fn redact_credentials(arg: &str) -> String {
+pub(crate) fn redact_credentials(arg: &str) -> String {
     let Some((scheme, rest)) = arg.split_once("://") else {
         return arg.to_owned();
     };
