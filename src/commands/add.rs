@@ -5,7 +5,9 @@
 use crate::cli::AddArgs;
 use crate::context::{Context, TEMP_PREFIX, is_real_dir};
 use crate::engine::status::{Content, SourceEntry, Worktree};
-use crate::engine::{Node, Tuple, parents, portable_link_target, read_node, safe_mode};
+use crate::engine::{
+    Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
+};
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::{
@@ -772,7 +774,7 @@ pub(crate) fn commit_one(
     let plaintext = match (expected, node) {
         (Kind::File, Node::File { bytes, mode, .. }) if encrypted => {
             store_encrypted(ctx, &repo_config.age.recipients, source, &bytes)?;
-            record_mode(repo_config, source, mode & 0o777, 0o600);
+            keep_private(repo_config, key, source, safe_mode(mode))?;
             Some(SourceEntry {
                 source: source.to_owned(),
                 tuple: Tuple::of_file(&bytes, safe_mode(mode)),
@@ -808,6 +810,21 @@ pub(crate) fn commit_one(
     Worktree::new(repo, &repo_config.modes)
         .get(source)?
         .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))
+}
+
+// A secret never loosens to group or other access through a capture: such a mode is not recorded,
+// so R keeps its own and the next apply tightens H back (S records H, which makes it row 10). A
+// looser mode already in `[modes]` was written by hand and is kept.
+fn keep_private(repo_config: &mut RepoConfig, key: &str, source: &str, mode: u32) -> Result<()> {
+    let applied = recorded_mode(&repo_config.modes, source)?.map_or(0o600, safe_mode);
+    if mode & 0o077 != 0 && mode != applied {
+        output::warning(&format!(
+            "{key} is {mode:04o}; this encrypted file applies at {applied:04o}, so this copy is tightened on the next apply; to keep {mode:04o}, set it for {source} in [modes] in .dotman.toml"
+        ));
+    } else {
+        record_mode(repo_config, source, mode, 0o600);
+    }
+    Ok(())
 }
 
 // age output differs on every run, so a source whose plaintext is unchanged keeps its ciphertext.

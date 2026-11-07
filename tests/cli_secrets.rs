@@ -6,6 +6,7 @@ mod common;
 use common::{TestEnv, files_containing, mode_of};
 use dotman::repo_config::RepoConfig;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Output;
 
@@ -85,11 +86,16 @@ fn remote_head(env: &TestEnv) -> String {
 
 /// A device with a key and `.config/gh/hosts.yml` added encrypted, synced to the remote.
 fn keyed_device() -> TestEnv {
+    encrypted_at(0o600).0
+}
+
+/// Like [`keyed_device`], with the file at `mode` when it is added; also returns `add`'s stderr.
+fn encrypted_at(mode: u32) -> (TestEnv, String) {
     let env = TestEnv::new();
     env.ok(&["init", "--remote", &env.remote_url()]);
     env.ok(&["key", "init"]);
-    env.write(HOSTS, PLAIN, 0o600);
-    env.ok(&["add", "--encrypt", HOSTS]);
+    env.write(HOSTS, PLAIN, mode);
+    let added = env.ok(&["add", "--encrypt", HOSTS]);
     env.ok(&["sync"]);
     env.git(&[
         "--git-dir",
@@ -98,7 +104,15 @@ fn keyed_device() -> TestEnv {
         "HEAD",
         "refs/heads/main",
     ]);
-    env
+    (env, added)
+}
+
+/// A second device that applies with `env`'s key.
+fn keyed_clone(env: &TestEnv) -> TestEnv {
+    let other = env.second_device();
+    let key = identity(env);
+    other.ok_with(&[("DOTMAN_AGE_KEY", &key)], &["init", &other.remote_url()]);
+    other
 }
 
 /// A repo of its own with a fresh key, for an identity no other device has.
@@ -537,6 +551,83 @@ fn without_a_remote_sync_re_encrypts_after_its_apply() {
 }
 
 #[test]
+fn a_shared_mode_is_not_recorded_for_an_encrypted_file_and_a_stricter_one_is() {
+    if !age_installed() {
+        return;
+    }
+    let (a, added) = encrypted_at(0o644);
+    assert!(
+        added.contains(".config/gh/hosts.yml is 0644; this encrypted file applies at 0600"),
+        "{added}"
+    );
+    assert!(!a.repo_config().modes.contains_key(HOSTS_AGE));
+    assert_eq!(
+        mode_of(&a.home().join(HOSTS)),
+        0o600,
+        "the sync tightened it"
+    );
+    assert_eq!(a.token_of("status", HOSTS).as_deref(), Some("clean"));
+    assert_eq!(mode_of(&keyed_clone(&a).home().join(HOSTS)), 0o600);
+
+    let (a, added) = encrypted_at(0o400);
+    assert!(!added.contains("applies at"), "{added}");
+    assert_eq!(
+        a.repo_config().modes.get(HOSTS_AGE).map(String::as_str),
+        Some("0400")
+    );
+    assert_eq!(mode_of(&keyed_clone(&a).home().join(HOSTS)), 0o400);
+}
+
+#[test]
+fn a_loosened_encrypted_file_is_tightened_and_its_content_still_captured() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let before = ciphertext(&a);
+    fs::set_permissions(a.home().join(HOSTS), fs::Permissions::from_mode(0o644)).unwrap();
+    let err = exits(&a.run(&["sync"]), 0);
+    assert!(
+        err.contains("is 0644; this encrypted file applies at 0600"),
+        "{err}"
+    );
+    assert_eq!(mode_of(&a.home().join(HOSTS)), 0o600);
+    assert_eq!(ciphertext(&a), before);
+    assert!(!a.repo_config().modes.contains_key(HOSTS_AGE));
+
+    a.write(HOSTS, b"rotated\n", 0o644);
+    let err = exits(&a.run(&["sync"]), 0);
+    assert!(err.contains("is 0644"), "{err}");
+    assert_eq!(mode_of(&a.home().join(HOSTS)), 0o600);
+    assert_ne!(ciphertext(&a), before);
+    assert!(!a.repo_config().modes.contains_key(HOSTS_AGE));
+    let b = keyed_clone(&a);
+    assert_eq!(b.read(HOSTS), b"rotated\n");
+    assert_eq!(mode_of(&b.home().join(HOSTS)), 0o600);
+}
+
+#[test]
+fn a_looser_mode_written_into_modes_by_hand_is_honored() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let mut config = a.repo_config();
+    config.modes.insert(HOSTS_AGE.to_owned(), "0640".to_owned());
+    config.save(&a.repo().join(".dotman.toml"), false).unwrap();
+    let err = exits(&a.run(&["sync"]), 0);
+    assert!(!err.contains("applies at"), "{err}");
+    assert_eq!(mode_of(&a.home().join(HOSTS)), 0o640);
+    let err = a.ok(&["add", HOSTS]);
+    assert!(!err.contains("applies at"), "{err}");
+    assert_eq!(
+        a.repo_config().modes.get(HOSTS_AGE).map(String::as_str),
+        Some("0640")
+    );
+    assert_eq!(a.token_of("status", HOSTS).as_deref(), Some("clean"));
+}
+
+#[test]
 fn hooks_and_the_editor_never_see_the_age_key() {
     let env = TestEnv::new();
     env.ok(&["init"]);
@@ -661,7 +752,7 @@ fn encrypting_a_plain_file_replaces_its_source_and_records_only_other_modes() {
     env.ok(&["init"]);
     env.ok(&["key", "init"]);
     env.write(HOSTS, PLAIN, 0o600);
-    env.write(".netrc", b"machine x\n", 0o640);
+    env.write(".netrc", b"machine x\n", 0o400);
     env.ok(&["add", HOSTS]);
     let err = env.ok(&["add", "--encrypt", HOSTS, ".netrc"]);
     assert!(err.contains("git history still has it"), "{err}");
@@ -672,7 +763,7 @@ fn encrypting_a_plain_file_replaces_its_source_and_records_only_other_modes() {
         !modes.contains_key(HOSTS) && !modes.contains_key(HOSTS_AGE),
         "{modes:?}"
     );
-    assert_eq!(modes.get(".netrc{age}").map(String::as_str), Some("0640"));
+    assert_eq!(modes.get(".netrc{age}").map(String::as_str), Some("0400"));
     assert_eq!(env.token_of("status", HOSTS).as_deref(), Some("clean"));
     assert_eq!(env.token_of("status", ".netrc").as_deref(), Some("clean"));
     let record = fs::read_to_string(env.repo().join(".dotman/age-recipients")).unwrap();

@@ -310,6 +310,17 @@ impl TestEnv {
         String::from_utf8_lossy(&out.stderr).into_owned()
     }
 
+    /// Like [`TestEnv::ok`], with extra environment variables.
+    pub fn ok_with(&self, vars: &[(&str, &str)], args: &[&str]) -> String {
+        let out = self.run_with(vars, args);
+        assert!(
+            out.status.success(),
+            "dot {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
     /// Runs `dot`, asserts exit 1 and returns stderr.
     pub fn fails(&self, args: &[&str]) -> String {
         let out = self.run(args);
