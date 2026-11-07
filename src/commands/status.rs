@@ -350,7 +350,7 @@ pub fn execute_verbose(
             })
             .collect();
         if !staged_new.is_empty() || !staged_modified.is_empty() || !staged_deleted.is_empty() {
-            println!("\n{}:", "Changes to be committed:".bold());
+            println!("\n{}", "Changes to be committed:".bold());
             for status in &staged_new {
                 println!("  {}: {}", "new file".green(), status.path().display());
             }
@@ -388,7 +388,7 @@ pub fn execute_verbose(
             })
             .collect();
         if !unstaged_modified.is_empty() || !unstaged_deleted.is_empty() {
-            println!("\n{}:", "Changes not staged for commit:".bold());
+            println!("\n{}", "Changes not staged for commit:".bold());
             for status in &unstaged_modified {
                 println!("  {}: {}", "modified".yellow(), status.path().display());
             }
