@@ -49,6 +49,8 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Show how $HOME differs from the repo
     Diff(DiffArgs),
+    /// Open a managed file's source in $VISUAL or $EDITOR, then apply it
+    Edit(EditArgs),
     /// Capture local changes, commit, pull, apply what arrived and push
     Sync(SyncArgs),
     /// Show the repo's history
@@ -123,6 +125,13 @@ pub struct ApplyArgs {
     /// Show what would be written and change nothing
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments of `dot edit`.
+#[derive(Args)]
+pub struct EditArgs {
+    /// The managed file to edit
+    pub path: PathBuf,
 }
 
 /// Arguments of `dot sync`.

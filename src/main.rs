@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
 use dotman::commands::{
-    Outcome, add, apply, diff, doctor, forget, git, init, list, log, restore, status, sync,
+    Outcome, add, apply, diff, doctor, edit, forget, git, init, list, log, restore, status, sync,
 };
 use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
@@ -56,6 +56,7 @@ fn main() {
         Commands::Status(args) => done(status::run(&args)),
         Commands::Apply(args) => apply::run(&args),
         Commands::Diff(args) => done(diff::run(&args, cli.no_pager)),
+        Commands::Edit(args) => edit::run(&args),
         Commands::Sync(args) => sync::run(&args),
         Commands::Log(args) => done(log::run(&args)),
         Commands::Restore(args) => done(restore::run(&args)),

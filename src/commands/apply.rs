@@ -61,7 +61,7 @@ pub(crate) struct Options {
 
 pub(crate) struct Applied {
     pub outcome: Outcome,
-    /// Keys that were asked about and left unanswered.
+    /// Keys that were asked about and left unanswered, or reported as template drift.
     pub undecided: BTreeSet<String>,
     /// Keys captured into the repo; in a dry run, the keys that would be.
     pub captured: BTreeSet<String>,
@@ -297,7 +297,12 @@ struct Run<'a> {
 impl Run<'_> {
     fn classify(&mut self, sources: &Sources, state: &State, keys: &BTreeSet<String>) -> Vec<Item> {
         let worktree = Worktree::new(&self.ctx.paths.repo, &self.modes);
-        let variants = Variants::new(worktree, sources, self.ctx.identity());
+        let variants = Variants::new(
+            worktree,
+            sources,
+            self.ctx.identity(),
+            self.ctx.template_vars(),
+        );
         let mut items = Vec::new();
         for key in keys {
             match classify_key(self.ctx, &variants, state, key) {
@@ -431,9 +436,11 @@ impl Run<'_> {
     /// Keeping H means different things per pass. `sync` captures it, except for a path deleted
     /// here, which has no H to capture.
     fn keep(&self, local: Action, item: &Item) -> Action {
+        let into_template = item.r.as_ref().is_some_and(|r| r.template);
         if local == Action::KeepLocal
             && self.opts.pass == Pass::Capture
             && item.row != Row::DeletedChangedUpstream
+            && !into_template
         {
             Action::Capture
         } else {
@@ -443,11 +450,20 @@ impl Run<'_> {
 
     /// The action for rows that need no question, with their reports.
     fn direct(&mut self, item: &Item) -> Option<Action> {
-        if self.opts.pass == Pass::Capture {
+        if self.opts.pass == Pass::Capture && item.row != Row::TemplateDrift {
             return (item.row == Row::ChangedLocally).then_some(Action::Capture);
         }
         let key = &item.key;
         match item.row {
+            Row::TemplateDrift => {
+                self.attention = true;
+                // `sync` reports it in its capture pass; the pass after the pull leaves it alone.
+                self.undecided.insert(key.clone());
+                output::warning(&format!(
+                    "{key}: template-drift; edit the template: dot edit {key}"
+                ));
+                None
+            }
             Row::GoneEverywhere => Some(Action::DropState),
             Row::Forgotten => {
                 output::info(&format!(
@@ -725,6 +741,11 @@ pub(crate) fn classify_key(
             .as_ref()
             .is_some_and(|old| old != ctx.identity() && variants.winner_under(key, old) != winner);
     let row = if switched { row.switched() } else { row };
+    let row = if r.as_ref().is_some_and(|r| r.template) {
+        row.drifted()
+    } else {
+        row
+    };
     let local_changes = match (&h, &s) {
         (Home::Present(h), Some(s)) => h != s,
         (Home::Present(_), None) => true,

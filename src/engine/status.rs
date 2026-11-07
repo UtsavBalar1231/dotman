@@ -2,8 +2,9 @@
 
 use super::{Home, Node, Tuple, read_node, recorded_mode, safe_mode};
 use crate::state::{IdentitySnapshot, Kind};
-use crate::variant::{Selection, Sources};
-use anyhow::Result;
+use crate::template::{self, Vars};
+use crate::variant::{Flag, Selection, Sources};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +36,8 @@ pub enum Row {
     ChangedInRepo,
     /// Row 11: H, R and S all differ.
     BothChanged,
+    /// Rows 9 and 11 where R is rendered from a template, so H is never captured into it.
+    TemplateDrift,
     /// R is a file or symlink and something dotman never removes is in the way.
     Blocked,
     /// R is a regular file and H is a symlink, which is never written through.
@@ -52,6 +55,8 @@ pub enum Category {
     ExistingFiles,
     /// Forget or restore.
     LocalDeletions,
+    /// Report-only; exit 3.
+    TemplateDrift,
     /// Report-only; exit 3.
     Blocked,
 }
@@ -72,7 +77,7 @@ impl Row {
             Self::ChangedLocally => 9,
             Self::ChangedInRepo => 10,
             Self::BothChanged => 11,
-            Self::Blocked | Self::SymlinkAtTarget => return None,
+            Self::TemplateDrift | Self::Blocked | Self::SymlinkAtTarget => return None,
         })
     }
 
@@ -86,6 +91,7 @@ impl Row {
                 Some(Category::Conflicts)
             }
             Self::Existing => Some(Category::ExistingFiles),
+            Self::TemplateDrift => Some(Category::TemplateDrift),
             Self::Blocked => Some(Category::Blocked),
             Self::GoneEverywhere
             | Self::Forgotten
@@ -93,6 +99,16 @@ impl Row {
             | Self::NotApplied
             | Self::ChangedLocally
             | Self::ChangedInRepo => None,
+        }
+    }
+
+    /// The row when R is rendered from a template: H cannot be captured into one, so a local
+    /// change is reported instead.
+    #[must_use]
+    pub const fn drifted(self) -> Self {
+        match self {
+            Self::ChangedLocally | Self::BothChanged => Self::TemplateDrift,
+            other => other,
         }
     }
 
@@ -155,6 +171,8 @@ pub struct SourceEntry {
     pub tuple: Tuple,
     /// Bytes or link target to write.
     pub content: Content,
+    /// The bytes were rendered from `source`, which is a template.
+    pub template: bool,
 }
 
 /// The content of R.
@@ -207,6 +225,7 @@ impl<'a> Worktree<'a> {
             source: key.to_owned(),
             tuple,
             content,
+            template: false,
         }))
     }
 }
@@ -217,21 +236,41 @@ pub struct Variants<'a> {
     worktree: Worktree<'a>,
     sources: &'a Sources,
     identity: &'a IdentitySnapshot,
+    vars: &'a Vars,
 }
 
 impl<'a> Variants<'a> {
-    /// `sources` groups the worktree's paths; `identity` picks among them.
+    /// `sources` groups the worktree's paths; `identity` picks among them, and `vars` is what
+    /// the winner is rendered with when it is a template.
     #[must_use]
     pub const fn new(
         worktree: Worktree<'a>,
         sources: &'a Sources,
         identity: &'a IdentitySnapshot,
+        vars: &'a Vars,
     ) -> Self {
         Self {
             worktree,
             sources,
             identity,
+            vars,
         }
+    }
+
+    fn render(&self, mut entry: SourceEntry) -> Result<SourceEntry> {
+        let Content::Bytes(bytes) = &entry.content else {
+            bail!(
+                "{}: a template must be a regular file, not a symlink",
+                entry.source
+            );
+        };
+        let text = std::str::from_utf8(bytes)
+            .with_context(|| format!("{} is not valid UTF-8", entry.source))?;
+        let rendered = template::render(&entry.source, text, self.vars)?.into_bytes();
+        entry.tuple = Tuple::of_file(&rendered, entry.tuple.mode);
+        entry.content = Content::Bytes(rendered);
+        entry.template = true;
+        Ok(entry)
     }
 
     /// The source `identity` would pick, such as the recorded snapshot rather than this run's.
@@ -245,10 +284,13 @@ impl Source for Variants<'_> {
     fn get(&self, key: &str) -> Result<Selection<SourceEntry>> {
         Ok(match self.sources.select(key, self.identity) {
             Selection::None => Selection::None,
-            Selection::Winner(source) => self
-                .worktree
-                .get(source)?
-                .map_or(Selection::None, Selection::Winner),
+            Selection::Winner(source) => match self.worktree.get(source)? {
+                Some(entry) if self.sources.flag(key, source) == Flag::Tmpl => {
+                    Selection::Winner(self.render(entry)?)
+                }
+                Some(entry) => Selection::Winner(entry),
+                None => Selection::None,
+            },
             Selection::Ambiguous(sources) => Selection::Ambiguous(sources),
             Selection::Invalid(problems) => Selection::Invalid(problems),
         })
@@ -538,7 +580,8 @@ mod tests {
             host: "x".to_owned(),
             ..IdentitySnapshot::default()
         };
-        let variants = Variants::new(Worktree::new(repo, &modes), &sources, &x);
+        let vars = Vars::default();
+        let variants = Variants::new(Worktree::new(repo, &modes), &sources, &x, &vars);
         let Selection::Winner(entry) = variants.get("a.conf").unwrap() else {
             unreachable!("a.conf has a winner on host x");
         };
@@ -548,6 +591,17 @@ mod tests {
         let other = IdentitySnapshot::default();
         assert_eq!(variants.winner_under("a.conf", &other), Some("a.conf"));
         assert_eq!(variants.get("missing").unwrap(), Selection::None);
+    }
+
+    #[test]
+    fn a_template_reports_local_changes_instead_of_capturing_them() {
+        assert_eq!(Row::ChangedLocally.drifted(), Row::TemplateDrift);
+        assert_eq!(Row::BothChanged.drifted(), Row::TemplateDrift);
+        assert_eq!(Row::TemplateDrift.category(), Some(Category::TemplateDrift));
+        assert_eq!(Row::TemplateDrift.number(), None);
+        for row in [Row::ChangedInRepo, Row::Existing, Row::DeletedLocally] {
+            assert_eq!(row.drifted(), row);
+        }
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::paths::{
 use crate::prompt;
 use crate::repo_config::RepoConfig;
 use crate::state::{IdentitySnapshot, Kind, State};
-use crate::variant::{self, Selection, Sources};
+use crate::variant::{self, Flag, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
 use glob::{MatchOptions, Pattern};
 use std::collections::{BTreeMap, BTreeSet};
@@ -183,6 +183,10 @@ pub fn run(args: &AddArgs) -> Result<()> {
     let mut dir_modes = BTreeMap::new();
     for (key, leaf) in &items {
         let kind = leaf.kind();
+        if !announced.contains(key) && targets.is_template(key) {
+            output::warning(&format!("{key}: rendered from a template; skipped"));
+            continue;
+        }
         match targets.commit(
             &ctx,
             &mut repo_config,
@@ -244,6 +248,9 @@ impl Targets<'_> {
         }
         match self.sources.select(key, self.identity) {
             Selection::None => Ok(key.to_owned()),
+            Selection::Winner(source) if self.sources.flag(key, source) == Flag::Tmpl => bail!(
+                "{source} is a template, so the file cannot replace it; edit the template with `dot edit {key}`"
+            ),
             Selection::Winner(source) => Ok(source.to_owned()),
             Selection::Ambiguous(tied) => bail!(
                 "{} are equally specific here; remove one first",
@@ -258,6 +265,13 @@ impl Targets<'_> {
                     .join("; ")
             ),
         }
+    }
+
+    fn is_template(&self, key: &str) -> bool {
+        self.sources
+            .select(key, self.identity)
+            .winner()
+            .is_some_and(|source| self.sources.flag(key, source) == Flag::Tmpl)
     }
 
     fn commit(

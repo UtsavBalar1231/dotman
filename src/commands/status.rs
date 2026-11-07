@@ -26,6 +26,7 @@ pub const fn token(row: Row) -> &'static str {
         Row::ChangedLocally => "changed-locally",
         Row::ChangedInRepo => "changed-in-repo",
         Row::BothChanged => "both-changed",
+        Row::TemplateDrift => "template-drift",
         Row::Blocked => "blocked",
         Row::SymlinkAtTarget => "symlink-at-target",
     }
@@ -57,7 +58,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     let scan = add::scan_dirs(&ctx, &repo_config, &keys)?;
     let in_scope = |key: &str| filters.is_empty() || filters.iter().any(|f| is_under(key, f));
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
-    let variants = Variants::new(worktree, &sources, ctx.identity());
+    let variants = Variants::new(worktree, &sources, ctx.identity(), ctx.template_vars());
 
     let mut rows = Vec::new();
     for key in keys {
@@ -69,7 +70,10 @@ pub fn run(args: &StatusArgs) -> Result<()> {
             Ok(Classified::Item(item)) => item.token(),
             Ok(Classified::Ambiguous(_)) => "ambiguous",
             Ok(Classified::Invalid(_)) => "invalid",
-            Err(_) => UNREADABLE,
+            Err(e) => {
+                output::warning(&format!("{key}: {e:#}"));
+                UNREADABLE
+            }
         };
         rows.push((label, key));
     }

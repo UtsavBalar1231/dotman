@@ -198,6 +198,21 @@ impl TestEnv {
         fs::read(self.home().join(path)).expect("read file")
     }
 
+    /// Replaces the machine config, `$XDG_CONFIG_HOME/dotman/config.toml`.
+    pub fn write_machine_config(&self, text: &str) {
+        let dir = self.xdg_config().join("dotman");
+        fs::create_dir_all(&dir).expect("create config dir");
+        fs::write(dir.join("config.toml"), text).expect("write machine config");
+    }
+
+    /// Writes an executable file at `name` under the temp root, outside HOME and the repo.
+    pub fn write_script(&self, name: &str, body: &str) -> PathBuf {
+        let path = self.root().join(name);
+        fs::write(&path, body).expect("write script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+        path
+    }
+
     /// Writes into the repo worktree directly, as a pull from upstream would.
     pub fn write_repo(&self, key: &str, bytes: &[u8]) {
         let path = self.repo().join(key);

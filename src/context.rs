@@ -7,6 +7,7 @@ use crate::paths::{Env, Paths, derive_key, validate_key};
 use crate::repo_config::RepoConfig;
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::sys;
+use crate::template::Vars;
 use crate::variant::Sources;
 use anyhow::{Context as _, Result, bail};
 use std::cell::OnceCell;
@@ -50,6 +51,7 @@ pub struct Context {
     /// The machine config, already applied to `paths`.
     pub machine: Config,
     identity: OnceCell<IdentitySnapshot>,
+    template_vars: OnceCell<Vars>,
 }
 
 impl Context {
@@ -69,6 +71,7 @@ impl Context {
             paths,
             machine,
             identity: OnceCell::new(),
+            template_vars: OnceCell::new(),
         }
     }
 
@@ -76,6 +79,15 @@ impl Context {
     pub fn identity(&self) -> &IdentitySnapshot {
         self.identity
             .get_or_init(|| identity::current(&self.machine))
+    }
+
+    /// What templates render with, from the identity as overridden.
+    pub fn template_vars(&self) -> &Vars {
+        self.template_vars.get_or_init(|| {
+            Vars::new(self.identity(), &self.machine, &self.paths.home, |name| {
+                std::env::var(name).ok()
+            })
+        })
     }
 
     /// [`Context::managed`] grouped by target key, so variants of one file share a key.

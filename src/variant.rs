@@ -71,12 +71,24 @@ fn rank(conditions: &[Condition], identity: &IdentitySnapshot) -> Option<Rank> {
     Some((positive, !conditions.is_empty()))
 }
 
+/// What a source's block says to do with its bytes before they are applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flag {
+    /// Applied as they are.
+    Plain,
+    /// Rendered as a template.
+    Tmpl,
+    /// Decrypted.
+    Age,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Name {
     Literal,
     Variant {
         target: String,
         conditions: Vec<Condition>,
+        flag: Flag,
     },
     Invalid {
         target: String,
@@ -109,26 +121,37 @@ fn parse_name(name: &str) -> Name {
     }
     match blocks.pop() {
         None => Name::Literal,
-        Some((target, Ok(conditions))) => Name::Variant { target, conditions },
+        Some((target, Ok((conditions, flag)))) => Name::Variant {
+            target,
+            conditions,
+            flag,
+        },
         Some((target, Err(reason))) => Name::Invalid { target, reason },
     }
 }
 
 // `None` when `inner` is not a block, so its braces are part of the name.
-fn parse_block(inner: &str) -> Option<Result<Vec<Condition>, &'static str>> {
+fn parse_block(inner: &str) -> Option<Result<(Vec<Condition>, Flag), &'static str>> {
     let mut conditions = Vec::new();
+    let mut flag = Flag::Plain;
     let mut flags = 0usize;
     for term in inner.split('+') {
-        if matches!(term, "tmpl" | "age") {
-            flags = flags.saturating_add(1);
-        } else {
-            conditions.push(parse_condition(term)?);
+        match term {
+            "tmpl" | "age" => {
+                flags = flags.saturating_add(1);
+                flag = if term == "tmpl" {
+                    Flag::Tmpl
+                } else {
+                    Flag::Age
+                };
+            }
+            _ => conditions.push(parse_condition(term)?),
         }
     }
     Some(if flags > 1 {
         Err(ONE_FLAG)
     } else {
-        Ok(conditions)
+        Ok((conditions, flag))
     })
 }
 
@@ -168,7 +191,7 @@ pub fn is_literal(name: &str) -> bool {
 /// The source path that makes `key` a variant for `conditions`, such as `host=laptop+os=linux`.
 /// The block goes before the last `.` of the name, unless that dot is the name's first character.
 pub fn variant_source(key: &str, conditions: &str) -> Result<String> {
-    let only_conditions = matches!(parse_block(conditions), Some(Ok(parsed))
+    let only_conditions = matches!(parse_block(conditions), Some(Ok((parsed, _)))
         if parsed.len() == conditions.split('+').count());
     if !only_conditions {
         bail!("`{conditions}` is not a list of conditions such as `host=laptop+os=linux`");
@@ -201,6 +224,28 @@ pub enum Selection<T> {
     Invalid(Vec<(String, &'static str)>),
 }
 
+impl<'a> Selection<&'a str> {
+    /// The winner, or an error saying why `key` has none.
+    pub fn require(self, key: &str) -> Result<&'a str> {
+        match self {
+            Self::Winner(source) => Ok(source),
+            Self::None => bail!("no source of {key} applies on this machine"),
+            Self::Ambiguous(tied) => bail!(
+                "{} are equally specific here; remove one first",
+                tied.join(", ")
+            ),
+            Self::Invalid(problems) => bail!(
+                "{}",
+                problems
+                    .iter()
+                    .map(|(source, reason)| format!("{source}: {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        }
+    }
+}
+
 impl<T> Selection<T> {
     /// `None` for an ambiguous or invalid key as well as for one that no source applies to.
     pub const fn winner(&self) -> Option<&T> {
@@ -214,7 +259,7 @@ impl<T> Selection<T> {
 #[derive(Debug)]
 enum Form {
     Plain,
-    Variant(Vec<Condition>),
+    Variant(Vec<Condition>, Flag),
     Invalid(&'static str),
 }
 
@@ -239,9 +284,13 @@ impl Sources {
             };
             let (key, form) = match parse_name(name) {
                 Name::Literal => (path.to_owned(), Form::Plain),
-                Name::Variant { target, conditions } => join(&target).map_or_else(
+                Name::Variant {
+                    target,
+                    conditions,
+                    flag,
+                } => join(&target).map_or_else(
                     || (path.to_owned(), Form::Invalid(BAD_TARGET)),
-                    |key| (key, Form::Variant(conditions)),
+                    |key| (key, Form::Variant(conditions, flag)),
                 ),
                 Name::Invalid { target, reason } => (
                     join(&target).unwrap_or_else(|| path.to_owned()),
@@ -273,6 +322,20 @@ impl Sources {
             .map(|(source, _)| source.as_str())
     }
 
+    /// What `source`, one of `key`'s paths, asks to be done with its bytes.
+    #[must_use]
+    pub fn flag(&self, key: &str, source: &str) -> Flag {
+        self.by_key
+            .get(key)
+            .into_iter()
+            .flatten()
+            .find_map(|(path, form)| match form {
+                Form::Variant(_, flag) if path == source => Some(*flag),
+                _ => None,
+            })
+            .unwrap_or(Flag::Plain)
+    }
+
     /// Picks `key`'s source for `identity`. The plain file is a candidate with no conditions,
     /// and negated conditions rank only against candidates whose positive conditions are the same.
     #[must_use]
@@ -284,7 +347,7 @@ impl Sources {
             .iter()
             .filter_map(|(source, form)| match form {
                 Form::Invalid(reason) => Some((source.clone(), *reason)),
-                Form::Plain | Form::Variant(_) => None,
+                Form::Plain | Form::Variant(..) => None,
             })
             .collect();
         if !invalid.is_empty() {
@@ -295,7 +358,7 @@ impl Sources {
         for (source, form) in candidates {
             let rank = match form {
                 Form::Plain => Some(Rank::default()),
-                Form::Variant(conditions) => rank(conditions, identity),
+                Form::Variant(conditions, _) => rank(conditions, identity),
                 Form::Invalid(_) => None,
             };
             let Some(rank) = rank else { continue };
@@ -464,6 +527,15 @@ mod tests {
             pick(&["sub/install{os=linux}.sh"], &id),
             winner("sub/install{os=linux}.sh")
         );
+    }
+
+    #[test]
+    fn the_block_flag_is_kept_per_source() {
+        let sources = Sources::group(["a.conf", "a{tmpl}.conf", "a{host=x+age}.conf"]);
+        assert_eq!(sources.flag("a.conf", "a.conf"), Flag::Plain);
+        assert_eq!(sources.flag("a.conf", "a{tmpl}.conf"), Flag::Tmpl);
+        assert_eq!(sources.flag("a.conf", "a{host=x+age}.conf"), Flag::Age);
+        assert_eq!(sources.flag("a.conf", "missing"), Flag::Plain);
     }
 
     #[test]

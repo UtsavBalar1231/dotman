@@ -20,6 +20,7 @@ pub mod repo_config;
 pub mod state;
 #[allow(unsafe_code)]
 pub mod sys;
+pub mod template;
 pub mod variant;
 
 /// Crate version from `Cargo.toml`.

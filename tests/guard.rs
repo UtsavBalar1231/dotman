@@ -15,6 +15,7 @@ const MINIMAL_ARGS: &[(&str, &[&str])] = &[
     ("status", &[]),
     ("apply", &[]),
     ("diff", &[]),
+    ("edit", &[".bashrc"]),
     ("sync", &[]),
     ("log", &[]),
     ("restore", &[".bashrc"]),

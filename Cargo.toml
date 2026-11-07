@@ -53,6 +53,7 @@ tempfile = "3.23"
 libc = "0.2"
 glob = "0.3.3"
 unicode-normalization = "0.1.26"
+minijinja = "3.0.5"
 
 shell-words = "1.1"
 tracing = "0.1"

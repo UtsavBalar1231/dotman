@@ -26,14 +26,17 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     let sources = ctx.sources()?;
     let keys = ctx.select(&args.paths, sources.keys().map(str::to_owned).collect())?;
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
-    let variants = Variants::new(worktree, &sources, ctx.identity());
+    let variants = Variants::new(worktree, &sources, ctx.identity(), ctx.template_vars());
     let mut entries = Vec::new();
     for key in keys {
-        match variants.get(&key)? {
-            Selection::Winner(r) => entries.push((key, r)),
-            Selection::None => {}
-            Selection::Ambiguous(_) => output::warning(&format!("{key}: ambiguous, not compared")),
-            Selection::Invalid(_) => {
+        match variants.get(&key) {
+            Ok(Selection::Winner(r)) => entries.push((key, r)),
+            Ok(Selection::None) => {}
+            Err(e) => output::warning(&format!("{key}: not compared: {e:#}")),
+            Ok(Selection::Ambiguous(_)) => {
+                output::warning(&format!("{key}: ambiguous, not compared"));
+            }
+            Ok(Selection::Invalid(_)) => {
                 output::warning(&format!("{key}: has an invalid variant, not compared"));
             }
         }
