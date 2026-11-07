@@ -228,6 +228,7 @@ fn execute_add_all(ctx: &DotmanContext) -> Result<()> {
 
     let mut files_to_stage = Vec::new();
     let mut files_to_delete = Vec::new();
+    let mut files_to_unstage = Vec::new();
 
     // 1. Check all tracked files (committed + staged) for modifications/deletions
     let tracked_paths: HashSet<PathBuf> = committed_files
@@ -244,8 +245,14 @@ fn execute_add_all(ctx: &DotmanContext) -> Result<()> {
         };
 
         if !abs_path.exists() {
-            // File was deleted
-            files_to_delete.push(tracked_path);
+            // File was deleted from disk
+            if committed_files.contains_key(&tracked_path) {
+                // File WAS committed - mark as deleted
+                files_to_delete.push(tracked_path);
+            } else {
+                // File was ONLY staged (never committed) - just unstage it
+                files_to_unstage.push(tracked_path);
+            }
         } else if abs_path.is_file() {
             // Check if file was modified - always re-stage to catch modifications
             // Only get cached_hash from staged entries (committed files don't have cache)
@@ -296,22 +303,37 @@ fn execute_add_all(ctx: &DotmanContext) -> Result<()> {
         println!("  {} {}", "modified:".yellow(), entry.path.display());
     }
 
-    // 3. Mark deleted files
+    // 3. Mark deleted files (only for previously committed files)
     let deleted_count = files_to_delete.len();
     for path in &files_to_delete {
         index.mark_deleted(path);
         println!("  {} {}", "deleted:".red(), path.display());
     }
 
-    // 4. Save the index
+    // 4. Unstage files that were only staged (never committed) and deleted from disk
+    let unstaged_count = files_to_unstage.len();
+    for path in &files_to_unstage {
+        let _ = index.remove_staged(path);
+        println!("  {} {}", "unstaged:".yellow(), path.display());
+    }
+
+    // 5. Save the index
     index.save(&index_path)?;
 
-    // 5. Print summary
-    let total = modified_count + deleted_count;
+    // 6. Print summary
+    let total = modified_count + deleted_count + unstaged_count;
     if total > 0 {
-        output::success(&format!(
-            "Staged {total} file(s): {modified_count} modified, {deleted_count} deleted"
-        ));
+        let mut parts = Vec::new();
+        if modified_count > 0 {
+            parts.push(format!("{modified_count} modified"));
+        }
+        if deleted_count > 0 {
+            parts.push(format!("{deleted_count} deleted"));
+        }
+        if unstaged_count > 0 {
+            parts.push(format!("{unstaged_count} unstaged"));
+        }
+        output::success(&format!("Staged {total} file(s): {}", parts.join(", ")));
     } else {
         output::info("No changes to stage");
     }
