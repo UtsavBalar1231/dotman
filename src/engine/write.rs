@@ -15,7 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempPath;
 
 const TEMP_PREFIX: &str = ".dotman-tmp-";
-const LINKS_FILE: &str = "links.txt";
+// Under `.dotman/`, a reserved root name, so no key's backup can land on the record.
+const LINKS_FILE: &str = ".dotman/links.txt";
 
 /// How one write behaves.
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +47,7 @@ pub enum WriteOutcome {
 /// Details of a write that happened, or would happen in a dry run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Written {
-    /// The backup file, or `links.txt` when the old target was a symlink.
+    /// The backup file, or `.dotman/links.txt` in the run dir when the old target was a symlink.
     pub backup: Option<PathBuf>,
     /// Rename was impossible, so the file was rewritten in place and kept its inode.
     pub in_place: bool,
@@ -254,7 +255,7 @@ fn create_dir(dir: &Path, mode: u32) -> io::Result<()> {
         .set_permissions(Permissions::from_mode(mode))
 }
 
-/// Copies a file at the target to `<dir>/<key>`, or records a symlink in `<dir>/links.txt`.
+/// Copies a file at the target to `<dir>/<key>`, or records a symlink in `<dir>/.dotman/links.txt`.
 /// Returns where the copy went; a dry run only reports it.
 fn back_up(dir: &Path, key: &str, current: &Node, dry_run: bool) -> Result<Option<PathBuf>> {
     let (dest, record) = match current {
@@ -614,7 +615,7 @@ mod tests {
             backup: Some(&f.run_dir),
             ..PLAIN
         };
-        let links = f.run_dir.join("links.txt");
+        let links = f.run_dir.join(".dotman/links.txt");
         assert_eq!(
             link(&f.home, ".bashrc", "../new", &call),
             written(Some(links.clone()))
@@ -625,6 +626,7 @@ mod tests {
         );
         assert_eq!(fs::read(&outside).unwrap(), b"outside");
         assert_eq!(mode_of(&links), 0o600);
+        assert_eq!(mode_of(&f.run_dir.join(".dotman")), 0o700);
         assert_eq!(names(&f.home), [".bashrc"]);
 
         symlink("a\tb\nc\u{e9}", f.home.join(".odd")).unwrap();
@@ -634,6 +636,43 @@ mod tests {
             outside.display()
         );
         assert_eq!(fs::read_to_string(&links).unwrap(), records);
+    }
+
+    #[test]
+    fn a_links_txt_key_and_a_link_record_back_up_to_distinct_files() {
+        let f = fixture();
+        let original = b"the user's own links.txt\n";
+        fs::write(f.home.join("links.txt"), original).unwrap();
+        symlink("old", f.home.join(".link")).unwrap();
+        let call = Call {
+            backup: Some(&f.run_dir),
+            ..PLAIN
+        };
+        let copy = f.run_dir.join("links.txt");
+        let record = f.run_dir.join(".dotman/links.txt");
+        assert_eq!(
+            write(&f.home, "links.txt", b"repo", 0o644, &call),
+            written(Some(copy.clone()))
+        );
+        assert_eq!(
+            link(&f.home, ".link", "new", &call),
+            written(Some(record.clone()))
+        );
+        assert_eq!(fs::read(&copy).unwrap(), original);
+        assert_eq!(fs::read_to_string(&record).unwrap(), ".link\told\n");
+
+        let second = f.tmp.path().join("state/dotman/backups/second");
+        let call = Call {
+            backup: Some(&second),
+            ..PLAIN
+        };
+        link(&f.home, ".link", "newer", &call);
+        write(&f.home, "links.txt", b"repo 2", 0o644, &call);
+        assert_eq!(fs::read(second.join("links.txt")).unwrap(), b"repo");
+        assert_eq!(
+            fs::read_to_string(second.join(".dotman/links.txt")).unwrap(),
+            ".link\tnew\n"
+        );
     }
 
     #[test]
@@ -786,7 +825,7 @@ mod tests {
         );
         assert_eq!(
             link(&f.home, ".link", "new", &call),
-            written(Some(f.run_dir.join("links.txt")))
+            written(Some(f.run_dir.join(".dotman/links.txt")))
         );
         assert_eq!(link(&f.home, ".local/bin/x", "t", &call), written(None));
 
