@@ -16,8 +16,10 @@ pub mod identity;
 pub mod lock;
 pub mod output;
 pub mod paths;
+pub mod proc;
 pub mod prompt;
 pub mod repo_config;
+pub mod secrets;
 pub mod state;
 #[allow(unsafe_code)]
 pub mod sys;

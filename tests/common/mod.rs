@@ -276,6 +276,18 @@ impl TestEnv {
         cmd.args(args).output().expect("run dot")
     }
 
+    /// Like [`TestEnv::run_with`], with `stdin` as standard input.
+    pub fn run_stdin(&self, vars: &[(&str, &str)], stdin: &[u8], args: &[&str]) -> Output {
+        let mut cmd = self.dot();
+        for (name, value) in vars {
+            cmd.env(name, value);
+        }
+        cmd.args(args)
+            .write_stdin(stdin.to_vec())
+            .output()
+            .expect("run dot")
+    }
+
     /// Runs `dot`, asserts exit 0 and returns stderr.
     pub fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);
@@ -393,6 +405,19 @@ pub fn mode_of(path: &Path) -> u32 {
         .permissions()
         .mode()
         & 0o7777
+}
+
+/// Regular files under `dir` whose bytes contain `needle`; symlinks are not followed.
+pub fn files_containing(dir: &Path, needle: &[u8]) -> Vec<String> {
+    tree_checksum(dir)
+        .into_iter()
+        .filter(|(_, entry)| entry.kind == Kind::File)
+        .map(|(rel, _)| rel)
+        .filter(|rel| {
+            let bytes = fs::read(dir.join(rel)).expect("read file");
+            bytes.windows(needle.len()).any(|window| window == needle)
+        })
+        .collect()
 }
 
 /// Symlinks are not followed.

@@ -169,7 +169,7 @@ impl Git {
     }
 
     fn base(&self) -> Command {
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::proc::command("git");
         for var in LOCAL_REPO_ENV {
             cmd.env_remove(var);
         }
@@ -743,7 +743,7 @@ mod tests {
 
         /// Un-isolated git, run the way a user would run it.
         fn raw(&self, dir: &Path, args: &[&str]) -> Output {
-            let mut cmd = Command::new("git");
+            let mut cmd = crate::proc::command("git");
             for var in LOCAL_REPO_ENV {
                 cmd.env_remove(var);
             }

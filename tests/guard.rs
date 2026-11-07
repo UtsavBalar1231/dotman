@@ -19,6 +19,7 @@ const MINIMAL_ARGS: &[(&str, &[&str])] = &[
     ("sync", &[]),
     ("log", &[]),
     ("restore", &[".bashrc"]),
+    ("key", &["init"]),
 ];
 
 fn listed_subcommands(help: &str) -> Vec<String> {

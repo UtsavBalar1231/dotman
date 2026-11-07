@@ -2,7 +2,8 @@
 
 use crate::output;
 use crate::paths::{create_private_dir, write_atomic};
-use anyhow::{Context, Result};
+use crate::proc::AGE_KEY_VAR;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -102,7 +103,11 @@ impl Config {
     pub fn parse(text: &str) -> Result<(Self, Vec<String>)> {
         let table: toml::Table = toml::from_str(text)?;
         let unknown = unknown_keys(&table);
-        Ok((table.try_into()?, unknown))
+        let config: Self = table.try_into()?;
+        if config.template.env.iter().any(|name| name == AGE_KEY_VAR) {
+            bail!("`[template] env` lists {AGE_KEY_VAR}; the age key never reaches a template");
+        }
+        Ok((config, unknown))
     }
 
     /// Loads the config; a missing file gives the defaults. Each unknown key is warned about once.
@@ -225,6 +230,15 @@ identity = "/keys/id.txt"
         .unwrap();
         assert_eq!(unknown, ["colour", "age.bogus"]);
         assert_eq!(config.age.command.as_deref(), Some("age"));
+    }
+
+    #[test]
+    fn templates_can_never_read_the_age_key() {
+        let err = Config::parse("[template]\nenv = [\"EDITOR\", \"DOTMAN_AGE_KEY\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("DOTMAN_AGE_KEY"), "{err}");
+        assert!(Config::parse("[template]\nenv = [\"DOTMAN_AGE_KEY_FILE\"]\n").is_ok());
     }
 
     #[test]

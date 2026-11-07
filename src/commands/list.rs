@@ -3,7 +3,7 @@
 use crate::cli::ListArgs;
 use crate::context::Context;
 use crate::state::Kind;
-use crate::variant::Sources;
+use crate::variant::{Flag, Sources};
 use anyhow::{Context as _, Result};
 use std::io::Write;
 
@@ -27,12 +27,17 @@ pub fn run(args: &ListArgs) -> Result<()> {
             Kind::File => "file",
             Kind::Symlink => "symlink",
         };
+        let flag = if sources.flag(key, source) == Flag::Age {
+            "  [age]"
+        } else {
+            ""
+        };
         if args.porcelain {
             write!(out, "{kind}\t{key}\0")
         } else if source == key {
-            writeln!(out, "{kind:<8}{key}")
+            writeln!(out, "{kind:<8}{key}{flag}")
         } else {
-            writeln!(out, "{kind:<8}{key}  ({source})")
+            writeln!(out, "{kind:<8}{key}  ({source}){flag}")
         }
         .context("cannot write to stdout")?;
     }

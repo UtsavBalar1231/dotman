@@ -1,6 +1,7 @@
 //! The three-way status model: each key's R, H and S tuples decide its row and prompt category.
 
 use super::{Home, Node, Tuple, read_node, recorded_mode, safe_mode};
+use crate::secrets::Age;
 use crate::state::{IdentitySnapshot, Kind};
 use crate::template::{self, Vars};
 use crate::variant::{Flag, Selection, Sources};
@@ -173,6 +174,8 @@ pub struct SourceEntry {
     pub content: Content,
     /// The bytes were rendered from `source`, which is a template.
     pub template: bool,
+    /// The bytes were decrypted from `source`, which holds ciphertext.
+    pub encrypted: bool,
 }
 
 /// The content of R.
@@ -226,6 +229,7 @@ impl<'a> Worktree<'a> {
             tuple,
             content,
             template: false,
+            encrypted: false,
         }))
     }
 }
@@ -237,24 +241,43 @@ pub struct Variants<'a> {
     sources: &'a Sources,
     identity: &'a IdentitySnapshot,
     vars: &'a Vars,
+    age: &'a Age,
 }
 
 impl<'a> Variants<'a> {
-    /// `sources` groups the worktree's paths; `identity` picks among them, and `vars` is what
-    /// the winner is rendered with when it is a template.
+    /// `sources` groups the worktree's paths; `identity` picks among them. A winning template is
+    /// rendered with `vars`, and an encrypted winner is decrypted through `age`.
     #[must_use]
     pub const fn new(
         worktree: Worktree<'a>,
         sources: &'a Sources,
         identity: &'a IdentitySnapshot,
         vars: &'a Vars,
+        age: &'a Age,
     ) -> Self {
         Self {
             worktree,
             sources,
             identity,
             vars,
+            age,
         }
+    }
+
+    // A failure to decrypt is a `secrets::Locked` error when no key here matches.
+    fn decrypt(&self, mut entry: SourceEntry) -> Result<SourceEntry> {
+        if !matches!(entry.content, Content::Bytes(_)) {
+            bail!(
+                "{}: an encrypted file must be a regular file, not a symlink",
+                entry.source
+            );
+        }
+        let plain = self.age.decrypt(&self.worktree.root.join(&entry.source))?;
+        let mode = safe_mode(recorded_mode(self.worktree.modes, &entry.source)?.unwrap_or(0o600));
+        entry.tuple = Tuple::of_file(&plain, mode);
+        entry.content = Content::Bytes(plain);
+        entry.encrypted = true;
+        Ok(entry)
     }
 
     fn render(&self, mut entry: SourceEntry) -> Result<SourceEntry> {
@@ -287,6 +310,9 @@ impl Source for Variants<'_> {
             Selection::Winner(source) => match self.worktree.get(source)? {
                 Some(entry) if self.sources.flag(key, source) == Flag::Tmpl => {
                     Selection::Winner(self.render(entry)?)
+                }
+                Some(entry) if self.sources.flag(key, source) == Flag::Age => {
+                    Selection::Winner(self.decrypt(entry)?)
                 }
                 Some(entry) => Selection::Winner(entry),
                 None => Selection::None,
@@ -581,7 +607,8 @@ mod tests {
             ..IdentitySnapshot::default()
         };
         let vars = Vars::default();
-        let variants = Variants::new(Worktree::new(repo, &modes), &sources, &x, &vars);
+        let age = Age::new(None, repo.join("no-identity"), None, None);
+        let variants = Variants::new(Worktree::new(repo, &modes), &sources, &x, &vars, &age);
         let Selection::Winner(entry) = variants.get("a.conf").unwrap() else {
             unreachable!("a.conf has a winner on host x");
         };

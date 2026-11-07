@@ -5,6 +5,7 @@ use crate::git::{Git, Operation};
 use crate::identity;
 use crate::paths::{Env, Paths, derive_key, validate_key};
 use crate::repo_config::RepoConfig;
+use crate::secrets::Age;
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::sys;
 use crate::template::Vars;
@@ -52,6 +53,7 @@ pub struct Context {
     pub machine: Config,
     identity: OnceCell<IdentitySnapshot>,
     template_vars: OnceCell<Vars>,
+    age: OnceCell<Age>,
 }
 
 impl Context {
@@ -72,6 +74,7 @@ impl Context {
             machine,
             identity: OnceCell::new(),
             template_vars: OnceCell::new(),
+            age: OnceCell::new(),
         }
     }
 
@@ -88,6 +91,12 @@ impl Context {
                 std::env::var(name).ok()
             })
         })
+    }
+
+    /// The age CLI and this machine's keys, resolved on first use.
+    pub fn age(&self) -> &Age {
+        self.age
+            .get_or_init(|| Age::from_env(&self.machine, &self.paths))
     }
 
     /// [`Context::managed`] grouped by target key, so variants of one file share a key.

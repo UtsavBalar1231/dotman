@@ -17,6 +17,7 @@ use crate::lock::Lock;
 use crate::output;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
+use crate::secrets::{HoldsKey, Locked};
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::variant::{Selection, Sources};
 use anyhow::{Result, bail};
@@ -80,7 +81,7 @@ pub(crate) struct Options {
 
 pub(crate) struct Applied {
     pub outcome: Outcome,
-    /// Keys that were asked about and left unanswered, or reported as template drift.
+    /// Keys that were asked about and left unanswered, or reported as template drift or held.
     pub undecided: BTreeSet<String>,
     /// Keys captured into the repo; in a dry run, the keys that would be.
     pub captured: BTreeSet<String>,
@@ -140,10 +141,12 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         written: BTreeSet::new(),
         dir_modes: BTreeMap::new(),
         accepted: false,
+        locked: Vec::new(),
     };
     let mut items = run.classify(&sources, &state, &keys);
+    run.report_locked();
     if opts.summary {
-        summarize(&items);
+        summarize(&items, run.locked.len());
     }
     run.decide_identity(&mut items, state.identity.as_ref())?;
     let actions = run.plan(&items)?;
@@ -212,6 +215,8 @@ pub(crate) enum Classified {
     Item(Item),
     Ambiguous(Vec<String>),
     Invalid(Vec<(String, &'static str)>),
+    /// Encrypted, and no key here decrypts it: left alone, with a warning only.
+    Locked(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +343,7 @@ struct Run<'a> {
     written: BTreeSet<String>,
     dir_modes: BTreeMap<String, u32>,
     accepted: bool,
+    locked: Vec<(String, String)>,
 }
 
 impl Run<'_> {
@@ -348,6 +354,7 @@ impl Run<'_> {
             sources,
             self.ctx.identity(),
             self.ctx.template_vars(),
+            self.ctx.age(),
         );
         let mut items = Vec::new();
         for key in keys {
@@ -355,8 +362,9 @@ impl Run<'_> {
                 Ok(Classified::Item(item)) => items.push(item),
                 Ok(Classified::Unmanaged) => {}
                 // Reported by the pass that applies, like the rows that are only reported.
-                Ok(Classified::Ambiguous(_) | Classified::Invalid(_))
+                Ok(Classified::Ambiguous(_) | Classified::Invalid(_) | Classified::Locked(_))
                     if self.opts.pass == Pass::Capture => {}
+                Ok(Classified::Locked(reason)) => self.locked.push((key.clone(), reason)),
                 Ok(Classified::Ambiguous(tied)) => {
                     self.attention = true;
                     output::warning(&format!(
@@ -377,6 +385,21 @@ impl Run<'_> {
             }
         }
         items
+    }
+
+    fn report_locked(&self) {
+        if self.locked.is_empty() {
+            return;
+        }
+        let n = self.locked.len();
+        output::warning(&format!(
+            "{n} encrypted {} locked, left alone until a key here decrypts {}:",
+            if n == 1 { "path is" } else { "paths are" },
+            if n == 1 { "it" } else { "them" },
+        ));
+        for (key, reason) in &self.locked {
+            output::warning(&format!("  {key} ({reason})"));
+        }
     }
 
     /// Asked before every other category, because accepting turns some of these paths into
@@ -627,7 +650,8 @@ impl Run<'_> {
             Action::Capture => {
                 let Home::Present(h) = &item.raw else { return };
                 let source = item.r.as_ref().map_or(key.as_str(), |r| r.source.as_str());
-                self.capture(key, source, h.kind, state, repo_config);
+                let encrypted = item.r.as_ref().is_some_and(|r| r.encrypted);
+                self.capture(key, source, h.kind, encrypted, state, repo_config);
             }
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };
@@ -649,7 +673,7 @@ impl Run<'_> {
     /// Captures the new files and lists the held ones, which keep the run at exit 3.
     fn capture_new(&mut self, scan: &Scan, state: &mut State, repo_config: &mut RepoConfig) {
         for (key, kind) in &scan.new {
-            self.capture(key, key, *kind, state, repo_config);
+            self.capture(key, key, *kind, false, state, repo_config);
         }
         for note in &scan.notes {
             output::warning(note);
@@ -671,11 +695,17 @@ impl Run<'_> {
         key: &str,
         source: &str,
         kind: Kind,
+        encrypted: bool,
         state: &mut State,
         repo_config: &mut RepoConfig,
     ) {
-        self.announce("capture", key);
         if self.opts.dry_run {
+            // Only a dry run reads H here; a real capture checks what it is about to store.
+            if !encrypted && add::holds_key(&self.ctx.paths.home, key) {
+                self.held_key(key);
+                return;
+            }
+            self.announce("capture", key);
             self.captured.insert(key.to_owned());
             return;
         }
@@ -686,20 +716,32 @@ impl Run<'_> {
             key,
             source,
             kind,
+            encrypted,
         );
         match done {
             Ok(entry) => {
+                self.announce("capture", key);
                 state
                     .files
                     .insert(key.to_owned(), entry.tuple.entry(&entry.source));
                 self.captured.insert(key.to_owned());
             }
+            Err(e) if e.is::<HoldsKey>() => self.held_key(key),
             Err(e) => {
                 self.failed = self.failed.saturating_add(1);
                 self.uncaptured = self.uncaptured.saturating_add(1);
                 output::warning(&format!("{key}: cannot be captured: {e:#}"));
             }
         }
+    }
+
+    /// Never staged or committed; the pass after the pull leaves it alone too.
+    fn held_key(&mut self, key: &str) {
+        self.attention = true;
+        self.undecided.insert(key.to_owned());
+        output::warning(&format!(
+            "{key}: held, it {HoldsKey}; or keep it out with an [ignore] pattern"
+        ));
     }
 
     /// Whether R reached `$HOME`. A skipped or failed write is reported here.
@@ -770,7 +812,15 @@ pub(crate) fn classify_key(
     state: &State,
     key: &str,
 ) -> Result<Classified> {
-    let r = match variants.get(key)? {
+    let selection = match variants.get(key) {
+        Ok(selection) => selection,
+        Err(e) => {
+            return e
+                .downcast::<Locked>()
+                .map(|locked| Classified::Locked(locked.0));
+        }
+    };
+    let r = match selection {
         Selection::None => None,
         Selection::Winner(entry) => Some(entry),
         Selection::Ambiguous(tied) => return Ok(Classified::Ambiguous(tied)),
@@ -816,16 +866,19 @@ pub(crate) fn classify_key(
     }))
 }
 
-fn summarize(items: &[Item]) {
+fn summarize(items: &[Item], locked: usize) {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for item in items {
         let count = counts.entry(item.token()).or_insert(0);
         *count = count.saturating_add(1);
     }
+    if locked > 0 {
+        counts.insert("locked", locked);
+    }
     let parts: Vec<String> = counts.iter().map(|(t, n)| format!("{n} {t}")).collect();
     output::info(&format!(
         "{} managed paths: {}",
-        items.len(),
+        items.len().saturating_add(locked),
         if parts.is_empty() {
             "none".to_owned()
         } else {

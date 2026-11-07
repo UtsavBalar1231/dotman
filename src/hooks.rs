@@ -5,12 +5,13 @@ use crate::commands::add::MATCH;
 use crate::context::Context;
 use crate::engine::hash_hex;
 use crate::output;
+use crate::proc;
 use crate::prompt;
 use anyhow::{Context as _, Result, bail};
 use glob::Pattern;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 
 // reason: independent switches, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -141,7 +142,7 @@ fn ask(table: &BTreeMap<String, String>) -> Result<bool> {
 
 /// The one place a hook process starts.
 fn spawn(ctx: &Context, command: &str) -> io::Result<ExitStatus> {
-    Command::new("/bin/sh")
+    proc::command("/bin/sh")
         .arg("-c")
         .arg(command)
         .current_dir(&ctx.paths.home)

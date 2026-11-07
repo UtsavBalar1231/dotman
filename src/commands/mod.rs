@@ -8,6 +8,7 @@ pub mod edit;
 pub mod forget;
 pub mod git;
 pub mod init;
+pub mod key;
 pub mod list;
 pub mod log;
 pub mod restore;

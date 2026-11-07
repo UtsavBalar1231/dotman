@@ -4,9 +4,10 @@ use crate::cli::DoctorArgs;
 use crate::context::Context;
 use crate::git::Git;
 use crate::lock::Lock;
+use crate::secrets::{self, Locked};
 use crate::state::State;
 use crate::sys;
-use crate::variant::Selection;
+use crate::variant::{Flag, Selection};
 use anyhow::{Context as _, Result};
 use std::fs;
 use std::io::Write;
@@ -115,6 +116,7 @@ fn collect(online: bool) -> Vec<Check> {
             }
             checks.extend(repo_health(ctx));
             checks.extend(variants(ctx));
+            checks.extend(encryption(ctx));
         } else {
             checks.push(fail(
                 "repo",
@@ -281,6 +283,57 @@ fn variants(ctx: &Context) -> Vec<Check> {
     }
     if checks.is_empty() {
         checks.push(pass("variants"));
+    }
+    checks
+}
+
+fn encryption(ctx: &Context) -> Vec<Check> {
+    let mut checks = Vec::new();
+    match ctx.age().key_reader() {
+        Some(Ok(version)) => checks.push(pass(&format!("DOTMAN_AGE_KEY is read by age {version}"))),
+        Some(Err(why)) => checks.push(fail(
+            "DOTMAN_AGE_KEY",
+            &why,
+            "install age 1.1.0 or newer, or use DOTMAN_AGE_KEY_FILE or dot key import",
+        )),
+        None => {}
+    }
+    if let Ok(config) = ctx.repo_config()
+        && secrets::recipient_set(&config.age.recipients).len() == 1
+    {
+        checks.push(warn(
+            "age recipients",
+            "only one; if its identity is lost, the encrypted files cannot be recovered. Add a second key: dot key init on another machine, or dot key import --add-recipient",
+        ));
+    }
+    let Ok(sources) = ctx.sources() else {
+        return checks;
+    };
+    let (mut total, mut locked) = (0_usize, Vec::new());
+    for key in sources.keys() {
+        let Selection::Winner(source) = sources.select(key, ctx.identity()) else {
+            continue;
+        };
+        if sources.flag(key, source) != Flag::Age {
+            continue;
+        }
+        total = total.saturating_add(1);
+        if let Err(e) = ctx.age().decrypt(&ctx.paths.repo.join(source))
+            && let Some(Locked(why)) = e.downcast_ref::<Locked>()
+        {
+            locked.push(format!("{key} ({why})"));
+        }
+    }
+    if total == 0 {
+        return checks;
+    }
+    if locked.is_empty() {
+        checks.push(pass(&format!("encrypted files: {total}, none locked")));
+    } else {
+        checks.push(warn(
+            "encrypted files",
+            &format!("{} of {total} locked: {}", locked.len(), locked.join(", ")),
+        ));
     }
     checks
 }

@@ -4,8 +4,8 @@
 
 use crate::cli::AddArgs;
 use crate::context::{Context, TEMP_PREFIX, is_real_dir};
-use crate::engine::status::{SourceEntry, Worktree};
-use crate::engine::{Node, parents, portable_link_target, read_node};
+use crate::engine::status::{Content, SourceEntry, Worktree};
+use crate::engine::{Node, Tuple, parents, portable_link_target, read_node, safe_mode};
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::{
@@ -13,6 +13,7 @@ use crate::paths::{
 };
 use crate::prompt;
 use crate::repo_config::RepoConfig;
+use crate::secrets::{self, HoldsKey};
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::variant::{self, Flag, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -136,9 +137,10 @@ pub fn run(args: &AddArgs) -> Result<()> {
         managed,
         identity: ctx.identity(),
         conditions: args.for_conditions.as_deref(),
+        encrypt: args.encrypt,
     };
     refuse_collisions(&targets.sources, &plan)?;
-    targets.check(&plan)?;
+    targets.check(&ctx, &repo_config, &plan)?;
 
     for line in &plan.skipped {
         output::warning(&format!("skipped {line}"));
@@ -178,34 +180,12 @@ pub fn run(args: &AddArgs) -> Result<()> {
             repo_config.dirs.paths.push(dir.key.clone());
         }
     }
-    let mut added = 0usize;
-    let mut failed = 0usize;
-    let mut dir_modes = BTreeMap::new();
-    for (key, leaf) in &items {
-        let kind = leaf.kind();
-        if !announced.contains(key) && targets.is_template(key) {
-            output::warning(&format!("{key}: rendered from a template; skipped"));
-            continue;
-        }
-        match targets.commit(
-            &ctx,
-            &mut repo_config,
-            &mut state,
-            &mut dir_modes,
-            key,
-            kind,
-        ) {
-            Ok(source) => {
-                added = added.saturating_add(1);
-                if announced.contains(key) {
-                    output::action("add", &shown(key, &source));
-                }
-            }
-            Err(e) => {
-                failed = failed.saturating_add(1);
-                output::warning(&format!("could not add {key}: {e:#}"));
-            }
-        }
+    let (added, failed) =
+        targets.commit_all(&ctx, &mut repo_config, &mut state, &items, &announced);
+    // The record names the set every `{age}` file is encrypted to; one that exists may mark a
+    // re-encryption that is still due, so only a missing one is created.
+    if args.encrypt && added > 0 && secrets::read_record(&ctx.paths.repo)?.is_none() {
+        secrets::write_record(&ctx.paths.repo, &repo_config.age.recipients)?;
     }
 
     if state.identity.is_none() {
@@ -225,24 +205,82 @@ struct Targets<'a> {
     sources: Sources,
     identity: &'a IdentitySnapshot,
     conditions: Option<&'a str>,
+    encrypt: bool,
 }
 
 impl Targets<'_> {
-    fn check(&self, plan: &Plan) -> Result<()> {
-        let Some(conditions) = self.conditions else {
-            return Ok(());
-        };
-        if !plan.dirs.is_empty() {
-            bail!("--for takes files and symlinks, not directories");
+    fn check(&self, ctx: &Context, repo_config: &RepoConfig, plan: &Plan) -> Result<()> {
+        if self.encrypt {
+            if !plan.dirs.is_empty() {
+                bail!("--encrypt takes files, not directories");
+            }
+            if let Some(key) = plan.files.iter().find_map(|(key, leaf)| match leaf {
+                Leaf::Link => Some(key),
+                Leaf::File { .. } => None,
+            }) {
+                bail!("{key} is a symlink; --encrypt takes regular files");
+            }
+            if secrets::recipient_set(&repo_config.age.recipients).is_empty() {
+                bail!(secrets::NO_RECIPIENTS);
+            }
+            ctx.age().require_cli()?;
+            for key in plan.files.keys() {
+                self.source_for(key)?;
+            }
         }
-        for key in plan.files.keys() {
-            variant::variant_source(key, conditions)?;
+        if let Some(conditions) = self.conditions {
+            if !plan.dirs.is_empty() {
+                bail!("--for takes files and symlinks, not directories");
+            }
+            for key in plan.files.keys() {
+                variant::variant_source(key, conditions)?;
+            }
         }
         Ok(())
     }
 
-    // Capture goes into the source this machine applies, which may be a variant.
+    fn commit_all(
+        &self,
+        ctx: &Context,
+        repo_config: &mut RepoConfig,
+        state: &mut State,
+        items: &BTreeMap<String, Leaf>,
+        announced: &BTreeSet<String>,
+    ) -> (usize, usize) {
+        let (mut added, mut failed) = (0usize, 0usize);
+        let mut dir_modes = BTreeMap::new();
+        for (key, leaf) in items {
+            if !announced.contains(key) && self.is_template(key) {
+                output::warning(&format!("{key}: rendered from a template; skipped"));
+                continue;
+            }
+            match self.commit(ctx, repo_config, state, &mut dir_modes, key, leaf.kind()) {
+                Ok(source) => {
+                    added = added.saturating_add(1);
+                    if announced.contains(key) {
+                        output::action("add", &shown(key, &source));
+                    }
+                }
+                Err(e) => {
+                    failed = failed.saturating_add(1);
+                    output::warning(&format!("could not add {key}: {e:#}"));
+                }
+            }
+        }
+        (added, failed)
+    }
+
     fn source_for(&self, key: &str) -> Result<String> {
+        let source = self.plain_source_for(key)?;
+        if self.encrypt {
+            variant::with_age(&source)
+        } else {
+            Ok(source)
+        }
+    }
+
+    // Capture goes into the source this machine applies, which may be a variant.
+    fn plain_source_for(&self, key: &str) -> Result<String> {
         if let Some(conditions) = self.conditions {
             return variant::variant_source(key, conditions);
         }
@@ -284,8 +322,23 @@ impl Targets<'_> {
         kind: Kind,
     ) -> Result<String> {
         let source = self.source_for(key)?;
-        let entry = commit_one(ctx, repo_config, dir_modes, key, &source, kind)?;
-        if self.applies(key, &source) {
+        let encrypted = self.encrypt || self.sources.flag(key, &source) == Flag::Age;
+        let entry = commit_one(ctx, repo_config, dir_modes, key, &source, kind, encrypted)?;
+        let replaced = self.replaced(key, &source);
+        if let Some(plain) = &replaced {
+            let path = ctx.paths.repo.join(plain);
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("cannot remove {}", path.display()));
+                }
+                _ => {}
+            }
+            repo_config.modes.remove(plain);
+            output::warning(&format!(
+                "{plain} held {key} in plain text and is removed, but git history still has it; to purge it, rewrite the history with a tool such as git filter-repo, run in the repo through `dot git`"
+            ));
+        }
+        if self.applies(key, &source, replaced.as_deref()) {
             state
                 .files
                 .insert(key.to_owned(), entry.tuple.entry(&source));
@@ -297,8 +350,23 @@ impl Targets<'_> {
         Ok(source)
     }
 
+    /// With `--encrypt`, the plain source that `source` encrypts, so the two never coexist.
+    fn replaced(&self, key: &str, source: &str) -> Option<String> {
+        if !self.encrypt {
+            return None;
+        }
+        self.sources
+            .sources_of(key)
+            .find(|path| {
+                *path != source
+                    && self.sources.flag(key, path) == Flag::Plain
+                    && variant::with_age(path).is_ok_and(|encrypted| encrypted == source)
+            })
+            .map(str::to_owned)
+    }
+
     // A `--for` variant may be meant for other machines; S follows only what this one applies.
-    fn applies(&self, key: &str, source: &str) -> bool {
+    fn applies(&self, key: &str, source: &str, removed: Option<&str>) -> bool {
         if self.conditions.is_none() {
             return true;
         }
@@ -306,7 +374,7 @@ impl Targets<'_> {
             .managed
             .iter()
             .map(String::as_str)
-            .filter(|path| *path != source)
+            .filter(|path| *path != source && Some(*path) != removed)
             .chain([source]);
         Sources::group(after).select(key, self.identity).winner() == Some(&source)
     }
@@ -326,6 +394,7 @@ pub(crate) enum Hold {
     Large,
     Binary,
     SecretName,
+    SecretKey,
 }
 
 impl Hold {
@@ -334,6 +403,7 @@ impl Hold {
             Self::Large => "over 1 MiB",
             Self::Binary => "binary: NUL in the first 8 KiB",
             Self::SecretName => "name matches [guard] secret_names",
+            Self::SecretKey => "holds an age secret key (AGE-SECRET-KEY-)",
         }
     }
 }
@@ -413,6 +483,7 @@ pub(crate) fn scan_dirs(
             match leaf {
                 Leaf::File { size, .. } if size > HOLD_BYTES => Some(Hold::Large),
                 Leaf::File { binary: true, .. } => Some(Hold::Binary),
+                Leaf::File { .. } if holds_key(&ctx.paths.home, &key) => Some(Hold::SecretKey),
                 _ => None,
             }
         };
@@ -600,6 +671,11 @@ impl Planner<'_> {
     }
 }
 
+// An unreadable file is not held here; capturing it fails and is reported then.
+pub(crate) fn holds_key(home: &Path, key: &str) -> bool {
+    matches!(read_node(home, key), Ok(Node::File { bytes, .. }) if secrets::holds_secret_key(&bytes))
+}
+
 fn is_missing(home: &Path, key: &str) -> bool {
     fs::symlink_metadata(home.join(key)).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
 }
@@ -668,8 +744,10 @@ fn preview(dir: &DirPlan) {
 }
 
 /// Copies H of `key` into the repo at `source`, which is `key` or one of its variants, and records
-/// the mode under `source`, so each variant keeps its own. `expected` is the kind the caller saw,
-/// and a different kind now is an error. The caller records S and saves `repo_config`.
+/// the mode under `source`, so each variant keeps its own. An `encrypted` source gets ciphertext,
+/// and a plain one holding an age identity is refused with [`HoldsKey`]. `expected` is the kind
+/// the caller saw, and a different kind now is an error. The caller records S and saves
+/// `repo_config`.
 pub(crate) fn commit_one(
     ctx: &Context,
     repo_config: &mut RepoConfig,
@@ -677,32 +755,79 @@ pub(crate) fn commit_one(
     key: &str,
     source: &str,
     expected: Kind,
+    encrypted: bool,
 ) -> Result<SourceEntry> {
     validate_key(source)?;
     let home = &ctx.paths.home;
     let repo = &ctx.paths.repo;
     let target = repo.join(source);
+    let node = read_node(home, key)?;
+    if let Node::File { bytes, .. } = &node
+        && !encrypted
+        && secrets::holds_secret_key(bytes)
+    {
+        return Err(HoldsKey.into());
+    }
     ensure_worktree_parents(repo, source)?;
-    match (expected, read_node(home, key)?) {
+    let plaintext = match (expected, node) {
+        (Kind::File, Node::File { bytes, mode, .. }) if encrypted => {
+            store_encrypted(ctx, &repo_config.age.recipients, source, &bytes)?;
+            record_mode(repo_config, source, mode & 0o777, 0o600);
+            Some(SourceEntry {
+                source: source.to_owned(),
+                tuple: Tuple::of_file(&bytes, safe_mode(mode)),
+                content: Content::Bytes(bytes),
+                template: false,
+                encrypted: true,
+            })
+        }
         (Kind::File, Node::File { bytes, mode, .. }) => {
             let stored = if mode & 0o111 == 0 { 0o644 } else { 0o755 };
             write_atomic(&target, &bytes, stored)?;
             record_mode(repo_config, source, mode & 0o777, stored);
+            None
+        }
+        (Kind::Symlink, Node::Symlink(_)) if encrypted => {
+            bail!("an encrypted file must be a regular file, not a symlink")
         }
         (Kind::Symlink, Node::Symlink(link)) => {
             let relative = portable_link_target(&link, key, home, ctx.paths.home_real.as_deref());
             replace_with_symlink(&target, &relative)?;
             repo_config.modes.remove(source);
+            None
         }
         _ => bail!("it changed while being added"),
-    }
+    };
     for parent in parents(key) {
         let mode = dir_mode(dir_modes, home, parent)?;
         record_mode(repo_config, &format!("{parent}/"), mode, 0o755);
     }
+    if let Some(entry) = plaintext {
+        return Ok(entry);
+    }
     Worktree::new(repo, &repo_config.modes)
         .get(source)?
         .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))
+}
+
+// age output differs on every run, so a source whose plaintext is unchanged keeps its ciphertext.
+fn store_encrypted(
+    ctx: &Context,
+    recipients: &[String],
+    source: &str,
+    plaintext: &[u8],
+) -> Result<()> {
+    let repo = &ctx.paths.repo;
+    let unchanged = matches!(read_node(repo, source)?, Node::File { .. })
+        && ctx
+            .age()
+            .decrypt(&repo.join(source))
+            .is_ok_and(|old| old == plaintext);
+    if unchanged {
+        return Ok(());
+    }
+    let ciphertext = ctx.age().encrypt(plaintext, recipients)?;
+    secrets::write_ciphertext(repo, source, &ciphertext)
 }
 
 fn dir_mode(cache: &mut BTreeMap<String, u32>, home: &Path, parent: &str) -> Result<u32> {
@@ -728,7 +853,7 @@ fn record_mode(repo_config: &mut RepoConfig, key: &str, mode: u32, default: u32)
 }
 
 // A symlink in the worktree (a cloned repo can ship one) must not carry the write out of the repo.
-fn ensure_worktree_parents(repo: &Path, key: &str) -> Result<()> {
+pub(crate) fn ensure_worktree_parents(repo: &Path, key: &str) -> Result<()> {
     for parent in parents(key) {
         let path = repo.join(parent);
         match fs::symlink_metadata(&path) {

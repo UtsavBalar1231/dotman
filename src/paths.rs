@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 /// The environment variables dotman reads (`HOME`, `XDG_{CONFIG,STATE,DATA}_HOME`,
-/// `DOTMAN_REPO_PATH`, `DOTMAN_CONFIG_PATH`, `SUDO_USER`), captured once.
+/// `DOTMAN_REPO_PATH`, `DOTMAN_CONFIG_PATH`, `DOTMAN_AGE_KEY_FILE`, `SUDO_USER`), captured once.
 #[derive(Debug, Default, Clone)]
 pub struct Env {
     home: Option<OsString>,
@@ -25,6 +25,7 @@ pub struct Env {
     xdg_data_home: Option<OsString>,
     repo_path: Option<OsString>,
     config_path: Option<OsString>,
+    age_key_file: Option<OsString>,
     sudo_user: Option<OsString>,
 }
 
@@ -38,6 +39,7 @@ impl Env {
             xdg_data_home: get("XDG_DATA_HOME"),
             repo_path: get("DOTMAN_REPO_PATH"),
             config_path: get("DOTMAN_CONFIG_PATH"),
+            age_key_file: get("DOTMAN_AGE_KEY_FILE"),
             sudo_user: get("SUDO_USER"),
         }
     }
@@ -73,6 +75,8 @@ pub struct Paths {
     pub state_dir: PathBuf,
     /// Age identity file. The machine config's `[age] identity` replaces the default.
     pub age_identity: PathBuf,
+    /// Identity file named by `DOTMAN_AGE_KEY_FILE`, read as well as `age_identity`.
+    pub age_key_file: Option<PathBuf>,
     repo_from_env: bool,
 }
 
@@ -105,6 +109,7 @@ impl Paths {
 
         let repo_override = absolute_override("DOTMAN_REPO_PATH", env.repo_path.as_deref())?;
         let config_override = absolute_override("DOTMAN_CONFIG_PATH", env.config_path.as_deref())?;
+        let age_key_file = absolute_override("DOTMAN_AGE_KEY_FILE", env.age_key_file.as_deref())?;
 
         let home_real = fs::canonicalize(&home).ok().filter(|real| *real != home);
         Ok(Self {
@@ -115,6 +120,7 @@ impl Paths {
             config_file: config_override.unwrap_or_else(|| config_home.join("dotman/config.toml")),
             state_dir: state_home.join("dotman"),
             age_identity: config_home.join("dotman/age-identity.txt"),
+            age_key_file,
         })
     }
 
@@ -152,7 +158,7 @@ impl Paths {
     }
 
     /// Fails for `path` if it is, or lies inside, the repo, the state dir, the machine config
-    /// file or the age identity file. `path` must be absolute.
+    /// file or an age identity file. `path` must be absolute.
     pub fn refuse_protected(&self, path: &Path) -> Result<()> {
         ensure!(
             !path.components().any(|c| c == Component::ParentDir),
@@ -165,7 +171,11 @@ impl Paths {
             ("the dotman machine config", &self.config_file),
             ("the age identity file", &self.age_identity),
         ];
-        for (what, root) in protected {
+        let key_file = self
+            .age_key_file
+            .as_ref()
+            .map(|file| ("the age identity file named by DOTMAN_AGE_KEY_FILE", file));
+        for (what, root) in protected.into_iter().chain(key_file) {
             // The canonical form is checked too, so `/var/home/...` input matches a `/home/...` default.
             let inside = path.starts_with(root)
                 || fs::canonicalize(root).is_ok_and(|real| path.starts_with(real));
@@ -683,6 +693,17 @@ mod tests {
                 .is_ok()
         );
         assert!(paths.refuse_protected(&paths.repo.join("../x")).is_err());
+
+        let key_file = tmp.path().join("keys/age.txt");
+        let key_env = env_with(
+            tmp.path(),
+            &[("DOTMAN_AGE_KEY_FILE", key_file.to_str().unwrap())],
+        );
+        let with_key = resolve(&key_env);
+        assert!(with_key.refuse_protected(&key_file).is_err());
+        assert!(paths.refuse_protected(&key_file).is_ok());
+        let relative = env_with(tmp.path(), &[("DOTMAN_AGE_KEY_FILE", "age.txt")]);
+        assert!(Paths::resolve(&relative, sys::geteuid()).is_err());
     }
 
     #[test]

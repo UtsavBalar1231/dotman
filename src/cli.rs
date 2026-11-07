@@ -61,6 +61,8 @@ pub enum Commands {
     Git(GitArgs),
     /// Check the environment and the repo for problems
     Doctor(DoctorArgs),
+    /// Create or import the age identity that decrypts encrypted files
+    Key(KeyArgs),
     /// Generate shell completion scripts
     Completion {
         /// Shell to generate completions for
@@ -179,6 +181,9 @@ pub struct AddArgs {
     /// `host=laptop+os!=macos`
     #[arg(long = "for", value_name = "CONDITIONS")]
     pub for_conditions: Option<String>,
+    /// Store the files encrypted to the `[age] recipients` in .dotman.toml
+    #[arg(long)]
+    pub encrypt: bool,
     /// Do not ask before adding directories
     #[arg(long)]
     pub yes: bool,
@@ -245,6 +250,37 @@ pub struct DoctorArgs {
     /// Also ask the remote with `git ls-remote`
     #[arg(long)]
     pub online: bool,
+}
+
+/// Arguments of `dot key`.
+#[derive(Args)]
+pub struct KeyArgs {
+    /// What to do with the identity.
+    #[command(subcommand)]
+    pub command: KeyCommand,
+}
+
+/// Subcommands of `dot key`.
+#[derive(Subcommand)]
+pub enum KeyCommand {
+    /// Generate an age identity and add its recipient to .dotman.toml
+    Init,
+    /// Copy an existing age identity into place and check that its recipient is listed
+    Import(KeyImportArgs),
+}
+
+/// Arguments of `dot key import`.
+#[derive(Args)]
+pub struct KeyImportArgs {
+    /// Identity file to import; `-` reads standard input
+    #[arg(value_name = "FILE", default_value = "-")]
+    pub file: PathBuf,
+    /// Add the identity's recipient to `[age] recipients` in .dotman.toml if it is missing
+    #[arg(long)]
+    pub add_recipient: bool,
+    /// Replace an existing, different identity, after backing it up
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments of `dot git`.

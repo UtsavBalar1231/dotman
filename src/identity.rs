@@ -1,11 +1,12 @@
 //! The machine identity that variant conditions are matched against.
 
 use crate::config::Config;
+use crate::proc;
 use crate::state::IdentitySnapshot;
 use crate::sys;
 use std::ffi::OsString;
 use std::fs;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Detected values, replaced by the machine config's `[identity]` and `profiles`, then by
 /// `DOTMAN_HOST` and `DOTMAN_PROFILES` (comma-separated). Every value is lowercased.
@@ -75,7 +76,7 @@ impl Probe {
 
 // `uname -n` on macOS follows DHCP and network names; LocalHostName is the one the user set.
 fn local_host_name() -> Option<String> {
-    let out = Command::new("/usr/sbin/scutil")
+    let out = proc::command("/usr/sbin/scutil")
         .args(["--get", "LocalHostName"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())

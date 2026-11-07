@@ -255,6 +255,17 @@ fn create_dir(dir: &Path, mode: u32) -> io::Result<()> {
         .set_permissions(Permissions::from_mode(mode))
 }
 
+/// Copies `bytes` to `<dir>/<rel>` at 0600, creating 0700 directories, and never replaces a file
+/// already there.
+pub(crate) fn back_up_bytes(dir: &Path, rel: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let node = Node::File {
+        bytes: bytes.to_vec(),
+        mode: 0o600,
+        nlink: 1,
+    };
+    back_up(dir, rel, &node, false)?.ok_or_else(|| anyhow!("nothing to back up at {rel}"))
+}
+
 /// Copies a file at the target to `<dir>/<key>`, or records a symlink in `<dir>/.dotman/links.txt`.
 /// Returns where the copy went; a dry run only reports it.
 fn back_up(dir: &Path, key: &str, current: &Node, dry_run: bool) -> Result<Option<PathBuf>> {

@@ -1,0 +1,785 @@
+//! Encrypted `{age}` files and `dot key`, through the binary. Tests that need an age CLI print why
+//! they skip when neither age nor rage is on PATH; `DOTMAN_REQUIRE_AGE=1` makes that a failure.
+
+mod common;
+
+use common::{TestEnv, files_containing, mode_of};
+use dotman::repo_config::RepoConfig;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Output;
+
+const HOSTS: &str = ".config/gh/hosts.yml";
+const HOSTS_AGE: &str = ".config/gh/hosts{age}.yml";
+const PLAIN: &[u8] = b"github.com:\n  oauth_token: gho_hunter2\n";
+const ARMOR: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
+const MARKER: &[u8] = b"AGE-SECRET-KEY-";
+// Only the marker matters to the guard, so this need not be a real identity.
+const FAKE_KEY: &str =
+    "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+
+/// Whether an age CLI is on PATH. Prints why a test skips, and fails it instead when
+/// `DOTMAN_REQUIRE_AGE=1`.
+fn age_installed() -> bool {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let found = std::env::split_paths(&path)
+        .any(|dir| ["age", "rage"].iter().any(|name| dir.join(name).is_file()));
+    if !found {
+        assert!(
+            std::env::var_os("DOTMAN_REQUIRE_AGE").is_none_or(|v| v != "1"),
+            "DOTMAN_REQUIRE_AGE=1, but neither age nor rage is on PATH"
+        );
+        eprintln!("skipped: neither age nor rage is on PATH (DOTMAN_REQUIRE_AGE=1 fails instead)");
+    }
+    found
+}
+
+fn exits(out: &Output, code: i32) -> String {
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(code), "{err}");
+    err
+}
+
+fn identity_path(env: &TestEnv) -> PathBuf {
+    env.xdg_config().join("dotman/age-identity.txt")
+}
+
+fn identity(env: &TestEnv) -> String {
+    fs::read_to_string(identity_path(env)).unwrap_or_default()
+}
+
+fn ciphertext(env: &TestEnv) -> Vec<u8> {
+    fs::read(env.repo().join(HOSTS_AGE)).unwrap_or_default()
+}
+
+fn remote_path(env: &TestEnv) -> String {
+    env.remote_path().to_string_lossy().into_owned()
+}
+
+/// Every blob ever pushed, as one text.
+fn remote_history(env: &TestEnv) -> String {
+    env.git(&[
+        "--git-dir",
+        &remote_path(env),
+        "log",
+        "--all",
+        "-p",
+        "--format=",
+    ])
+}
+
+fn remote_tree(env: &TestEnv) -> String {
+    env.git(&[
+        "--git-dir",
+        &remote_path(env),
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "main",
+    ])
+}
+
+fn remote_head(env: &TestEnv) -> String {
+    env.git(&["--git-dir", &remote_path(env), "rev-parse", "main"])
+}
+
+/// A device with a key and `.config/gh/hosts.yml` added encrypted, synced to the remote.
+fn keyed_device() -> TestEnv {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.ok(&["key", "init"]);
+    env.write(HOSTS, PLAIN, 0o600);
+    env.ok(&["add", "--encrypt", HOSTS]);
+    env.ok(&["sync"]);
+    env.git(&[
+        "--git-dir",
+        &remote_path(&env),
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    env
+}
+
+/// A repo of its own with a fresh key, for an identity no other device has.
+fn other_key() -> TestEnv {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    env
+}
+
+#[test]
+fn a_keyless_device_is_locked_and_the_key_in_the_environment_applies_it() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let stored = ciphertext(&a);
+    assert!(stored.starts_with(ARMOR));
+    assert!(!a.repo().join(HOSTS).exists());
+    assert!(remote_tree(&a).contains(HOSTS_AGE));
+    assert!(!remote_history(&a).contains("gho_hunter2"));
+
+    let b = a.second_device();
+    let err = exits(&b.run(&["init", &b.remote_url()]), 0);
+    assert!(err.contains("locked"), "{err}");
+    assert!(!b.home().join(HOSTS).exists());
+    assert!(!b.home().join(".config").exists(), "nothing written for it");
+    assert_eq!(b.token_of("status", HOSTS).as_deref(), Some("locked"));
+
+    let key = identity(&a);
+    let vars = [("DOTMAN_AGE_KEY", key.as_str())];
+    exits(&b.run_with(&vars, &["apply"]), 0);
+    assert_eq!(b.read(HOSTS), PLAIN);
+    assert_eq!(mode_of(&b.home().join(HOSTS)), 0o600);
+    let status = b.porcelain_with(&vars, "status");
+    assert!(
+        status.contains(&("clean".to_owned(), HOSTS.to_owned())),
+        "{status:?}"
+    );
+    for dir in [b.home(), b.state_dir(), b.repo()] {
+        assert_eq!(files_containing(&dir, MARKER), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn ciphertext_changes_only_when_the_plaintext_does() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let first = ciphertext(&a);
+    exits(&a.run(&["sync"]), 0);
+    exits(&a.run(&["add", HOSTS]), 0);
+    assert_eq!(ciphertext(&a), first);
+
+    a.write(HOSTS, b"github.com:\n  oauth_token: gho_rotated\n", 0o600);
+    assert_eq!(
+        a.token_of("status", HOSTS).as_deref(),
+        Some("changed-locally")
+    );
+    exits(&a.run(&["sync"]), 0);
+    let second = ciphertext(&a);
+    assert!(second.starts_with(ARMOR));
+    assert_ne!(second, first);
+    assert_eq!(a.token_of("status", HOSTS).as_deref(), Some("clean"));
+
+    let b = a.second_device();
+    let key = identity(&a);
+    exits(
+        &b.run_with(&[("DOTMAN_AGE_KEY", &key)], &["init", &b.remote_url()]),
+        0,
+    );
+    assert_eq!(b.read(HOSTS), b"github.com:\n  oauth_token: gho_rotated\n");
+}
+
+#[test]
+fn add_refuses_a_plain_age_key_and_the_identity_files() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let keys = ".config/sops/age/keys.txt";
+    env.write(keys, format!("# created\n{FAKE_KEY}\n").as_bytes(), 0o600);
+    for args in [&["add", keys][..], &["add", "--yes", keys]] {
+        let err = env.fails(args);
+        assert!(err.contains("AGE-SECRET-KEY-"), "{err}");
+    }
+    assert!(!env.repo().join(keys).exists());
+    assert!(!env.repo().join(".config").exists());
+
+    let own = env.home().join(".age/id.txt");
+    env.write(".age/id.txt", FAKE_KEY.as_bytes(), 0o600);
+    env.write_machine_config(&format!("[age]\nidentity = \"{}\"\n", own.display()));
+    let err = env.fails(&["add", "--encrypt", ".age/id.txt"]);
+    assert!(err.contains("never manages its own files"), "{err}");
+
+    env.write(".keys/age.txt", FAKE_KEY.as_bytes(), 0o600);
+    let file = env.home().join(".keys/age.txt");
+    let vars = [("DOTMAN_AGE_KEY_FILE", file.to_str().unwrap())];
+    let out = env.run_with(&vars, &["add", ".keys/age.txt"]);
+    let err = exits(&out, 1);
+    assert!(err.contains("DOTMAN_AGE_KEY_FILE"), "{err}");
+}
+
+#[test]
+fn a_new_key_file_under_a_managed_dir_is_held_and_never_pushed() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.ok(&["add", ".config"]);
+    exits(&env.run(&["sync"]), 0);
+
+    let keys = ".config/sops/age/keys.txt";
+    env.write(keys, format!("{FAKE_KEY}\n").as_bytes(), 0o600);
+    assert_eq!(env.token_of("status", keys).as_deref(), Some("held"));
+    let human = String::from_utf8_lossy(&env.run(&["status"]).stdout).into_owned();
+    assert!(
+        human.contains("keys.txt (holds an age secret key"),
+        "{human}"
+    );
+
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(err.contains("held back"), "{err}");
+    assert!(!remote_tree(&env).contains("keys.txt"));
+    assert!(!remote_history(&env).contains("AGE-SECRET-KEY-"));
+    assert!(!env.repo().join(keys).exists());
+}
+
+#[test]
+fn a_managed_file_edited_to_hold_a_key_is_held_on_sync() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.ok(&["add", ".config/app/a.conf"]);
+    exits(&env.run(&["sync"]), 0);
+    let head = remote_head(&env);
+
+    env.write(
+        ".config/app/a.conf",
+        format!("a\n{FAKE_KEY}\n").as_bytes(),
+        0o644,
+    );
+    let before = (env.four_trees(), env.remote_refs());
+    let err = exits(&env.run(&["sync", "--dry-run"]), 3);
+    assert!(err.contains(".config/app/a.conf: held"), "{err}");
+    assert_eq!((env.four_trees(), env.remote_refs()), before);
+
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(err.contains(".config/app/a.conf: held"), "{err}");
+    assert!(
+        !err.contains("changed locally"),
+        "the second pass leaves it alone: {err}"
+    );
+    assert_eq!(
+        fs::read(env.repo().join(".config/app/a.conf")).unwrap(),
+        b"a\n"
+    );
+    let repo = env.repo().to_string_lossy().into_owned();
+    assert_eq!(env.git(&["-C", &repo, "status", "--porcelain"]), "");
+    assert_eq!(remote_head(&env), head);
+    assert!(!remote_history(&env).contains("AGE-SECRET-KEY-"));
+    exits(&env.run(&["sync"]), 3);
+}
+
+#[test]
+fn the_age_key_is_refused_in_the_template_allowlist() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_machine_config("[template]\nenv = [\"HOME\", \"DOTMAN_AGE_KEY\"]\n");
+    let err = env.fails(&["status"]);
+    assert!(
+        err.contains("`[template] env` lists DOTMAN_AGE_KEY"),
+        "{err}"
+    );
+}
+
+#[test]
+fn key_init_creates_a_private_identity_once_and_never_prints_it() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let out = env.run(&["key", "init"]);
+    let err = exits(&out, 0);
+    assert!(!err.contains("AGE-SECRET-KEY-") && !out.stdout.windows(15).any(|w| w == MARKER));
+    assert!(err.contains("password manager"), "{err}");
+    let created = identity(&env);
+    assert!(created.contains("AGE-SECRET-KEY-1"));
+    assert_eq!(mode_of(&identity_path(&env)), 0o600);
+    assert_eq!(mode_of(&env.xdg_config().join("dotman")), 0o700);
+    let recipients = env.repo_config().age.recipients;
+    assert_eq!(recipients.len(), 1);
+    assert!(recipients.iter().all(|r| r.starts_with("age1")));
+
+    let err = env.fails(&["key", "init"]);
+    assert!(err.contains("already exists"), "{err}");
+    assert_eq!(identity(&env), created);
+    assert_eq!(env.repo_config().age.recipients, recipients);
+}
+
+#[test]
+fn key_import_replaces_a_different_identity_only_with_force_and_keeps_a_backup() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    let old = identity(&env);
+    let other = other_key();
+    let new_file = identity_path(&other);
+    let new_arg = new_file.to_str().unwrap();
+
+    let err = env.fails(&["key", "import", new_arg]);
+    assert!(err.contains("--force"), "{err}");
+    assert_eq!(identity(&env), old);
+    assert_eq!(env.backups(".dotman/age-identity.txt"), Vec::new());
+
+    exits(
+        &env.run(&["key", "import", new_arg, "--force", "--add-recipient"]),
+        0,
+    );
+    assert_eq!(identity(&env), identity(&other));
+    assert_eq!(mode_of(&identity_path(&env)), 0o600);
+    assert_eq!(
+        env.backups(".dotman/age-identity.txt"),
+        [(old.into_bytes(), 0o600)]
+    );
+    let runs = fs::read_dir(env.state_dir().join("backups")).unwrap();
+    for run in runs {
+        assert_eq!(mode_of(&run.unwrap().path()), 0o700);
+    }
+    assert_eq!(env.repo_config().age.recipients.len(), 2);
+}
+
+#[test]
+fn key_import_reads_stdin_and_reports_a_recipient_that_is_not_listed() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let other = other_key();
+    let text = identity(&other);
+
+    let err = exits(
+        &env.run_stdin(&[], text.as_bytes(), &["key", "import", "-"]),
+        3,
+    );
+    assert!(err.contains("is not in [age] recipients"), "{err}");
+    assert!(err.contains("--add-recipient"), "{err}");
+    assert_eq!(identity(&env), text);
+    assert_eq!(mode_of(&identity_path(&env)), 0o600);
+    assert_eq!(env.repo_config().age.recipients, Vec::<String>::new());
+
+    let out = env.run_stdin(&[], text.as_bytes(), &["key", "import", "--add-recipient"]);
+    exits(&out, 0);
+    assert_eq!(
+        env.repo_config().age.recipients,
+        other.repo_config().age.recipients
+    );
+
+    let err = exits(&env.run_stdin(&[], b"not a key\n", &["key", "import"]), 1);
+    assert!(err.contains("holds no age identity"), "{err}");
+}
+
+#[test]
+fn an_imported_recipient_can_decrypt_after_a_keyed_machine_syncs() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let b = a.second_device();
+    exits(&b.run(&["init", &b.remote_url()]), 0);
+    let other = other_key();
+    let new_file = identity_path(&other);
+    exits(
+        &b.run(&[
+            "key",
+            "import",
+            new_file.to_str().unwrap(),
+            "--add-recipient",
+        ]),
+        0,
+    );
+    let err = exits(&b.run(&["sync"]), 0);
+    assert!(err.contains("none was re-encrypted"), "{err}");
+    assert!(!b.home().join(HOSTS).exists());
+
+    let err = exits(&a.run(&["sync"]), 0);
+    assert!(err.contains("re-encrypt"), "{err}");
+    exits(&b.run(&["sync"]), 0);
+    assert_eq!(b.read(HOSTS), PLAIN);
+    assert_eq!(mode_of(&b.home().join(HOSTS)), 0o600);
+}
+
+#[test]
+fn one_keyed_machine_re_encrypts_and_the_next_finds_nothing_to_do() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let key = identity(&a);
+    let vars = [("DOTMAN_AGE_KEY", key.as_str())];
+    let b = a.second_device();
+    exits(&b.run_with(&vars, &["init", &b.remote_url()]), 0);
+    assert_eq!(b.read(HOSTS), PLAIN);
+    let before = ciphertext(&a);
+
+    let other = other_key();
+    let config_file = a.repo().join(".dotman.toml");
+    let mut config = RepoConfig::load(&config_file).unwrap();
+    config
+        .age
+        .recipients
+        .extend(other.repo_config().age.recipients);
+    config.save(&config_file, false).unwrap();
+
+    let err = exits(&a.run(&["sync"]), 0);
+    assert!(
+        err.contains("re-encrypt .config/gh/hosts{age}.yml"),
+        "{err}"
+    );
+    assert_ne!(ciphertext(&a), before);
+    let record = fs::read_to_string(a.repo().join(".dotman/age-recipients")).unwrap();
+    assert_eq!(record.lines().count(), 2);
+    let head = remote_head(&a);
+
+    let err = exits(&b.run_with(&vars, &["sync"]), 0);
+    assert!(!err.contains("re-encrypt"), "{err}");
+    assert_eq!(remote_head(&a), head);
+    assert_eq!(b.token_of("status", HOSTS).as_deref(), Some("locked"));
+    let status = b.porcelain_with(&vars, "status");
+    assert!(
+        status.contains(&("clean".to_owned(), HOSTS.to_owned())),
+        "{status:?}"
+    );
+
+    let c = a.second_device();
+    let other_identity = identity(&other);
+    let only_new = [("DOTMAN_AGE_KEY", other_identity.as_str())];
+    exits(&c.run_with(&only_new, &["init", &c.remote_url()]), 0);
+    assert_eq!(c.read(HOSTS), PLAIN);
+}
+
+#[test]
+fn a_dry_run_reports_a_due_re_encryption_and_writes_nothing() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let mut config = a.repo_config();
+    config
+        .age
+        .recipients
+        .extend(other_key().repo_config().age.recipients);
+    config.save(&a.repo().join(".dotman.toml"), false).unwrap();
+    let before = (a.four_trees(), a.remote_refs());
+    let err = exits(&a.run(&["sync", "--dry-run"]), 0);
+    assert!(err.contains("would re-encrypt 1 file"), "{err}");
+    assert_eq!((a.four_trees(), a.remote_refs()), before);
+}
+
+#[test]
+fn a_damaged_ciphertext_is_skipped_and_fails_the_run() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    fs::remove_file(a.home().join(HOSTS)).unwrap();
+    a.write_repo(HOSTS_AGE, b"not an age file\n");
+    a.write_repo(".plain", b"p\n");
+    let err = exits(&a.run(&["apply", "--restore-deleted"]), 1);
+    assert!(err.contains(".config/gh/hosts.yml: skipped:"), "{err}");
+    assert!(err.contains("failed to read header"), "{err}");
+    assert!(err.contains("1 path could not be applied"), "{err}");
+    assert!(!err.contains("locked"), "{err}");
+    assert!(!a.home().join(HOSTS).exists());
+    assert_eq!(a.read(".plain"), b"p\n", "other paths still apply");
+    assert_eq!(a.token_of("status", HOSTS).as_deref(), Some("unreadable"));
+}
+
+#[test]
+fn a_key_file_under_a_managed_dir_is_never_scanned() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.ok(&["add", ".config"]);
+    env.write(".config/keys/age.txt", FAKE_KEY.as_bytes(), 0o600);
+    let file = env.home().join(".config/keys/age.txt");
+    let vars = [("DOTMAN_AGE_KEY_FILE", file.to_str().unwrap())];
+    let status = env.porcelain_with(&vars, "status");
+    assert!(
+        status.iter().all(|(_, key)| key != ".config/keys/age.txt"),
+        "{status:?}"
+    );
+    exits(&env.run_with(&vars, &["sync"]), 0);
+    assert!(!env.repo().join(".config/keys/age.txt").exists());
+}
+
+#[test]
+fn without_a_remote_sync_re_encrypts_after_its_apply() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    env.write(".netrc", b"machine x\n", 0o600);
+    env.ok(&["add", "--encrypt", "--for", "os!=plan9", ".netrc"]);
+    let source = ".netrc{os!=plan9+age}";
+    assert!(
+        fs::read(env.repo().join(source))
+            .unwrap()
+            .starts_with(ARMOR)
+    );
+    exits(&env.run(&["sync"]), 0);
+    let before = fs::read(env.repo().join(source)).unwrap();
+
+    let mut config = env.repo_config();
+    config
+        .age
+        .recipients
+        .extend(other_key().repo_config().age.recipients);
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .unwrap();
+    let err = exits(&env.run(&["sync", "-m", "my message"]), 0);
+    assert!(err.contains("re-encrypt .netrc{os!=plan9+age}"), "{err}");
+    assert_ne!(fs::read(env.repo().join(source)).unwrap(), before);
+    let repo = env.repo().to_string_lossy().into_owned();
+    let subject = env.git(&["-C", &repo, "log", "-1", "--format=%s"]);
+    assert!(subject.starts_with("sync("), "{subject}");
+    assert_eq!(env.git(&["-C", &repo, "status", "--porcelain"]), "");
+    let err = exits(&env.run(&["sync"]), 0);
+    assert!(!err.contains("re-encrypt"), "{err}");
+}
+
+#[test]
+fn hooks_and_the_editor_never_see_the_age_key() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let hook_env = env.root().join("hook-env");
+    env.write_repo(".config/app/a.conf", b"a\n");
+    env.write_repo(
+        ".dotman.toml",
+        format!(
+            "[hooks]\n\".config/app/**\" = \"env > '{}'\"\n",
+            hook_env.display()
+        )
+        .as_bytes(),
+    );
+    let vars = [("DOTMAN_AGE_KEY", FAKE_KEY)];
+    exits(&env.run_with(&vars, &["apply", "--approve-hooks"]), 0);
+    let seen = fs::read_to_string(&hook_env).unwrap();
+    assert!(seen.contains("HOME="), "{seen}");
+    assert!(!seen.contains("DOTMAN_AGE_KEY"), "{seen}");
+
+    let editor_env = env.root().join("editor-env");
+    let editor = env.write_script(
+        "env-editor.sh",
+        &format!("#!/bin/sh\nenv > '{}'\n", editor_env.display()),
+    );
+    let vars = [
+        ("DOTMAN_AGE_KEY", FAKE_KEY),
+        ("EDITOR", editor.to_str().unwrap()),
+    ];
+    exits(&env.run_with(&vars, &["edit", ".config/app/a.conf"]), 0);
+    let seen = fs::read_to_string(&editor_env).unwrap();
+    assert!(seen.contains("HOME="), "{seen}");
+    assert!(!seen.contains("DOTMAN_AGE_KEY"), "{seen}");
+}
+
+#[test]
+fn edit_of_an_encrypted_file_points_at_the_file_itself() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_repo(HOSTS_AGE, ARMOR);
+    let opened = env.root().join("opened");
+    let editor = env.write_script(
+        "editor.sh",
+        &format!("#!/bin/sh\ntouch '{}'\n", opened.display()),
+    );
+    let out = env.run_with(&[("EDITOR", editor.to_str().unwrap())], &["edit", HOSTS]);
+    let err = exits(&out, 1);
+    assert!(
+        err.contains("edit `~/.config/gh/hosts.yml` directly, then `dot sync`"),
+        "{err}"
+    );
+    assert!(!opened.exists());
+}
+
+#[test]
+fn restore_decrypts_an_earlier_version_and_leaves_the_repo_alone() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    a.write(HOSTS, b"newer\n", 0o600);
+    exits(&a.run(&["sync"]), 0);
+    let source = ciphertext(&a);
+    let state = fs::read(a.state_dir().join("state.toml")).unwrap();
+
+    let before = a.four_trees();
+    exits(
+        &a.run(&["restore", HOSTS, "--from", "HEAD~1", "--dry-run"]),
+        0,
+    );
+    assert_eq!(a.four_trees(), before);
+
+    exits(&a.run(&["restore", HOSTS, "--from", "HEAD~1"]), 0);
+    assert_eq!(a.read(HOSTS), PLAIN);
+    assert_eq!(mode_of(&a.home().join(HOSTS)), 0o600);
+    assert_eq!(a.backups(HOSTS), [(b"newer\n".to_vec(), 0o600)]);
+    assert_eq!(ciphertext(&a), source);
+    assert_eq!(fs::read(a.state_dir().join("state.toml")).unwrap(), state);
+    let leftovers: Vec<String> = fs::read_dir(a.state_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("dotman-restore-"))
+        .collect();
+    assert_eq!(leftovers, Vec::<String>::new());
+
+    let b = a.second_device();
+    exits(&b.run(&["init", &b.remote_url()]), 0);
+    let err = exits(&b.run(&["restore", HOSTS, "--from", "HEAD~1"]), 1);
+    assert!(err.contains("dot key import"), "{err}");
+}
+
+#[test]
+fn dry_runs_of_add_encrypt_and_apply_change_nothing() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    env.write(HOSTS, PLAIN, 0o600);
+    let before = env.four_trees();
+    let err = env.ok(&["add", "--encrypt", "--dry-run", HOSTS]);
+    assert!(
+        err.contains("would add .config/gh/hosts.yml as .config/gh/hosts{age}.yml"),
+        "{err}"
+    );
+    assert_eq!(env.four_trees(), before);
+
+    env.ok(&["add", "--encrypt", HOSTS]);
+    fs::remove_file(env.home().join(HOSTS)).unwrap();
+    let before = env.four_trees();
+    let err = env.ok(&["apply", "--restore-deleted", "--dry-run"]);
+    assert!(err.contains("would apply .config/gh/hosts.yml"), "{err}");
+    assert_eq!(env.four_trees(), before);
+}
+
+#[test]
+fn encrypting_a_plain_file_replaces_its_source_and_records_only_other_modes() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    env.write(HOSTS, PLAIN, 0o600);
+    env.write(".netrc", b"machine x\n", 0o640);
+    env.ok(&["add", HOSTS]);
+    let err = env.ok(&["add", "--encrypt", HOSTS, ".netrc"]);
+    assert!(err.contains("git history still has it"), "{err}");
+    assert!(!env.repo().join(HOSTS).exists());
+    assert!(ciphertext(&env).starts_with(ARMOR));
+    let modes = env.repo_config().modes;
+    assert!(
+        !modes.contains_key(HOSTS) && !modes.contains_key(HOSTS_AGE),
+        "{modes:?}"
+    );
+    assert_eq!(modes.get(".netrc{age}").map(String::as_str), Some("0640"));
+    assert_eq!(env.token_of("status", HOSTS).as_deref(), Some("clean"));
+    assert_eq!(env.token_of("status", ".netrc").as_deref(), Some("clean"));
+    let record = fs::read_to_string(env.repo().join(".dotman/age-recipients")).unwrap();
+    assert_eq!(
+        record.lines().map(str::to_owned).collect::<Vec<_>>(),
+        env.repo_config().age.recipients
+    );
+    let listed = String::from_utf8_lossy(&env.run(&["list"]).stdout).into_owned();
+    assert!(
+        listed.contains("(.config/gh/hosts{age}.yml)  [age]"),
+        "{listed}"
+    );
+}
+
+#[test]
+fn without_an_age_cli_encrypted_paths_are_locked_and_encrypting_names_the_install() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_repo(HOSTS_AGE, ARMOR);
+    env.write_machine_config("[age]\ncommand = \"/nonexistent/age\"\n");
+    assert_eq!(env.token_of("status", HOSTS).as_deref(), Some("locked"));
+    let err = exits(&env.run(&["apply"]), 0);
+    assert!(
+        err.contains("locked") && err.contains("[age] command"),
+        "{err}"
+    );
+    assert!(!env.home().join(HOSTS).exists());
+
+    env.write_machine_config("");
+    env.write_repo(".dotman.toml", b"[age]\nrecipients = [\"age1example\"]\n");
+    let empty = env.root().join("empty-path");
+    fs::create_dir(&empty).unwrap();
+    env.write(".netrc", b"machine x\n", 0o600);
+    let vars = [("PATH", empty.to_str().unwrap())];
+    let err = exits(&env.run_with(&vars, &["add", "--encrypt", ".netrc"]), 1);
+    assert!(
+        err.contains("pacman -S age") && err.contains("brew install age"),
+        "{err}"
+    );
+    assert!(!env.repo().join(".netrc{age}").exists());
+}
+
+#[test]
+fn diff_compares_the_plaintext_and_removes_its_temp_dir() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    a.write(HOSTS, b"github.com:\n  oauth_token: gho_local\n", 0o600);
+    let runtime = a.root().join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    let out = a.run_with(&[("XDG_RUNTIME_DIR", runtime.to_str().unwrap())], &["diff"]);
+    exits(&out, 0);
+    let shown = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(shown.contains("-  oauth_token: gho_local"), "{shown}");
+    assert!(shown.contains("+  oauth_token: gho_hunter2"), "{shown}");
+    assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+
+    exits(&a.run(&["diff"]), 0);
+    let leftovers = fs::read_dir(a.state_dir())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .is_ok_and(|e| e.file_name().to_string_lossy().starts_with("dotman-diff-"))
+        })
+        .count();
+    assert_eq!(leftovers, 0);
+
+    let b = a.second_device();
+    exits(&b.run(&["init", &b.remote_url()]), 0);
+    let err = exits(&b.run(&["diff"]), 0);
+    assert!(
+        err.contains(".config/gh/hosts.yml: locked, not compared"),
+        "{err}"
+    );
+}
+
+#[test]
+fn doctor_warns_on_one_recipient_counts_locked_files_and_checks_the_key_reader() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let out = String::from_utf8_lossy(&a.run(&["doctor"]).stdout).into_owned();
+    assert!(out.contains("warn  age recipients: only one"), "{out}");
+    assert!(
+        out.contains("pass  encrypted files: 1, none locked"),
+        "{out}"
+    );
+
+    let b = a.second_device();
+    exits(&b.run(&["init", &b.remote_url()]), 0);
+    let out = String::from_utf8_lossy(&b.run(&["doctor"]).stdout).into_owned();
+    assert!(
+        out.contains("warn  encrypted files: 1 of 1 locked"),
+        "{out}"
+    );
+
+    let key = identity(&a);
+    let doctor = b.run_with(&[("DOTMAN_AGE_KEY", &key)], &["doctor"]);
+    let out = String::from_utf8_lossy(&doctor.stdout).into_owned();
+    assert!(
+        out.contains("pass  DOTMAN_AGE_KEY is read by age "),
+        "{out}"
+    );
+    assert!(
+        out.contains("pass  encrypted files: 1, none locked"),
+        "{out}"
+    );
+}

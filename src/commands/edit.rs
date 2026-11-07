@@ -7,10 +7,10 @@ use crate::context::Context;
 use crate::hooks::Policy;
 use crate::lock::Lock;
 use crate::paths::derive_key;
+use crate::proc;
 use crate::variant::Flag;
 use anyhow::{Context as _, Result, bail};
 use std::fs;
-use std::process::Command;
 
 /// Runs `dot edit`. The lock is taken only after the editor exits, so a long edit blocks nothing.
 pub fn run(args: &EditArgs) -> Result<Outcome> {
@@ -30,7 +30,7 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
     }
     let source = sources.select(&key, ctx.identity()).require(&key)?;
     if sources.flag(&key, source) == Flag::Age {
-        bail!("{source} is encrypted; `dot edit` cannot open it yet");
+        bail!("edit `~/{key}` directly, then `dot sync`");
     }
     let path = ctx.paths.repo.join(source);
     if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
@@ -39,7 +39,7 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
 
     let before = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
     let (program, rest) = editor_command()?;
-    let status = Command::new(&program)
+    let status = proc::command(&program)
         .args(rest)
         .arg(&path)
         .status()

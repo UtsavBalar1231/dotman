@@ -18,6 +18,32 @@ pub fn restore_sigpipe() {
     }
 }
 
+/// Puts back the SIGPIPE action that [`ignore_sigpipe`] replaced, when dropped.
+#[cfg(unix)]
+pub struct SigpipeIgnored(libc::sighandler_t);
+
+/// Ignores SIGPIPE until the value is dropped. Meanwhile a write to a child that has already
+/// exited fails with EPIPE instead of killing the process.
+#[cfg(unix)]
+#[must_use]
+pub fn ignore_sigpipe() -> SigpipeIgnored {
+    // SAFETY: `signal` with SIG_IGN installs no handler; the previous action is kept to be put back.
+    SigpipeIgnored(unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) })
+}
+
+#[cfg(unix)]
+impl Drop for SigpipeIgnored {
+    fn drop(&mut self) {
+        if self.0 == libc::SIG_ERR {
+            return;
+        }
+        // SAFETY: the value came from `signal` for SIGPIPE, so it is a valid action for it.
+        unsafe {
+            libc::signal(libc::SIGPIPE, self.0);
+        }
+    }
+}
+
 /// Effective user id of the process.
 #[must_use]
 pub fn geteuid() -> u32 {
@@ -210,7 +236,7 @@ mod tests {
 
     #[test]
     fn hostname_matches_uname() {
-        let uname = std::process::Command::new("uname")
+        let uname = crate::proc::command("uname")
             .arg("-n")
             .output()
             .expect("run uname");
@@ -222,7 +248,7 @@ mod tests {
 
     #[test]
     fn machine_matches_uname() {
-        let uname = std::process::Command::new("uname")
+        let uname = crate::proc::command("uname")
             .arg("-m")
             .output()
             .expect("run uname");

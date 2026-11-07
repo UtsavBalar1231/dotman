@@ -2,7 +2,8 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
 use dotman::commands::{
-    Outcome, add, apply, diff, doctor, edit, forget, git, init, list, log, restore, status, sync,
+    Outcome, add, apply, diff, doctor, edit, forget, git, init, key, list, log, restore, status,
+    sync,
 };
 use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
@@ -66,6 +67,7 @@ fn main() {
             }
             Outcome::Done
         }),
+        Commands::Key(args) => key::run(&args),
         Commands::Git(args) => git::run(&args).map(|code| -> Outcome { std::process::exit(code) }),
     };
     match result {

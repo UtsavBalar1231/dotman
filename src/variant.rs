@@ -196,18 +196,57 @@ pub fn variant_source(key: &str, conditions: &str) -> Result<String> {
     if !only_conditions {
         bail!("`{conditions}` is not a list of conditions such as `host=laptop+os=linux`");
     }
-    let (dir, name) = key
-        .rsplit_once('/')
-        .map_or((None, key), |(dir, name)| (Some(dir), name));
+    Ok(insert_block(key, conditions))
+}
+
+/// `source` with the `age` flag: `a{host=x}.conf` gives `a{host=x+age}.conf`, and a name with no
+/// block gets `{age}` where `--for` would put its block.
+pub fn with_age(source: &str) -> Result<String> {
+    let (dir, name) = split_name(source);
+    for (open, _) in name.match_indices('{') {
+        let (Some(head), Some(after)) = (
+            name.get(..open),
+            name.get(open..).and_then(|s| s.strip_prefix('{')),
+        ) else {
+            continue;
+        };
+        let Some((inner, tail)) = after.split_once('}') else {
+            break;
+        };
+        match parse_block(inner) {
+            None => {}
+            Some(Ok((_, Flag::Age))) => return Ok(source.to_owned()),
+            Some(Ok((_, Flag::Plain))) => {
+                return Ok(join_name(dir, &format!("{head}{{{inner}+age}}{tail}")));
+            }
+            Some(Ok((_, Flag::Tmpl))) => bail!("{source} is a template, which cannot be encrypted"),
+            Some(Err(reason)) => bail!("{source}: {reason}"),
+        }
+    }
+    Ok(insert_block(source, "age"))
+}
+
+fn split_name(path: &str) -> (Option<&str>, &str) {
+    path.rsplit_once('/')
+        .map_or((None, path), |(dir, name)| (Some(dir), name))
+}
+
+fn join_name(dir: Option<&str>, name: &str) -> String {
+    dir.map_or_else(|| name.to_owned(), |dir| format!("{dir}/{name}"))
+}
+
+// Before the last `.` of the name, unless that dot is its first character.
+fn insert_block(key: &str, block: &str) -> String {
+    let (dir, name) = split_name(key);
     let named = match name
         .rfind('.')
         .filter(|dot| *dot > 0)
         .and_then(|dot| name.split_at_checked(dot))
     {
-        Some((stem, ext)) => format!("{stem}{{{conditions}}}{ext}"),
-        None => format!("{name}{{{conditions}}}"),
+        Some((stem, ext)) => format!("{stem}{{{block}}}{ext}"),
+        None => format!("{name}{{{block}}}"),
     };
-    Ok(dir.map_or_else(|| named.clone(), |dir| format!("{dir}/{named}")))
+    join_name(dir, &named)
 }
 
 /// What a key resolves to on one machine.
@@ -714,6 +753,20 @@ mod tests {
         let source = place(".config/a{b}.conf", "host=a");
         let sources = Sources::group([source.as_str()]);
         assert_eq!(sources.keys().collect::<Vec<_>>(), [".config/a{b}.conf"]);
+    }
+
+    #[test]
+    fn the_age_flag_joins_an_existing_block_or_gets_its_own() {
+        let encrypt = |source: &str| with_age(source).unwrap();
+        assert_eq!(encrypt(".config/gh/hosts.yml"), ".config/gh/hosts{age}.yml");
+        assert_eq!(encrypt(".netrc"), ".netrc{age}");
+        assert_eq!(encrypt("a{host=x}.conf"), "a{host=x+age}.conf");
+        assert_eq!(encrypt("a{host=x+age}.conf"), "a{host=x+age}.conf");
+        assert_eq!(encrypt("d/{ca54-e3}.xpi"), "d/{ca54-e3}{age}.xpi");
+        assert!(with_age("kitty{tmpl}.conf").is_err());
+        assert!(with_age("a{age+tmpl}.conf").is_err());
+        let sources = Sources::group(["a{host=x+age}.conf"]);
+        assert_eq!(sources.flag("a.conf", "a{host=x+age}.conf"), Flag::Age);
     }
 
     proptest! {

@@ -9,7 +9,8 @@ use crate::engine::status::{Content, Source, SourceEntry, Variants, Worktree};
 use crate::engine::{Home, Node, observe_portable, read_node};
 use crate::git::Git;
 use crate::output;
-use crate::paths::private_temp_dir;
+use crate::paths::{create_private_dir, private_temp_dir};
+use crate::secrets::Locked;
 use crate::variant::Selection;
 use anyhow::{Context as _, Result, bail};
 use std::fs::{self, Permissions};
@@ -26,12 +27,19 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     let sources = ctx.sources()?;
     let keys = ctx.select(&args.paths, sources.keys().map(str::to_owned).collect())?;
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
-    let variants = Variants::new(worktree, &sources, ctx.identity(), ctx.template_vars());
+    let variants = Variants::new(
+        worktree,
+        &sources,
+        ctx.identity(),
+        ctx.template_vars(),
+        ctx.age(),
+    );
     let mut entries = Vec::new();
     for key in keys {
         match variants.get(&key) {
             Ok(Selection::Winner(r)) => entries.push((key, r)),
             Ok(Selection::None) => {}
+            Err(e) if e.is::<Locked>() => output::warning(&format!("{key}: locked, not compared")),
             Err(e) => output::warning(&format!("{key}: not compared: {e:#}")),
             Ok(Selection::Ambiguous(_)) => {
                 output::warning(&format!("{key}: ambiguous, not compared"));
@@ -49,7 +57,8 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
 /// One `git diff` from `a/<key>` (H) to `b/<key>` (R) over the keys whose H differs from R.
 pub(crate) fn show(ctx: &Context, entries: &[(&str, &SourceEntry)], no_pager: bool) -> Result<()> {
     ctx.git.check_version()?;
-    let tmp = private_temp_dir("dotman-diff-", &runtime_dir())?;
+    // Decrypted content goes here, so it is removed on every return, a failed git diff included.
+    let tmp = private_temp_dir("dotman-diff-", &private_base(ctx)?)?;
     let (home_side, repo_side) = (tmp.path().join("a"), tmp.path().join("b"));
     let (home, home_real) = (&ctx.paths.home, ctx.paths.home_real.as_deref());
     let mut differs = false;
@@ -108,11 +117,18 @@ pub(crate) fn show(ctx: &Context, entries: &[(&str, &SourceEntry)], no_pager: bo
     }
 }
 
-fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
+// `$XDG_RUNTIME_DIR` is private to the user and usually memory-backed; the state dir is private too.
+fn private_base(ctx: &Context) -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(std::env::temp_dir)
+    {
+        return Ok(dir);
+    }
+    let state = &ctx.paths.state_dir;
+    create_private_dir(state, false)
+        .with_context(|| format!("cannot create {}", state.display()))?;
+    Ok(state.clone())
 }
 
 fn place(path: &Path, content: &Content, mode: u32) -> Result<()> {

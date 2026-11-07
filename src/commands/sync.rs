@@ -1,16 +1,19 @@
 //! `dot sync`: capture local changes, commit them, pull with rebase, apply what arrived and push.
 //!
 //! Capture and apply are two passes of `apply`, split by the pull. A rebase conflict aborts the
-//! pull and leaves everything as it was, with the recovery steps printed.
+//! pull and leaves everything as it was, with the recovery steps printed. Encrypted files are
+//! re-encrypted after the apply, when `[age] recipients` changed, so a machine that pulls the
+//! re-encryption finds nothing left to do.
 
 use crate::cli::SyncArgs;
 use crate::commands::Outcome;
-use crate::commands::apply::{self, Options, Pass};
+use crate::commands::apply::{self, Applied, Options, Pass};
 use crate::context::Context;
 use crate::git::PullOutcome;
 use crate::hooks::{self, Policy};
 use crate::lock::Lock;
 use crate::output;
+use crate::secrets;
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -48,11 +51,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         dry_run,
         never_ask: false,
     };
-    // A failed path never stops the sync; the failure is reported after the push.
-    let (first_failed, uncaptured) = (first.failed, first.uncaptured);
-    let mut attention = first.outcome == Outcome::Attention;
-    commit(&ctx, args, &first.captured)?;
-    let written = first.written;
+    commit(&ctx, args.message.as_deref(), dry_run, &first.captured)?;
 
     let branch = match ctx.git.remote_url(REMOTE)? {
         Some(_) => Some(
@@ -64,30 +63,17 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     };
     let Some(branch) = branch else {
         output::info("no remote is set; add one with `dot init --remote <url>`");
-        // A dry run captured nothing, so its captured keys are not reported a second time.
-        let mut skip = first.undecided;
-        if dry_run {
-            skip.extend(first.captured);
-        }
-        let mut second = apply::apply(
-            &ctx,
-            &[],
-            &Options {
-                dry_run,
-                decisions: args.decisions,
-                skip,
-                ..Options::default()
-            },
-        )?;
-        second.written.extend(written);
-        second.failed = second.failed.saturating_add(uncaptured);
-        let outcome = apply::finish(&ctx, &second, policy)?;
-        return Ok(finish(attention || outcome == Outcome::Attention));
+        return without_remote(&ctx, args, first, policy);
     };
+    // A failed path never stops the sync; the failure is reported after the push.
+    let (first_failed, uncaptured) = (first.failed, first.uncaptured);
+    let mut attention = first.outcome == Outcome::Attention;
+    let written = first.written;
     if dry_run {
         output::info(&format!(
             "would pull {REMOTE} {branch}, apply what arrived and push"
         ));
+        secrets::reencrypt(&ctx, true)?;
         let hooked = hooks::run(&ctx, &written, policy);
         apply::check_failed(first_failed).and(hooked)?;
         return Ok(finish(attention));
@@ -113,6 +99,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     )?;
     attention |= second.outcome == Outcome::Attention;
     second.written.extend(written);
+    let reencrypted = reencrypt(&ctx, false);
     let hooked = hooks::run(&ctx, &second.written, policy);
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured));
 
@@ -121,8 +108,47 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         ctx.git.push_set_upstream(REMOTE, &branch)?;
         output::success(&format!("{REMOTE}/{branch} is up to date"));
     }
-    failed.and(hooked)?;
+    failed.and(reencrypted).and(hooked)?;
     Ok(finish(attention))
+}
+
+fn without_remote(
+    ctx: &Context,
+    args: &SyncArgs,
+    first: Applied,
+    policy: Policy,
+) -> Result<Outcome> {
+    let dry_run = args.dry_run;
+    // A dry run captured nothing, so its captured keys are not reported a second time.
+    let mut skip = first.undecided;
+    if dry_run {
+        skip.extend(first.captured);
+    }
+    let mut second = apply::apply(
+        ctx,
+        &[],
+        &Options {
+            dry_run,
+            decisions: args.decisions,
+            skip,
+            ..Options::default()
+        },
+    )?;
+    second.written.extend(first.written);
+    second.failed = second.failed.saturating_add(first.uncaptured);
+    let reencrypted = reencrypt(ctx, dry_run);
+    let outcome = apply::finish(ctx, &second, policy);
+    reencrypted?;
+    let attention = first.outcome == Outcome::Attention || outcome? == Outcome::Attention;
+    Ok(finish(attention))
+}
+
+/// Commits a re-encryption with the generated message, whatever `-m` said.
+fn reencrypt(ctx: &Context, dry_run: bool) -> Result<()> {
+    if secrets::reencrypt(ctx, dry_run)? > 0 {
+        commit(ctx, None, false, &BTreeSet::new())?;
+    }
+    Ok(())
 }
 
 const fn finish(attention: bool) -> Outcome {
@@ -135,9 +161,14 @@ const fn finish(attention: bool) -> Outcome {
 
 /// Stages everything and commits it. A dry run stages nothing, so it counts the keys that would
 /// be captured plus what the worktree already holds.
-fn commit(ctx: &Context, args: &SyncArgs, captured: &BTreeSet<String>) -> Result<()> {
+fn commit(
+    ctx: &Context,
+    message: Option<&str>,
+    dry_run: bool,
+    captured: &BTreeSet<String>,
+) -> Result<()> {
     let mut changed = BTreeSet::new();
-    if args.dry_run {
+    if dry_run {
         changed.extend(captured.iter().cloned());
     } else {
         ctx.git.stage_all()?;
@@ -151,11 +182,11 @@ fn commit(ctx: &Context, args: &SyncArgs, captured: &BTreeSet<String>) -> Result
     if changed.is_empty() {
         return Ok(());
     }
-    let message = args
-        .message
-        .clone()
-        .unwrap_or_else(|| default_message(&ctx.identity().host, &changed));
-    if args.dry_run {
+    let message = message.map_or_else(
+        || default_message(&ctx.identity().host, &changed),
+        str::to_owned,
+    );
+    if dry_run {
         output::info(&format!("would commit: {message}"));
         return Ok(());
     }
