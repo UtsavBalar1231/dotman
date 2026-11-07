@@ -51,22 +51,24 @@ impl Condition {
     }
 }
 
-// Positive conditions, most specific first. `Vec`'s ordering is the selection rule: elements are
-// compared in turn, and a list that extends another wins. The flag makes `os=wsl` outrank
+// Positive conditions, most specific first, then whether the candidate has any condition at all.
+// The tuple's ordering is the selection rule: the lists are compared element by element, a list
+// that extends another wins, and on equal lists a candidate with conditions beats one without, so
+// a negated-only variant beats the plain fallback. The element flag makes `os=wsl` outrank
 // `os=linux`; off WSL `os=wsl` never holds, so it never competes.
-type Rank = Vec<(Reverse<Key>, bool)>;
+type Rank = (Vec<(Reverse<Key>, bool)>, bool);
 
 fn rank(conditions: &[Condition], identity: &IdentitySnapshot) -> Option<Rank> {
     if !conditions.iter().all(|c| c.holds(identity)) {
         return None;
     }
-    let mut rank: Rank = conditions
+    let mut positive: Vec<(Reverse<Key>, bool)> = conditions
         .iter()
         .filter(|c| !c.negated)
         .map(|c| (Reverse(c.key), c.key == Key::Os && c.value == "wsl"))
         .collect();
-    rank.sort_unstable_by(|a, b| b.cmp(a));
-    Some(rank)
+    positive.sort_unstable_by(|a, b| b.cmp(a));
+    Some((positive, !conditions.is_empty()))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -272,7 +274,7 @@ impl Sources {
     }
 
     /// Picks `key`'s source for `identity`. The plain file is a candidate with no conditions,
-    /// and negated conditions filter candidates without ranking them.
+    /// and negated conditions rank only against candidates whose positive conditions are the same.
     #[must_use]
     pub fn select(&self, key: &str, identity: &IdentitySnapshot) -> Selection<&str> {
         let Some(candidates) = self.by_key.get(key) else {
@@ -292,7 +294,7 @@ impl Sources {
         let mut top: Vec<&str> = Vec::new();
         for (source, form) in candidates {
             let rank = match form {
-                Form::Plain => Some(Rank::new()),
+                Form::Plain => Some(Rank::default()),
                 Form::Variant(conditions) => rank(conditions, identity),
                 Form::Invalid(_) => None,
             };
@@ -523,17 +525,31 @@ mod tests {
     }
 
     #[test]
-    fn negated_conditions_filter_without_ranking() {
+    fn negated_conditions_beat_only_the_plain_fallback() {
         let mac = machine("x", "macos");
         assert_eq!(
             pick(&["a.conf", "a{os!=macos}.conf"], &mac),
             winner("a.conf")
         );
         assert_eq!(pick(&["a{os!=macos}.conf"], &mac), Selection::None);
-        // On Linux both candidates rank empty, which is a tie.
         let linux = machine("x", "linux");
-        assert!(matches!(
+        assert_eq!(
             pick(&["a.conf", "a{os!=macos}.conf"], &linux),
+            winner("a{os!=macos}.conf")
+        );
+        assert_eq!(
+            pick(
+                &["a.conf", "a{os!=macos}.conf", "a{arch=x86_64}.conf"],
+                &linux
+            ),
+            winner("a{arch=x86_64}.conf")
+        );
+        assert!(matches!(
+            pick(&["a.conf", "a{os!=macos}.conf", "a{host!=y}.conf"], &linux),
+            Selection::Ambiguous(tied) if tied == ["a{os!=macos}.conf", "a{host!=y}.conf"]
+        ));
+        assert!(matches!(
+            pick(&["a{host=x}.conf", "a{host=x+os!=macos}.conf"], &linux),
             Selection::Ambiguous(_)
         ));
         let paths = [
