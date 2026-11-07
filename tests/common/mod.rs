@@ -1,4 +1,4 @@
-//! Hermetic harness: per-command environment only, never `set_var`.
+//! Hermetic harness: environment is set per command; the process environment is never mutated.
 #![allow(dead_code)]
 // reason: test-only helpers; clippy.toml exempts expect only inside #[test] fns, not shared helpers.
 #![allow(clippy::expect_used)]
