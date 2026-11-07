@@ -245,6 +245,16 @@ pub fn create_private_dir(path: &Path, dry_run: bool) -> io::Result<()> {
     DirBuilder::new().recursive(true).mode(0o700).create(path)
 }
 
+/// A 0700 directory under `base`, removed when the value is dropped. tempfile's default mode would
+/// follow the umask and could leave rendered or decrypted content readable by others.
+pub fn private_temp_dir(prefix: &str, base: &Path) -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir_in(base)
+        .with_context(|| format!("cannot create a temp dir in {}", base.display()))
+}
+
 /// Writes `bytes` to a temp file beside `path`, fsyncs it, renames it over `path` and fsyncs the
 /// directory. The final mode is exactly `mode`, whatever the umask. `path`'s directory must exist.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
@@ -698,6 +708,18 @@ mod tests {
         create_private_dir(&dir, false).unwrap();
         let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn private_temp_dirs_are_0700_and_removed_on_drop() {
+        let tmp = TempDir::new().unwrap();
+        let dir = private_temp_dir("dotman-test-", tmp.path()).unwrap();
+        let path = dir.path().to_path_buf();
+        assert!(path.starts_with(tmp.path()));
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        drop(dir);
+        assert!(!path.exists());
     }
 
     #[test]

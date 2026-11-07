@@ -3,6 +3,7 @@
 //! Maps are `BTreeMap`s so saving is stable and a load/save round trip of a saved file is
 //! byte-identical.
 
+use crate::engine::recorded_mode;
 use crate::paths::write_atomic;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -126,8 +127,13 @@ pub struct SystemFile {
 
 impl RepoConfig {
     /// Parses `.dotman.toml` text. Unknown keys are an error, because saving would drop them from a tracked file.
+    /// A malformed `[modes]` value fails here rather than at write time, so dry runs catch it too.
     pub fn parse(text: &str) -> Result<Self> {
-        Ok(toml::from_str(text)?)
+        let config: Self = toml::from_str(text)?;
+        for key in config.modes.keys() {
+            recorded_mode(&config.modes, key)?;
+        }
+        Ok(config)
     }
 
     /// Loads the file; a missing file gives the defaults.
@@ -187,6 +193,18 @@ mod tests {
     fn unknown_keys_are_rejected() {
         assert!(RepoConfig::parse("surprise = 1").is_err());
         assert!(RepoConfig::parse("[ignore]\nglobs = []").is_err());
+    }
+
+    #[test]
+    fn malformed_modes_are_rejected_for_files_and_dirs() {
+        for bad in [
+            "[modes]\n\".bashrc\" = \"rwx\"\n",
+            "[modes]\n\".ssh/\" = \"0o700\"\n",
+        ] {
+            let err = format!("{:#}", RepoConfig::parse(bad).unwrap_err());
+            assert!(err.contains("[modes] entry"), "{err}");
+        }
+        assert!(RepoConfig::parse("[modes]\n\".ssh/\" = \"0700\"\n\"x\" = \"4755\"\n").is_ok());
     }
 
     #[test]

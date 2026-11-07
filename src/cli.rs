@@ -34,7 +34,7 @@ pub struct Cli {
 /// Available subcommands.
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Create the dotman repo, or set its remote
+    /// Create the dotman repo or set its remote, or clone a repo and apply it
     Init(InitArgs),
     /// Start managing files or directories
     Add(AddArgs),
@@ -44,6 +44,10 @@ pub enum Commands {
     List(ListArgs),
     /// Compare $HOME, the repo and the last applied state
     Status(StatusArgs),
+    /// Write the repo's files into $HOME
+    Apply(ApplyArgs),
+    /// Show how $HOME differs from the repo
+    Diff(DiffArgs),
     /// Generate shell completion scripts
     Completion {
         /// Shell to generate completions for
@@ -55,12 +59,63 @@ pub enum Commands {
 /// Arguments of `dot init`.
 #[derive(Args)]
 pub struct InitArgs {
+    /// Git URL or local path of an existing dotman repo to clone and apply
+    #[arg(value_name = "URL_OR_PATH")]
+    pub source: Option<String>,
     /// Set or replace the `origin` remote
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", conflicts_with = "source")]
     pub remote: Option<String>,
+    /// Keep the local version of files that differ from the repo
+    #[arg(long, requires = "source", conflicts_with = "take_repo")]
+    pub keep_local: bool,
+    /// Take the repo version of files that differ, after backing them up
+    #[arg(long, requires = "source")]
+    pub take_repo: bool,
     /// Show what would be created and change nothing
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Answers to `apply`'s prompts, given in advance.
+#[derive(Args, Clone, Copy, Debug, Default)]
+// reason: independent answers to separate prompts, not a state machine
+#[allow(clippy::struct_excessive_bools)]
+pub struct Decisions {
+    /// Keep the local version of conflicting and existing files
+    #[arg(long, conflicts_with = "take_repo")]
+    pub keep_local: bool,
+    /// Take the repo version of conflicting and existing files, after backing them up
+    #[arg(long)]
+    pub take_repo: bool,
+    /// Stop managing files deleted locally; they stay deleted
+    #[arg(long, conflicts_with = "restore_deleted")]
+    pub forget_deleted: bool,
+    /// Write files deleted locally back from the repo
+    #[arg(long)]
+    pub restore_deleted: bool,
+}
+
+/// Arguments of `dot apply`.
+#[derive(Args)]
+pub struct ApplyArgs {
+    /// Apply only these files or directories; every managed path when none are given
+    pub paths: Vec<PathBuf>,
+    /// Answers that replace the prompts, which a non-interactive run never shows.
+    #[command(flatten)]
+    pub decisions: Decisions,
+    /// Rewrite files in place when a rename cannot replace them, as on a bind mount
+    #[arg(long)]
+    pub in_place: bool,
+    /// Show what would be written and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments of `dot diff`.
+#[derive(Args)]
+pub struct DiffArgs {
+    /// Compare only these files or directories; every managed path when none are given
+    pub paths: Vec<PathBuf>,
 }
 
 /// Arguments of `dot add`.

@@ -2,16 +2,16 @@
 
 use crate::config::Config;
 use crate::git::Git;
-use crate::paths::{Env, Paths, validate_key};
+use crate::paths::{Env, Paths, derive_key, validate_key};
 use crate::repo_config::RepoConfig;
 use crate::state::{Kind, State};
 use crate::sys;
 use anyhow::{Context as _, Result, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// Leftover temp files of the write engine; never managed.
@@ -101,6 +101,26 @@ impl Context {
             found.insert(key.to_owned(), kind);
         }
         Ok(found)
+    }
+
+    /// The `keys` under the user-supplied `inputs`, or all of them when there are no inputs. An
+    /// input that matches no key is an error, so a mistyped path is never a silent no-op.
+    pub fn select(&self, inputs: &[PathBuf], keys: BTreeSet<String>) -> Result<BTreeSet<String>> {
+        if inputs.is_empty() {
+            return Ok(keys);
+        }
+        let cwd = std::env::current_dir().context("cannot read the current directory")?;
+        let mut selected = BTreeSet::new();
+        for input in inputs {
+            let home_real = self.paths.home_real.as_deref();
+            let filter = derive_key(input, &cwd, &self.paths.home, home_real)?;
+            let under: Vec<&String> = keys.iter().filter(|k| is_under(k, &filter)).collect();
+            if under.is_empty() {
+                bail!("{filter} is not managed");
+            }
+            selected.extend(under.into_iter().cloned());
+        }
+        Ok(selected)
     }
 }
 

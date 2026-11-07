@@ -188,6 +188,52 @@ impl TestEnv {
         unix_symlink(target, full).expect("create symlink");
     }
 
+    /// Contents of `path` (relative to HOME, or absolute).
+    pub fn read(&self, path: impl AsRef<Path>) -> Vec<u8> {
+        fs::read(self.home().join(path)).expect("read file")
+    }
+
+    /// Writes into the repo worktree directly, as a pull from upstream would.
+    pub fn write_repo(&self, key: &str, bytes: &[u8]) {
+        let path = self.repo().join(key);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create repo dirs");
+        }
+        fs::write(path, bytes).expect("write repo file");
+    }
+
+    /// Contents and mode of every backup of `key`, across all backup runs.
+    pub fn backups(&self, key: &str) -> Vec<(Vec<u8>, u32)> {
+        let Ok(runs) = fs::read_dir(self.state_dir().join("backups")) else {
+            return Vec::new();
+        };
+        runs.map(|run| run.expect("read backups").path().join(key))
+            .filter(|path| path.exists())
+            .map(|path| (fs::read(&path).expect("read backup"), mode_of(&path)))
+            .collect()
+    }
+
+    /// Commits the repo worktree with plain git and pushes it to the remote's `main`, which
+    /// becomes the remote's HEAD so a clone checks it out.
+    pub fn push_repo(&self) {
+        let repo = self.repo().to_string_lossy().into_owned();
+        let remote = self.remote_path().to_string_lossy().into_owned();
+        self.git(&["-C", &repo, "add", "-A", "-f"]);
+        self.git(&["-C", &repo, "commit", "-q", "-m", "test"]);
+        self.git(&["-C", &repo, "push", "-q", &remote, "HEAD:refs/heads/main"]);
+        self.git(&[
+            "--git-dir",
+            &remote,
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+    }
+
+    pub fn remote_url(&self) -> String {
+        format!("file://{}", self.remote_path().display())
+    }
+
     /// The dotman repo under the default `XDG_DATA_HOME`.
     pub fn repo(&self) -> PathBuf {
         self.xdg_data().join("dotman")

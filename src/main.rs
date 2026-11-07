@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
-use dotman::commands::{add, forget, init, list, status};
+use dotman::commands::{Outcome, add, apply, diff, forget, init, list, status};
 use dotman::output::{self, Verbosity};
 use dotman::{paths, sys};
 use std::io;
@@ -38,21 +38,28 @@ fn main() {
         std::process::exit(1);
     }
 
+    let done = |result: anyhow::Result<()>| result.map(|()| Outcome::Done);
     let result = match cli.command {
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut io::stdout());
-            Ok(())
+            Ok(Outcome::Done)
         }
         Commands::Init(args) => init::run(&args),
-        Commands::Add(args) => add::run(&args),
-        Commands::Forget(args) => forget::run(&args),
-        Commands::List(args) => list::run(&args),
-        Commands::Status(args) => status::run(&args),
+        Commands::Add(args) => done(add::run(&args)),
+        Commands::Forget(args) => done(forget::run(&args)),
+        Commands::List(args) => done(list::run(&args)),
+        Commands::Status(args) => done(status::run(&args)),
+        Commands::Apply(args) => apply::run(&args),
+        Commands::Diff(args) => done(diff::run(&args, cli.no_pager)),
     };
-    if let Err(e) = result {
-        output::error(&format!("{e:#}"));
-        std::process::exit(1);
+    match result {
+        Ok(Outcome::Done) => {}
+        Ok(Outcome::Attention) => std::process::exit(3),
+        Err(e) => {
+            output::error(&format!("{e:#}"));
+            std::process::exit(1);
+        }
     }
 }

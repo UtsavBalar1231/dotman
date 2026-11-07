@@ -5,6 +5,8 @@ use crate::context::{Context, is_real_dir, is_under};
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::derive_key;
+use crate::repo_config::RepoConfig;
+use crate::state::State;
 use anyhow::{Context as _, Result, bail};
 use std::collections::BTreeSet;
 use std::fs;
@@ -52,7 +54,23 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
         return Ok(());
     }
 
-    for key in &gone {
+    remove_keys(&ctx, &mut repo_config, &mut state, &gone)?;
+    repo_config.dirs.paths.retain(|d| !dirs.contains(d));
+
+    repo_config.save(&ctx.repo_config_file(), false)?;
+    state.save(&ctx.paths.state_file(), false)?;
+    Ok(())
+}
+
+/// Removes `keys` from the worktree, `[modes]` and the state, then drops `dir/` modes that no
+/// remaining key lies under. `[dirs]` entries and `$HOME` are left alone.
+pub(crate) fn remove_keys(
+    ctx: &Context,
+    repo_config: &mut RepoConfig,
+    state: &mut State,
+    keys: &BTreeSet<String>,
+) -> Result<()> {
+    for key in keys {
         let path = ctx.paths.repo.join(key);
         match fs::remove_file(&path) {
             Ok(()) => remove_empty_parents(&ctx.paths.repo, &path),
@@ -62,15 +80,10 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
         repo_config.modes.remove(key);
         state.files.remove(key);
     }
-    repo_config.dirs.paths.retain(|d| !dirs.contains(d));
-
     let remaining = ctx.managed()?;
     repo_config.modes.retain(|key, _| {
         !key.ends_with('/') || remaining.keys().any(|k| k.starts_with(key.as_str()))
     });
-
-    repo_config.save(&ctx.repo_config_file(), false)?;
-    state.save(&ctx.paths.state_file(), false)?;
     Ok(())
 }
 
