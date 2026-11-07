@@ -123,6 +123,13 @@ fn absolute_symlink_targets_become_relative_and_dangling_links_are_skipped() {
         env.token_of("list", ".config/inside").as_deref(),
         Some("symlink")
     );
+    for key in [".config/inside", ".config/outside", ".config/relative"] {
+        assert_eq!(
+            env.token_of("status", key).as_deref(),
+            Some("clean"),
+            "{key}"
+        );
+    }
 }
 
 #[test]

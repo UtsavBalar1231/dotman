@@ -12,7 +12,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use xxhash_rust::xxh3::xxh3_128;
 
 // Symlink permission bits are ignored on Linux and depend on the umask on macOS, so every
@@ -101,6 +101,52 @@ pub enum Obstacle {
 /// Reads H for `key` below `home`.
 pub fn observe(home: &Path, key: &str) -> Result<Home> {
     Ok(read_node(home, key)?.home())
+}
+
+/// Like [`observe`], but a symlink's tuple is computed from [`portable_link_target`], so an
+/// absolute in-`$HOME` link compares equal to the relative form `add` stores.
+pub fn observe_portable(home: &Path, home_real: Option<&Path>, key: &str) -> Result<Home> {
+    Ok(match read_node(home, key)? {
+        Node::Symlink(target) => Home::Present(Tuple::of_link(&portable_link_target(
+            &target, key, home, home_real,
+        ))),
+        node => node.home(),
+    })
+}
+
+/// An absolute target inside `$HOME` becomes relative to the link's parent, so the repo is portable
+/// across home directories. Anything else, `..` components included, is kept verbatim.
+#[must_use]
+pub fn portable_link_target(
+    target: &Path,
+    key: &str,
+    home: &Path,
+    home_real: Option<&Path>,
+) -> PathBuf {
+    if !target.is_absolute() {
+        return target.to_path_buf();
+    }
+    let Some(inside) = std::iter::once(home)
+        .chain(home_real)
+        .find_map(|root| target.strip_prefix(root).ok())
+    else {
+        return target.to_path_buf();
+    };
+    if inside
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return target.to_path_buf();
+    }
+    let mut relative = PathBuf::new();
+    for _ in parents(key) {
+        relative.push("..");
+    }
+    relative.push(inside);
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+    relative
 }
 
 pub(crate) enum Node {
@@ -246,6 +292,46 @@ mod tests {
         let mut entry = link.entry(".link");
         entry.mode = "0755".to_owned();
         assert_eq!(Tuple::from_entry(&entry).unwrap(), link);
+    }
+
+    #[test]
+    fn absolute_targets_inside_home_become_relative() {
+        let home = Path::new("/home/u");
+        let rel = |t: &str, key: &str| portable_link_target(Path::new(t), key, home, None);
+        assert_eq!(
+            rel("/home/u/.config/a", ".local/l"),
+            Path::new("../.config/a")
+        );
+        assert_eq!(rel("/home/u/x", "l"), Path::new("x"));
+        assert_eq!(rel("/home/u", ".l/k"), Path::new(".."));
+        assert_eq!(rel("/home/u", "l"), Path::new("."));
+        assert_eq!(rel("/etc/hosts", "l"), Path::new("/etc/hosts"));
+        assert_eq!(rel("/home/u/../v/x", "l"), Path::new("/home/u/../v/x"));
+        assert_eq!(rel("../x", "a/l"), Path::new("../x"));
+    }
+
+    #[test]
+    fn observe_portable_equates_absolute_and_relative_links() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join(".config")).unwrap();
+        fs::write(home.join(".bashrc"), b"x").unwrap();
+        symlink(home.join(".bashrc"), home.join(".config/abs")).unwrap();
+        symlink("../.bashrc", home.join(".config/rel")).unwrap();
+        symlink("/etc/hostname", home.join(".config/out")).unwrap();
+
+        let abs = observe_portable(&home, None, ".config/abs").unwrap();
+        let rel = observe_portable(&home, None, ".config/rel").unwrap();
+        assert_eq!(abs, rel);
+        assert_eq!(abs, Home::Present(Tuple::of_link(Path::new("../.bashrc"))));
+        assert_eq!(
+            observe_portable(&home, None, ".config/out").unwrap(),
+            Home::Present(Tuple::of_link(Path::new("/etc/hostname")))
+        );
+        assert_eq!(
+            observe_portable(&home, None, ".bashrc").unwrap(),
+            observe(&home, ".bashrc").unwrap()
+        );
     }
 
     #[test]

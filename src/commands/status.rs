@@ -3,7 +3,7 @@
 use crate::cli::StatusArgs;
 use crate::context::{Context, is_under};
 use crate::engine::status::{Row, Source, Worktree, classify};
-use crate::engine::{Tuple, observe};
+use crate::engine::{Tuple, observe_portable};
 use crate::output;
 use crate::paths::derive_key;
 use anyhow::{Context as _, Result};
@@ -59,7 +59,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
             continue;
         }
         let r = worktree.get(&key);
-        let h = observe(&ctx.paths.home, &key);
+        let h = observe_portable(&ctx.paths.home, ctx.paths.home_real.as_deref(), &key);
         let s = state.files.get(&key).map(Tuple::from_entry).transpose();
         let label = match (&r, &h, &s) {
             (Ok(r), Ok(h), Ok(s)) => match classify(r.as_ref().map(|e| &e.tuple), h, s.as_ref()) {

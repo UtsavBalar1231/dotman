@@ -5,7 +5,7 @@
 use crate::cli::AddArgs;
 use crate::context::{Context, TEMP_PREFIX};
 use crate::engine::status::{Source, Worktree};
-use crate::engine::{Node, parents, read_node};
+use crate::engine::{Node, parents, portable_link_target, read_node};
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::{
@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 // Binary detection looks at this many leading bytes, as git does.
@@ -433,7 +433,7 @@ fn commit_one(
             record_mode(repo_config, key, mode & 0o777, stored);
         }
         (Leaf::Link, Node::Symlink(link)) => {
-            let relative = stored_target(&link, key, home, ctx.paths.home_real.as_deref());
+            let relative = portable_link_target(&link, key, home, ctx.paths.home_real.as_deref());
             replace_with_symlink(&target, &relative)?;
             repo_config.modes.remove(key);
         }
@@ -513,54 +513,9 @@ fn replace_with_symlink(path: &Path, target: &Path) -> Result<()> {
     bail!("cannot find a free temp name in {}", dir.display())
 }
 
-// An absolute target inside `$HOME` becomes relative to the link's parent, so the repo is portable
-// across home directories. Anything else, `..` components included, is kept verbatim.
-fn stored_target(target: &Path, key: &str, home: &Path, home_real: Option<&Path>) -> PathBuf {
-    if !target.is_absolute() {
-        return target.to_path_buf();
-    }
-    let Some(inside) = std::iter::once(home)
-        .chain(home_real)
-        .find_map(|root| target.strip_prefix(root).ok())
-    else {
-        return target.to_path_buf();
-    };
-    if inside
-        .components()
-        .any(|c| !matches!(c, Component::Normal(_)))
-    {
-        return target.to_path_buf();
-    }
-    let mut relative = PathBuf::new();
-    for _ in parents(key) {
-        relative.push("..");
-    }
-    relative.push(inside);
-    if relative.as_os_str().is_empty() {
-        relative.push(".");
-    }
-    relative
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn absolute_targets_inside_home_become_relative() {
-        let home = Path::new("/home/u");
-        let rel = |t: &str, key: &str| stored_target(Path::new(t), key, home, None);
-        assert_eq!(
-            rel("/home/u/.config/a", ".local/l"),
-            Path::new("../.config/a")
-        );
-        assert_eq!(rel("/home/u/x", "l"), Path::new("x"));
-        assert_eq!(rel("/home/u", ".l/k"), Path::new(".."));
-        assert_eq!(rel("/home/u", "l"), Path::new("."));
-        assert_eq!(rel("/etc/hosts", "l"), Path::new("/etc/hosts"));
-        assert_eq!(rel("/home/u/../v/x", "l"), Path::new("/home/u/../v/x"));
-        assert_eq!(rel("../x", "a/l"), Path::new("../x"));
-    }
 
     #[test]
     fn ignore_patterns_match_like_gitignore_globs() {
