@@ -6,8 +6,13 @@
 #![allow(clippy::missing_errors_doc)]
 
 pub mod cli;
+pub mod config;
 pub mod git;
+pub mod lock;
 pub mod output;
+pub mod paths;
+pub mod repo_config;
+pub mod state;
 #[allow(unsafe_code)]
 pub mod sys;
 

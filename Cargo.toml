@@ -52,6 +52,7 @@ fs4 = "0.13"
 tempfile = "3.23"
 libc = "0.2"
 glob = "0.3.3"
+unicode-normalization = "0.1.26"
 
 shell-words = "1.1"
 tracing = "0.1"

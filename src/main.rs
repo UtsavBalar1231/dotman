@@ -2,6 +2,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
 use dotman::output::{self, Verbosity};
+use dotman::{paths, sys};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
@@ -26,6 +27,15 @@ fn main() {
     } else {
         Verbosity::Normal
     });
+
+    if let Err(e) = paths::ensure_not_root(
+        sys::geteuid(),
+        cli.allow_root,
+        std::env::var_os("DOTMAN_ALLOW_ROOT").as_deref(),
+    ) {
+        output::error(&format!("{e:#}"));
+        std::process::exit(1);
+    }
 
     match cli.command {
         Commands::Completion { shell } => {
