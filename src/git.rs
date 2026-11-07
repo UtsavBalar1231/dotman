@@ -361,6 +361,31 @@ impl Git {
         Ok(out.stdout)
     }
 
+    /// The commit `rev` names, or `None` when it is not a revision.
+    pub fn resolve_commit(&self, rev: &str) -> Result<Option<String>> {
+        if rev.starts_with('-') {
+            return Ok(None);
+        }
+        self.optional(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
+    }
+
+    /// The git file mode of `path` in `rev` (`100644`, `100755`, `120000`); `None` when absent.
+    pub fn tree_mode(&self, rev: &str, path: &str) -> Result<Option<String>> {
+        let out = self.run(&["ls-tree", "-z", rev, "--", path])?;
+        Ok(out
+            .stdout
+            .split(|b| *b == 0)
+            .filter_map(|record| record.split_at_checked(record.iter().position(|b| *b == b'\t')?))
+            .find(|(_, rest)| rest.get(1..) == Some(path.as_bytes()))
+            .and_then(|(meta, _)| meta.split(|b| *b == b' ').next())
+            .map(|mode| String::from_utf8_lossy(mode).into_owned()))
+    }
+
     /// Commits reachable from `HEAD`, newest first, touching `paths` when given.
     pub fn log(&self, paths: &[&str], limit: Option<usize>) -> Result<Vec<LogEntry>> {
         if self.head()?.is_none() {

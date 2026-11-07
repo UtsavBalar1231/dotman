@@ -1,0 +1,145 @@
+mod common;
+
+use common::TestEnv;
+
+/// A repo with `.a` committed as "one\n" on 2020-01-01 and "two\n" by `sync` today.
+fn two_commits() -> TestEnv {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"one\n", 0o644);
+    env.ok(&["add", ".a"]);
+    commit_at(&env, "2020-01-01T12:00:00Z", "first");
+    env.write(".a", b"two\n", 0o644);
+    env.ok(&["sync"]);
+    env
+}
+
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+/// Commits the repo worktree with the given author and committer date.
+fn commit_at(env: &TestEnv, date: &str, message: &str) {
+    let repo = env.repo().to_string_lossy().into_owned();
+    let dated = |args: &[&str]| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["-C", &repo]).args(args);
+        cmd.env("HOME", env.home())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date);
+        let out = cmd.output().expect("run git");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    dated(&["add", "-A", "-f"]);
+    dated(&["commit", "-q", "-m", message]);
+}
+
+fn token(env: &TestEnv, key: &str) -> Option<String> {
+    env.token_of("status", key)
+}
+
+#[test]
+fn restore_from_an_earlier_commit_backs_up_and_leaves_the_repo_alone() {
+    let env = two_commits();
+    env.write(".a", b"three\n", 0o644);
+    env.ok(&["sync"]);
+    let head = env.git(&["-C", &env.repo().to_string_lossy(), "rev-parse", "HEAD"]);
+    assert_eq!(token(&env, ".a").as_deref(), Some("clean"));
+    env.ok(&["restore", ".a", "--from", "HEAD~1"]);
+    assert_eq!(env.read(".a"), b"two\n");
+    assert!(
+        env.backups(".a")
+            .iter()
+            .any(|(bytes, _)| bytes == b"three\n")
+    );
+    assert_eq!(token(&env, ".a").as_deref(), Some("changed-locally"));
+    env.ok(&["sync"]);
+    let repo = env.repo().to_string_lossy().into_owned();
+    assert_eq!(env.git(&["-C", &repo, "show", "HEAD:.a"]), "two\n");
+    assert_ne!(env.git(&["-C", &repo, "rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn restore_from_a_date_between_commits_picks_the_earlier_one() {
+    let env = two_commits();
+    env.ok(&["restore", ".a", "--from", "2020-02-01"]);
+    assert_eq!(env.read(".a"), b"one\n");
+}
+
+#[test]
+fn a_dry_run_restore_changes_nothing() {
+    let env = two_commits();
+    let before = env.four_trees();
+    env.ok(&["restore", ".a", "--from", "HEAD~1", "--dry-run"]);
+    assert_eq!(env.four_trees(), before);
+}
+
+#[test]
+fn restore_refuses_an_unmanaged_path() {
+    let env = two_commits();
+    env.write(".b", b"x", 0o644);
+    assert!(env.fails(&["restore", ".b"]).contains("not managed"));
+}
+
+#[test]
+fn log_filters_by_directory() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    env.write(".config/x/c", b"c\n", 0o644);
+    env.ok(&["add", ".config/x/c"]);
+    env.ok(&["sync"]);
+    let out = env.run(&["log", ".config/"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("x/c"), "{text}");
+    assert!(text.contains("ago"), "{text}");
+    let all = env.run(&["log"]);
+    assert_eq!(String::from_utf8_lossy(&all.stdout).lines().count(), 2);
+    let one = env.run(&["log", "-n", "1"]);
+    assert_eq!(String::from_utf8_lossy(&one.stdout).lines().count(), 1);
+}
+
+#[test]
+fn log_notes_a_shallow_history() {
+    let env = two_commits();
+    let source = env.root().join("source");
+    let url = format!("file://{}", env.repo().display());
+    env.git(&[
+        "clone",
+        "-q",
+        "--depth",
+        "1",
+        &url,
+        &source.to_string_lossy(),
+    ]);
+    let other = env.second_device();
+    other.ok(&["init", &source.to_string_lossy()]);
+    let out = other.run(&["log"]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("history is shallow; run `dot git fetch --unshallow`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn git_passes_arguments_and_the_exit_code_through() {
+    let env = two_commits();
+    assert_eq!(
+        env.run(&["git", "rev-parse", "--verify", "nosuch"])
+            .status
+            .code(),
+        Some(128)
+    );
+    let out = env.run(&["git", "log", "--oneline", "-n", "1"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(".a"));
+}

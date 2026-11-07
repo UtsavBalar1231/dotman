@@ -1,7 +1,9 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
-use dotman::commands::{Outcome, add, apply, diff, forget, init, list, status, sync};
+use dotman::commands::{
+    Outcome, add, apply, diff, forget, git, init, list, log, restore, status, sync,
+};
 use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
 use dotman::{paths, sys};
@@ -55,6 +57,9 @@ fn main() {
         Commands::Apply(args) => apply::run(&args),
         Commands::Diff(args) => done(diff::run(&args, cli.no_pager)),
         Commands::Sync(args) => sync::run(&args),
+        Commands::Log(args) => done(log::run(&args)),
+        Commands::Restore(args) => done(restore::run(&args)),
+        Commands::Git(args) => git::run(&args).map(|code| -> Outcome { std::process::exit(code) }),
     };
     match result {
         Ok(Outcome::Done) => {}

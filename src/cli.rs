@@ -2,6 +2,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Top-level arguments for `dot`.
@@ -50,6 +51,12 @@ pub enum Commands {
     Diff(DiffArgs),
     /// Capture local changes, commit, pull, apply what arrived and push
     Sync(SyncArgs),
+    /// Show the repo's history
+    Log(LogArgs),
+    /// Write an earlier version of a file into $HOME, keeping the current one as a backup
+    Restore(RestoreArgs),
+    /// Run git in the repo
+    Git(GitArgs),
     /// Generate shell completion scripts
     Completion {
         /// Shell to generate completions for
@@ -175,4 +182,40 @@ pub struct StatusArgs {
     /// Print `<status>\t<key>\0` records for every managed path
     #[arg(long)]
     pub porcelain: bool,
+}
+
+/// Arguments of `dot log`.
+#[derive(Args)]
+pub struct LogArgs {
+    /// Files, directories or globs to filter by; a trailing `/` means the whole subtree
+    pub paths: Vec<String>,
+    /// Show at most this many commits
+    #[arg(short = 'n', long, value_name = "N")]
+    pub max_count: Option<usize>,
+}
+
+/// Arguments of `dot restore`.
+#[derive(Args)]
+pub struct RestoreArgs {
+    /// The managed file or symlink to restore
+    pub path: PathBuf,
+    /// Revision or date to restore from; `HEAD` when omitted
+    #[arg(long, value_name = "REV_OR_DATE")]
+    pub from: Option<String>,
+    /// Show what would be written and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments of `dot git`.
+#[derive(Args)]
+#[command(disable_help_flag = true)]
+pub struct GitArgs {
+    /// Passed to git as given
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "ARGS"
+    )]
+    pub args: Vec<OsString>,
 }

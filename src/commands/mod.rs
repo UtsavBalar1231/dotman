@@ -4,8 +4,11 @@ pub mod add;
 pub mod apply;
 pub mod diff;
 pub mod forget;
+pub mod git;
 pub mod init;
 pub mod list;
+pub mod log;
+pub mod restore;
 pub mod status;
 pub mod sync;
 
