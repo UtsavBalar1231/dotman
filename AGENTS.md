@@ -26,7 +26,7 @@ packaging/         per-distro recipes, each with its own version string
 | Path validation | `DotmanContext::validate_user_path` in `src/lib.rs` | It is an inherent method, not part of the `CommandContext` trait |
 
 ## House rules
-- New code should pass `just lint-strict`, which is the clippy set the pre-commit hook runs. `just lint` is pedantic + nursery, and CI runs only `-D warnings`. The existing code fails every tier on recent nightly clippy, so check whether a lint error predates your change before fixing it.
+- New code should pass `just lint-strict`, which is the clippy set the pre-commit hook runs. `just lint` is pedantic + nursery, and CI runs only `-D warnings`, so a change can pass CI and still be rejected at commit time.
 - No `.unwrap()`, `.expect()` or `panic!` in `src/`, because lint-strict denies them. `clippy.toml` allows them in tests only.
 - Every item needs a `///` doc comment, including private items and `pub mod` lines. `src/lib.rs` warns on `missing_docs` and `missing_docs_in_private_items`, and lint runs with `-D warnings`.
 - Status output goes through `crate::output` (`success`, `info`, `warning`, `error`, `start_progress`), which writes to stderr in the git convention. stdout is for command output.

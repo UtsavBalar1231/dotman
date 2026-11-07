@@ -198,7 +198,7 @@ strip_dangerous_permissions = true
 
         // The hash should be different
         let (_, entry) = &staged[0];
-        assert!(entry.size == 16); // "modified content" length
+        assert_eq!(entry.size, 16); // "modified content" length
 
         Ok(())
     }
@@ -1270,8 +1270,7 @@ mod reset_command_tests {
         let is_staged = index_after_readd.staged_entries.contains_key(&test_file)
             || test_file
                 .strip_prefix(temp_dir.path())
-                .ok()
-                .is_some_and(|rel| index_after_readd.staged_entries.contains_key(rel));
+                .is_ok_and(|rel| index_after_readd.staged_entries.contains_key(rel));
 
         assert!(is_staged, "Modified file should be staged after re-adding");
 

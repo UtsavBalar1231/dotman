@@ -92,7 +92,7 @@ impl SnapshotManager {
         let snapshot_path = self
             .repo_path
             .join("commits")
-            .join(format!("{}.zst", &snapshot_id));
+            .join(format!("{snapshot_id}.zst"));
 
         if let Some(parent) = snapshot_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -420,7 +420,7 @@ impl SnapshotManager {
             let object_path = self
                 .repo_path
                 .join("objects")
-                .join(format!("{}.zst", &snapshot_file.content_hash));
+                .join(format!("{}.zst", snapshot_file.content_hash));
 
             // Check if object exists
             if !object_path.exists() {

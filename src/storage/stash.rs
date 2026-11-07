@@ -129,7 +129,7 @@ impl StashManager {
     pub fn save_stash(&self, entry: &StashEntry) -> Result<()> {
         self.init_stash_dirs()?;
 
-        let entry_path = self.entries_dir().join(format!("{}.zst", &entry.id));
+        let entry_path = self.entries_dir().join(format!("{}.zst", entry.id));
 
         // Serialize and compress
         let serialized = serialization::serialize(entry)?;

@@ -570,35 +570,31 @@ fn apply_commit_changes(
                 // Mark as deleted in index
                 index.mark_deleted(&path);
             }
-            // File exists in both (modified)
-            (_, Some(commit_file), Some(parent_file)) => {
-                // Only apply if changed from parent
-                if commit_file.hash != parent_file.hash {
-                    let target_path = if path.is_relative() {
-                        home_dir.join(&path)
-                    } else {
-                        path.clone()
-                    };
+            // File exists in both and changed from parent (modified)
+            (_, Some(commit_file), Some(parent_file)) if commit_file.hash != parent_file.hash => {
+                let target_path = if path.is_relative() {
+                    home_dir.join(&path)
+                } else {
+                    path.clone()
+                };
 
-                    snapshot_manager
-                        .restore_file_content(&commit_file.content_hash, &target_path)?;
+                snapshot_manager.restore_file_content(&commit_file.content_hash, &target_path)?;
 
-                    // Stage the file
-                    let metadata = fs::metadata(&target_path)?;
-                    let entry = FileEntry {
-                        path: path.clone(),
-                        hash: commit_file.hash.clone(),
-                        size: metadata.len(),
-                        modified: metadata
-                            .modified()?
-                            .duration_since(std::time::UNIX_EPOCH)?
-                            .as_secs()
-                            .cast_signed(),
-                        mode: commit_file.mode,
-                        cached_hash: None,
-                    };
-                    index.stage_entry(entry);
-                }
+                // Stage the file
+                let metadata = fs::metadata(&target_path)?;
+                let entry = FileEntry {
+                    path: path.clone(),
+                    hash: commit_file.hash.clone(),
+                    size: metadata.len(),
+                    modified: metadata
+                        .modified()?
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_secs()
+                        .cast_signed(),
+                    mode: commit_file.mode,
+                    cached_hash: None,
+                };
+                index.stage_entry(entry);
             }
             _ => {
                 // No action needed for other cases
@@ -694,13 +690,13 @@ fn create_rebased_commit_for_branch(
         ref_manager.set_head_to_branch(
             branch,
             Some("rebase"),
-            Some(&format!("rebase: {}", &commit.message)),
+            Some(&format!("rebase: {}", commit.message)),
         )?;
     } else {
         ref_manager.set_head_to_commit(
             &commit_id,
             Some("rebase"),
-            Some(&format!("rebase: {}", &commit.message)),
+            Some(&format!("rebase: {}", commit.message)),
         )?;
     }
 

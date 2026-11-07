@@ -81,9 +81,7 @@ mod num_cpus {
 
     /// Cached number of available CPU cores
     static NUM_CPUS: LazyLock<usize> = LazyLock::new(|| {
-        std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(1)
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
     });
 
     /// Get the number of available CPU cores

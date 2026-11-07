@@ -321,7 +321,7 @@ pub fn execute(
             })
             .collect();
 
-        snapshot_data.sort_by(|a, b| b.1.commit.timestamp.cmp(&a.1.commit.timestamp));
+        snapshot_data.sort_by_key(|(_, snap)| std::cmp::Reverse(snap.commit.timestamp));
 
         let display_limit = limit.min(snapshot_data.len());
 

@@ -168,7 +168,7 @@ fn test_concurrent_stage_commit_cycle() -> Result<()> {
 
     // Verify final state
     let total = index.staged_entries().len();
-    assert!(total == 0); // All should be committed, so staged should be empty
+    assert_eq!(total, 0); // All should be committed, so staged should be empty
     assert!(!index.has_staged_changes());
 
     Ok(())
@@ -377,12 +377,12 @@ fn test_concurrent_bulk_operations() -> Result<()> {
     // Final state should be consistent
     index.commit_staged();
     let total = index.staged_entries().len();
-    assert!(total == 0); // All should be committed
+    assert_eq!(total, 0); // All should be committed
 
     // Verify no internal corruption in staged entries
     let all_entries = index.staged_entries();
     for (_path, entry) in all_entries {
-        assert!(!entry.hash.is_empty());
+        assert!(!entry.hash.is_empty(), "staged entry has an empty hash");
         assert!(entry.mode > 0);
     }
 

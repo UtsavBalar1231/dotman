@@ -206,13 +206,12 @@ pub fn get_current_timestamp() -> i64 {
 pub fn get_precise_timestamp() -> (i64, u32) {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| {
+        .map_or((0, 0), |d| {
             (
                 i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
                 d.subsec_nanos(),
             )
         })
-        .unwrap_or((0, 0))
 }
 
 /// Retrieves the current system username, falling back to "unknown" if not found.

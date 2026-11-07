@@ -647,9 +647,7 @@ impl Config {
 /// of querying the system's available parallelism. Falls back to 1 if the
 /// query fails.
 static NUM_CPUS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
-    std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 });
 
 /// Internal module for CPU count queries.

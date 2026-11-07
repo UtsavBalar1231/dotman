@@ -83,7 +83,7 @@ pub fn execute_verbose(
     } else if let Some(commit) = ref_manager.get_head_commit()? {
         println!(
             "HEAD detached at {}",
-            &commit[..8.min(commit.len())].yellow()
+            commit[..8.min(commit.len())].yellow()
         );
     }
 
