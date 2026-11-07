@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod engine;
 pub mod git;
 pub mod lock;
 pub mod output;
