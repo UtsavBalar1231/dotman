@@ -86,24 +86,7 @@ pub fn start_progress(title: &str, total: usize) -> Progress {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_verbosity_quiet() {
-        set_verbosity(Verbosity::Quiet);
-        assert_eq!(get_verbosity(), Verbosity::Quiet);
-    }
-
-    #[test]
-    fn test_verbosity_normal() {
-        set_verbosity(Verbosity::Normal);
-        assert_eq!(get_verbosity(), Verbosity::Normal);
-    }
-
-    #[test]
-    fn test_verbosity_verbose() {
-        set_verbosity(Verbosity::Verbose);
-        assert_eq!(get_verbosity(), Verbosity::Verbose);
-    }
-
+    // The verbosity is a process global, so only one test may set it; parallel tests would race.
     #[test]
     fn test_verbosity_round_trip() {
         let levels = [Verbosity::Quiet, Verbosity::Normal, Verbosity::Verbose];
