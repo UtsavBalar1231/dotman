@@ -255,7 +255,7 @@ pub struct ImportArgs {
     /// Add the modes, and with `--include-missing` the files, that SOURCE has and the repo lacks, as one commit
     #[arg(long, value_name = "SOURCE")]
     pub overlay: Option<PathBuf>,
-    /// With `--overlay`, also add the files the repo lacks
+    /// With `--overlay`, add the files the repo lacks without asking
     #[arg(long)]
     pub include_missing: bool,
     /// Do not ask before writing

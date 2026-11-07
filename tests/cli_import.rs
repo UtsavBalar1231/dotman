@@ -410,6 +410,12 @@ fn overlay_env(run_mode: u32, bashrc: &[u8]) -> TestEnv {
     env
 }
 
+/// The git mode of `key` in `HEAD`, such as `100755`.
+fn tree_mode(env: &TestEnv, key: &str) -> String {
+    let listing = git_in(env, &env.repo(), &["ls-tree", "HEAD", "--", key]);
+    listing.split(' ').next().unwrap_or_default().to_owned()
+}
+
 fn changed_files(env: &TestEnv) -> BTreeSet<String> {
     git_in(
         env,
@@ -431,13 +437,9 @@ fn overlay_records_missing_modes_reports_missing_files_and_makes_one_commit() {
     let out = env.run(&["import", "--overlay", FIXTURE]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(3), "{err}");
-    assert_eq!(accounting(&err), (6, 4, 2), "{err}");
+    assert_eq!(accounting(&err), (6, 5, 1), "{err}");
     assert!(err.contains(".config/side.toml: not in the repo"), "{err}");
     assert!(err.contains("--include-missing"), "{err}");
-    assert!(
-        err.contains(".local/bin/run: the legacy mode 0755"),
-        "{err}"
-    );
 
     assert_eq!(
         env.repo_config().modes,
@@ -449,13 +451,16 @@ fn overlay_records_missing_modes_reports_missing_files_and_makes_one_commit() {
     assert_eq!(subject.trim(), OVERLAY_MESSAGE);
     assert_eq!(
         changed_files(&env),
-        BTreeSet::from([".dotman.toml".to_owned()])
+        BTreeSet::from([".dotman.toml".to_owned(), ".local/bin/run".to_owned()])
     );
+    assert_eq!(tree_mode(&env, ".local/bin/run"), "100755");
+    assert_eq!(tree_mode(&env, ".bashrc"), "100644");
     assert_eq!(git_in(&env, &env.repo(), &["status", "--porcelain"]), "");
     assert_eq!(tree_checksum(&env.home()), home_before, "HOME is untouched");
 
     env.ok(&["apply"]);
     assert_eq!(mode_of(&env.home().join(".ssh/config")), 0o600);
+    assert_eq!(mode_of(&env.home().join(".local/bin/run")), 0o755);
     pristine.check();
 }
 
@@ -465,14 +470,8 @@ fn overlay_with_include_missing_adds_the_file() {
     let env = overlay_env(0o644, BASHRC);
     let before = commits(&env);
 
-    let out = env.run(&["import", "--overlay", FIXTURE, "--include-missing"]);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        out.status.code(),
-        Some(3),
-        "only the executable bit is left: {err}"
-    );
-    assert_eq!(accounting(&err), (6, 5, 1), "{err}");
+    let err = env.ok(&["import", "--overlay", FIXTURE, "--include-missing"]);
+    assert_eq!(accounting(&err), (6, 6, 0), "{err}");
     assert_eq!(
         fs::read(env.repo().join(".config/side.toml")).expect("added file"),
         b"side = 1\n"
@@ -485,9 +484,46 @@ fn overlay_with_include_missing_adds_the_file() {
     assert_eq!(commits(&env), before.saturating_add(1));
     assert_eq!(
         changed_files(&env),
-        BTreeSet::from([".config/side.toml".to_owned(), ".dotman.toml".to_owned()])
+        BTreeSet::from([
+            ".config/side.toml".to_owned(),
+            ".dotman.toml".to_owned(),
+            ".local/bin/run".to_owned()
+        ])
     );
+    assert_eq!(tree_mode(&env, ".local/bin/run"), "100755");
+    assert_eq!(tree_mode(&env, ".config/side.toml"), "100644");
     assert_eq!(git_in(&env, &env.repo(), &["status", "--porcelain"]), "");
+
+    let err = env.ok(&["import", "--overlay", FIXTURE, "--include-missing"]);
+    assert!(err.contains("no commit made"), "{err}");
+    assert_eq!(commits(&env), before.saturating_add(1));
+    pristine.check();
+}
+
+#[test]
+fn overlay_reports_an_extra_exec_bit_and_leaves_it() {
+    let pristine = Pristine::new();
+    let env = overlay_env(0o644, BASHRC);
+    let repo = env.repo();
+    fs::set_permissions(repo.join(".bashrc"), fs::Permissions::from_mode(0o755))
+        .expect("make it executable");
+    git_in(&env, &repo, &["add", "-A"]);
+    git_in(&env, &repo, &["commit", "-q", "-m", "exec"]);
+    assert_eq!(tree_mode(&env, ".bashrc"), "100755");
+    let before = commits(&env);
+
+    let out = env.run(&["import", "--overlay", FIXTURE, "--include-missing"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(accounting(&err), (6, 5, 1), "{err}");
+    assert!(
+        err.contains(".bashrc: the repo file is executable and the legacy mode 0644 is not"),
+        "{err}"
+    );
+    assert_eq!(tree_mode(&env, ".bashrc"), "100755");
+    assert_eq!(mode_of(&repo.join(".bashrc")), 0o755);
+    assert!(!changed_files(&env).contains(".bashrc"));
+    assert_eq!(commits(&env), before.saturating_add(1));
     pristine.check();
 }
 
@@ -514,7 +550,7 @@ fn overlay_reports_content_differences_and_leaves_them() {
     let out = env.run(&["import", "--overlay", FIXTURE]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(3), "{err}");
-    assert_eq!(accounting(&err), (6, 3, 3), "{err}");
+    assert_eq!(accounting(&err), (6, 4, 2), "{err}");
     assert!(err.contains("content differs"), "{err}");
     assert!(err.contains("\n  .bashrc\n"), "{err}");
     assert_eq!(
@@ -527,7 +563,7 @@ fn overlay_reports_content_differences_and_leaves_them() {
 #[test]
 fn overlay_never_overrides_an_existing_mode_entry() {
     let pristine = Pristine::new();
-    let env = overlay_env(0o644, BASHRC);
+    let env = overlay_env(0o755, BASHRC);
     let config = env.repo().join(".dotman.toml");
     let mut parsed = RepoConfig::load(&config).expect("load");
     parsed
@@ -565,7 +601,7 @@ fn overlay_dry_run_changes_nothing() {
         "--dry-run",
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(out.status.code(), Some(0), "{err}");
     assert!(
         err.contains(&format!("would commit: {OVERLAY_MESSAGE}")),
         "{err}"

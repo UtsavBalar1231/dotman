@@ -86,6 +86,11 @@ impl Report {
     }
 }
 
+/// `1 file`, `2 files`.
+pub(crate) fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
 /// The legacy repo `dot import` takes when no source is given.
 #[must_use]
 pub fn find_legacy(home: &Path) -> Option<PathBuf> {
@@ -252,6 +257,13 @@ mod tests {
         let repo = real.join("not/yet/created");
         let source = tmp.path().join("link/not");
         assert!(refuse_overlap(&repo, &source).is_err());
+    }
+
+    #[test]
+    fn counts_are_pluralised() {
+        assert_eq!(count(0, "file"), "0 files");
+        assert_eq!(count(1, "file"), "1 file");
+        assert_eq!(count(2, "commit"), "2 commits");
     }
 
     #[test]

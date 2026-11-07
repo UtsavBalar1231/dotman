@@ -8,7 +8,7 @@
 //! key counts as converted when every commit that holds it kept it, and as needing action when any
 //! commit dropped it.
 
-use super::{EditedConfig, Item, Report, author_email, homes, proceed, require_fresh};
+use super::{EditedConfig, Item, Report, author_email, count, homes, proceed, require_fresh};
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::add::ensure_worktree_parents;
@@ -17,12 +17,14 @@ use crate::context::Context;
 use crate::engine::{Node, read_node, recorded_mode};
 use crate::output;
 use crate::paths::{validate_key, write_atomic};
+use crate::prompt;
 use crate::repo_config::RepoConfig;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, BufWriter, Read, Seek, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -33,8 +35,8 @@ const UNSAFE_KEY: &str = "keys the path rules refuse";
 const OUTSIDE_HOME: &str = "absolute keys outside any home directory";
 const COLLISION: &str = "keys that land on the same path as another key";
 const NO_OBJECT: &str = "keys whose content is missing from the legacy store";
-const MISSING: &str = "files the repo lacks (left out)";
-const DIFFERS: &str = "files whose content differs from the repo (left as they are)";
+const MISSING: &str = "files missing from the repo, left out";
+const DIFFERS: &str = "files whose content differs from the repo, left as they are";
 const MODE_DIFFERS: &str = "modes dotman does not change";
 const BLOCKED: &str = "files the repo holds in another form";
 
@@ -499,10 +501,15 @@ fn account(tallies: BTreeMap<String, Tally>) -> Report {
         report.needs_action.push(Item { reason, detail });
     }
     if let Some((source, key)) = stripped.first() {
-        let count = stripped.len();
-        let verb = if count == 1 { "key was" } else { "keys were" };
+        let n = stripped.len();
+        let (verb, pronoun) = if n == 1 {
+            ("was", "its")
+        } else {
+            ("were", "their")
+        };
         report.notes.push(format!(
-            "{count} absolute {verb} imported without their home prefix, for example {source} as {key}"
+            "{} {verb} imported without {pronoun} home prefix, for example {source} as {key}",
+            count(n, "absolute key")
         ));
     }
     report
@@ -632,16 +639,13 @@ pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Ou
     stream.rewind()?;
 
     plan.report.print();
-    let commits = plan.commits.len();
+    let commits = count(plan.commits.len(), "commit");
     let repo = &ctx.paths.repo;
     if args.dry_run {
-        output::info(&format!(
-            "would import {commits} commits into {}",
-            repo.display()
-        ));
+        output::info(&format!("would import {commits} into {}", repo.display()));
         return Ok(plan.report.outcome());
     }
-    let question = format!("import {commits} commits into {}? [y/N]", repo.display());
+    let question = format!("import {commits} into {}? [y/N]", repo.display());
     if !proceed(args, &question)? {
         output::info("nothing imported");
         return Ok(Outcome::Done);
@@ -652,10 +656,7 @@ pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Ou
     }
     ctx.git.fast_import(stream)?;
     ctx.git.checkout_head()?;
-    output::success(&format!(
-        "imported {commits} commits into {}",
-        repo.display()
-    ));
+    output::success(&format!("imported {commits} into {}", repo.display()));
     output::info("next: run `dot status`, then `dot apply`");
     Ok(plan.report.outcome())
 }
@@ -663,12 +664,15 @@ pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Ou
 enum ModeChange {
     Keep,
     Set(u32),
+    /// The legacy mode has an executable bit the repo file lacks.
+    Executable(u32),
     Differs(String),
 }
 
-/// An existing `[modes]` entry is never overridden. Without one, a legacy mode that differs
-/// only in permission bits is recorded; one that differs in the executable bit is reported,
-/// because dotman records that bit as the git file mode and not in `[modes]`.
+/// An existing `[modes]` entry is never overridden. Without one, an executable bit the repo file
+/// lacks is restored, because dotman records that bit as the git file mode and not in `[modes]`.
+/// A repo file that is executable where the legacy mode is not keeps its bit and is reported.
+/// Other differences go into `[modes]`.
 fn mode_change(
     modes: &BTreeMap<String, String>,
     key: &str,
@@ -685,12 +689,15 @@ fn mode_change(
         });
     }
     let repo_executable = on_disk & 0o100 != 0;
+    let legacy_executable = legacy & 0o111 != 0;
     let default = if repo_executable { 0o755 } else { 0o644 };
     Ok(if legacy == default {
         ModeChange::Keep
-    } else if (legacy & 0o111 != 0) != repo_executable {
+    } else if legacy_executable && !repo_executable {
+        ModeChange::Executable(legacy)
+    } else if repo_executable && !legacy_executable {
         ModeChange::Differs(format!(
-            "{key}: the legacy mode {legacy:04o} and the repo file differ in the executable bit, which git records as the file mode; fix it in the repo with chmod, then run `dot sync`"
+            "{key}: the repo file is executable and the legacy mode {legacy:04o} is not; the bit is left as it is"
         ))
     } else {
         ModeChange::Set(legacy)
@@ -703,14 +710,24 @@ struct Addition {
     bytes: Vec<u8>,
 }
 
+/// A mode the overlay restores: the executable bit first if `executable`, then the entry in
+/// `[modes]` if `record`.
+struct ModeFix {
+    key: String,
+    executable: bool,
+    record: Option<u32>,
+}
+
 struct Overlay {
     report: Report,
-    modes: Vec<(String, u32)>,
+    fixes: Vec<ModeFix>,
     files: Vec<Addition>,
+    /// Keys the repo lacks and `compare` left out.
+    missing: Vec<String>,
 }
 
 /// Compares the legacy `HEAD` snapshot with the worktree. Content is never changed.
-fn compare(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Overlay> {
+fn compare(ctx: &Context, root: &Path, include_missing: bool) -> Result<Overlay> {
     let snapshot = load_snapshot(root, &head(root)?)?;
     let Selection { chosen, dropped } = select(&snapshot, &homes(ctx), &|hash| {
         object_path(root, hash).is_file()
@@ -720,8 +737,9 @@ fn compare(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Overlay> {
     let sources = ctx.sources()?;
     let mut overlay = Overlay {
         report: Report::default(),
-        modes: Vec::new(),
+        fixes: Vec::new(),
         files: Vec::new(),
+        missing: Vec::new(),
     };
     let mut needs = |reason: &'static str, detail: String| {
         overlay.report.needs_action.push(Item { reason, detail });
@@ -739,7 +757,7 @@ fn compare(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Overlay> {
                     "{key}: the repo keeps it as a variant, template or encrypted file; not compared"
                 ),
             ),
-            Node::Missing if args.include_missing => {
+            Node::Missing if include_missing => {
                 overlay.files.push(Addition {
                     key: entry.key.clone(),
                     mode: entry.mode,
@@ -747,14 +765,27 @@ fn compare(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Overlay> {
                 });
                 converted = converted.saturating_add(1);
             }
-            Node::Missing => needs(
-                MISSING,
-                format!("{key}: not in the repo; `--include-missing` adds it"),
-            ),
+            Node::Missing => {
+                overlay.missing.push(entry.key.clone());
+                needs(
+                    MISSING,
+                    format!("{key}: not in the repo; `--include-missing` adds it"),
+                );
+            }
             Node::File { bytes, mode, .. } => {
                 let change = mode_change(&config.modes, key, mode, entry.mode)?;
-                if let ModeChange::Set(mode) = change {
-                    overlay.modes.push((entry.key.clone(), mode));
+                match &change {
+                    ModeChange::Set(mode) => overlay.fixes.push(ModeFix {
+                        key: entry.key.clone(),
+                        executable: false,
+                        record: Some(*mode),
+                    }),
+                    ModeChange::Executable(mode) => overlay.fixes.push(ModeFix {
+                        key: entry.key.clone(),
+                        executable: true,
+                        record: (*mode != 0o755).then_some(*mode),
+                    }),
+                    ModeChange::Keep | ModeChange::Differs(_) => {}
                 }
                 if bytes != read_object(root, &entry.object)? {
                     needs(DIFFERS, key.to_owned());
@@ -782,6 +813,40 @@ fn compare(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Overlay> {
     Ok(overlay)
 }
 
+/// Whether to add the files the repo lacks: yes with `--include-missing`, which `compare` has
+/// already applied, or when an interactive run is asked once and says yes. `--yes`, `--dry-run`
+/// and a non-interactive run never ask, so the files stay out.
+fn add_missing(args: &ImportArgs, missing: &[String]) -> Result<bool> {
+    if missing.is_empty() || args.yes || args.dry_run || !prompt::interactive() {
+        return Ok(false);
+    }
+    output::warning("the repo lacks these files:");
+    for key in missing {
+        output::warning(&format!("  {key}"));
+    }
+    prompt::confirm(&format!(
+        "add {}? [y/N]",
+        count(missing.len(), "missing file")
+    ))
+}
+
+/// Opens without following a symlink, so a link swapped in meanwhile cannot redirect the chmod,
+/// and sets the mode through the handle.
+fn make_executable(path: &Path) -> Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "{} is no longer a regular file",
+        path.display()
+    );
+    file.set_permissions(Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
 /// Adds the legacy `HEAD`'s modes, and with `--include-missing` its missing files, to the repo as
 /// one commit.
 pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Outcome> {
@@ -791,17 +856,26 @@ pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<O
         "the repo at {} has uncommitted changes; run `dot sync` first, so the overlay commit holds only the overlay",
         ctx.paths.repo.display()
     );
+    let mut found = compare(ctx, root, args.include_missing)?;
+    if add_missing(args, &found.missing)? {
+        found = compare(ctx, root, true)?;
+    }
     let Overlay {
         report,
-        modes,
+        fixes,
         files,
-    } = compare(ctx, root, args)?;
-    let changed = !modes.is_empty() || !files.is_empty();
+        ..
+    } = found;
+    let changed = !fixes.is_empty() || !files.is_empty();
     if changed && !ctx.git.identity_configured()? {
         bail!(IDENTITY_FIX);
     }
     report.print();
-    let summary = format!("{} modes, {} files", modes.len(), files.len());
+    let summary = format!(
+        "{}, {}",
+        count(fixes.len(), "mode"),
+        count(files.len(), "file")
+    );
     if !changed {
         output::info("nothing to overlay; no commit made");
         return Ok(report.outcome());
@@ -816,8 +890,14 @@ pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<O
     }
     let repo = &ctx.paths.repo;
     let mut config = ctx.repo_config()?;
-    for (key, mode) in modes {
-        config.modes.insert(key, format!("{mode:04o}"));
+    for fix in fixes {
+        if fix.executable {
+            ensure_worktree_parents(repo, &fix.key)?;
+            make_executable(&repo.join(&fix.key))?;
+        }
+        if let Some(mode) = fix.record {
+            config.modes.insert(fix.key, format!("{mode:04o}"));
+        }
     }
     for file in files {
         ensure_worktree_parents(repo, &file.key)?;
@@ -1152,6 +1232,82 @@ mod tests {
         assert_eq!(
             read_object(&root, "00000000000000000000000000000000").unwrap(),
             b""
+        );
+    }
+
+    fn change(modes: &[(&str, &str)], on_disk: u32, legacy: u32) -> ModeChange {
+        let modes = modes
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        mode_change(&modes, "f", on_disk, legacy).unwrap()
+    }
+
+    #[test]
+    fn a_lost_exec_bit_is_restored_and_an_extra_one_is_reported() {
+        assert!(matches!(change(&[], 0o644, 0o644), ModeChange::Keep));
+        assert!(matches!(change(&[], 0o755, 0o755), ModeChange::Keep));
+        assert!(matches!(
+            change(&[], 0o644, 0o755),
+            ModeChange::Executable(0o755)
+        ));
+        assert!(matches!(
+            change(&[], 0o644, 0o700),
+            ModeChange::Executable(0o700)
+        ));
+        assert!(matches!(change(&[], 0o644, 0o600), ModeChange::Set(0o600)));
+        assert!(matches!(change(&[], 0o755, 0o700), ModeChange::Set(0o700)));
+        let ModeChange::Differs(why) = change(&[], 0o755, 0o644) else {
+            unreachable!("an extra exec bit is reported");
+        };
+        assert!(why.contains("the repo file is executable"), "{why}");
+        assert!(matches!(
+            change(&[("f", "0640")], 0o644, 0o640),
+            ModeChange::Keep
+        ));
+        assert!(matches!(
+            change(&[("f", "0640")], 0o644, 0o755),
+            ModeChange::Differs(_)
+        ));
+    }
+
+    #[test]
+    fn only_an_interactive_run_without_yes_or_dry_run_is_asked_about_missing_files() {
+        let args = |yes, dry_run| ImportArgs {
+            source: None,
+            overlay: None,
+            include_missing: false,
+            yes,
+            dry_run,
+        };
+        let missing = ["a".to_owned()];
+        assert!(!add_missing(&args(false, false), &[]).unwrap());
+        assert!(!add_missing(&args(true, false), &missing).unwrap());
+        assert!(!add_missing(&args(false, true), &missing).unwrap());
+    }
+
+    #[test]
+    fn one_absolute_key_reads_in_the_singular() {
+        let one = planned(&[snapshot("c1", &[], &[("/home/o/.a", 0o644)])], &[]);
+        assert_eq!(
+            one.report.notes,
+            ["1 absolute key was imported without its home prefix, for example /home/o/.a as .a"]
+        );
+        let two = planned(
+            &[snapshot(
+                "c1",
+                &[],
+                &[("/home/o/.a", 0o644), ("/home/o/.b", 0o644)],
+            )],
+            &[],
+        );
+        assert!(
+            two.report
+                .notes
+                .iter()
+                .any(|n| n.starts_with("2 absolute keys were imported without their home prefix")),
+            "{:?}",
+            two.report.notes
         );
     }
 }
