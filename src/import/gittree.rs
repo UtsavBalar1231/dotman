@@ -648,8 +648,9 @@ fn tally(found: &Analysis, recover: bool) -> Report {
     }
     if !reserved.is_empty() {
         report.notes.push(format!(
-            "{} stay in the repo and are never applied: {}",
+            "{} {} in the repo and never applied: {}",
             count(reserved.len(), "root file"),
+            if reserved.len() == 1 { "stays" } else { "stay" },
             shown(&reserved)
         ));
     }
