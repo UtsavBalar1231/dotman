@@ -2,8 +2,8 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
 use dotman::commands::{
-    Outcome, add, apply, diff, doctor, edit, forget, git, init, key, list, log, restore, status,
-    sync,
+    Outcome, add, apply, diff, doctor, edit, forget, git, import, init, key, list, log, restore,
+    status, sync,
 };
 use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
@@ -61,6 +61,7 @@ fn main() {
         Commands::Sync(args) => sync::run(&args),
         Commands::Log(args) => done(log::run(&args)),
         Commands::Restore(args) => done(restore::run(&args)),
+        Commands::Import(args) => import::run(&args),
         Commands::Doctor(args) => doctor::run(&args).map(|healthy| {
             if !healthy {
                 std::process::exit(1);

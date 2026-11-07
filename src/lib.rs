@@ -13,6 +13,7 @@ pub mod engine;
 pub mod git;
 pub mod hooks;
 pub mod identity;
+pub mod import;
 pub mod lock;
 pub mod output;
 pub mod paths;

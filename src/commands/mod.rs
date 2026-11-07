@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod edit;
 pub mod forget;
 pub mod git;
+pub mod import;
 pub mod init;
 pub mod key;
 pub mod list;

@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -196,8 +196,12 @@ impl Git {
         Ok(())
     }
 
-    fn spawn(&self, mut cmd: Command) -> Result<Output> {
-        cmd.stdin(Stdio::null());
+    fn spawn(&self, cmd: Command) -> Result<Output> {
+        self.spawn_with(cmd, Stdio::null())
+    }
+
+    fn spawn_with(&self, mut cmd: Command, stdin: Stdio) -> Result<Output> {
+        cmd.stdin(stdin);
         cmd.output().map_err(|err| {
             if err.kind() == io::ErrorKind::NotFound {
                 anyhow!(
@@ -285,9 +289,30 @@ impl Git {
             self.set_remote_url("origin", &url)?;
         }
         if self.head()?.is_some() {
-            self.run(&["checkout", "-q", "-f", "HEAD"])?;
+            self.checkout_head()?;
         }
         Ok(())
+    }
+
+    /// Makes the index and working tree match `HEAD`, overwriting files in the way.
+    pub fn checkout_head(&self) -> Result<()> {
+        self.run(&["checkout", "-q", "-f", "HEAD"]).map(drop)
+    }
+
+    /// Feeds a `git fast-import` stream that ends in `done` to git. Git moves the refs the stream
+    /// names only after it has read the whole stream. A file, not a pipe: if git exits early, a
+    /// write to a closed pipe would kill `dot` with SIGPIPE.
+    pub fn fast_import(&self, stream: File) -> Result<()> {
+        self.check_version()?;
+        let args = ["fast-import", "--quiet", "--done"];
+        let mut cmd = self.command();
+        cmd.args(args);
+        let out = self.spawn_with(cmd, Stdio::from(stream))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(failure(&args, &out))
+        }
     }
 
     fn write_metadata(&self) -> Result<()> {
@@ -520,6 +545,23 @@ impl Git {
         Ok(true)
     }
 
+    /// The email in `git var GIT_AUTHOR_IDENT`; `None` when git has no configured identity. A repo
+    /// that does not exist yet has only the global config, so git then runs from `/`.
+    pub fn author_email(&self) -> Result<Option<String>> {
+        let args = ["-c", "user.useConfigOnly=true", "var", "GIT_AUTHOR_IDENT"];
+        let dir = if self.repo.is_dir() {
+            self.repo.as_path()
+        } else {
+            Path::new("/")
+        };
+        let out = self.output(self.command_in(dir), &args)?;
+        match out.status.code() {
+            Some(0) => Ok(parse_ident_email(&text(&out))),
+            Some(128) => Ok(None),
+            _ => Err(failure(&args, &out)),
+        }
+    }
+
     /// Whether `url` answers `git ls-remote` with no credentials and no prompt.
     /// Has no timeout; the caller bounds it.
     pub fn ls_remote_anonymous(&self, url: &str) -> Result<bool> {
@@ -546,6 +588,13 @@ fn failure<S: AsRef<OsStr>>(args: &[S], out: &Output) -> anyhow::Error {
         out.status,
         String::from_utf8_lossy(&out.stderr).trim()
     )
+}
+
+/// `Name <email> 1700000000 +0000` gives `email`.
+fn parse_ident_email(ident: &str) -> Option<String> {
+    let after = ident.rsplit_once('<')?.1;
+    let email = after.split_once('>')?.0;
+    (!email.is_empty()).then(|| email.to_owned())
 }
 
 /// Hides `user:password@` in URLs so tokens do not reach error messages.
@@ -1028,6 +1077,59 @@ mod tests {
             .git("a")
             .with_env([("HOME", &bare_home), ("XDG_CONFIG_HOME", &bare_home)]);
         assert!(!git.identity_configured().expect("check"));
+    }
+
+    #[test]
+    fn author_email_is_read_with_or_without_a_repo() {
+        assert_eq!(
+            parse_ident_email("A <b> <a@b.invalid> 1700000000 +0000").as_deref(),
+            Some("a@b.invalid")
+        );
+        assert_eq!(parse_ident_email("no email 1 +0000"), None);
+        assert_eq!(parse_ident_email("A <> 1 +0000"), None);
+
+        // Pinned in the environment: `git commit` exports GIT_AUTHOR_* to the hooks that run
+        // the tests, and those would override the sandbox config. The config path and the
+        // missing-identity path run through the binary in tests/cli_import.rs.
+        let sb = Sandbox::new();
+        let git = sb.git("repo").with_env([
+            ("GIT_AUTHOR_NAME", "Pinned"),
+            ("GIT_AUTHOR_EMAIL", "pinned@example.invalid"),
+        ]);
+        let email = |git: &Git| git.author_email().expect("author_email");
+        assert_eq!(email(&git).as_deref(), Some("pinned@example.invalid"));
+        git.init().expect("init");
+        assert_eq!(email(&git).as_deref(), Some("pinned@example.invalid"));
+    }
+
+    #[test]
+    fn fast_import_builds_a_branch_from_a_stream_file() {
+        use std::io::{Seek, Write};
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        let mut stream = tempfile::tempfile().expect("tempfile");
+        stream
+            .write_all(
+                b"blob\nmark :1\ndata 3\nhi\n\ncommit refs/heads/main\nauthor A <a@b> 1700000000 +0000\ncommitter A <a@b> 1700000000 +0000\ndata 2\nm\nM 100644 :1 \"f\"\n\ndone\n",
+            )
+            .expect("write");
+        stream.rewind().expect("rewind");
+        git.fast_import(stream).expect("import");
+        git.checkout_head().expect("checkout");
+        assert_eq!(fs::read(git.repo().join("f")).expect("read"), b"hi\n");
+
+        let mut truncated = tempfile::tempfile().expect("tempfile");
+        truncated
+            .write_all(
+                b"commit refs/heads/other\ncommitter A <a@b> 1700000000 +0000\ndata 2\nm\n\n",
+            )
+            .expect("write");
+        truncated.rewind().expect("rewind");
+        let err = git.fast_import(truncated).expect_err("no done");
+        assert!(err.to_string().contains("fast-import"), "{err}");
+        let other = sb.raw(git.repo(), &["rev-parse", "--verify", "-q", "other"]);
+        assert_eq!(other.status.code(), Some(1));
     }
 
     #[test]

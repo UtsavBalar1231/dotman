@@ -23,7 +23,7 @@ const REMOTE: &str = "origin";
 // Paths named in the generated commit message; the rest are counted.
 const LISTED: usize = 3;
 
-const IDENTITY_FIX: &str = "git has no user.name and user.email to commit with; set them with:\n  dot git config --global user.name \"Your Name\"\n  dot git config --global user.email \"you@example.com\"";
+pub(crate) const IDENTITY_FIX: &str = "git has no user.name and user.email to commit with; set them with:\n  dot git config --global user.name \"Your Name\"\n  dot git config --global user.email \"you@example.com\"";
 
 /// Runs `dot sync`.
 pub fn run(args: &SyncArgs) -> Result<Outcome> {

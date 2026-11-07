@@ -57,6 +57,8 @@ pub enum Commands {
     Log(LogArgs),
     /// Write an earlier version of a file into $HOME, keeping the current one as a backup
     Restore(RestoreArgs),
+    /// Convert another setup into the repo, or add what the repo lacks from one
+    Import(ImportArgs),
     /// Run git in the repo
     Git(GitArgs),
     /// Check the environment and the repo for problems
@@ -240,6 +242,26 @@ pub struct RestoreArgs {
     #[arg(long, value_name = "REV_OR_DATE")]
     pub from: Option<String>,
     /// Show what would be written and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments of `dot import`.
+#[derive(Args)]
+pub struct ImportArgs {
+    /// Legacy dotman repo to convert; `$HOME/.dotman` when omitted
+    #[arg(value_name = "SOURCE", conflicts_with = "overlay")]
+    pub source: Option<PathBuf>,
+    /// Add the modes, and with `--include-missing` the files, that SOURCE has and the repo lacks, as one commit
+    #[arg(long, value_name = "SOURCE")]
+    pub overlay: Option<PathBuf>,
+    /// With `--overlay`, also add the files the repo lacks
+    #[arg(long)]
+    pub include_missing: bool,
+    /// Do not ask before writing
+    #[arg(long)]
+    pub yes: bool,
+    /// Show the report and change nothing
     #[arg(long)]
     pub dry_run: bool,
 }
