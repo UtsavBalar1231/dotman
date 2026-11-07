@@ -48,6 +48,8 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Show how $HOME differs from the repo
     Diff(DiffArgs),
+    /// Capture local changes, commit, pull, apply what arrived and push
+    Sync(SyncArgs),
     /// Generate shell completion scripts
     Completion {
         /// Shell to generate completions for
@@ -76,7 +78,7 @@ pub struct InitArgs {
     pub dry_run: bool,
 }
 
-/// Answers to `apply`'s prompts, given in advance.
+/// Answers to the prompts of `apply` and `sync`, given in advance.
 #[derive(Args, Clone, Copy, Debug, Default)]
 // reason: independent answers to separate prompts, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -107,6 +109,20 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub in_place: bool,
     /// Show what would be written and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments of `dot sync`.
+#[derive(Args)]
+pub struct SyncArgs {
+    /// Commit message, replacing the generated `sync(<host>): ...` line
+    #[arg(short = 'm', long, value_name = "MSG")]
+    pub message: Option<String>,
+    /// Answers that replace the prompts, which a non-interactive run never shows.
+    #[command(flatten)]
+    pub decisions: Decisions,
+    /// Show what would be captured, committed, pulled, applied and pushed; change nothing
     #[arg(long)]
     pub dry_run: bool,
 }

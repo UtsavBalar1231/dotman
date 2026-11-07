@@ -17,6 +17,7 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
     let ctx = Context::resolve("forget")?;
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
+    ctx.guard()?;
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;

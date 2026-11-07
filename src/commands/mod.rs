@@ -7,6 +7,7 @@ pub mod forget;
 pub mod init;
 pub mod list;
 pub mod status;
+pub mod sync;
 
 /// How a command that hit no error ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,4 +16,6 @@ pub enum Outcome {
     Done,
     /// Exit 3: paths were left undecided, blocked or reported for action.
     Attention,
+    /// Exit 4: a rebase conflict was found and aborted.
+    Conflict,
 }

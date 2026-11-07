@@ -25,6 +25,22 @@ pub fn geteuid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// The node name `uname -n` prints, unshortened. `None` when the call fails or the name does not
+/// fit the buffer.
+#[must_use]
+pub fn hostname() -> Option<String> {
+    // Linux caps host names at 64 bytes and macOS at 255, both below this.
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is writable for `buf.len()` bytes and outlives the call; on success the
+    // result is NUL-terminated unless it was truncated, which is checked below.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<c_char>(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|b| *b == 0)?;
+    Some(String::from_utf8_lossy(buf.get(..end)?).into_owned())
+}
+
 /// A passwd database entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Passwd {
@@ -168,6 +184,18 @@ mod tests {
         assert!(by_uid.home.is_absolute());
         let by_name = passwd_by_name(&by_uid.name).expect("lookup by name");
         assert_eq!(by_name.uid, euid);
+    }
+
+    #[test]
+    fn hostname_matches_uname() {
+        let uname = std::process::Command::new("uname")
+            .arg("-n")
+            .output()
+            .expect("run uname");
+        assert_eq!(
+            hostname().as_deref(),
+            Some(String::from_utf8_lossy(&uname.stdout).trim())
+        );
     }
 
     #[test]

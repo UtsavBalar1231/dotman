@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
-use dotman::commands::{Outcome, add, apply, diff, forget, init, list, status};
+use dotman::commands::{Outcome, add, apply, diff, forget, init, list, status, sync};
+use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
 use dotman::{paths, sys};
 use std::io;
@@ -53,13 +54,15 @@ fn main() {
         Commands::Status(args) => done(status::run(&args)),
         Commands::Apply(args) => apply::run(&args),
         Commands::Diff(args) => done(diff::run(&args, cli.no_pager)),
+        Commands::Sync(args) => sync::run(&args),
     };
     match result {
         Ok(Outcome::Done) => {}
         Ok(Outcome::Attention) => std::process::exit(3),
+        Ok(Outcome::Conflict) => std::process::exit(4),
         Err(e) => {
             output::error(&format!("{e:#}"));
-            std::process::exit(1);
+            std::process::exit(if e.is::<InProgress>() { 4 } else { 1 });
         }
     }
 }

@@ -1,7 +1,7 @@
 //! What every command needs: resolved paths, the machine config and a git handle.
 
 use crate::config::Config;
-use crate::git::Git;
+use crate::git::{Git, Operation};
 use crate::paths::{Env, Paths, derive_key, validate_key};
 use crate::repo_config::RepoConfig;
 use crate::state::{Kind, State};
@@ -9,6 +9,7 @@ use crate::sys;
 use anyhow::{Context as _, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,26 @@ use walkdir::WalkDir;
 
 /// Leftover temp files of the write engine; never managed.
 pub const TEMP_PREFIX: &str = ".dotman-tmp-";
+
+/// A rebase or merge is unfinished in the repo. `main` maps it to exit code 4.
+#[derive(Debug)]
+pub struct InProgress {
+    operation: Operation,
+    repo: PathBuf,
+}
+
+impl fmt::Display for InProgress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = self.operation.name();
+        write!(
+            f,
+            "a {name} is in progress in {}; finish it with `dot git {name} --continue` or undo it with `dot git {name} --abort`",
+            self.repo.display()
+        )
+    }
+}
+
+impl std::error::Error for InProgress {}
 
 /// Resolved locations, with the machine config applied, and the git handle for one run.
 pub struct Context {
@@ -33,6 +54,18 @@ impl Context {
         let paths = paths.apply_config(&machine)?;
         let git = Git::new(paths.repo.clone(), dot_command);
         Ok(Self { paths, git })
+    }
+
+    /// Fails with [`InProgress`] while a rebase or merge is unfinished in the repo. Every command
+    /// except `doctor` and `git` calls it, after taking its lock.
+    pub fn guard(&self) -> Result<()> {
+        self.git.operation().map_or(Ok(()), |operation| {
+            Err(InProgress {
+                operation,
+                repo: self.paths.repo.clone(),
+            }
+            .into())
+        })
     }
 
     /// Path of `.dotman.toml` in the repo.

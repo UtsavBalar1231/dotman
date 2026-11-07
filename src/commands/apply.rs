@@ -3,7 +3,7 @@
 
 use crate::cli::{ApplyArgs, Decisions};
 use crate::commands::status::token;
-use crate::commands::{Outcome, diff, forget};
+use crate::commands::{Outcome, add, diff, forget};
 use crate::context::Context;
 use crate::engine::status::{Content, Row, Source, SourceEntry, Worktree, classify};
 use crate::engine::write::{
@@ -13,6 +13,7 @@ use crate::engine::{Home, Tuple, observe, observe_portable};
 use crate::lock::Lock;
 use crate::output;
 use crate::prompt;
+use crate::repo_config::RepoConfig;
 use crate::state::{Kind, State};
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,31 +24,55 @@ use std::time::SystemTime;
 pub fn run(args: &ApplyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("apply")?;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;
+    ctx.guard()?;
     let opts = Options {
         dry_run: args.dry_run,
         in_place: args.in_place,
         decisions: args.decisions,
-        summary: false,
+        ..Options::default()
     };
-    apply(&ctx, &args.paths, &opts)
+    apply(&ctx, &args.paths, &opts).map(|applied| applied.outcome)
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pass {
+    /// Write R into `$HOME`; H changed here is left for the next `sync` to capture.
+    #[default]
+    Apply,
+    /// `sync`'s pass before the pull: capture H into the repo where `Apply` would leave it, and
+    /// leave the rows that need no decision for the pass after the pull.
+    Capture,
+}
+
+#[derive(Default)]
 pub(crate) struct Options {
     pub dry_run: bool,
     pub in_place: bool,
     pub decisions: Decisions,
     /// Print how many paths are in each row before anything else.
     pub summary: bool,
+    pub pass: Pass,
+    /// Keys left alone, because an earlier pass already reported them undecided.
+    pub skip: BTreeSet<String>,
+}
+
+pub(crate) struct Applied {
+    pub outcome: Outcome,
+    /// Keys that were asked about and left unanswered.
+    pub undecided: BTreeSet<String>,
+    /// Keys captured into the repo; in a dry run, the keys that would be.
+    pub captured: BTreeSet<String>,
 }
 
 /// Applies the keys under `inputs` (every key when empty). The caller holds the lock.
-pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result<Outcome> {
+pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result<Applied> {
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
     let mut keys: BTreeSet<String> = ctx.managed()?.into_keys().collect();
     keys.extend(state.files.keys().cloned());
-    let keys = ctx.select(inputs, keys)?;
+    let mut keys = ctx.select(inputs, keys)?;
+    keys.retain(|key| !opts.skip.contains(key));
 
     let mut run = Run {
         ctx,
@@ -57,6 +82,9 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         attention: false,
         failed: 0,
         forget: BTreeSet::new(),
+        undecided: BTreeSet::new(),
+        captured: BTreeSet::new(),
+        dir_modes: BTreeMap::new(),
     };
     let items = run.classify(&state, &keys);
     if opts.summary {
@@ -65,25 +93,33 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     let actions = run.plan(&items)?;
     for (item, action) in items.iter().zip(actions) {
         if let Some(action) = action {
-            run.execute(item, action, &mut state);
+            run.execute(item, action, &mut state, &mut repo_config);
         }
     }
 
-    let forgotten = if run.forget.is_empty() || opts.dry_run {
+    let repo_saved = if opts.dry_run || (run.forget.is_empty() && run.captured.is_empty()) {
         Ok(())
     } else {
-        forget::remove_keys(ctx, &mut repo_config, &mut state, &run.forget)
-            .and_then(|()| repo_config.save(&ctx.repo_config_file(), false))
+        let removed = if run.forget.is_empty() {
+            Ok(())
+        } else {
+            forget::remove_keys(ctx, &mut repo_config, &mut state, &run.forget)
+        };
+        removed.and_then(|()| repo_config.save(&ctx.repo_config_file(), false))
     };
     state.save(&ctx.paths.state_file(), opts.dry_run)?;
-    forgotten?;
+    repo_saved?;
     if run.failed > 0 {
         bail!("{} paths could not be applied", run.failed);
     }
-    Ok(if run.attention {
-        Outcome::Attention
-    } else {
-        Outcome::Done
+    Ok(Applied {
+        outcome: if run.attention {
+            Outcome::Attention
+        } else {
+            Outcome::Done
+        },
+        undecided: run.undecided,
+        captured: run.captured,
     })
 }
 
@@ -108,6 +144,8 @@ enum Action {
     DropState,
     /// Remove the key from the repo, as `dot forget` does.
     Forget,
+    /// Copy H into the repo, so that S, R and H agree.
+    Capture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +252,9 @@ struct Run<'a> {
     attention: bool,
     failed: usize,
     forget: BTreeSet<String>,
+    undecided: BTreeSet<String>,
+    captured: BTreeSet<String>,
+    dir_modes: BTreeMap<String, u32>,
 }
 
 impl Run<'_> {
@@ -245,10 +286,11 @@ impl Run<'_> {
             let mut undecided = Vec::new();
             for ((index, item), choice) in indices.iter().zip(&members).zip(choices) {
                 let action = match choice {
-                    Choice::Local => Some(question.local_action),
+                    Choice::Local => Some(self.keep(question.local_action, item)),
                     Choice::Repo => Some(Action::Write),
                     Choice::Skip => {
                         undecided.push(item.key.as_str());
+                        self.undecided.insert(item.key.clone());
                         None
                     }
                 };
@@ -272,8 +314,24 @@ impl Run<'_> {
         Ok(actions)
     }
 
+    /// Keeping H means different things per pass. `sync` captures it, except for a path deleted
+    /// here, which has no H to capture.
+    fn keep(&self, local: Action, item: &Item) -> Action {
+        if local == Action::KeepLocal
+            && self.opts.pass == Pass::Capture
+            && item.row != Row::DeletedChangedUpstream
+        {
+            Action::Capture
+        } else {
+            local
+        }
+    }
+
     /// The action for rows that need no question, with their reports.
     fn direct(&mut self, item: &Item) -> Option<Action> {
+        if self.opts.pass == Pass::Capture {
+            return (item.row == Row::ChangedLocally).then_some(Action::Capture);
+        }
         let key = &item.key;
         match item.row {
             Row::GoneEverywhere => Some(Action::DropState),
@@ -371,7 +429,13 @@ impl Run<'_> {
         }
     }
 
-    fn execute(&mut self, item: &Item, action: Action, state: &mut State) {
+    fn execute(
+        &mut self,
+        item: &Item,
+        action: Action,
+        state: &mut State,
+        repo_config: &mut RepoConfig,
+    ) {
         let key = &item.key;
         match action {
             Action::DropState => {
@@ -381,6 +445,7 @@ impl Run<'_> {
                 self.announce("forget", key);
                 self.forget.insert(key.clone());
             }
+            Action::Capture => self.capture(item, state, repo_config),
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };
                 let done = match action {
@@ -394,6 +459,33 @@ impl Run<'_> {
                 if done {
                     state.files.insert(key.clone(), r.tuple.entry(&r.source));
                 }
+            }
+        }
+    }
+
+    fn capture(&mut self, item: &Item, state: &mut State, repo_config: &mut RepoConfig) {
+        let key = &item.key;
+        self.announce("capture", key);
+        if self.opts.dry_run {
+            self.captured.insert(key.clone());
+            return;
+        }
+        let Home::Present(h) = &item.raw else { return };
+        let done = add::commit_one(
+            self.ctx,
+            repo_config,
+            state,
+            &mut self.dir_modes,
+            key,
+            h.kind,
+        );
+        match done {
+            Ok(()) => {
+                self.captured.insert(key.clone());
+            }
+            Err(e) => {
+                self.failed = self.failed.saturating_add(1);
+                output::warning(&format!("{key}: cannot be captured: {e:#}"));
             }
         }
     }

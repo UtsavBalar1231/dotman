@@ -13,7 +13,7 @@ use crate::paths::{
 };
 use crate::prompt;
 use crate::repo_config::RepoConfig;
-use crate::state::State;
+use crate::state::{Kind, State};
 use anyhow::{Context as _, Result, anyhow, bail};
 use glob::{MatchOptions, Pattern};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +36,15 @@ const MATCH: MatchOptions = MatchOptions {
 enum Leaf {
     File { mode: u32, size: u64, binary: bool },
     Link,
+}
+
+impl Leaf {
+    const fn kind(self) -> Kind {
+        match self {
+            Self::File { .. } => Kind::File,
+            Self::Link => Kind::Symlink,
+        }
+    }
 }
 
 enum Found {
@@ -95,6 +104,7 @@ pub fn run(args: &AddArgs) -> Result<()> {
     let ctx = Context::resolve("add")?;
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
+    ctx.guard()?;
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
@@ -153,7 +163,7 @@ pub fn run(args: &AddArgs) -> Result<()> {
             &mut state,
             &mut dir_modes,
             key,
-            *leaf,
+            leaf.kind(),
         );
         match one {
             Ok(()) => {
@@ -414,25 +424,28 @@ fn preview(dir: &DirPlan) {
     }
 }
 
-fn commit_one(
+/// Copies H of `key` into the repo worktree, records its mode in `repo_config` and sets S to the
+/// result. `expected` is the kind the caller saw, and a different kind now is an error. The caller
+/// saves `repo_config` and `state`.
+pub(crate) fn commit_one(
     ctx: &Context,
     repo_config: &mut RepoConfig,
     state: &mut State,
     dir_modes: &mut BTreeMap<String, u32>,
     key: &str,
-    leaf: Leaf,
+    expected: Kind,
 ) -> Result<()> {
     let home = &ctx.paths.home;
     let repo = &ctx.paths.repo;
     let target = repo.join(key);
     ensure_worktree_parents(repo, key)?;
-    match (leaf, read_node(home, key)?) {
-        (Leaf::File { .. }, Node::File { bytes, mode, .. }) => {
+    match (expected, read_node(home, key)?) {
+        (Kind::File, Node::File { bytes, mode, .. }) => {
             let stored = if mode & 0o111 == 0 { 0o644 } else { 0o755 };
             write_atomic(&target, &bytes, stored)?;
             record_mode(repo_config, key, mode & 0o777, stored);
         }
-        (Leaf::Link, Node::Symlink(link)) => {
+        (Kind::Symlink, Node::Symlink(link)) => {
             let relative = portable_link_target(&link, key, home, ctx.paths.home_real.as_deref());
             replace_with_symlink(&target, &relative)?;
             repo_config.modes.remove(key);

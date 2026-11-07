@@ -22,6 +22,7 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
         check_url(url)?;
     }
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
+    ctx.guard()?;
     let repo = &ctx.paths.repo;
     let config_file = ctx.repo_config_file();
     let exists = repo.join(".git").exists();
@@ -66,6 +67,7 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     check_url(source)?;
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
+    ctx.guard()?;
     let repo = &ctx.paths.repo;
     if repo.join(".git").exists() {
         bail!(
@@ -75,18 +77,18 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     }
     let opts = apply::Options {
         dry_run,
-        in_place: false,
         decisions: Decisions {
             keep_local: args.keep_local,
             take_repo: args.take_repo,
             ..Decisions::default()
         },
         summary: true,
+        ..apply::Options::default()
     };
     if !dry_run {
         ctx.git.clone_from(source)?;
         output::success(&format!("cloned {source} into {}", repo.display()));
-        return apply::apply(ctx, &[], &opts);
+        return apply::apply(ctx, &[], &opts).map(|applied| applied.outcome);
     }
 
     // The plan needs the repo's content, so a dry run clones for real, into a temp dir that is
@@ -100,7 +102,7 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     };
     clone.git.clone_from(source)?;
     output::info(&format!("would clone {source} into {}", repo.display()));
-    apply::apply(&clone, &[], &opts)
+    apply::apply(&clone, &[], &opts).map(|applied| applied.outcome)
 }
 
 fn ask_remote() -> Result<Option<String>> {

@@ -159,8 +159,13 @@ impl TestEnv {
         cmd
     }
 
+    /// Runs git and returns its output, whatever the exit status.
+    pub fn git_raw(&self, args: &[&str]) -> Output {
+        self.git_command().args(args).output().expect("run git")
+    }
+
     pub fn git(&self, args: &[&str]) -> String {
-        let out = self.git_command().args(args).output().expect("run git");
+        let out = self.git_raw(args);
         assert!(
             out.status.success(),
             "git {args:?} failed: {}",
@@ -316,6 +321,40 @@ impl TestEnv {
 impl Default for TestEnv {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// `uname -n`, cut at the first `.`, as `sync` puts it in its commit message.
+pub fn short_host() -> String {
+    let out = std::process::Command::new("uname")
+        .arg("-n")
+        .output()
+        .expect("run uname");
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    name.split('.').next().unwrap_or_default().to_owned()
+}
+
+/// Every managed key holds the same bytes, link target and mode on both devices.
+pub fn assert_converged(a: &TestEnv, b: &TestEnv) {
+    let keys = a.porcelain("list");
+    assert_eq!(keys, b.porcelain("list"));
+    assert_ne!(keys.len(), 0);
+    for (kind, key) in keys {
+        let (on_a, on_b) = (a.home().join(&key), b.home().join(&key));
+        if kind == "symlink" {
+            assert_eq!(
+                fs::read_link(&on_a).expect("link on a"),
+                fs::read_link(&on_b).expect("link on b"),
+                "{key}"
+            );
+        } else {
+            assert_eq!(
+                fs::read(&on_a).expect("file on a"),
+                fs::read(&on_b).expect("file on b"),
+                "{key}"
+            );
+            assert_eq!(mode_of(&on_a), mode_of(&on_b), "{key}");
+        }
     }
 }
 

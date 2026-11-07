@@ -68,6 +68,26 @@ pub enum PullOutcome {
     },
 }
 
+/// An unfinished git operation that blocks dotman commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// `.git/rebase-merge` or `.git/rebase-apply` exists.
+    Rebase,
+    /// `.git/MERGE_HEAD` exists.
+    Merge,
+}
+
+impl Operation {
+    /// The git subcommand that continues or aborts it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase",
+            Self::Merge => "merge",
+        }
+    }
+}
+
 /// Which `git status --porcelain=v2` record an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
@@ -313,15 +333,23 @@ impl Git {
         self.head()
     }
 
-    /// Parsed `git status --porcelain=v2`, including every untracked file.
+    /// Parsed `git status --porcelain=v2`, including every untracked file. Never rewrites the
+    /// index, so it is safe in a dry run.
     pub fn status(&self) -> Result<Vec<StatusEntry>> {
-        let out = self.run(&["status", "--porcelain=v2", "-z", "--untracked-files=all"])?;
-        parse_status(&out.stdout)
+        let mut cmd = self.command();
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        let args = ["status", "--porcelain=v2", "-z", "--untracked-files=all"];
+        parse_status(&self.run_with(cmd, &args)?.stdout)
     }
 
     /// The commit `HEAD` points at; `None` on an unborn branch.
     pub fn head(&self) -> Result<Option<String>> {
         self.optional(&["rev-parse", "--verify", "-q", "HEAD"])
+    }
+
+    /// The branch `HEAD` points at, also when it is unborn; `None` when `HEAD` is detached.
+    pub fn branch(&self) -> Result<Option<String>> {
+        self.optional(&["symbolic-ref", "--short", "-q", "HEAD"])
     }
 
     /// Raw bytes of `path` as stored in `rev`, with no filters or text conversion.
@@ -391,18 +419,50 @@ impl Git {
         Ok(PullOutcome::Conflict { paths })
     }
 
-    /// Looks for `rebase-merge`, `rebase-apply` and `MERGE_HEAD` under `.git`.
+    /// Looks for `rebase-merge`, `rebase-apply` and `MERGE_HEAD` under `.git`; a rebase wins.
     #[must_use]
-    pub fn operation_in_progress(&self) -> bool {
+    pub fn operation(&self) -> Option<Operation> {
         let git_dir = self.repo.join(".git");
-        ["rebase-merge", "rebase-apply", "MERGE_HEAD"]
+        if ["rebase-merge", "rebase-apply"]
             .iter()
             .any(|name| git_dir.join(name).exists())
+        {
+            Some(Operation::Rebase)
+        } else {
+            git_dir
+                .join("MERGE_HEAD")
+                .exists()
+                .then_some(Operation::Merge)
+        }
+    }
+
+    /// Whether [`Git::operation`] finds a rebase or merge.
+    #[must_use]
+    pub fn operation_in_progress(&self) -> bool {
+        self.operation().is_some()
     }
 
     /// Fails if the remote has commits `branch` lacks; pull first.
     pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
         self.run(&["push", remote, branch]).map(drop)
+    }
+
+    /// Like [`Git::push`], and records `remote` as the upstream of `branch`, so that a bare
+    /// `git pull --rebase` works.
+    pub fn push_set_upstream(&self, remote: &str, branch: &str) -> Result<()> {
+        self.run(&["push", "-u", remote, branch]).map(drop)
+    }
+
+    /// Whether `remote` has `branch`. Asks the remote and writes nothing locally.
+    pub fn remote_has_branch(&self, remote: &str, branch: &str) -> Result<bool> {
+        let pattern = format!("refs/heads/{branch}");
+        let args = ["ls-remote", "--exit-code", remote, pattern.as_str()];
+        let out = self.probe(&args)?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(2) => Ok(false),
+            _ => Err(failure(&args, &out)),
+        }
     }
 
     /// The URL of remote `name` exactly as written in the config, without `insteadOf` rewriting.
@@ -1069,11 +1129,35 @@ mod tests {
         for marker in ["rebase-merge", "rebase-apply"] {
             let dir = git.repo().join(".git").join(marker);
             fs::create_dir(&dir).expect("mkdir");
-            assert!(git.operation_in_progress(), "{marker}");
+            assert_eq!(git.operation(), Some(Operation::Rebase), "{marker}");
             fs::remove_dir(&dir).expect("rmdir");
         }
         fs::write(git.repo().join(".git/MERGE_HEAD"), "x").expect("write");
-        assert!(git.operation_in_progress());
+        assert_eq!(git.operation(), Some(Operation::Merge));
+    }
+
+    #[test]
+    fn branch_and_remote_branch_lookups() {
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        assert_eq!(a.branch().expect("branch").as_deref(), Some("main"));
+        a.set_remote_url("origin", utf8(&remote)).expect("remote");
+        assert!(!a.remote_has_branch("origin", "main").expect("empty remote"));
+        commit_file(&a, "f", b"f", "one");
+        a.push_set_upstream("origin", "main").expect("push");
+        assert_eq!(
+            sb.raw_ok(a.repo(), &["rev-parse", "--abbrev-ref", "@{u}"]),
+            "origin/main"
+        );
+        assert!(a.remote_has_branch("origin", "main").expect("pushed"));
+        assert!(!a.remote_has_branch("origin", "ain").expect("tail only"));
+        sb.raw_ok(a.repo(), &["checkout", "-q", "--detach"]);
+        assert_eq!(a.branch().expect("detached"), None);
+        a.set_remote_url("origin", utf8(&sb.dir.path().join("none")))
+            .expect("set-url");
+        assert!(a.remote_has_branch("origin", "main").is_err());
     }
 
     #[test]

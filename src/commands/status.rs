@@ -35,6 +35,7 @@ const UNREADABLE: &str = "unreadable";
 /// Runs `dot status`. Takes no lock, writes nothing and always exits 0 when it can read the repo.
 pub fn run(args: &StatusArgs) -> Result<()> {
     let ctx = Context::resolve("status")?;
+    ctx.guard()?;
     let repo_id = ctx.repo_id()?;
     let repo_config = ctx.repo_config()?;
     let state = ctx.state(&repo_id)?;

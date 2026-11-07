@@ -3,6 +3,7 @@
 mod common;
 
 use common::TestEnv;
+use std::fs;
 
 const NOT_COVERED: &[&str] = &["git", "doctor", "completion", "system-write", "help"];
 
@@ -14,6 +15,7 @@ const MINIMAL_ARGS: &[(&str, &[&str])] = &[
     ("status", &[]),
     ("apply", &[]),
     ("diff", &[]),
+    ("sync", &[]),
 ];
 
 fn listed_subcommands(help: &str) -> Vec<String> {
@@ -64,4 +66,45 @@ fn minimal_args_are_accepted_by_the_parser() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+fn stderr_of(env: &TestEnv, args: &[&str]) -> (Option<i32>, String) {
+    let out = env.run(args);
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn every_subcommand_exits_4_while_a_rebase_is_in_progress() {
+    for (name, args) in MINIMAL_ARGS {
+        let env = TestEnv::new();
+        env.ok(&["init"]);
+        fs::create_dir(env.repo().join(".git/rebase-merge")).expect("mark the rebase");
+        let mut full = vec![*name];
+        full.extend_from_slice(args);
+        let (code, err) = stderr_of(&env, &full);
+        assert_eq!(code, Some(4), "`dot {full:?}`: {err}");
+        assert!(err.contains("a rebase is in progress"), "{name}: {err}");
+        assert!(err.contains("dot git rebase --continue"), "{name}: {err}");
+        assert!(err.contains("dot git rebase --abort"), "{name}: {err}");
+    }
+}
+
+#[test]
+fn the_other_markers_are_refused_and_named() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let marker = env.repo().join(".git/rebase-apply");
+    fs::create_dir(&marker).expect("mark the rebase");
+    assert_eq!(stderr_of(&env, &["status"]).0, Some(4));
+    fs::remove_dir(&marker).expect("clear the rebase");
+
+    fs::write(env.repo().join(".git/MERGE_HEAD"), "x").expect("mark the merge");
+    let (code, err) = stderr_of(&env, &["status"]);
+    assert_eq!(code, Some(4), "{err}");
+    assert!(err.contains("a merge is in progress"), "{err}");
+    assert!(err.contains("dot git merge --continue"), "{err}");
+    assert!(err.contains("dot git merge --abort"), "{err}");
 }

@@ -9,6 +9,7 @@ use std::io::Write;
 /// Runs `dot list`. Takes no lock and writes nothing.
 pub fn run(args: &ListArgs) -> Result<()> {
     let ctx = Context::resolve("list")?;
+    ctx.guard()?;
     ctx.repo_id()?;
     let managed = ctx.managed()?;
     let mut out = std::io::stdout().lock();

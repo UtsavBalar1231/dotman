@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 /// Runs `dot diff`. Takes no lock and writes nothing outside its temp tree; differences are not an error.
 pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     let ctx = Context::resolve("diff")?;
+    ctx.guard()?;
     ctx.repo_id()?;
     let repo_config = ctx.repo_config()?;
     let keys = ctx.select(&args.paths, ctx.managed()?.into_keys().collect())?;
