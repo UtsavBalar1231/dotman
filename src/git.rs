@@ -1,8 +1,6 @@
 //! Git CLI wrapper that ignores the user's global git configuration where it would change stored content.
 //!
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
-#![allow(clippy::missing_errors_doc)]
-// reason: every fallible method fails the same way, stated once in the module doc above.
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::{OsStr, OsString};
