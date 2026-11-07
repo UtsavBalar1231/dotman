@@ -11,6 +11,7 @@ use crate::engine::write::{
     Skip, WriteOptions, WriteOutcome, backup_run_dir, safe_symlink, safe_write,
 };
 use crate::engine::{Home, Tuple, observe, observe_portable};
+use crate::hooks::{self, Policy};
 use crate::identity;
 use crate::lock::Lock;
 use crate::output;
@@ -34,7 +35,21 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
         decisions: args.decisions,
         ..Options::default()
     };
-    apply(&ctx, &args.paths, &opts).map(|applied| applied.outcome)
+    let applied = apply(&ctx, &args.paths, &opts)?;
+    let policy = Policy {
+        approve: args.decisions.approve_hooks,
+        no_hooks: args.no_hooks,
+        dry_run: args.dry_run,
+        never_ask: false,
+    };
+    finish(&ctx, &applied, policy)
+}
+
+/// Runs the hooks for what `applied` wrote, then fails if a path or a hook failed.
+pub(crate) fn finish(ctx: &Context, applied: &Applied, policy: Policy) -> Result<Outcome> {
+    let hooked = hooks::run(ctx, &applied.written, policy);
+    applied.check().and(hooked)?;
+    Ok(applied.outcome)
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +84,24 @@ pub(crate) struct Applied {
     pub undecided: BTreeSet<String>,
     /// Keys captured into the repo; in a dry run, the keys that would be.
     pub captured: BTreeSet<String>,
+    /// Keys whose `$HOME` entry was written; in a dry run, the keys that would be.
+    pub written: BTreeSet<String>,
+    /// Paths that could not be applied or captured. The caller reports them with `check`, after
+    /// it has run the hooks for what was written.
+    pub failed: usize,
+}
+
+impl Applied {
+    pub(crate) fn check(&self) -> Result<()> {
+        if self.failed > 0 {
+            bail!(
+                "{} {} could not be applied",
+                self.failed,
+                if self.failed == 1 { "path" } else { "paths" }
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Applies the keys under `inputs` (every key when empty). The caller holds the lock.
@@ -98,6 +131,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         forget: BTreeSet::new(),
         undecided: BTreeSet::new(),
         captured: BTreeSet::new(),
+        written: BTreeSet::new(),
         dir_modes: BTreeMap::new(),
         accepted: false,
     };
@@ -129,13 +163,6 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     }
     state.save(&ctx.paths.state_file(), opts.dry_run)?;
     repo_saved?;
-    if run.failed > 0 {
-        bail!(
-            "{} {} could not be applied",
-            run.failed,
-            if run.failed == 1 { "path" } else { "paths" }
-        );
-    }
     Ok(Applied {
         outcome: if run.attention {
             Outcome::Attention
@@ -144,6 +171,8 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         },
         undecided: run.undecided,
         captured: run.captured,
+        written: run.written,
+        failed: run.failed,
     })
 }
 
@@ -298,6 +327,7 @@ struct Run<'a> {
     forget: BTreeSet<String>,
     undecided: BTreeSet<String>,
     captured: BTreeSet<String>,
+    written: BTreeSet<String>,
     dir_modes: BTreeMap<String, u32>,
     accepted: bool,
 }
@@ -680,6 +710,7 @@ impl Run<'_> {
         };
         match outcome {
             Ok(WriteOutcome::Written(written)) => {
+                self.written.insert(key.clone());
                 self.announce("apply", key);
                 if let Some(backup) = &written.backup {
                     self.backed_up(backup);

@@ -3,6 +3,7 @@
 use crate::cli::{Decisions, InitArgs};
 use crate::commands::{Outcome, apply};
 use crate::context::Context;
+use crate::hooks::Policy;
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::private_temp_dir;
@@ -84,10 +85,17 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
         summary: true,
         ..apply::Options::default()
     };
+    let policy = Policy {
+        approve: args.approve_hooks,
+        dry_run,
+        never_ask: true,
+        ..Policy::default()
+    };
     if !dry_run {
         ctx.git.clone_from(source)?;
         output::success(&format!("cloned {source} into {}", repo.display()));
-        return apply::apply(ctx, &[], &opts).map(|applied| applied.outcome);
+        let applied = apply::apply(ctx, &[], &opts)?;
+        return apply::finish(ctx, &applied, policy);
     }
 
     // The plan needs the repo's content, so a dry run clones for real, into a temp dir that is
@@ -98,7 +106,8 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let clone = Context::new(paths, ctx.machine.clone(), "init");
     clone.git.clone_from(source)?;
     output::info(&format!("would clone {source} into {}", repo.display()));
-    apply::apply(&clone, &[], &opts).map(|applied| applied.outcome)
+    let applied = apply::apply(&clone, &[], &opts)?;
+    apply::finish(&clone, &applied, policy)
 }
 
 fn ask_remote() -> Result<Option<String>> {

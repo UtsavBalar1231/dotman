@@ -11,6 +11,7 @@ pub mod config;
 pub mod context;
 pub mod engine;
 pub mod git;
+pub mod hooks;
 pub mod identity;
 pub mod lock;
 pub mod output;

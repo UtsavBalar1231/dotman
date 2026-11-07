@@ -4,6 +4,7 @@ use crate::cli::EditArgs;
 use crate::commands::Outcome;
 use crate::commands::apply::{self, Options};
 use crate::context::Context;
+use crate::hooks::Policy;
 use crate::lock::Lock;
 use crate::paths::derive_key;
 use crate::variant::Flag;
@@ -56,7 +57,8 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
         take_drift: before != after,
         ..Options::default()
     };
-    apply::apply(&ctx, std::slice::from_ref(&args.path), &opts).map(|applied| applied.outcome)
+    let applied = apply::apply(&ctx, std::slice::from_ref(&args.path), &opts)?;
+    apply::finish(&ctx, &applied, Policy::default())
 }
 
 /// `$VISUAL`, else `$EDITOR`, else `vi`, split like a shell would.

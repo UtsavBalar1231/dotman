@@ -71,6 +71,8 @@ pub enum Commands {
 
 /// Arguments of `dot init`.
 #[derive(Args)]
+// reason: independent flags, not a state machine
+#[allow(clippy::struct_excessive_bools)]
 pub struct InitArgs {
     /// Git URL or local path of an existing dotman repo to clone and apply
     #[arg(value_name = "URL_OR_PATH")]
@@ -84,6 +86,9 @@ pub struct InitArgs {
     /// Take the repo version of files that differ, after backing them up
     #[arg(long, requires = "source")]
     pub take_repo: bool,
+    /// Approve the `[hooks]` table of the cloned repo on this machine and run its hooks
+    #[arg(long, requires = "source")]
+    pub approve_hooks: bool,
     /// Show what would be created and change nothing
     #[arg(long)]
     pub dry_run: bool,
@@ -109,6 +114,9 @@ pub struct Decisions {
     /// Accept a changed machine identity and use the variants it selects
     #[arg(long)]
     pub accept_identity: bool,
+    /// Approve the current `[hooks]` table on this machine and run its hooks
+    #[arg(long)]
+    pub approve_hooks: bool,
 }
 
 /// Arguments of `dot apply`.
@@ -122,6 +130,9 @@ pub struct ApplyArgs {
     /// Rewrite files in place when a rename cannot replace them, as on a bind mount
     #[arg(long)]
     pub in_place: bool,
+    /// Run no hooks
+    #[arg(long, conflicts_with = "approve_hooks")]
+    pub no_hooks: bool,
     /// Show what would be written and change nothing
     #[arg(long)]
     pub dry_run: bool,
@@ -143,6 +154,9 @@ pub struct SyncArgs {
     /// Answers that replace the prompts, which a non-interactive run never shows.
     #[command(flatten)]
     pub decisions: Decisions,
+    /// Run no hooks
+    #[arg(long, conflicts_with = "approve_hooks")]
+    pub no_hooks: bool,
     /// Show what would be captured, committed, pulled, applied and pushed; change nothing
     #[arg(long)]
     pub dry_run: bool,

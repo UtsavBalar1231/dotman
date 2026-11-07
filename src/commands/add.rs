@@ -29,7 +29,7 @@ const SNIFF_BYTES: u64 = 8192;
 // A new file over this size is probably a download, a cache or a database, not a config.
 const HOLD_BYTES: u64 = 1_048_576;
 const LARGEST_SHOWN: usize = 5;
-const MATCH: MatchOptions = MatchOptions {
+pub(crate) const MATCH: MatchOptions = MatchOptions {
     case_sensitive: true,
     require_literal_separator: true,
     require_literal_leading_dot: false,

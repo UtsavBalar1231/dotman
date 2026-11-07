@@ -8,6 +8,7 @@ use crate::commands::Outcome;
 use crate::commands::apply::{self, Options, Pass};
 use crate::context::Context;
 use crate::git::PullOutcome;
+use crate::hooks::{self, Policy};
 use crate::lock::Lock;
 use crate::output;
 use anyhow::{Result, anyhow, bail};
@@ -41,8 +42,18 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
             ..Options::default()
         },
     )?;
+    let policy = Policy {
+        approve: args.decisions.approve_hooks,
+        no_hooks: args.no_hooks,
+        dry_run,
+        never_ask: false,
+    };
+    if first.failed > 0 {
+        return apply::finish(&ctx, &first, policy);
+    }
     let mut attention = first.outcome == Outcome::Attention;
     commit(&ctx, args, &first.captured)?;
+    let written = first.written;
 
     let branch = match ctx.git.remote_url(REMOTE)? {
         Some(_) => Some(
@@ -59,7 +70,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         if dry_run {
             skip.extend(first.captured);
         }
-        let second = apply::apply(
+        let mut second = apply::apply(
             &ctx,
             &[],
             &Options {
@@ -69,12 +80,15 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
                 ..Options::default()
             },
         )?;
-        return Ok(finish(attention || second.outcome == Outcome::Attention));
+        second.written.extend(written);
+        let outcome = apply::finish(&ctx, &second, policy)?;
+        return Ok(finish(attention || outcome == Outcome::Attention));
     };
     if dry_run {
         output::info(&format!(
             "would pull {REMOTE} {branch}, apply what arrived and push"
         ));
+        hooks::run(&ctx, &written, policy)?;
         return Ok(finish(attention));
     }
 
@@ -86,7 +100,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         return Ok(Outcome::Conflict);
     }
 
-    let second = apply::apply(
+    let mut second = apply::apply(
         &ctx,
         &[],
         &Options {
@@ -96,12 +110,16 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         },
     )?;
     attention |= second.outcome == Outcome::Attention;
+    second.written.extend(written);
+    let hooked = hooks::run(&ctx, &second.written, policy);
+    second.check()?;
 
     // A repo with no commit has nothing to push.
     if ctx.git.head()?.is_some() {
         ctx.git.push_set_upstream(REMOTE, &branch)?;
         output::success(&format!("{REMOTE}/{branch} is up to date"));
     }
+    hooked?;
     Ok(finish(attention))
 }
 
