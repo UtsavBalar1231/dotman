@@ -110,6 +110,14 @@ pub fn find_legacy(home: &Path) -> Option<PathBuf> {
     legacy::is_legacy(&dir).then_some(dir)
 }
 
+/// The kind and path of every setup `dot import` finds when given no source.
+pub fn detect(ctx: &Context) -> Result<Vec<(&'static str, PathBuf)>> {
+    Ok(gittree::candidates(ctx)?
+        .into_iter()
+        .map(|candidate| (candidate.label, candidate.path))
+        .collect())
+}
+
 /// What `dot import` reads: a path, or a URL that git clones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
@@ -248,11 +256,20 @@ fn resolved(path: &Path) -> PathBuf {
     }
 }
 
-/// The error names `--overlay`, the way to add to a repo that already has content.
-pub(crate) fn require_fresh(ctx: &Context) -> Result<()> {
+/// Whether the repo has no commit and no managed file, so an import may fill it.
+pub fn is_fresh(ctx: &Context) -> Result<bool> {
     let repo = &ctx.paths.repo;
     let committed = repo.join(".git").exists() && ctx.git.head()?.is_some();
-    if committed || (repo.is_dir() && !ctx.managed()?.is_empty()) {
+    if committed {
+        return Ok(false);
+    }
+    Ok(!repo.is_dir() || ctx.managed()?.is_empty())
+}
+
+/// The error names `--overlay`, the way to add to a repo that already has content.
+pub(crate) fn require_fresh(ctx: &Context) -> Result<()> {
+    if !is_fresh(ctx)? {
+        let repo = &ctx.paths.repo;
         bail!(
             "the repo at {} already has files or history, and `dot import` needs a fresh repo. To add what a source has and the repo lacks, use `dot import --overlay <source>`",
             repo.display()

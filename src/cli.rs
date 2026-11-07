@@ -84,6 +84,9 @@ pub struct InitArgs {
     /// Set or replace the `origin` remote
     #[arg(long, value_name = "URL", conflicts_with = "source")]
     pub remote: Option<String>,
+    /// Create a fresh repo without looking for an existing setup to import
+    #[arg(long, conflicts_with = "source")]
+    pub no_import: bool,
     /// Keep the local version of files that differ from the repo
     #[arg(long, requires = "source", conflicts_with = "take_repo")]
     pub keep_local: bool,
