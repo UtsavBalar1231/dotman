@@ -271,3 +271,25 @@ fn restore_keeps_a_copy_of_the_uncommitted_source_it_replaces() {
     exits(&env.run(&["restore", KEY, "--from", "HEAD~1"]), 0);
     assert_eq!(env.backups(SOURCE), [(b"font_size 1\n".to_vec(), 0o600)]);
 }
+
+#[test]
+fn sync_without_a_remote_still_applies_after_capturing() {
+    let env = drifted();
+    exits(&env.run(&["sync", "--take-repo"]), 0);
+    assert_eq!(env.read(KEY), b"font_size 14\n");
+    assert_eq!(env.backups(KEY), [(b"font_size 99\n".to_vec(), 0o600)]);
+    assert_eq!(token(&env, KEY).as_deref(), Some("clean"));
+
+    env.write_machine_config("[vars]\nfont = \"16\"\n");
+    exits(&env.run(&["sync"]), 0);
+    assert_eq!(env.read(KEY), b"font_size 16\n");
+}
+
+#[test]
+fn a_dry_run_sync_without_a_remote_previews_the_apply() {
+    let env = drifted();
+    let before = env.four_trees();
+    let err = exits(&env.run(&["sync", "--take-repo", "--dry-run"]), 0);
+    assert!(err.contains(KEY), "{err}");
+    assert_eq!(env.four_trees(), before);
+}

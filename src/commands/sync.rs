@@ -54,7 +54,22 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     };
     let Some(branch) = branch else {
         output::info("no remote is set; add one with `dot init --remote <url>`");
-        return Ok(finish(attention));
+        // A dry run captured nothing, so its captured keys are not reported a second time.
+        let mut skip = first.undecided;
+        if dry_run {
+            skip.extend(first.captured);
+        }
+        let second = apply::apply(
+            &ctx,
+            &[],
+            &Options {
+                dry_run,
+                decisions: args.decisions,
+                skip,
+                ..Options::default()
+            },
+        )?;
+        return Ok(finish(attention || second.outcome == Outcome::Attention));
     };
     if dry_run {
         output::info(&format!(
