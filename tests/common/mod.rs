@@ -133,7 +133,7 @@ impl TestEnv {
             &std::env::var_os("PATH").unwrap_or_default(),
         ));
         let path = std::env::join_paths(dirs).expect("join PATH");
-        vec![
+        let mut vars: Vec<(&'static str, OsString)> = vec![
             ("HOME", self.home().into()),
             ("XDG_CONFIG_HOME", self.xdg_config().into()),
             ("XDG_STATE_HOME", self.xdg_state().into()),
@@ -143,12 +143,17 @@ impl TestEnv {
             ("NO_PAGER", "1".into()),
             ("LC_ALL", "C".into()),
             ("PATH", path),
-        ]
+        ];
+        if let Some(tmp) = std::env::var_os("TMPDIR") {
+            vars.push(("TMPDIR", tmp));
+        }
+        vars
     }
 
     /// The `dot` binary with this device's environment, running in HOME.
     pub fn dot(&self) -> Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("dot");
+        cmd.env_clear();
         for (k, v) in self.vars() {
             cmd.env(k, v);
         }
@@ -158,6 +163,7 @@ impl TestEnv {
 
     fn git_command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new("git");
+        cmd.env_clear();
         for (k, v) in self.vars() {
             cmd.env(k, v);
         }

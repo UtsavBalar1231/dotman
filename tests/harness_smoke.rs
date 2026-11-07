@@ -83,3 +83,16 @@ fn tree_checksum_known_tree() {
     .collect();
     assert_eq!(got, expected);
 }
+
+#[test]
+fn git_uses_harness_identity_only() {
+    let env = TestEnv::new();
+    assert_eq!(
+        env.git(&["config", "--get", "user.email"]).trim(),
+        "test@example.invalid"
+    );
+    assert!(
+        env.git(&["var", "GIT_AUTHOR_IDENT"])
+            .contains("Test User <test@example.invalid>")
+    );
+}
