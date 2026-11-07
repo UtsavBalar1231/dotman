@@ -149,6 +149,17 @@ impl TestEnv {
         cmd
     }
 
+    /// `dot` as a std command, for what `assert_cmd` does not expose, such as a process group.
+    pub fn dot_process(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dot"));
+        cmd.env_clear();
+        for (k, v) in self.vars() {
+            cmd.env(k, v);
+        }
+        cmd.current_dir(self.home());
+        cmd
+    }
+
     fn git_command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new("git");
         cmd.env_clear();

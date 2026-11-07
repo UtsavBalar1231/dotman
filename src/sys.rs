@@ -18,28 +18,46 @@ pub fn restore_sigpipe() {
     }
 }
 
-/// Puts back the SIGPIPE action that [`ignore_sigpipe`] replaced, when dropped.
+/// Puts back the actions that [`ignore_signals`] replaced, when dropped.
 #[cfg(unix)]
-pub struct SigpipeIgnored(libc::sighandler_t);
+pub struct SignalsIgnored(Vec<(libc::c_int, libc::sighandler_t)>);
+
+/// Ignores `signals` until the value is dropped. `SIG_IGN` survives exec, so a child spawned
+/// meanwhile would ignore them too; spawn it first.
+#[cfg(unix)]
+#[must_use]
+pub fn ignore_signals(signals: &[libc::c_int]) -> SignalsIgnored {
+    SignalsIgnored(
+        signals
+            .iter()
+            .map(|&signal| {
+                // SAFETY: `signal` with SIG_IGN installs no handler; the previous action is kept
+                // to be put back.
+                (signal, unsafe { libc::signal(signal, libc::SIG_IGN) })
+            })
+            .collect(),
+    )
+}
 
 /// Ignores SIGPIPE until the value is dropped. Meanwhile a write to a child that has already
 /// exited fails with EPIPE instead of killing the process.
 #[cfg(unix)]
 #[must_use]
-pub fn ignore_sigpipe() -> SigpipeIgnored {
-    // SAFETY: `signal` with SIG_IGN installs no handler; the previous action is kept to be put back.
-    SigpipeIgnored(unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) })
+pub fn ignore_sigpipe() -> SignalsIgnored {
+    ignore_signals(&[libc::SIGPIPE])
 }
 
 #[cfg(unix)]
-impl Drop for SigpipeIgnored {
+impl Drop for SignalsIgnored {
     fn drop(&mut self) {
-        if self.0 == libc::SIG_ERR {
-            return;
-        }
-        // SAFETY: the value came from `signal` for SIGPIPE, so it is a valid action for it.
-        unsafe {
-            libc::signal(libc::SIGPIPE, self.0);
+        for &(signal, previous) in &self.0 {
+            if previous == libc::SIG_ERR {
+                continue;
+            }
+            // SAFETY: `previous` came from `signal` for this signal, so it is a valid action for it.
+            unsafe {
+                libc::signal(signal, previous);
+            }
         }
     }
 }
@@ -276,5 +294,34 @@ mod tests {
     fn buffer_growth_is_bounded() {
         assert_eq!(grow(1024), Some(2048));
         assert_eq!(grow(MAX_LOOKUP_BUF), None);
+    }
+
+    extern "C" fn noop(_: libc::c_int) {}
+
+    fn action(signal: libc::c_int) -> libc::sighandler_t {
+        let mut current = MaybeUninit::<libc::sigaction>::zeroed();
+        // SAFETY: a null new action only reads the current one into `current`, which is writable.
+        let rc = unsafe { libc::sigaction(signal, ptr::null(), current.as_mut_ptr()) };
+        assert_eq!(rc, 0);
+        // SAFETY: zeroed memory is a valid `sigaction`, and the call filled it in.
+        unsafe { current.assume_init() }.sa_sigaction
+    }
+
+    // SIGUSR1 and SIGUSR2 are touched by nothing else, so parallel tests cannot race on them.
+    #[test]
+    fn ignored_signals_get_their_previous_action_back() {
+        let handler = noop as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        // SAFETY: `noop` is a valid handler that does nothing.
+        unsafe { libc::signal(libc::SIGUSR1, handler) };
+        let default = action(libc::SIGUSR2);
+        {
+            let _ignored = ignore_signals(&[libc::SIGUSR1, libc::SIGUSR2]);
+            assert_eq!(action(libc::SIGUSR1), libc::SIG_IGN);
+            assert_eq!(action(libc::SIGUSR2), libc::SIG_IGN);
+        }
+        assert_eq!(action(libc::SIGUSR1), handler);
+        assert_eq!(action(libc::SIGUSR2), default);
+        // SAFETY: SIG_DFL installs no handler.
+        unsafe { libc::signal(libc::SIGUSR1, libc::SIG_DFL) };
     }
 }

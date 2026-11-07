@@ -750,6 +750,39 @@ fn diff_compares_the_plaintext_and_removes_its_temp_dir() {
     );
 }
 
+// Without a TTY git starts no pager, even with `-p`, so an external diff stands in for it: a child
+// of git that interrupts the whole process group while dot waits. dot runs in a group of its own,
+// so the interrupt never reaches the test runner.
+#[test]
+fn an_interrupted_diff_leaves_no_temp_dir_behind() {
+    use std::os::unix::process::CommandExt;
+
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_repo(".a", b"repo\n");
+    env.write(".a", b"home\n", 0o644);
+    let ran = env.root().join("interrupted");
+    let stub = env.write_script(
+        "interrupt.sh",
+        &format!("#!/bin/sh\ntouch '{}'\nkill -INT 0\n", ran.display()),
+    );
+    let out = env
+        .dot_process()
+        .env("GIT_EXTERNAL_DIFF", &stub)
+        .arg("diff")
+        .process_group(0)
+        .output()
+        .unwrap();
+    assert!(ran.exists(), "the stub never ran: {out:?}");
+    assert!(out.status.code().is_some(), "dot died by a signal: {out:?}");
+    let left: Vec<String> = fs::read_dir(env.state_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("dotman-diff-"))
+        .collect();
+    assert_eq!(left, Vec::<String>::new());
+}
+
 #[test]
 fn doctor_warns_on_one_recipient_counts_locked_files_and_checks_the_key_reader() {
     if !age_installed() {

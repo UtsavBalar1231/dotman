@@ -11,8 +11,10 @@ use crate::git::Git;
 use crate::output;
 use crate::paths::{create_private_dir, private_temp_dir};
 use crate::secrets::Locked;
+use crate::sys;
 use crate::variant::Selection;
 use anyhow::{Context as _, Result, bail};
+use libc::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
@@ -109,7 +111,15 @@ pub(crate) fn show(ctx: &Context, entries: &[(&str, &SourceEntry)], no_pager: bo
         "a",
         "b",
     ]);
-    let status = cmd.status().context("failed to run git diff")?;
+    let mut child = cmd.spawn().context("failed to run git diff")?;
+    // Ctrl-C reaches the whole foreground group. Ignored here only after the spawn, so git and the
+    // pager keep their default actions, and dot outlives them to remove the temp dir; only SIGKILL
+    // can still leave it behind.
+    let status = {
+        let _ignored = sys::ignore_signals(&[SIGINT, SIGQUIT, SIGHUP, SIGTERM]);
+        child.wait()
+    }
+    .context("failed to run git diff")?;
     match status.code() {
         Some(0 | 1) => Ok(()),
         None if status.signal() == Some(libc::SIGPIPE) => Ok(()),
