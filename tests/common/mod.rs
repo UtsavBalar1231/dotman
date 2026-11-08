@@ -75,6 +75,11 @@ impl TestEnv {
     }
 
     fn init_dirs(&self) {
+        fs::create_dir_all(self.gh_block_dir()).expect("create the gh stub dir");
+        write_stub(
+            &self.gh_block_dir().join("gh"),
+            "#!/bin/sh\necho 'real gh blocked in tests' >&2\nexit 97\n",
+        );
         for dir in [
             self.home(),
             self.xdg_config(),
@@ -88,6 +93,12 @@ impl TestEnv {
             "[user]\n\tname = Test User\n\temail = test@example.invalid\n",
         )
         .expect("write .gitconfig");
+    }
+
+    /// Holds a `gh` that refuses to run, so the real one is never reached. It comes after
+    /// [`TestEnv::prepend_path`] directories, so a test's own `gh` stub wins.
+    fn gh_block_dir(&self) -> PathBuf {
+        self.root().join("gh-blocked")
     }
 
     pub fn root(&self) -> &Path {
@@ -167,6 +178,7 @@ impl TestEnv {
 
     fn vars(&self) -> Vec<(&'static str, OsString)> {
         let mut dirs = self.path_prepend.clone();
+        dirs.push(self.gh_block_dir());
         dirs.extend(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
         ));
@@ -177,6 +189,18 @@ impl TestEnv {
             ("XDG_STATE_HOME", self.xdg_state().into()),
             ("XDG_DATA_HOME", self.xdg_data().into()),
             ("GIT_CONFIG_NOSYSTEM", "1".into()),
+            // Every http(s) URL points at a path that does not exist, so no test reaches the network.
+            ("GIT_CONFIG_COUNT", "2".into()),
+            (
+                "GIT_CONFIG_KEY_0",
+                "url.file:///dotman-tests-no-network/.insteadOf".into(),
+            ),
+            ("GIT_CONFIG_VALUE_0", "https://".into()),
+            (
+                "GIT_CONFIG_KEY_1",
+                "url.file:///dotman-tests-no-network/.insteadOf".into(),
+            ),
+            ("GIT_CONFIG_VALUE_1", "http://".into()),
             ("DOTMAN_NON_INTERACTIVE", "1".into()),
             ("NO_PAGER", "1".into()),
             ("LC_ALL", "C".into()),
@@ -259,6 +283,12 @@ impl TestEnv {
     /// Contents of `path` (relative to HOME, or absolute).
     pub fn read(&self, path: impl AsRef<Path>) -> Vec<u8> {
         fs::read(self.home().join(path)).expect("read file")
+    }
+
+    /// Replaces `$HOME/.gitconfig` with one that names no identity.
+    pub fn clear_git_identity(&self) {
+        fs::write(self.home().join(".gitconfig"), "[core]\n\teditor = true\n")
+            .expect("write .gitconfig");
     }
 
     /// Replaces the machine config, `$XDG_CONFIG_HOME/dotman/config.toml`.

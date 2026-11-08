@@ -2,9 +2,13 @@
 //! reaches git, hooks, the editor or any other program; the age CLI gets it on stdin instead.
 
 use std::ffi::OsStr;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+const POLL: Duration = Duration::from_millis(20);
 
 /// Holds age identity text. Never written to a file and never passed to a child's environment.
 pub const AGE_KEY_VAR: &str = "DOTMAN_AGE_KEY";
@@ -14,6 +18,29 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
     cmd.env_remove(AGE_KEY_VAR);
     cmd
+}
+
+/// Runs `cmd` with no stdin and its output discarded, and kills it after `timeout`, giving `None`.
+pub fn status_within(cmd: &mut Command, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let left = timeout.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            // The child may have exited since the poll, which makes the kill fail; the wait reaps it.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(POLL.min(left));
+    }
 }
 
 /// `name` itself when it contains a `/`, else the first executable `name` in an absolute `PATH`
@@ -68,6 +95,23 @@ mod tests {
             .map(|e| e.path().display().to_string())
             .collect();
         assert!(offenders.is_empty(), "use proc::command in {offenders:?}");
+    }
+
+    #[test]
+    fn a_child_past_the_timeout_is_killed() {
+        let started = Instant::now();
+        let mut slow = command("sh");
+        slow.args(["-c", "sleep 30"]);
+        assert_eq!(
+            status_within(&mut slow, Duration::from_millis(200)).unwrap(),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let mut quick = command("sh");
+        quick.args(["-c", "exit 3"]);
+        let status = status_within(&mut quick, Duration::from_secs(30)).unwrap();
+        assert_eq!(status.and_then(|s| s.code()), Some(3));
     }
 
     #[test]

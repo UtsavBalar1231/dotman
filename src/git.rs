@@ -10,7 +10,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use xxhash_rust::xxh3::xxh3_128;
 
 const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding\n";
@@ -616,14 +616,24 @@ impl Git {
         }
     }
 
-    /// Whether `url` answers `git ls-remote` with no credentials and no prompt.
-    /// Has no timeout; the caller bounds it.
-    pub fn ls_remote_anonymous(&self, url: &str) -> Result<bool> {
+    /// Whether `url` answers `git ls-remote` within `timeout` with no credentials and no prompt.
+    /// A timeout counts as no answer.
+    pub fn ls_remote_anonymous(&self, url: &str, timeout: Duration) -> Result<bool> {
+        self.check_version()?;
         let mut cmd = self.base();
-        cmd.args(["-c", "credential.helper="]);
+        cmd.args(["-c", "credential.helper=", "ls-remote", url, "HEAD"]);
         cmd.env("GIT_TERMINAL_PROMPT", "0");
-        let out = self.output(cmd, &["ls-remote", url, "HEAD"])?;
-        Ok(out.status.success())
+        cmd.env("GIT_ASKPASS", "").env("SSH_ASKPASS", "");
+        let status = crate::proc::status_within(&mut cmd, timeout).context("failed to run git")?;
+        Ok(status.is_some_and(|status| status.success()))
+    }
+
+    /// Sets `key` in the repo's config, or in the user's global config.
+    pub fn set_config(&self, key: &str, value: &str, global: bool) -> Result<()> {
+        let scope = if global { "--global" } else { "--local" };
+        let cmd = if global { self.base() } else { self.command() };
+        self.run_with(cmd, &["config", scope, "--", key, value])
+            .map(drop)
     }
 }
 
@@ -1348,9 +1358,10 @@ mod tests {
         let sb = Sandbox::new();
         let git = sb.git("repo");
         git.init().expect("init");
-        assert!(git.ls_remote_anonymous(utf8(git.repo())).expect("ls"));
+        let wait = Duration::from_secs(30);
+        assert!(git.ls_remote_anonymous(utf8(git.repo()), wait).expect("ls"));
         let missing = sb.dir.path().join("missing");
-        assert!(!git.ls_remote_anonymous(utf8(&missing)).expect("ls"));
+        assert!(!git.ls_remote_anonymous(utf8(&missing), wait).expect("ls"));
     }
 
     #[test]

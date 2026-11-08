@@ -13,6 +13,7 @@ use crate::git::PullOutcome;
 use crate::hooks::{self, Policy};
 use crate::lock::Lock;
 use crate::output;
+use crate::remote;
 use crate::secrets;
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
@@ -65,6 +66,9 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         output::info("no remote is set; add one with `dot init --remote <url>`");
         return without_remote(&ctx, args, first, policy);
     };
+    if !dry_run {
+        remote::note_origin(&ctx, true);
+    }
     // A failed path never stops the sync; the failure is reported after the push.
     let (first_failed, uncaptured) = (first.failed, first.uncaptured);
     let mut attention = first.outcome == Outcome::Attention;

@@ -12,7 +12,7 @@ use crate::output;
 use crate::paths::{create_private_dir, write_atomic};
 use crate::prompt;
 use crate::secrets;
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, IsTerminal, Read};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -34,6 +34,13 @@ fn init(ctx: &Context) -> Result<Outcome> {
     let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
     ctx.guard()?;
     ctx.repo_id()?;
+    create_identity(ctx)?;
+    Ok(Outcome::Done)
+}
+
+/// Generates the identity and lists its recipient. The caller holds the lock and has checked
+/// that the repo exists.
+pub(crate) fn create_identity(ctx: &Context) -> Result<()> {
     let identity = &ctx.paths.age_identity;
     if fs::symlink_metadata(identity).is_ok() {
         bail!(
@@ -66,7 +73,7 @@ fn init(ctx: &Context) -> Result<Outcome> {
         output::info(&format!("  recipient {recipient}{note}"));
     }
     output::info(GUIDANCE);
-    Ok(Outcome::Done)
+    Ok(())
 }
 
 fn import(ctx: &Context, args: &KeyImportArgs) -> Result<Outcome> {
@@ -78,21 +85,63 @@ fn import(ctx: &Context, args: &KeyImportArgs) -> Result<Outcome> {
     };
     let text =
         read_input(&args.file, from_stdin).with_context(|| format!("cannot read {shown}"))?;
+    let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
+    ctx.guard()?;
+    ctx.repo_id()?;
+    let incoming = validate(ctx, &text, &shown)?;
+    install(ctx, &incoming, args.force, args.add_recipient)
+}
+
+/// Identity text that holds an age identity and whose recipients were derived.
+pub struct Incoming {
+    text: String,
+    recipients: Option<Vec<String>>,
+}
+
+/// Derives the recipients before anything is written, so a damaged key is refused and nothing
+/// changes. `shown` names the source in messages.
+pub(crate) fn validate(ctx: &Context, text: &str, shown: &str) -> Result<Incoming> {
     let starts = |prefix: &str| text.lines().any(|line| line.trim().starts_with(prefix));
     let (native, plugin) = (starts("AGE-SECRET-KEY-1"), starts("AGE-PLUGIN-"));
     if !native && !plugin {
         bail!("{shown} holds no age identity: no AGE-SECRET-KEY-1 or AGE-PLUGIN- line");
     }
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
-    ctx.guard()?;
-    ctx.repo_id()?;
-    // Derived before anything is written, so a damaged key is refused and nothing changes.
     let recipients = match ctx.age().recipients_of(text.as_bytes()) {
         Ok(recipients) => Some(recipients),
         Err(e) if native => return Err(e.context(format!("{shown} is not a usable age identity"))),
         Err(_) => None,
     };
+    Ok(Incoming {
+        text: text.to_owned(),
+        recipients,
+    })
+}
 
+fn replace_refused(identity: &Path) -> anyhow::Error {
+    anyhow!(
+        "a different age identity is already at {}; replacing it loses every file encrypted only to it. --force replaces it after a backup",
+        identity.display()
+    )
+}
+
+/// Fails when installing `incoming` would replace a different identity without `force`.
+pub(crate) fn check_replaceable(ctx: &Context, incoming: &Incoming, force: bool) -> Result<()> {
+    let identity = &ctx.paths.age_identity;
+    match existing(identity)? {
+        Some(old) if old != incoming.text.as_bytes() && !force => Err(replace_refused(identity)),
+        _ => Ok(()),
+    }
+}
+
+/// Copies the identity into place at 0600, backing up a different one that `force` replaces. The
+/// caller holds the lock.
+pub(crate) fn install(
+    ctx: &Context,
+    incoming: &Incoming,
+    force: bool,
+    add_recipient: bool,
+) -> Result<Outcome> {
+    let Incoming { text, recipients } = incoming;
     let identity = &ctx.paths.age_identity;
     let write = match existing(identity)? {
         None => true,
@@ -103,10 +152,7 @@ fn import(ctx: &Context, args: &KeyImportArgs) -> Result<Outcome> {
             ));
             false
         }
-        Some(_) if !args.force => bail!(
-            "a different age identity is already at {}; replacing it loses every file encrypted only to it. --force replaces it after a backup",
-            identity.display()
-        ),
+        Some(_) if !force => return Err(replace_refused(identity)),
         Some(old) => {
             let run = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
             let name = identity.file_name().map_or_else(
@@ -130,7 +176,7 @@ fn import(ctx: &Context, args: &KeyImportArgs) -> Result<Outcome> {
         write_atomic(identity, text.as_bytes(), 0o600)?;
         output::success(&format!("imported the identity to {}", identity.display()));
     }
-    check_recipients(ctx, recipients, args.add_recipient)
+    check_recipients(ctx, recipients.clone(), add_recipient)
 }
 
 fn check_recipients(ctx: &Context, recipients: Option<Vec<String>>, add: bool) -> Result<Outcome> {

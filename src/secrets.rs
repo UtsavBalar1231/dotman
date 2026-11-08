@@ -134,6 +134,14 @@ impl Age {
         )
     }
 
+    /// Whether an identity is available here: `DOTMAN_AGE_KEY`, an existing `DOTMAN_AGE_KEY_FILE`
+    /// or the identity file.
+    #[must_use]
+    pub fn has_key_source(&self) -> bool {
+        let exists = |path: &Path| fs::symlink_metadata(path).is_ok();
+        self.key.is_some() || self.key_file.as_deref().is_some_and(exists) || exists(&self.identity)
+    }
+
     fn cli(&self) -> Result<&Cli> {
         self.cli
             .get_or_init(|| select(self.command.as_deref()))

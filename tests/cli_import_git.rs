@@ -725,11 +725,16 @@ fn a_url_import_keeps_the_url_as_origin() {
 #[test]
 fn a_credential_in_a_url_never_reaches_the_report() {
     let env = TestEnv::new();
-    let out = env.run(&[
-        "import",
-        "--dry-run",
-        "https://user:s3cret@127.0.0.1:9/dots.git",
-    ]);
+    // Port 9 on localhost refuses at once; the harness's https rewrite would put the credential
+    // into git's own error text.
+    let out = env.run_with(
+        &[("GIT_CONFIG_COUNT", "0")],
+        &[
+            "import",
+            "--dry-run",
+            "https://user:s3cret@127.0.0.1:9/dots.git",
+        ],
+    );
     assert_ne!(out.status.code(), Some(0));
     assert!(!stderr(&out).contains("s3cret"), "{}", stderr(&out));
 }

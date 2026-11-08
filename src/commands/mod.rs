@@ -15,6 +15,7 @@ pub mod log;
 pub mod restore;
 pub mod status;
 pub mod sync;
+pub mod wizard;
 
 /// How a command that hit no error ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

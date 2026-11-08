@@ -19,6 +19,7 @@ pub mod output;
 pub mod paths;
 pub mod proc;
 pub mod prompt;
+pub mod remote;
 pub mod repo_config;
 pub mod secrets;
 pub mod state;

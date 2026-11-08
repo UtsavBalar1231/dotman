@@ -1,6 +1,7 @@
 //! `dot init`: create the repo or set its remote, or clone an existing repo and apply it.
 
 use crate::cli::{Decisions, ImportArgs, InitArgs};
+use crate::commands::wizard::{self, Ask, Wizard};
 use crate::commands::{Outcome, apply};
 use crate::context::Context;
 use crate::hooks::Policy;
@@ -9,6 +10,7 @@ use crate::lock::Lock;
 use crate::output;
 use crate::paths::private_temp_dir;
 use crate::prompt;
+use crate::remote;
 use crate::repo_config::RepoConfig;
 use anyhow::{Result, anyhow, bail};
 use std::path::PathBuf;
@@ -36,6 +38,25 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
     let repo = &ctx.paths.repo;
     let config_file = ctx.repo_config_file();
     let exists = repo.join(".git").exists();
+    let origin = if exists {
+        ctx.git.remote_url("origin")?
+    } else {
+        None
+    };
+
+    let ask = match (prompt::interactive() && !dry_run, exists) {
+        (false, _) => Ask::Nothing,
+        (true, true) => Ask::Remote,
+        (true, false) => Ask::Everything,
+    };
+    let wizard = Wizard {
+        ctx: &ctx,
+        args,
+        ask,
+    };
+    wizard.check_flags()?;
+    let answers = wizard.new_repo(origin.as_deref())?;
+    wizard.check(&answers, origin.as_deref(), dry_run)?;
 
     if dry_run {
         if !exists {
@@ -44,9 +65,7 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
         if !config_file.exists() {
             output::info(&format!("would write {}", config_file.display()));
         }
-        if let Some(url) = &args.remote {
-            output::info(&format!("would set origin to {url}"));
-        }
+        wizard.describe(&answers);
         return Ok(Outcome::Done);
     }
 
@@ -57,19 +76,7 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
     if !exists {
         output::success(&format!("created the repo at {}", repo.display()));
     }
-
-    let current = ctx.git.remote_url("origin")?;
-    let wanted = match &args.remote {
-        Some(url) => Some(url.clone()),
-        None if current.is_none() && prompt::interactive() => ask_remote()?,
-        None => None,
-    };
-    if let Some(url) = wanted
-        && current.as_deref() != Some(url.as_str())
-    {
-        ctx.git.set_remote_url("origin", &url)?;
-        output::success(&format!("origin is {url}"));
-    }
+    wizard.apply(&answers)?;
     Ok(Outcome::Done)
 }
 
@@ -85,6 +92,18 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
             repo.display()
         );
     }
+    // Everything a flag can get wrong is refused before the clone, which would be left behind.
+    Wizard {
+        ctx,
+        args,
+        ask: Ask::Nothing,
+    }
+    .check_flags()?;
+    let key = args
+        .age_key_file
+        .as_deref()
+        .map(|path| wizard::read_key_file(ctx, path, args.force))
+        .transpose()?;
     let opts = apply::Options {
         dry_run,
         decisions: Decisions {
@@ -104,6 +123,16 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     if !dry_run {
         ctx.git.clone_from(source)?;
         output::success(&format!("cloned {source} into {}", repo.display()));
+        remote::note_origin(ctx, false);
+        let ask = if prompt::interactive() {
+            Ask::Everything
+        } else {
+            Ask::Nothing
+        };
+        let wizard = Wizard { ctx, args, ask };
+        let answers = wizard.existing_repo(key)?;
+        let updated = wizard.apply(&answers)?;
+        let ctx = updated.as_ref().unwrap_or(ctx);
         let applied = apply::apply(ctx, &[], &opts)?;
         return apply::finish(ctx, &applied, policy);
     }
@@ -116,8 +145,17 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let clone = Context::new(paths, ctx.machine.clone(), "init");
     clone.git.clone_from(source)?;
     output::info(&format!("would clone {source} into {}", repo.display()));
-    let applied = apply::apply(&clone, &[], &opts)?;
-    apply::finish(&clone, &applied, policy)
+    let wizard = Wizard {
+        ctx: &clone,
+        args,
+        ask: Ask::Nothing,
+    };
+    let answers = wizard.existing_repo(key)?;
+    wizard.check(&answers, None, true)?;
+    wizard.describe(&answers);
+    let planning = Context::new(clone.paths.clone(), wizard.machine_for(&answers), "init");
+    let applied = apply::apply(&planning, &[], &opts)?;
+    apply::finish(&planning, &applied, policy)
 }
 
 /// `None` when the user chose to start fresh and `init` goes on.
@@ -156,17 +194,15 @@ fn offer_import(
         return Ok(Some(Outcome::Attention));
     }
     let fresh = found.len().saturating_add(1);
-    let answer = prompt::ask(&format!(
+    let question = format!(
         "Import which? 1-{}, {fresh} to start fresh, empty to do nothing:",
         found.len()
-    ))?;
-    if answer.is_empty() {
+    );
+    let Some(choice) = prompt::ask_parsed(&question, |answer| prompt::choice(answer, fresh))?
+    else {
         output::info("nothing created");
         return Ok(Some(Outcome::Done));
-    }
-    let choice: usize = answer
-        .parse()
-        .map_err(|_| anyhow!("`{answer}` is not a number from 1 to {fresh}"))?;
+    };
     if choice == fresh {
         return Ok(None);
     }
@@ -186,28 +222,16 @@ fn offer_import(
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;
     ctx.guard()?;
     let outcome = import::run(ctx, &import_args)?;
-    if let Some(url) = &args.remote
-        && !args.dry_run
-    {
-        ctx.git.set_remote_url("origin", url)?;
-        output::success(&format!("origin is {url}"));
+    if !args.dry_run {
+        if let Some(url) = &args.remote {
+            wizard::set_origin(ctx, url)?;
+        }
+        remote::note_origin(ctx, false);
     }
     Ok(Some(outcome))
 }
 
-fn ask_remote() -> Result<Option<String>> {
-    let answer = prompt::ask("Remote URL for origin (empty to skip):")?;
-    if answer.is_empty() {
-        return Ok(None);
-    }
-    check_url(&answer)?;
-    Ok(Some(answer))
-}
-
 // A leading `-` would be read by git as an option.
 fn check_url(url: &str) -> Result<()> {
-    if url.is_empty() || url.starts_with('-') {
-        bail!("`{url}` is not a usable remote URL");
-    }
-    Ok(())
+    wizard::usable_url(url).map(drop).map_err(|e| anyhow!(e))
 }

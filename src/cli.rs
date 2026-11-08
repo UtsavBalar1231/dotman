@@ -110,6 +110,49 @@ pub struct InitArgs {
     /// Show what would be created and change nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// Git `user.name` to set when git has no identity
+    #[arg(long, value_name = "NAME")]
+    pub git_name: Option<String>,
+    /// Git `user.email` to set when git has no identity
+    #[arg(long, value_name = "EMAIL")]
+    pub git_email: Option<String>,
+    /// Store --git-name and --git-email in the global git config instead of the repo's
+    #[arg(long)]
+    pub git_global: bool,
+    /// Create the private GitHub repo `OWNER/NAME` with `gh` and make it `origin`
+    #[arg(
+        long,
+        value_name = "OWNER/NAME",
+        conflicts_with_all = ["source", "remote", "no_remote"]
+    )]
+    pub create_github: Option<String>,
+    /// Do not ask for a remote
+    #[arg(long, conflicts_with_all = ["source", "remote"])]
+    pub no_remote: bool,
+    /// Host name of this machine, written to `[identity]` in the machine config
+    #[arg(long, value_name = "NAME")]
+    pub host: Option<String>,
+    /// A profile this machine opts into, written to the machine config; repeatable
+    #[arg(long, value_name = "NAME")]
+    pub profile: Vec<String>,
+    /// A directory outside $HOME whose files this machine manages, added to `[system] roots`; repeatable
+    #[arg(long, value_name = "DIR")]
+    pub system_root: Vec<PathBuf>,
+    /// Do not ask about system files
+    #[arg(long, conflicts_with = "system_root")]
+    pub no_system: bool,
+    /// Create an age identity for encrypted files
+    #[arg(long, conflicts_with_all = ["source", "no_key"])]
+    pub create_key: bool,
+    /// Do not ask about an age identity
+    #[arg(long, conflicts_with = "source")]
+    pub no_key: bool,
+    /// Import the age identity in FILE before applying, so encrypted files decrypt
+    #[arg(long, value_name = "FILE", requires = "source")]
+    pub age_key_file: Option<PathBuf>,
+    /// With --age-key-file: replace a different existing identity, after backing it up
+    #[arg(long, requires = "age_key_file")]
+    pub force: bool,
 }
 
 /// Answers to the prompts of `apply` and `sync`, given in advance.
@@ -218,6 +261,9 @@ pub struct AddArgs {
     /// Store the files encrypted to the `[age] recipients` in .dotman.toml
     #[arg(long)]
     pub encrypt: bool,
+    /// Add files in plain text although their names match `[guard] secret_names` and the remote is public
+    #[arg(long, conflicts_with = "encrypt")]
+    pub allow_plain: bool,
     /// Do not ask before adding directories
     #[arg(long)]
     pub yes: bool,

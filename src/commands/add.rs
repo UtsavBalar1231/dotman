@@ -15,6 +15,7 @@ use crate::paths::{
     absolute_input, derive_key, find_collisions, refuse_non_nfc, validate_key, write_atomic,
 };
 use crate::prompt;
+use crate::remote;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{self, HoldsKey};
 use crate::state::{IdentitySnapshot, Kind, State};
@@ -148,6 +149,17 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     };
     refuse_collisions(&targets.sources, &plan)?;
     targets.check(&ctx, &repo_config, &plan)?;
+    let public = remote_is_public(&ctx, &mut state, dry_run)?;
+    let held = if public && !args.encrypt && !args.allow_plain {
+        guard_public(&mut plan, &repo_config)?
+    } else {
+        Vec::new()
+    };
+    for key in &held {
+        output::warning(&format!(
+            "held {key}: name matches [guard] secret_names and the remote is public; `dot add --encrypt {key}` stores it encrypted, `--allow-plain` stores it as it is"
+        ));
+    }
 
     for line in &plan.skipped {
         output::warning(&format!("skipped {line}"));
@@ -204,7 +216,54 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         bail!("{failed} of {} paths could not be added", items.len());
     }
     output::success(&format!("added {added} paths"));
-    Ok(Outcome::Done)
+    Ok(if held.is_empty() {
+        Outcome::Done
+    } else {
+        Outcome::Attention
+    })
+}
+
+/// Whether `origin` is known to be public. A remote with no stored result is checked first, and
+/// the result saved at once, because a refusal below ends the run before the state is written.
+fn remote_is_public(ctx: &Context, state: &mut State, dry_run: bool) -> Result<bool> {
+    let Some(origin) = ctx.git.remote_url("origin")? else {
+        return Ok(false);
+    };
+    if !dry_run && remote::needs_check(state, &origin) {
+        remote::refresh(ctx, state, &origin);
+        state.save(&ctx.paths.state_file(), false)?;
+    }
+    Ok(remote::is_public(state, &origin))
+}
+
+/// With a public remote: refuses explicit files whose names match `[guard] secret_names`, and
+/// takes such files out of the directories' plans. Returns the keys it took out.
+fn guard_public(plan: &mut Plan, repo_config: &RepoConfig) -> Result<Vec<String>> {
+    let secrets = secret_patterns(repo_config)?;
+    let named = |key: &str| secrets.iter().any(|p| p.matches_with(key, MATCH_SECRET));
+    let refused: Vec<&str> = plan
+        .files
+        .keys()
+        .map(String::as_str)
+        .filter(|key| named(key))
+        .collect();
+    if !refused.is_empty() {
+        bail!(
+            "{} match [guard] secret_names and the remote is public; pass --encrypt to store them encrypted, or --allow-plain to store them as they are",
+            refused.join(", ")
+        );
+    }
+    let mut held = Vec::new();
+    for dir in &mut plan.dirs {
+        dir.items.retain(|key, _| {
+            let keep = !named(key);
+            if !keep {
+                held.push(key.clone());
+            }
+            keep
+        });
+    }
+    Ok(held)
 }
 
 struct Targets<'a> {
@@ -1243,6 +1302,47 @@ fn settle_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn link() -> Leaf {
+        Leaf::Link
+    }
+
+    fn plan_of(files: &[&str], dir_items: &[&str]) -> Plan {
+        Plan {
+            files: files.iter().map(|k| ((*k).to_owned(), link())).collect(),
+            dirs: vec![DirPlan {
+                key: ".config/x".to_owned(),
+                items: dir_items
+                    .iter()
+                    .map(|k| ((*k).to_owned(), link()))
+                    .collect(),
+                ..DirPlan::default()
+            }],
+            ..Plan::default()
+        }
+    }
+
+    #[test]
+    fn a_public_remote_refuses_a_secret_name_and_holds_it_in_a_directory() {
+        let config = RepoConfig::default();
+        let mut plan = plan_of(&[".bashrc"], &[".config/x/.env", ".config/x/rc"]);
+        let held = guard_public(&mut plan, &config).unwrap();
+        assert_eq!(held, [".config/x/.env"]);
+        let kept: Vec<&String> = plan.dirs.iter().flat_map(|d| d.items.keys()).collect();
+        assert_eq!(kept, [".config/x/rc"]);
+
+        let mut plan = plan_of(&[".bashrc", ".ENV", ".aws/credentials"], &[]);
+        let err = guard_public(&mut plan, &config).unwrap_err().to_string();
+        assert!(
+            err.contains(".ENV") && err.contains(".aws/credentials"),
+            "{err}"
+        );
+        assert!(!err.contains(".bashrc"), "{err}");
+        assert!(
+            err.contains("--encrypt") && err.contains("--allow-plain"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn ignore_patterns_match_like_gitignore_globs() {
