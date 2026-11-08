@@ -337,6 +337,21 @@ fn dot_gets_the_directory_and_the_environment_and_exit_3_is_success() -> R {
 }
 
 #[test]
+fn a_rerun_applies_without_downloading_and_keeps_a_local_edit() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let out = setup.run(&[])?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    fs::write(setup.home().join(".bashrc"), "local edit\n")?;
+    let out = setup.command(&setup.empty_base()?, &[]).output()?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert_eq!(fs::read(setup.home().join(".bashrc"))?, b"local edit\n");
+    Ok(())
+}
+
+#[test]
 fn macos_prints_the_install_command_and_exits_0() -> R {
     if !curl_available() {
         return Ok(());
@@ -624,5 +639,42 @@ fn the_generated_script_passes_shellcheck() -> R {
         .arg(repo_script(&env))
         .output()?;
     assert!(out.status.success(), "{}", text(&out));
+    Ok(())
+}
+
+#[test]
+fn an_overlay_right_after_an_import_takes_the_generated_script_into_its_commit() -> R {
+    let env = TestEnv::new();
+    let first = work_tree(&env, "first")?;
+    let second = work_tree(&env, "second")?;
+    fs::remove_file(second.join(".vimrc"))?;
+    fs::write(second.join(".zshrc"), "export Z=1\n")?;
+    let second_arg = second.to_string_lossy().into_owned();
+    env.git(&["-C", &second_arg, "add", "-A"]);
+    env.git(&["-C", &second_arg, "commit", "-q", "-m", "second"]);
+    let out = env.run(&["import", &first.to_string_lossy()]);
+    assert!(out.status.success(), "{}", text(&out));
+    let repo = env.repo().to_string_lossy().into_owned();
+    let count = || env.git(&["-C", &repo, "rev-list", "--count", "HEAD"]);
+    let before = count();
+
+    let path = repo_script(&env);
+    let generated = fs::read_to_string(&path)?;
+    fs::write(&path, format!("{generated}# mine\n"))?;
+    let out = env.run(&["import", "--overlay", &second_arg, "--include-missing"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    fs::write(&path, &generated)?;
+
+    let out = env.run(&["import", "--overlay", &second_arg, "--include-missing"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert_eq!(
+        count().trim().parse::<u32>()?,
+        before.trim().parse::<u32>()? + 1
+    );
+    let files = env.git(&["-C", &repo, "show", "--name-only", "--format=", "HEAD"]);
+    assert!(
+        files.contains("install.sh") && files.contains(".zshrc"),
+        "{files}"
+    );
     Ok(())
 }

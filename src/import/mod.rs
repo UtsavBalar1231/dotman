@@ -287,6 +287,25 @@ pub fn is_fresh(ctx: &Context) -> Result<bool> {
     Ok(!repo.is_dir() || ctx.managed()?.is_empty())
 }
 
+/// An overlay needs a clean worktree, except for the `install.sh` an import just wrote, which
+/// goes into the overlay commit.
+pub(crate) fn require_clean(ctx: &Context) -> Result<()> {
+    let generated = matches!(
+        bootstrap::inspect(&ctx.paths.repo)?,
+        bootstrap::Found::Unedited { .. }
+    );
+    let dirty =
+        ctx.git.status()?.iter().any(|entry| {
+            !(generated && entry.xy == "??" && entry.path == Path::new(bootstrap::FILE))
+        });
+    ensure!(
+        !dirty,
+        "the repo at {} has uncommitted changes; run `dot sync` first, so the overlay commit holds only the overlay",
+        ctx.paths.repo.display()
+    );
+    Ok(())
+}
+
 /// The error names `--overlay`, the way to add to a repo that already has content.
 pub(crate) fn require_fresh(ctx: &Context) -> Result<()> {
     if !is_fresh(ctx)? {

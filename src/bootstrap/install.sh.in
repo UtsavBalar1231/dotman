@@ -141,7 +141,13 @@ if [ "$(id -u)" = 0 ]; then
     DOTMAN_ALLOW_ROOT=1
     export DOTMAN_ALLOW_ROOT
 fi
-set -- init "$dir" --take-repo
+# A rerun must not clobber edits: with a repo present, apply skips conflicting files when
+# non-interactive, where init --take-repo would overwrite them.
+if "$dot" status >/dev/null 2>&1; then
+    set -- apply
+else
+    set -- init "$dir" --take-repo
+fi
 if [ "${DOTMAN_APPROVE_HOOKS:-}" = 1 ]; then
     set -- "$@" --approve-hooks
 fi

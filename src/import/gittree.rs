@@ -14,7 +14,7 @@ use super::farm;
 use super::yadm::{self, Alternate, Machine};
 use super::{
     EditedConfig, Item, Report, Source, author_email, count, find_legacy, homes, legacy, proceed,
-    require_fresh,
+    require_clean, require_fresh,
 };
 use crate::bootstrap;
 use crate::cli::ImportArgs;
@@ -1252,11 +1252,7 @@ fn overlay_message(ctx: &Context, source: &Source) -> String {
 pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Result<Outcome> {
     check_source(source)?;
     ctx.repo_id()?;
-    ensure!(
-        ctx.git.status()?.is_empty(),
-        "the repo at {} has uncommitted changes; run `dot sync` first, so the overlay commit holds only the overlay",
-        ctx.paths.repo.display()
-    );
+    require_clean(ctx)?;
     let staging = Staging::new(ctx, false)?;
     staging.clone_source(source)?;
     let tree = staging.git.ls_tree("HEAD")?;

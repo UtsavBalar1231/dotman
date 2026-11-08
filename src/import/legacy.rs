@@ -8,7 +8,9 @@
 //! key counts as converted when every commit that holds it kept it, and as needing action when any
 //! commit dropped it.
 
-use super::{EditedConfig, Item, Report, author_email, count, homes, proceed, require_fresh};
+use super::{
+    EditedConfig, Item, Report, author_email, count, homes, proceed, require_clean, require_fresh,
+};
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::add::ensure_worktree_parents;
@@ -851,11 +853,7 @@ fn make_executable(path: &Path) -> Result<()> {
 /// one commit.
 pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Outcome> {
     ctx.repo_id()?;
-    ensure!(
-        ctx.git.status()?.is_empty(),
-        "the repo at {} has uncommitted changes; run `dot sync` first, so the overlay commit holds only the overlay",
-        ctx.paths.repo.display()
-    );
+    require_clean(ctx)?;
     let mut found = compare(ctx, root, args.include_missing)?;
     if add_missing(args, &found.missing)? {
         found = compare(ctx, root, true)?;
