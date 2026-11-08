@@ -19,6 +19,7 @@ use crate::prompt;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{HoldsKey, Locked};
 use crate::state::{IdentitySnapshot, Kind, State};
+use crate::system::{self, Verdict};
 use crate::variant::{Selection, Sources};
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -154,6 +155,9 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         if let Some(action) = action {
             run.execute(item, action, &mut state, &mut repo_config);
         }
+    }
+    if inputs.is_empty() {
+        run.system(&mut state, &mut repo_config);
     }
     run.capture_new(&scan, &mut state, &mut repo_config);
 
@@ -666,6 +670,74 @@ impl Run<'_> {
                 if done {
                     state.files.insert(key.clone(), r.tuple.entry(&r.source));
                 }
+            }
+        }
+    }
+
+    /// System files are never written here. `sync`'s capture pass copies edits made to them into
+    /// the repo, and any other pass says once that the rest needs `apply --system`.
+    fn system(&mut self, state: &mut State, repo_config: &mut RepoConfig) {
+        let found = match system::evaluate(self.ctx, repo_config, state) {
+            Ok(found) => found,
+            Err(e) => {
+                output::warning(&format!("system files: skipped: {e:#}"));
+                return;
+            }
+        };
+        let capturing = self.opts.pass == Pass::Capture;
+        let mut pending = 0_usize;
+        for item in found {
+            let key = item.key;
+            match item.verdict {
+                Verdict::Row {
+                    row: Row::ChangedLocally,
+                    r: Some(r),
+                    ..
+                } if capturing => self.capture_system(&key, &r.source, state, repo_config),
+                Verdict::Row { row, .. } if !capturing && !item.off && system::needs_write(row) => {
+                    pending = pending.saturating_add(1);
+                }
+                Verdict::Unreadable(why) if !capturing && !item.off => {
+                    output::warning(&format!("{key}: skipped, it cannot be read: {why}"));
+                }
+                _ => {}
+            }
+        }
+        if pending > 0 {
+            output::info(&format!(
+                "{pending} system {} differ from the repo; `dot apply --system` will write them, but it is not available yet",
+                if pending == 1 { "file" } else { "files" }
+            ));
+        }
+    }
+
+    fn capture_system(
+        &mut self,
+        key: &str,
+        source: &str,
+        state: &mut State,
+        repo_config: &mut RepoConfig,
+    ) {
+        let dry_run = self.opts.dry_run;
+        match system::capture(self.ctx, key, source, repo_config, dry_run) {
+            Ok(tuple) => {
+                self.announce("capture", key);
+                if !dry_run {
+                    state.system.insert(key.to_owned(), tuple.entry(source));
+                }
+                self.captured.insert(key.to_owned());
+            }
+            Err(e) if e.is::<HoldsKey>() => {
+                self.attention = true;
+                self.undecided.insert(key.to_owned());
+                output::warning(&format!(
+                    "{key}: held, it holds an age secret key (AGE-SECRET-KEY-) and system scope does not encrypt"
+                ));
+            }
+            Err(e) => {
+                self.failed = self.failed.saturating_add(1);
+                self.uncaptured = self.uncaptured.saturating_add(1);
+                output::warning(&format!("{key}: cannot be captured: {e:#}"));
             }
         }
     }

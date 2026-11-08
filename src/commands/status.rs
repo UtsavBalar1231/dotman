@@ -7,6 +7,9 @@ use crate::context::{Context, is_under};
 use crate::engine::status::{Row, Variants, Worktree};
 use crate::output;
 use crate::paths::derive_key;
+use crate::repo_config::RepoConfig;
+use crate::state::State;
+use crate::system::{self, Verdict};
 use anyhow::{Context as _, Result};
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -42,21 +45,23 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     let repo_config = ctx.repo_config()?;
     let state = ctx.state(&repo_id)?;
 
-    let filters = if args.paths.is_empty() {
+    let (home_paths, system_filters) = system::split_inputs(&ctx.paths, &args.paths)?;
+    let filters = if home_paths.is_empty() {
         Vec::new()
     } else {
         let cwd = std::env::current_dir().context("cannot read the current directory")?;
-        args.paths
+        home_paths
             .iter()
             .map(|p| derive_key(p, &cwd, &ctx.paths.home, ctx.paths.home_real.as_deref()))
             .collect::<Result<Vec<_>>>()?
     };
+    let unfiltered = args.paths.is_empty();
 
     let sources = ctx.sources()?;
     let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
     let scan = add::scan_dirs(&ctx, &repo_config, &keys)?;
-    let in_scope = |key: &str| filters.is_empty() || filters.iter().any(|f| is_under(key, f));
+    let in_scope = |key: &str| unfiltered || filters.iter().any(|f| is_under(key, f));
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
     let variants = Variants::new(
         worktree,
@@ -84,6 +89,9 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         };
         rows.push((label, key));
     }
+
+    let wanted = |key: &str| unfiltered || system_filters.iter().any(|f| is_under(key, f));
+    rows.extend(system_rows(&ctx, &repo_config, &state, wanted)?);
 
     let new: Vec<&String> = scan.new.keys().filter(|k| in_scope(k)).collect();
     let held: Vec<(&String, Hold)> = scan
@@ -147,4 +155,47 @@ fn list_new(
         }
     }
     Ok(())
+}
+
+fn system_rows(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    state: &State,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<Vec<(&'static str, String)>> {
+    let scope = ctx.system_scope();
+    let mut rows = Vec::new();
+    for found in system::evaluate(ctx, repo_config, state)? {
+        if !wanted(&found.key) {
+            continue;
+        }
+        let key = found.key;
+        let label = match found.verdict {
+            Verdict::Refused(why) => {
+                output::warning(&format!("{key}: {why}"));
+                "invalid"
+            }
+            Verdict::Invalid(problems) => {
+                for (source, reason) in problems {
+                    output::warning(&format!("{key}: skipped, {source}: {reason}"));
+                }
+                "invalid"
+            }
+            Verdict::Ambiguous(_) => "ambiguous",
+            _ if found.off => "system-off",
+            Verdict::Unreadable(why) => {
+                output::warning(&format!("{key}: {why}"));
+                UNREADABLE
+            }
+            Verdict::Row { row, .. } => {
+                let siblings = scope.siblings(&key);
+                if !siblings.is_empty() {
+                    output::warning(&system::sibling_note(&key, &siblings));
+                }
+                token(row)
+            }
+        };
+        rows.push((label, key));
+    }
+    Ok(rows)
 }

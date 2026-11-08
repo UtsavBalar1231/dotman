@@ -178,8 +178,10 @@ pub struct DiffArgs {
 
 /// Arguments of `dot add`.
 #[derive(Args)]
+// reason: independent flags, not a state machine
+#[allow(clippy::struct_excessive_bools)]
 pub struct AddArgs {
-    /// Files, symlinks or directories under $HOME
+    /// Files, symlinks or directories under $HOME; with --system, files outside it
     #[arg(required = true)]
     pub paths: Vec<PathBuf>,
     /// Add the files as variants that apply only where these `+`-joined conditions hold, such as
@@ -195,6 +197,15 @@ pub struct AddArgs {
     /// Show what would be added and change nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// Add regular files outside $HOME that you can read, such as /etc/keyd/default.conf
+    #[arg(long)]
+    pub system: bool,
+    /// With --system: the file belongs to a package; manage it anyway
+    #[arg(long, requires = "system")]
+    pub package_owned: bool,
+    /// With --system: add the top-level directory to `[system] roots` without asking
+    #[arg(long, requires = "system")]
+    pub add_root: bool,
 }
 
 /// Arguments of `dot forget`.

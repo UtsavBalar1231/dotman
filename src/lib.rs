@@ -24,6 +24,7 @@ pub mod secrets;
 pub mod state;
 #[allow(unsafe_code)]
 pub mod sys;
+pub mod system;
 pub mod template;
 pub mod variant;
 

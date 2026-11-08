@@ -16,7 +16,8 @@ use std::path::{Component, Path, PathBuf};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 /// The environment variables dotman reads (`HOME`, `XDG_{CONFIG,STATE,DATA}_HOME`,
-/// `DOTMAN_REPO_PATH`, `DOTMAN_CONFIG_PATH`, `DOTMAN_AGE_KEY_FILE`, `SUDO_USER`), captured once.
+/// `DOTMAN_REPO_PATH`, `DOTMAN_CONFIG_PATH`, `DOTMAN_AGE_KEY_FILE`, `DOTMAN_SYSTEM_ROOT`, `SUDO_USER`),
+/// captured once.
 #[derive(Debug, Default, Clone)]
 pub struct Env {
     home: Option<OsString>,
@@ -26,6 +27,7 @@ pub struct Env {
     repo_path: Option<OsString>,
     config_path: Option<OsString>,
     age_key_file: Option<OsString>,
+    system_root: Option<OsString>,
     sudo_user: Option<OsString>,
 }
 
@@ -40,6 +42,7 @@ impl Env {
             repo_path: get("DOTMAN_REPO_PATH"),
             config_path: get("DOTMAN_CONFIG_PATH"),
             age_key_file: get("DOTMAN_AGE_KEY_FILE"),
+            system_root: get("DOTMAN_SYSTEM_ROOT"),
             sudo_user: get("SUDO_USER"),
         }
     }
@@ -81,6 +84,8 @@ pub struct Paths {
     pub age_identity: PathBuf,
     /// Identity file named by `DOTMAN_AGE_KEY_FILE`, read as well as `age_identity`.
     pub age_key_file: Option<PathBuf>,
+    /// `DOTMAN_SYSTEM_ROOT`, canonicalized once. When set, system paths are read below it.
+    pub system_root: Option<PathBuf>,
     repo_from_env: bool,
 }
 
@@ -115,6 +120,13 @@ impl Paths {
         let config_override = absolute_override("DOTMAN_CONFIG_PATH", env.config_path.as_deref())?;
         let age_key_file = absolute_override("DOTMAN_AGE_KEY_FILE", env.age_key_file.as_deref())?;
 
+        let system_root = absolute_override("DOTMAN_SYSTEM_ROOT", env.system_root.as_deref())?
+            .map(|root| {
+                fs::canonicalize(&root).with_context(|| {
+                    format!("DOTMAN_SYSTEM_ROOT ({}) cannot be resolved", root.display())
+                })
+            })
+            .transpose()?;
         let home_real = fs::canonicalize(&home).ok().filter(|real| *real != home);
         Ok(Self {
             home,
@@ -127,6 +139,7 @@ impl Paths {
             config_home,
             data_home,
             age_key_file,
+            system_root,
         })
     }
 

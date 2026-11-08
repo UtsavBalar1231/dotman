@@ -3,6 +3,7 @@
 use crate::cli::ListArgs;
 use crate::context::Context;
 use crate::state::Kind;
+use crate::system;
 use crate::variant::{Flag, Sources};
 use anyhow::{Context as _, Result};
 use std::io::Write;
@@ -38,6 +39,34 @@ pub fn run(args: &ListArgs) -> Result<()> {
             writeln!(out, "{kind:<8}{key}{flag}")
         } else {
             writeln!(out, "{kind:<8}{key}  ({source}){flag}")
+        }
+        .context("cannot write to stdout")?;
+    }
+    // The kind column says `system`, so a system key is told apart from a home key by more than
+    // its leading `/`.
+    let system_managed = ctx.managed_system()?;
+    let system_sources = Sources::group(system_managed.keys().map(String::as_str));
+    for rel in system_sources.keys() {
+        let Some(source) = system_sources.select(rel, ctx.identity()).winner().copied() else {
+            continue;
+        };
+        if system_managed.get(source) != Some(&Kind::File)
+            || system_sources.flag(rel, source) != Flag::Plain
+        {
+            continue;
+        }
+        let key = system::key_of(rel);
+        if args.porcelain {
+            write!(out, "system\t{key}\0")
+        } else if source == rel {
+            writeln!(out, "{:<8}{key}", "system")
+        } else {
+            writeln!(
+                out,
+                "{:<8}{key}  ({})",
+                "system",
+                system::source_path(source)
+            )
         }
         .context("cannot write to stdout")?;
     }

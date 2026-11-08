@@ -7,6 +7,7 @@ use crate::lock::Lock;
 use crate::secrets::{self, Locked};
 use crate::state::State;
 use crate::sys;
+use crate::system::{self, Verdict};
 use crate::variant::{Flag, Selection};
 use anyhow::{Context as _, Result};
 use std::fs;
@@ -110,6 +111,7 @@ fn collect(online: bool) -> Vec<Check> {
     }
     if let Some(ctx) = &ctx {
         checks.extend(directories(ctx));
+        checks.extend(system_roots(ctx));
         if repo_exists {
             if git_ok {
                 checks.push(remote(&git, online));
@@ -117,6 +119,7 @@ fn collect(online: bool) -> Vec<Check> {
             checks.extend(repo_health(ctx));
             checks.extend(variants(ctx));
             checks.extend(encryption(ctx));
+            checks.extend(system_files(ctx));
         } else {
             checks.push(fail(
                 "repo",
@@ -333,6 +336,92 @@ fn encryption(ctx: &Context) -> Vec<Check> {
         checks.push(warn(
             "encrypted files",
             &format!("{} of {total} locked: {}", locked.len(), locked.join(", ")),
+        ));
+    }
+    checks
+}
+
+fn system_roots(ctx: &Context) -> Vec<Check> {
+    let scope = ctx.system_scope();
+    let mut checks = Vec::new();
+    for root in scope.roots() {
+        match root.problem {
+            Some(problem) => checks.push(fail(
+                "system roots",
+                &format!("{} {problem}", root.shown),
+                "remove it from [system] roots in the machine config",
+            )),
+            None if !root.exists => checks.push(warn(
+                "system roots",
+                &format!("{} does not exist", root.shown),
+            )),
+            None => {}
+        }
+    }
+    if checks.is_empty() && !scope.roots().is_empty() {
+        let shown: Vec<&str> = scope.roots().iter().map(|r| r.shown.as_str()).collect();
+        checks.push(pass(&format!("system roots {}", shown.join(", "))));
+    }
+    checks
+}
+
+// System files are read as the user; a leftover beside one means the package manager and the repo disagree.
+fn system_files(ctx: &Context) -> Vec<Check> {
+    let (Ok(config), Ok(id)) = (ctx.repo_config(), ctx.repo_id()) else {
+        return Vec::new();
+    };
+    let Ok(state) = ctx.state(&id) else {
+        return Vec::new();
+    };
+    let found = match system::evaluate(ctx, &config, &state) {
+        Ok(found) => found,
+        Err(e) => return vec![warn("system files", &format!("{e:#}"))],
+    };
+    let scope = ctx.system_scope();
+    let mut checks = Vec::new();
+    let (mut total, mut off) = (0_usize, 0_usize);
+    for item in found {
+        total = total.saturating_add(1);
+        if item.off {
+            off = off.saturating_add(1);
+        }
+        match item.verdict {
+            Verdict::Refused(why) => checks.push(warn("system files", &why)),
+            Verdict::Invalid(problems) => {
+                for (source, reason) in problems {
+                    checks.push(warn(
+                        "system files",
+                        &format!("{source}: {reason}; {} is not applied", item.key),
+                    ));
+                }
+            }
+            Verdict::Ambiguous(tied) => checks.push(warn(
+                "system files",
+                &format!(
+                    "{}: {} are equally specific here",
+                    item.key,
+                    tied.join(", ")
+                ),
+            )),
+            Verdict::Unreadable(why) if !item.off => {
+                checks.push(warn("system files", &format!("{}: {why}", item.key)));
+            }
+            Verdict::Row { .. } if !item.off => {
+                let siblings = scope.siblings(&item.key);
+                if !siblings.is_empty() {
+                    checks.push(warn(
+                        "system files",
+                        &system::sibling_note(&item.key, &siblings),
+                    ));
+                }
+            }
+            Verdict::Unreadable(_) | Verdict::Row { .. } => {}
+        }
+    }
+    if off > 0 {
+        checks.push(info(
+            "system files",
+            &format!("{off} of {total} are outside [system] roots and stay off"),
         ));
     }
     checks

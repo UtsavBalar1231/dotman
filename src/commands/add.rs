@@ -3,6 +3,7 @@
 //! Planning reads `$HOME` and changes nothing, so a refused path leaves the repo untouched.
 
 use crate::cli::AddArgs;
+use crate::commands::Outcome;
 use crate::context::{Context, TEMP_PREFIX, is_real_dir};
 use crate::engine::status::{Content, SourceEntry, Worktree};
 use crate::engine::{
@@ -17,6 +18,7 @@ use crate::prompt;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{self, HoldsKey};
 use crate::state::{IdentitySnapshot, Kind, State};
+use crate::system::{self, Ownership, Standing};
 use crate::variant::{self, Flag, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
 use glob::{MatchOptions, Pattern};
@@ -117,11 +119,14 @@ impl Ignore {
 }
 
 /// Runs `dot add`.
-pub fn run(args: &AddArgs) -> Result<()> {
+pub fn run(args: &AddArgs) -> Result<Outcome> {
     let ctx = Context::resolve("add")?;
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
     ctx.guard()?;
+    if args.system {
+        return add_system(&ctx, args);
+    }
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
@@ -161,7 +166,7 @@ pub fn run(args: &AddArgs) -> Result<()> {
         if in_dirs > 0 {
             output::info(&format!("would add {in_dirs} files from directories"));
         }
-        return Ok(());
+        return Ok(Outcome::Done);
     }
 
     if in_dirs > 0 && !args.yes && prompt::interactive() {
@@ -199,7 +204,7 @@ pub fn run(args: &AddArgs) -> Result<()> {
         bail!("{failed} of {} paths could not be added", items.len());
     }
     output::success(&format!("added {added} paths"));
-    Ok(())
+    Ok(Outcome::Done)
 }
 
 struct Targets<'a> {
@@ -932,6 +937,307 @@ fn replace_with_symlink(path: &Path, target: &Path) -> Result<()> {
         }
     }
     bail!("cannot find a free temp name in {}", dir.display())
+}
+
+struct Planned {
+    key: String,
+    rel: String,
+    source: String,
+    bytes: Vec<u8>,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    package_owned: bool,
+}
+
+/// `dot add --system`: copies readable regular files outside `$HOME` into `.dotman/system`.
+/// Exits 3 without writing anything when a root is missing and cannot be asked about.
+fn add_system(ctx: &Context, args: &AddArgs) -> Result<Outcome> {
+    if args.encrypt {
+        bail!(
+            "--encrypt cannot be used with --system: system scope does not encrypt; keep secrets as {{age}} files under $HOME"
+        );
+    }
+    let dry_run = args.dry_run;
+    let repo_id = ctx.repo_id()?;
+    let mut repo_config = ctx.repo_config()?;
+    let mut state = ctx.state(&repo_id)?;
+    let scope = ctx.system_scope();
+    let sources = Sources::group(ctx.managed_system()?.keys().map(String::as_str));
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+
+    let mut files = Vec::new();
+    let mut unchecked = false;
+    for input in &args.paths {
+        let key = system_key(ctx, &scope, input, &cwd).with_context(|| {
+            if input.is_absolute() {
+                input.display().to_string()
+            } else {
+                format!(
+                    "{} (relative, so resolved against the current directory)",
+                    input.display()
+                )
+            }
+        })?;
+        let file = read_system_file(ctx, &scope, &sources, args, key)?;
+        unchecked |= !file.checked;
+        files.push(file.file);
+    }
+    if unchecked {
+        output::info(
+            "no pacman, dpkg or rpm found; cannot tell whether a package owns these files",
+        );
+    }
+    let collisions = find_collisions(
+        sources
+            .keys()
+            .chain(files.iter().map(|file| file.rel.as_str())),
+    );
+    if let Some((a, b)) = collisions
+        .iter()
+        .find(|(a, b)| files.iter().any(|f| f.rel == *a || f.rel == *b))
+    {
+        bail!("{a} and {b} differ only in case or normalization");
+    }
+
+    let missing: BTreeSet<String> = files
+        .iter()
+        .filter(|file| scope.standing(&file.key) == Standing::Off)
+        .filter_map(|file| system::offered_root(&file.key, scope.macos()))
+        .collect();
+    if !missing.is_empty() && !settle_roots(ctx, &scope, &missing, args)? {
+        return Ok(Outcome::Attention);
+    }
+
+    for file in &files {
+        let shown_source = shown(&file.key, &format!("/{}", file.source));
+        if dry_run {
+            output::action("would add", &shown_source);
+            continue;
+        }
+        let path = system::source_path(&file.source);
+        ensure_worktree_parents(&ctx.paths.repo, &path)?;
+        write_atomic(
+            &ctx.paths.repo.join(&path),
+            &file.bytes,
+            system::stored_mode(file.mode),
+        )?;
+        system::record(&mut repo_config, &file.key, file.uid, file.gid, file.mode)?;
+        if let Some(record) = repo_config.system.get_mut(&file.key) {
+            record.package_owned = file.package_owned;
+        }
+        if applies(&sources, args, ctx.identity(), file) {
+            state.system.insert(
+                file.key.clone(),
+                Tuple::of_file(&file.bytes, file.mode).entry(&path),
+            );
+        } else {
+            output::info(&format!(
+                "{}: this machine does not apply {path}, so it keeps its current source",
+                file.key
+            ));
+        }
+        output::action("add", &shown_source);
+    }
+    if dry_run {
+        return Ok(Outcome::Done);
+    }
+    if state.identity.is_none() {
+        state.identity = Some(ctx.identity().clone());
+    }
+    repo_config.save(&ctx.repo_config_file(), false)?;
+    state.save(&ctx.paths.state_file(), false)?;
+    output::success(&format!("added {} system files", files.len()));
+    Ok(Outcome::Done)
+}
+
+fn system_key(ctx: &Context, scope: &system::Scope, input: &Path, cwd: &Path) -> Result<String> {
+    let abs = absolute_input(input, cwd, &ctx.paths.home);
+    let key = abs
+        .to_str()
+        .ok_or_else(|| anyhow!("it is not valid UTF-8"))?
+        .to_owned();
+    let paths = &ctx.paths;
+    let in_home = std::iter::once(paths.home.as_path())
+        .chain(paths.home_real.as_deref())
+        .any(|root| abs.starts_with(root));
+    if in_home {
+        bail!("{key} is under $HOME; add it without --system");
+    }
+    refuse_non_nfc(&abs)?;
+    system::rel(&key)?;
+    if !key.rsplit('/').next().is_some_and(variant::is_literal) {
+        bail!("{key}: {BLOCK_NAME}; system scope takes no {{tmpl}} or {{age}} either");
+    }
+    if let Standing::Refused(why) = scope.standing(&key) {
+        bail!("{why}");
+    }
+    if system::offered_root(&key, scope.macos()).is_none() {
+        bail!("{key} is not inside a directory that can be a root");
+    }
+    Ok(key)
+}
+
+struct Prepared {
+    file: Planned,
+    /// A package manager answered.
+    checked: bool,
+}
+
+fn read_system_file(
+    ctx: &Context,
+    scope: &system::Scope,
+    sources: &Sources,
+    args: &AddArgs,
+    key: String,
+) -> Result<Prepared> {
+    let unreadable = |why: &str| anyhow!("{key} {why}: {}", system::SECRETS_NOTE);
+    let node = scope.node(&key).map_err(|e| {
+        if system::is_unreadable(&e) {
+            unreadable("cannot be read by you")
+        } else {
+            e
+        }
+    })?;
+    let (bytes, mode, uid, gid) = match node {
+        Node::File {
+            bytes,
+            mode,
+            uid,
+            gid,
+            ..
+        } => {
+            if mode & 0o444 == 0 {
+                return Err(unreadable("has no read permission"));
+            }
+            (bytes, mode & 0o777, uid, gid)
+        }
+        Node::Missing => bail!("{key} does not exist"),
+        Node::BadParent(parent) => {
+            bail!("/{parent} is a symlink or not a directory; dotman does not add through it")
+        }
+        Node::Dir => bail!("{key} is a directory; system scope takes regular files only"),
+        Node::Symlink(_) => bail!("{key} is a symlink; system scope takes regular files only"),
+        Node::Special => bail!("{key} is a socket, FIFO or device"),
+    };
+    if secrets::holds_secret_key(&bytes) {
+        bail!("{key} holds an age secret key (AGE-SECRET-KEY-), and system scope does not encrypt");
+    }
+
+    let checked = match system::package_owner(&scope.disk(&key))? {
+        Ownership::Package(owner) if !args.package_owned => bail!(
+            "{key} belongs to a package ({owner}); add it with --package-owned to manage it anyway"
+        ),
+        Ownership::Package(_) | Ownership::Unowned => true,
+        Ownership::NoChecker => false,
+    };
+
+    let rel = system::rel(&key)?.to_owned();
+    let source = match args.for_conditions.as_deref() {
+        Some(conditions) => variant::variant_source(&rel, conditions)?,
+        None => match sources.select(&rel, ctx.identity()) {
+            Selection::None => rel.clone(),
+            Selection::Winner(source) if sources.flag(&rel, source) != Flag::Plain => {
+                bail!("{source} is a template or encrypted file, which system scope does not take")
+            }
+            Selection::Winner(source) => source.to_owned(),
+            Selection::Ambiguous(tied) => bail!(
+                "{} are equally specific here; remove one first",
+                tied.join(", ")
+            ),
+            Selection::Invalid(problems) => bail!(
+                "{}",
+                problems
+                    .iter()
+                    .map(|(source, reason)| format!("{source}: {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        },
+    };
+    Ok(Prepared {
+        checked,
+        file: Planned {
+            key,
+            rel,
+            source,
+            bytes,
+            mode,
+            uid,
+            gid,
+            package_owned: args.package_owned,
+        },
+    })
+}
+
+// A `--for` variant may be meant for other machines; S follows only what this one applies.
+fn applies(sources: &Sources, args: &AddArgs, identity: &IdentitySnapshot, file: &Planned) -> bool {
+    if args.for_conditions.is_none() {
+        return true;
+    }
+    let after: Vec<&str> = sources
+        .sources_of(&file.rel)
+        .filter(|path| *path != file.source)
+        .chain([file.source.as_str()])
+        .collect();
+    Sources::group(after).select(&file.rel, identity).winner() == Some(&file.source.as_str())
+}
+
+/// Adds the missing roots to the machine config when the user agrees. When it cannot ask, prints
+/// the config line to add and returns false, having written nothing.
+fn settle_roots(
+    ctx: &Context,
+    scope: &system::Scope,
+    missing: &BTreeSet<String>,
+    args: &AddArgs,
+) -> Result<bool> {
+    let wanted = missing.iter().cloned().collect::<Vec<_>>().join(", ");
+    let config_file = &ctx.paths.config_file;
+    let agreed = if args.add_root {
+        true
+    } else if prompt::interactive() && !args.dry_run {
+        prompt::confirm(&format!(
+            "{wanted} is not in [system] roots; add it to {}? [y/N]",
+            config_file.display()
+        ))?
+    } else if prompt::interactive() {
+        true
+    } else {
+        let mut roots: Vec<String> = scope
+            .roots()
+            .iter()
+            .filter(|root| root.problem.is_none())
+            .map(|root| root.shown.clone())
+            .collect();
+        roots.extend(missing.iter().cloned());
+        let list = roots
+            .iter()
+            .map(|root| format!("\"{root}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        output::warning(&format!(
+            "{wanted} is not in [system] roots, so system scope is off for it. Add it to {} and run again:",
+            config_file.display()
+        ));
+        output::warning("[system]");
+        output::warning(&format!("roots = [{list}]"));
+        output::warning("or run again with --add-root");
+        return Ok(false);
+    };
+    if !agreed {
+        bail!("{wanted} is not in [system] roots, so nothing was added");
+    }
+    let mut machine = ctx.machine.clone();
+    for root in missing {
+        machine.system.roots.push(PathBuf::from(root));
+    }
+    machine.save(config_file, args.dry_run)?;
+    output::info(&format!(
+        "{} {wanted} to [system] roots in {}",
+        if args.dry_run { "would add" } else { "added" },
+        config_file.display()
+    ));
+    Ok(true)
 }
 
 #[cfg(test)]

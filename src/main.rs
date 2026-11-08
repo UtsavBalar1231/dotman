@@ -51,7 +51,7 @@ fn main() {
             Ok(Outcome::Done)
         }
         Commands::Init(args) => init::run(&args),
-        Commands::Add(args) => done(add::run(&args)),
+        Commands::Add(args) => add::run(&args),
         Commands::Forget(args) => done(forget::run(&args)),
         Commands::List(args) => done(list::run(&args)),
         Commands::Status(args) => done(status::run(&args)),

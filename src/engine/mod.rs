@@ -158,6 +158,8 @@ pub(crate) enum Node {
         bytes: Vec<u8>,
         mode: u32,
         nlink: u64,
+        uid: u32,
+        gid: u32,
     },
     Symlink(PathBuf),
 }
@@ -221,6 +223,8 @@ fn read_file(path: &Path) -> Result<Node> {
         bytes,
         mode: meta.mode() & 0o7777,
         nlink: meta.nlink(),
+        uid: meta.uid(),
+        gid: meta.gid(),
     })
 }
 

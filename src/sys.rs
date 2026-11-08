@@ -153,22 +153,32 @@ pub fn passwd_by_name(name: &str) -> Option<Passwd> {
 #[must_use]
 pub fn group_by_name(name: &str) -> Option<Group> {
     let name = CString::new(name).ok()?;
+    lookup_group(|grp, buf, len, out| {
+        // SAFETY: `name` is NUL-terminated and outlives the call; the other pointers come from
+        // `lookup_group`: `buf` is `len` writable bytes and all three outlive the call.
+        unsafe { libc::getgrnam_r(name.as_ptr(), grp, buf, len, out) }
+    })
+}
+
+/// Looks up a group by id. `None` covers both "no such group" and lookup failure.
+#[must_use]
+pub fn group_by_gid(gid: u32) -> Option<Group> {
+    lookup_group(|grp, buf, len, out| {
+        // SAFETY: the pointers come from `lookup_group`: `buf` is `len` writable bytes and all
+        // three outlive the call.
+        unsafe { libc::getgrgid_r(gid, grp, buf, len, out) }
+    })
+}
+
+fn lookup_group(
+    call: impl Fn(*mut libc::group, *mut c_char, usize, *mut *mut libc::group) -> i32,
+) -> Option<Group> {
     let mut buf_len = initial_buf_len(libc::_SC_GETGR_R_SIZE_MAX);
     loop {
         let mut buf: Vec<c_char> = vec![0; buf_len];
         let mut grp = MaybeUninit::<libc::group>::zeroed();
         let mut out: *mut libc::group = ptr::null_mut();
-        // SAFETY: `name` is NUL-terminated; `grp` is zeroed, which is valid for `group`'s
-        // integer and pointer fields; `buf` has `buf.len()` writable bytes; all outlive the call.
-        let rc = unsafe {
-            libc::getgrnam_r(
-                name.as_ptr(),
-                grp.as_mut_ptr(),
-                buf.as_mut_ptr(),
-                buf.len(),
-                &raw mut out,
-            )
-        };
+        let rc = call(grp.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &raw mut out);
         if rc == libc::ERANGE {
             buf_len = grow(buf_len)?;
             continue;
@@ -280,6 +290,7 @@ mod tests {
     fn root_group_has_gid_zero() {
         if let Some(group) = group_by_name("root") {
             assert_eq!(group.gid, 0);
+            assert_eq!(group_by_gid(0).map(|g| g.name).as_deref(), Some("root"));
         }
     }
 

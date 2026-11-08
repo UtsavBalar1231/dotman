@@ -522,6 +522,8 @@ pub(crate) fn back_up_bytes(dir: &Path, rel: &str, bytes: &[u8]) -> Result<PathB
         bytes: bytes.to_vec(),
         mode: 0o600,
         nlink: 1,
+        uid: 0,
+        gid: 0,
     };
     back_up(dir, rel, &node, false)?.ok_or_else(|| anyhow!("nothing to back up at {rel}"))
 }

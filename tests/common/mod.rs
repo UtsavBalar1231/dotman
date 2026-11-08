@@ -38,6 +38,7 @@ pub struct TestEnv {
     /// Owner of `remote.git`; differs from `root` on a second device.
     remote_owner: Arc<TempDir>,
     path_prepend: Vec<PathBuf>,
+    system_root_on: bool,
 }
 
 impl TestEnv {
@@ -47,6 +48,7 @@ impl TestEnv {
             remote_owner: Arc::clone(&root),
             root,
             path_prepend: Vec::new(),
+            system_root_on: false,
         };
         env.init_dirs();
         let remote = env.remote_path();
@@ -66,6 +68,7 @@ impl TestEnv {
             root: Arc::new(TempDir::new().expect("create temp root")),
             remote_owner: Arc::clone(&self.remote_owner),
             path_prepend: self.path_prepend.clone(),
+            system_root_on: false,
         };
         env.init_dirs();
         env
@@ -111,6 +114,52 @@ impl TestEnv {
         self.remote_owner.path().join("remote.git")
     }
 
+    /// The directory `DOTMAN_SYSTEM_ROOT` names once [`TestEnv::use_system_root`] ran.
+    pub fn system_root(&self) -> PathBuf {
+        self.root().join("sysroot")
+    }
+
+    /// Points `DOTMAN_SYSTEM_ROOT` at an empty directory, and puts stub `pacman`, `dpkg` and `rpm`
+    /// in front of PATH that own nothing, so the host's package database is never asked.
+    pub fn use_system_root(&mut self) {
+        fs::create_dir_all(self.system_root()).expect("create the system root");
+        self.system_root_on = true;
+        let stubs = self.root().join("stubs");
+        fs::create_dir_all(&stubs).expect("create the stub dir");
+        self.prepend_path(&stubs);
+        self.stub_package_manager(&[]);
+        for name in ["dpkg", "rpm"] {
+            write_stub(&stubs.join(name), "#!/bin/sh\nexit 1\n");
+        }
+    }
+
+    /// Replaces the stub `pacman`: it owns every path that ends with one of `owned`.
+    pub fn stub_package_manager(&self, owned: &[&str]) {
+        let mut arms = String::new();
+        for suffix in owned {
+            arms.push_str("  *");
+            arms.push_str(suffix);
+            arms.push_str(") echo \"$2 is owned by keyd 2.4.3-1\"; exit 0;;\n");
+        }
+        let body = format!(
+            "#!/bin/sh\ncase \"$2\" in\n{arms}esac\necho \"error: No package owns $2\" >&2\nexit 1\n"
+        );
+        write_stub(&self.root().join("stubs/pacman"), &body);
+    }
+
+    /// Where `key`, an absolute path such as `/etc/x`, is on disk under the system root.
+    pub fn system_path(&self, key: &str) -> PathBuf {
+        self.system_root().join(key.trim_start_matches('/'))
+    }
+
+    /// Writes a file at `key` under the system root with `mode`, creating parents.
+    pub fn write_system(&self, key: &str, bytes: &[u8], mode: u32) {
+        let path = self.system_path(key);
+        fs::create_dir_all(path.parent().expect("a parent")).expect("create parents");
+        fs::write(&path, bytes).expect("write system file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
     /// Put `dir` in front of PATH (for stub binaries).
     pub fn prepend_path(&mut self, dir: impl Into<PathBuf>) {
         self.path_prepend.insert(0, dir.into());
@@ -135,6 +184,9 @@ impl TestEnv {
         ];
         if let Some(tmp) = std::env::var_os("TMPDIR") {
             vars.push(("TMPDIR", tmp));
+        }
+        if self.system_root_on {
+            vars.push(("DOTMAN_SYSTEM_ROOT", self.system_root().into()));
         }
         vars
     }
@@ -384,6 +436,11 @@ impl Default for TestEnv {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn write_stub(path: &Path, body: &str) {
+    fs::write(path, body).expect("write stub");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
 }
 
 /// `uname -n`, cut at the first `.` and lowercased, as identity reports it for `sync`'s message.

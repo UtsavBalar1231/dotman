@@ -8,6 +8,7 @@ use crate::repo_config::RepoConfig;
 use crate::secrets::Age;
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::sys;
+use crate::system::{self, Scope};
 use crate::template::Vars;
 use crate::variant::Sources;
 use anyhow::{Context as _, Result, bail};
@@ -102,6 +103,50 @@ impl Context {
     /// [`Context::managed`] grouped by target key, so variants of one file share a key.
     pub fn sources(&self) -> Result<Sources> {
         Ok(Sources::group(self.managed()?.keys().map(String::as_str)))
+    }
+
+    /// System sources: regular files and symlinks under `.dotman/system`, keyed by their path
+    /// relative to it. [`Context::managed`] leaves them out, because `.dotman` is a reserved name.
+    pub fn managed_system(&self) -> Result<BTreeMap<String, Kind>> {
+        let root = self.paths.repo.join(system::DIR);
+        let real = is_real_dir(&self.paths.repo.join(".dotman")) && is_real_dir(&root);
+        let mut found = BTreeMap::new();
+        if !real {
+            return Ok(found);
+        }
+        for entry in WalkDir::new(&root).follow_links(false).min_depth(1) {
+            let entry = entry.with_context(|| format!("cannot read {}", root.display()))?;
+            let file_type = entry.file_type();
+            let kind = if file_type.is_symlink() {
+                Kind::Symlink
+            } else if file_type.is_file() {
+                Kind::File
+            } else {
+                continue;
+            };
+            let Some(inside) = entry.path().strip_prefix(&root).ok().and_then(Path::to_str) else {
+                continue;
+            };
+            if !entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
+                && validate_key(inside).is_ok()
+            {
+                found.insert(inside.to_owned(), kind);
+            }
+        }
+        Ok(found)
+    }
+
+    /// [`Context::managed_system`] grouped by the key each source targets, without the leading `/`.
+    pub fn system_sources(&self) -> Result<Sources> {
+        Ok(Sources::group(
+            self.managed_system()?.keys().map(String::as_str),
+        ))
+    }
+
+    /// `DOTMAN_SYSTEM_ROOT` and `[system] roots` of this run.
+    #[must_use]
+    pub fn system_scope(&self) -> Scope {
+        Scope::new(&self.paths, &self.machine)
     }
 
     /// Fails with [`InProgress`] while a rebase or merge is unfinished in the repo. Every command
