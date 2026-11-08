@@ -1,9 +1,9 @@
 # Maintainer: Utsav Balar <utsavbalar1231@gmail.com>
 
 pkgname=dotman
-pkgver=0.0.1
+pkgver=0.1.0
 pkgrel=1
-pkgdesc="High-performance dotfiles manager with git-like semantics"
+pkgdesc="Dotfiles manager with git-like semantics"
 arch=('x86_64' 'aarch64')
 url="https://github.com/UtsavBalar1231/dotman"
 license=('MIT')
@@ -58,6 +58,6 @@ package() {
 
     # Generate and install man page
     mkdir -p "$pkgdir/usr/share/man/man1"
-    help2man --no-info --name="high-performance dotfiles manager" \
+    help2man --no-info --name="dotfiles manager" \
         --version-string="$pkgver" ./target/release/dot > "$pkgdir/usr/share/man/man1/dot.1"
 }

@@ -13,7 +13,7 @@ src/sync.rs        git importer (`dot import`), not remote sync
 xtask/             man page generator (cargo run -p xtask -- generate-man-pages)
 completions/       dot.* are clap-generated; *-enhanced* are hand-written
 man/               generated output, tracked in git
-packaging/         per-distro recipes, each with its own version string
+packaging/         Arch PKGBUILD only
 ```
 
 ## Finding your way
@@ -56,7 +56,7 @@ packaging/         per-distro recipes, each with its own version string
 - Do not weaken the security defaults. Paths must be validated against `allowed_directories`, which defaults to `$HOME` only. Setuid, setgid and sticky bits are stripped on add, and restore always passes `allow_dangerous: false` to `apply_to_path`. Regression tests belong in `tests/security_tests.rs`.
 - Do not commit proptest regression files. They are gitignored on purpose.
 - Do not hand-edit `man/*.1` or the clap-generated `completions/dot.*`. Regenerate them instead.
-- Do not rely on `just release-prepare` alone for a version bump. It updates Cargo.toml, PKGBUILD, the rpm spec and the debian control file. It does not touch `packaging/nix/default.nix`, `packaging/homebrew/dotman.rb`, `packaging/alpine/APKBUILD` or the versioned gentoo ebuild filename.
+- `just release-prepare <ver>` bumps Cargo.toml, Cargo.lock, the PKGBUILD and the fallback version in `install/install.sh`. `src/bootstrap/install.sh.in` pins `CARGO_PKG_VERSION` itself.
 
 ## Commands
 ```bash

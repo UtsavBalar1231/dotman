@@ -66,26 +66,6 @@ updates:
         patterns:
           - "*"
 
-  # Docker dependencies
-  - package-ecosystem: "docker"
-    directory: "/containers"
-    schedule:
-      interval: "weekly"
-      day: "wednesday"
-      time: "05:00"
-      timezone: "UTC"
-    open-pull-requests-limit: 5
-    reviewers:
-      - "UtsavBalar1231"
-    assignees:
-      - "UtsavBalar1231"
-    commit-message:
-      prefix: "docker"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "docker"
-
   # Add more package ecosystems as needed
   # - package-ecosystem: "npm"
   #   directory: "/docs" # If you add Node.js docs tooling

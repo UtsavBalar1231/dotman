@@ -1,5 +1,0 @@
-version=4
-
-# Watch for new releases on GitHub
-opts=filenamemangle=s/.+\/v?(\d\S+)\.tar\.gz/dotman-$1\.tar\.gz/ \
-  https://github.com/UtsavBalar1231/dotman/tags .*/v?(\d\S+)\.tar\.gz

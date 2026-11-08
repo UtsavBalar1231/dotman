@@ -3,111 +3,55 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to release'
-        required: true
-        type: string
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
-  # Extract and validate release information
-  release-info:
-    name: Release Information
+  verify:
+    name: Test and check version
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.extract.outputs.version }}
-      tag: ${{ steps.extract.outputs.tag }}
-      is_prerelease: ${{ steps.extract.outputs.is_prerelease }}
-
     steps:
-      - name: Extract release information
-        id: extract
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Check the tag matches Cargo.toml
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
+          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dotman") | .version')
+          if [[ "${GITHUB_REF_NAME#v}" != "$crate_version" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate_version}" >&2
+            exit 1
           fi
 
-          VERSION="${TAG#v}"
+      - name: Configure git for tests
+        run: |
+          git config --global user.email "release@users.noreply.github.com"
+          git config --global user.name "release"
 
-          if [[ "$VERSION" =~ -.*$ ]]; then
-            IS_PRERELEASE="true"
-          else
-            IS_PRERELEASE="false"
-          fi
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2.8.2
 
-          echo "Release Info:"
-          echo "  Tag: $TAG"
-          echo "  Version: $VERSION"
-          echo "  Pre-release: $IS_PRERELEASE"
+      - name: Run tests
+        run: cargo test --all-targets
 
-  # Build release binaries for all supported platforms
-  build-release:
-    name: Build Release
-    runs-on: ${{ matrix.config.os }}
-    needs: release-info
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: verify
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        config:
-          # Linux targets
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            cross: false
-            artifact_name: dot
-            release_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-linux-gnu
-            asset_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-linux-gnu.tar.gz
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            cross: true
-            artifact_name: dot
-            release_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-linux-musl
-            asset_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-linux-musl.tar.gz
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            cross: true
-            artifact_name: dot
-            release_name: dotman-v${{needs.release-info.outputs.version}}-aarch64-linux-gnu
-            asset_name: dotman-v${{needs.release-info.outputs.version}}-aarch64-linux-gnu.tar.gz
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            cross: true
-            artifact_name: dot
-            release_name: dotman-v${{needs.release-info.outputs.version}}-aarch64-linux-musl
-            asset_name: dotman-v${{needs.release-info.outputs.version}}-aarch64-linux-musl.tar.gz
-
-          # macOS targets
-          # - os: macos-latest
-          #   target: x86_64-apple-darwin
-          #   cross: false
-          #   artifact_name: dot
-          #   release_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-apple-darwin
-          #   asset_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-apple-darwin.tar.gz
-          # - os: macos-latest
-          #   target: aarch64-apple-darwin
-          #   cross: false
-          #   artifact_name: dot
-          #   release_name: dotman-v${{needs.release-info.outputs.version}}-aarch64-apple-darwin
-          #   asset_name: dotman-v${{needs.release-info.outputs.version}}-aarch64-apple-darwin.tar.gz
-
-          # # Windows targets
-          # - os: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   cross: false
-          #   artifact_name: dot.exe
-          #   release_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-pc-windows-msvc
-          #   asset_name: dotman-v${{needs.release-info.outputs.version}}-x86_64-pc-windows-msvc.zip
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, cross: false }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true }
+          - { os: macos-latest, target: x86_64-apple-darwin, cross: false }
+          - { os: macos-latest, target: aarch64-apple-darwin, cross: false }
 
     steps:
       - name: Checkout code
@@ -116,292 +60,66 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.config.target }}
+          targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tool
-        if: matrix.config.cross
+      - name: Install cross
+        if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2.8.2
         with:
-          key: release-${{ matrix.config.target }}
+          key: release-${{ matrix.target }}
 
-      - name: Build release binary
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          USE_CROSS: ${{ matrix.cross }}
         run: |
-          if [[ "${{ matrix.config.cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.config.target }}
+          if [[ "$USE_CROSS" == "true" ]]; then
+            cross build --release --target "$TARGET"
           else
-            cargo build --release --target ${{ matrix.config.target }}
-          fi
-        shell: bash
-
-      - name: Strip binary (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          # Use the appropriate strip tool for each target
-          if [[ "${{ matrix.config.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            # Use cross-platform strip for ARM64 GNU
-            aarch64-linux-gnu-strip target/${{ matrix.config.target }}/release/${{ matrix.config.artifact_name }}
-          elif [[ "${{ matrix.config.target }}" == "aarch64-unknown-linux-musl" ]]; then
-            # Use cross-platform strip for ARM64 musl
-            aarch64-linux-musl-strip target/${{ matrix.config.target }}/release/${{ matrix.config.artifact_name }}
-          elif [[ "${{ matrix.config.target }}" == "x86_64-unknown-linux-musl" ]]; then
-            # musl binaries can use regular strip
-            strip target/${{ matrix.config.target }}/release/${{ matrix.config.artifact_name }}
-          else
-            # Regular strip for native builds
-            strip target/${{ matrix.config.target }}/release/${{ matrix.config.artifact_name }}
+            cargo build --release --target "$TARGET"
           fi
 
-      - name: Create release directory
-        run: mkdir -p release-assets
-
-      - name: Package release (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          cp target/${{ matrix.config.target }}/release/${{ matrix.config.artifact_name }} release-assets/dot
-          cp README.md release-assets/
-          cp CLAUDE.md release-assets/
+          mkdir -p stage dist
+          cp "target/${TARGET}/release/dot" LICENSE README.md stage/
+          chmod 0755 stage/dot
+          tar -czf "dist/dotman-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C stage dot LICENSE README.md
 
-          cd release-assets
-          tar czf ../${{ matrix.config.asset_name }} *
-          cd ..
-
-      - name: Package release (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          copy target\${{ matrix.config.target }}\release\${{ matrix.config.artifact_name }} release-assets\dot.exe
-          copy README.md release-assets\
-          copy CLAUDE.md release-assets\
-
-          cd release-assets
-          7z a ..\${{ matrix.config.asset_name }} *
-          cd ..
-        shell: cmd
-
-      - name: Upload release asset
+      - name: Upload tarball
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: ${{ matrix.config.asset_name }}
-          path: ${{ matrix.config.asset_name }}
+          name: dotman-${{ matrix.target }}
+          path: dist/*.tar.gz
 
-  # Generate checksums for all release assets
-  generate-checksums:
-    name: Generate Checksums
+  release:
+    name: Publish release
     runs-on: ubuntu-latest
-    needs: [release-info, build-release]
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
-        with:
-          path: artifacts
-
-      - name: Generate checksums
-        run: |
-          cd artifacts
-          find . -name "*.tar.gz" -o -name "*.zip" | while read file; do
-            echo "Processing: $file"
-            sha256sum "$file" >> ../checksums.txt
-            sha512sum "$file" >> ../checksums-sha512.txt
-          done
-          cd ..
-
-          # Move files to root for easier access
-          find artifacts -name "*.tar.gz" -o -name "*.zip" -exec mv {} . \;
-
-      - name: Upload checksums
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        with:
-          name: checksums
-          path: |
-            checksums.txt
-            checksums-sha512.txt
-
-  # Create the GitHub release
-  create-release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    needs: [release-info, build-release, generate-checksums]
+    needs: build
     permissions:
       contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-        with:
-          fetch-depth: 0
 
-      - name: Download all artifacts
+      - name: Download tarballs
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           path: artifacts
 
-      - name: Prepare release assets
-        run: |
-          mkdir release-assets
-          find artifacts -name "*.tar.gz" -o -name "*.zip" -o -name "checksums*.txt" -exec cp {} release-assets/ \;
-          ls -la release-assets/
+      - name: Collect tarballs and write checksums.txt
+        run: scripts/collect-release.sh artifacts release-assets
 
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          if [[ -f CHANGELOG.md ]]; then
-            # Extract changelog for this version
-            sed -n "/## \[${VERSION#v}\]/,/## \[/p" CHANGELOG.md | head -n -1 > release_notes.md
-          else
-            # Generate basic release notes from git log
-            echo "## Release ${{ needs.release-info.outputs.tag }}" > release_notes.md
-            echo "" >> release_notes.md
-            echo "### Changes" >> release_notes.md
-
-            # Get changes since last tag
-            LAST_TAG=$(git tag --sort=-version:refname | grep -v ${{ needs.release-info.outputs.tag }} | head -n1)
-            if [[ -n "$LAST_TAG" ]]; then
-              git log --pretty=format:"- %s" ${LAST_TAG}..HEAD >> release_notes.md
-            else
-              git log --pretty=format:"- %s" HEAD~10..HEAD >> release_notes.md
-            fi
-          fi
-
-          echo "" >> release_notes.md
-          echo "### Installation" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "Download the appropriate binary for your platform from the assets below." >> release_notes.md
-          echo "" >> release_notes.md
-          echo "#### Linux/macOS Quick Install:" >> release_notes.md
-          echo '```bash' >> release_notes.md
-          echo 'curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.release-info.outputs.tag }}/dotman-${{ needs.release-info.outputs.tag }}-x86_64-linux-gnu.tar.gz' >> release_notes.md
-          echo 'tar xzf dotman-${{ needs.release-info.outputs.tag }}-x86_64-linux-gnu.tar.gz' >> release_notes.md
-          echo 'sudo mv dot /usr/local/bin/' >> release_notes.md
-          echo '```' >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Verification" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "All release assets are accompanied by SHA256 and SHA512 checksums for verification." >> release_notes.md
-
-      - name: Create GitHub Release
+      - name: Create GitHub release
         uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
         with:
-          tag_name: ${{ needs.release-info.outputs.tag }}
-          name: Release ${{ needs.release-info.outputs.tag }}
-          body_path: release_notes.md
-          prerelease: ${{ needs.release-info.outputs.is_prerelease == 'true' }}
-          draft: false
-          files: release-assets/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Build distribution packages
-  build-packages:
-    name: Build Distribution Packages
-    runs-on: ubuntu-latest
-    needs: [release-info, build-release]
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [debian, fedora]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.11.1
-
-      - name: Build ${{ matrix.package }} package
-        run: |
-          docker build \
-            --network=host \
-            -f packaging/docker-test/${{ matrix.package }}.Dockerfile \
-            -t dotman-${{ matrix.package }}-build .
-
-      - name: Extract package from container
-        run: |
-          # Create container without starting it
-          CONTAINER_ID=$(docker create dotman-${{ matrix.package }}-build)
-
-          # Copy package files from builder stage
-          mkdir -p packages
-
-          if [ "${{ matrix.package }}" = "debian" ]; then
-            docker cp ${CONTAINER_ID}:/tmp/dotman.deb packages/dotman-${{ needs.release-info.outputs.version }}.deb
-          elif [ "${{ matrix.package }}" = "fedora" ]; then
-            docker cp ${CONTAINER_ID}:/tmp/dotman.rpm packages/dotman-${{ needs.release-info.outputs.version }}.rpm
-          fi
-
-          docker rm ${CONTAINER_ID}
-
-      - name: Upload package artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        with:
-          name: dotman-${{ matrix.package }}-${{ needs.release-info.outputs.version }}
-          path: packages/*
-          retention-days: 7
-
-  # Build Docker images
-  build-docker:
-    name: Build Docker Images
-    runs-on: ubuntu-latest
-    needs: [release-info, build-release]
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.11.1
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push Debian image
-        uses: docker/build-push-action@v6.18.0
-        with:
-          context: .
-          file: containers/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ needs.release-info.outputs.version }}
-            ghcr.io/${{ github.repository }}:latest
-
-      - name: Build and push Alpine image
-        uses: docker/build-push-action@v6.18.0
-        with:
-          context: .
-          file: containers/Dockerfile.alpine
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ needs.release-info.outputs.version }}-alpine
-            ghcr.io/${{ github.repository }}:alpine
-
-  # Update package repositories (Homebrew, AUR, etc.)
-  update-packages:
-    name: Update Package Repositories
-    runs-on: ubuntu-latest
-    needs: [release-info, create-release]
-    if: needs.release-info.outputs.is_prerelease == 'false'
-
-    steps:
-      - name: Trigger Homebrew update
-        run: |
-          echo "Homebrew formula update would be triggered here"
-          # This would typically make a PR to a homebrew-core or homebrew tap
-
-      - name: Update AUR package
-        run: |
-          echo "AUR package update would be triggered here"
-          # This would update the PKGBUILD in the AUR repository
-
-      - name: Notify package maintainers
-        run: |
-          echo "Package maintainers would be notified here"
-          # This could send notifications to distribution package maintainers
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            release-assets/*.tar.gz
+            release-assets/checksums.txt

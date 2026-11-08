@@ -1,4 +1,4 @@
-# Codecov configuration for dotman-rs
+# Codecov configuration for dotman
 # https://docs.codecov.com/docs/codecovyml-reference
 
 coverage:
@@ -32,7 +32,6 @@ ignore:
   - "**/*.proptest-regressions" # Property test regression files
   - "scripts/**"            # Build scripts
   - "packaging/**"          # Packaging configurations
-  - "containers/**"         # Docker configurations
   - "completions/**"        # Shell completions
   - "install/**"            # Installation scripts
 

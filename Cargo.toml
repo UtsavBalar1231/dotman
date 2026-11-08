@@ -4,13 +4,13 @@ resolver = "2"
 
 [package]
 name = "dotman"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 authors = ["Utsav Balar <utsavbalar1231@gmail.com>"]
-description = "Blazingly fast dotfiles manager with git-like semantics"
+description = "Dotfiles manager with git-like semantics"
 # documentation = "https://docs.rs/dotman"
-homepage = "https://github.com/UtsavBalar1231/dotman-rs"
-repository = "https://github.com/UtsavBalar1231/dotman-rs"
+homepage = "https://github.com/UtsavBalar1231/dotman"
+repository = "https://github.com/UtsavBalar1231/dotman"
 license = "MIT"
 readme = "README.md"
 keywords = ["dotfiles", "configuration", "manager", "cli", "git"]
@@ -27,7 +27,6 @@ exclude = [
     "examples/",
     ".github/",
     "packaging/",
-    "containers/",
     "scripts/",
     "install/",
     "man/",
@@ -80,7 +79,6 @@ inherits = "release"
 debug = true
 strip = false
 
-# Production optimizations for different use cases
 [profile.dist]
 inherits = "release"
 lto = "fat"
@@ -94,30 +92,10 @@ inherits = "dist"
 debug = true
 strip = "none"
 
-# Binary configuration
 [[bin]]
 name = "dot"
 path = "src/main.rs"
 
-# Metadata for crates.io
-[package.metadata]
-# Release configuration
-[package.metadata.release]
-pre-release-replacements = [
-    {file="README.md", search="dotman \\d+\\.\\d+\\.\\d+", replace="dotman {{version}}"},
-    {file="packaging/arch/PKGBUILD", search="pkgver=\\d+\\.\\d+\\.\\d+", replace="pkgver={{version}}"},
-    {file="packaging/rpm/dotman.spec", search="Version:\\s+\\d+\\.\\d+\\.\\d+", replace="Version:        {{version}}"},
-    {file="packaging/homebrew/dotman.rb", search="version \"\\d+\\.\\d+\\.\\d+\"", replace="version \"{{version}}\""},
-]
-pre-release-commit-message = "chore: Release {{version}}"
-tag-message = "Release {{version}}"
-tag-prefix = "v"
-publish = false  # We handle publishing through CI
-push = false     # We handle pushing through CI
-
-# Documentation configuration
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
-
-# Performance optimizations for specific targets

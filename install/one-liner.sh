@@ -5,13 +5,10 @@
 # For documentation and website usage
 
 # Universal Unix/Linux/macOS one-liner:
-# curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman-rs/main/install/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash
 
 # Or with wget:
-# wget -qO- https://raw.githubusercontent.com/UtsavBalar1231/dotman-rs/main/install/install.sh | bash
-
-# Windows PowerShell one-liner:
-# irm https://raw.githubusercontent.com/UtsavBalar1231/dotman-rs/main/install/install-windows.ps1 | iex
+# wget -qO- https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash
 
 # Cargo installation (if Rust is installed):
 # cargo install dotman
@@ -55,6 +52,6 @@ echo "This file contains one-liner installation commands for dotman"
 echo "Use these commands for quick installation on various platforms"
 echo ""
 echo "Universal one-liner:"
-echo "  curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman-rs/main/install/install.sh | bash"
+echo "  curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash"
 echo ""
 echo "For more installation options, see the full documentation."

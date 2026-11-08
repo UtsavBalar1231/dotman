@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Configuration
-REPO_URL="https://github.com/UtsavBalar1231/dotman-rs"
+REPO_URL="https://github.com/UtsavBalar1231/dotman"
 BINARY_NAME="dot"
 INSTALL_DIR="${DOTMAN_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -65,9 +65,6 @@ detect_platform() {
 	darwin)
 		echo "macos-$arch"
 		;;
-	mingw* | msys* | cygwin*)
-		echo "windows-$arch"
-		;;
 	*)
 		log_error "Unsupported operating system: $os"
 		exit 1
@@ -88,7 +85,7 @@ get_latest_version() {
 		wget -qO- "$REPO_URL/releases/latest" | grep -oE '"tag_name":\s*"[^"]*"' | cut -d'"' -f4 | sed 's/^v//'
 	else
 		# Fallback to a default version
-		echo "0.0.1"
+		echo "0.1.0"
 	fi
 }
 
@@ -100,7 +97,13 @@ install_from_github() {
 	version=$(get_latest_version)
 	log_info "Installing dotman v$version for $platform"
 
-	local download_url="$REPO_URL/releases/download/v$version/dotman-rs-$version-$platform.tar.gz"
+	local target
+	case "$platform" in
+	linux-*) target="${platform#linux-}-unknown-linux-musl" ;;
+	macos-*) target="${platform#macos-}-apple-darwin" ;;
+	esac
+
+	local download_url="$REPO_URL/releases/download/v$version/dotman-v$version-$target.tar.gz"
 	local temp_dir
 	temp_dir=$(mktemp -d)
 
@@ -108,29 +111,23 @@ install_from_github() {
 
 	# Download the release
 	if command_exists curl; then
-		curl -L "$download_url" -o "$temp_dir/dotman-rs.tar.gz"
+		curl -L "$download_url" -o "$temp_dir/dotman.tar.gz"
 	elif command_exists wget; then
-		wget "$download_url" -O "$temp_dir/dotman-rs.tar.gz"
+		wget "$download_url" -O "$temp_dir/dotman.tar.gz"
 	else
 		log_error "Neither curl nor wget found. Cannot download release."
 		exit 1
 	fi
 
 	# Extract and install
-	tar -xzf "$temp_dir/dotman-rs.tar.gz" -C "$temp_dir"
+	tar -xzf "$temp_dir/dotman.tar.gz" -C "$temp_dir"
 
 	# Create install directory
 	mkdir -p "$INSTALL_DIR"
 
-	# Install binary
-	if [[ "$platform" == windows-* ]]; then
-		cp "$temp_dir/${BINARY_NAME}.exe" "$INSTALL_DIR/"
-		binary_path="$INSTALL_DIR/${BINARY_NAME}.exe"
-	else
-		cp "$temp_dir/$BINARY_NAME" "$INSTALL_DIR/"
-		chmod +x "$INSTALL_DIR/$BINARY_NAME"
-		binary_path="$INSTALL_DIR/$BINARY_NAME"
-	fi
+	cp "$temp_dir/$BINARY_NAME" "$INSTALL_DIR/"
+	chmod +x "$INSTALL_DIR/$BINARY_NAME"
+	binary_path="$INSTALL_DIR/$BINARY_NAME"
 
 	# Cleanup
 	rm -rf "$temp_dir"
@@ -178,25 +175,6 @@ install_via_package_manager() {
 			}
 		else
 			log_warning "Homebrew not found. Using GitHub release."
-			return 1
-		fi
-		;;
-	windows-*)
-		if command_exists scoop; then
-			log_info "Installing via Scoop..."
-			scoop bucket add utsav https://github.com/UtsavBalar1231/scoop-bucket
-			scoop install dotman || {
-				log_warning "Scoop package not yet available. Using GitHub release."
-				return 1
-			}
-		elif command_exists winget; then
-			log_info "Installing via winget..."
-			winget install UtsavBalar1231.dotman || {
-				log_warning "winget package not yet available. Using GitHub release."
-				return 1
-			}
-		else
-			log_warning "No supported Windows package manager found. Using GitHub release."
 			return 1
 		fi
 		;;
