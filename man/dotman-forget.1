@@ -1,0 +1,32 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dotman-forget 1  "forget "
+.SH NAME
+dotman\-forget \- Stop managing files or directories, keeping them in $HOME
+.SH SYNOPSIS
+\fBdotman forget\fR [\fB\-\-dry\-run\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIPATHS\fR>
+.SH DESCRIPTION
+Stop managing files or directories, keeping them in $HOME
+.SH OPTIONS
+.TP
+\fB\-\-dry\-run\fR
+Show what would be forgotten and change nothing
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIPATHS\fR>
+Files, symlinks or directories to stop managing
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show verbose output
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress informational messages
+.TP
+\fB\-\-no\-pager\fR
+Disable pager output
+.TP
+\fB\-\-allow\-root\fR
+Allow running as root

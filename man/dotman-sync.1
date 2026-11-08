@@ -1,0 +1,60 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dotman-sync 1  "sync "
+.SH NAME
+dotman\-sync \- Capture local changes, commit, pull, apply what arrived and push
+.SH SYNOPSIS
+\fBdotman sync\fR [\fB\-m\fR|\fB\-\-message\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Capture local changes, commit, pull, apply what arrived and push
+.SH OPTIONS
+.TP
+\fB\-m\fR, \fB\-\-message\fR \fI<MSG>\fR
+Commit message, replacing the generated `sync(<host>): ...` line
+.TP
+\fB\-\-no\-hooks\fR
+Run no hooks
+.TP
+\fB\-\-dry\-run\fR
+Show what would be captured, committed, pulled, applied and pushed; change nothing
+.TP
+\fB\-\-system\fR
+After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call
+.TP
+\fB\-\-yes\fR
+With \-\-system: write the system files without asking
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH DECISIONS
+.TP
+\fB\-\-keep\-local\fR
+Keep the local version of conflicting and existing files
+.TP
+\fB\-\-take\-repo\fR
+Take the repo version of conflicting and existing files, after backing them up
+.TP
+\fB\-\-forget\-deleted\fR
+Stop managing files deleted locally; they stay deleted
+.TP
+\fB\-\-restore\-deleted\fR
+Write files deleted locally back from the repo
+.TP
+\fB\-\-accept\-identity\fR
+Accept a changed machine identity and use the variants it selects
+.TP
+\fB\-\-approve\-hooks\fR
+Approve the current `[hooks]` table on this machine and run its hooks
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show verbose output
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress informational messages
+.TP
+\fB\-\-no\-pager\fR
+Disable pager output
+.TP
+\fB\-\-allow\-root\fR
+Allow running as root

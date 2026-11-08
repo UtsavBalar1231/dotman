@@ -89,10 +89,10 @@ docs:
 docs-check:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
-generate-manpages:
-    cargo run -p xtask -- generate-man-pages
+generate:
+    cargo run -p xtask -- generate
 
-install-manpages: generate-manpages
+install-manpages: generate
     #!/usr/bin/env bash
     set -e
     echo "Installing man pages to /usr/share/man/man1/ (requires sudo)..."

@@ -1,0 +1,50 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dotman-import 1  "import "
+.SH NAME
+dotman\-import \- Convert another setup into the repo, or add what the repo lacks from one
+.SH SYNOPSIS
+\fBdotman import\fR [\fB\-\-overlay\fR] [\fB\-\-include\-missing\fR] [\fB\-\-render\-templates\fR] [\fB\-\-swap\fR] [\fB\-\-yes\fR] [\fB\-\-no\-bootstrap\fR] [\fB\-\-dry\-run\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISOURCE\fR]
+.SH DESCRIPTION
+Convert another setup into the repo, or add what the repo lacks from one
+.SH OPTIONS
+.TP
+\fB\-\-overlay\fR \fI<SOURCE>\fR
+Add what SOURCE has and the repo lacks as one commit: modes, and with `\-\-include\-missing` files
+.TP
+\fB\-\-include\-missing\fR
+With `\-\-overlay`, add the files the repo lacks without asking
+.TP
+\fB\-\-render\-templates\fR
+For a chezmoi source, run its templates and import this host\*(Aqs rendering
+.TP
+\fB\-\-swap\fR
+Replace the symlinks of an imported farm with real files holding the same bytes
+.TP
+\fB\-\-yes\fR
+Do not ask before writing
+.TP
+\fB\-\-no\-bootstrap\fR
+Do not write install.sh, the script that sets up `dotman` in a container
+.TP
+\fB\-\-dry\-run\fR
+Show the report and change nothing
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+[\fISOURCE\fR]
+Legacy dotman repo, chezmoi source, symlink\-farm directory, yadm, bare or vcsh repo, or git URL to convert; found in $HOME when omitted
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show verbose output
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress informational messages
+.TP
+\fB\-\-no\-pager\fR
+Disable pager output
+.TP
+\fB\-\-allow\-root\fR
+Allow running as root

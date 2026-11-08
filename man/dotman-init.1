@@ -1,0 +1,96 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dotman-init 1  "init "
+.SH NAME
+dotman\-init \- Create the dotman repo or set its remote, or clone a repo and apply it
+.SH SYNOPSIS
+\fBdotman init\fR [\fB\-\-remote\fR] [\fB\-\-no\-import\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-no\-bootstrap\fR] [\fB\-\-refresh\-bootstrap\fR] [\fB\-\-git\-name\fR] [\fB\-\-git\-email\fR] [\fB\-\-git\-global\fR] [\fB\-\-create\-github\fR] [\fB\-\-no\-remote\fR] [\fB\-\-host\fR] [\fB\-\-profile\fR] [\fB\-\-system\-root\fR] [\fB\-\-no\-system\fR] [\fB\-\-create\-key\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-key\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-age\-key\-file\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIURL_OR_PATH\fR]
+.SH DESCRIPTION
+Create the dotman repo or set its remote, or clone a repo and apply it
+.SH OPTIONS
+.TP
+\fB\-\-dry\-run\fR
+Show what would be created and change nothing
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SOURCE
+.TP
+\fB\-\-no\-import\fR
+Create a fresh repo without looking for an existing setup to import
+.TP
+[\fIURL_OR_PATH\fR]
+Git URL or local path of an existing dotman repo to clone and apply
+.SH REMOTE
+.TP
+\fB\-\-remote\fR \fI<URL>\fR
+Set or replace the `origin` remote
+.TP
+\fB\-\-create\-github\fR \fI<OWNER/NAME>\fR
+Create the private GitHub repo `OWNER/NAME` with `gh` and make it `origin`
+.TP
+\fB\-\-no\-remote\fR
+Do not ask for a remote
+.SH DECISIONS
+.TP
+\fB\-\-keep\-local\fR
+Keep the local version of files that differ from the repo
+.TP
+\fB\-\-take\-repo\fR
+Take the repo version of files that differ, after backing them up
+.TP
+\fB\-\-approve\-hooks\fR
+Approve the `[hooks]` table of the cloned repo on this machine and run its hooks
+.SH "THIS MACHINE"
+.TP
+\fB\-\-no\-bootstrap\fR
+Do not write install.sh, the script that sets up `dotman` in a container
+.TP
+\fB\-\-refresh\-bootstrap\fR
+Rewrite install.sh with this version\*(Aqs script, unless it was edited
+.TP
+\fB\-\-git\-name\fR \fI<NAME>\fR
+Git `user.name` to set when git has no identity
+.TP
+\fB\-\-git\-email\fR \fI<EMAIL>\fR
+Git `user.email` to set when git has no identity
+.TP
+\fB\-\-git\-global\fR
+Store \-\-git\-name and \-\-git\-email in the global git config instead of the repo\*(Aqs
+.TP
+\fB\-\-host\fR \fI<NAME>\fR
+Host name of this machine, written to `[identity]` in the machine config
+.TP
+\fB\-\-profile\fR \fI<NAME>\fR
+A profile this machine opts into, written to the machine config; repeatable
+.TP
+\fB\-\-system\-root\fR \fI<DIR>\fR
+A directory outside $HOME whose files this machine manages, added to `[system] roots`; repeatable
+.TP
+\fB\-\-no\-system\fR
+Do not ask about system files
+.TP
+\fB\-\-create\-key\fR
+Create an age identity for encrypted files
+.TP
+\fB\-\-no\-key\fR
+Do not ask about an age identity
+.TP
+\fB\-\-age\-key\-file\fR \fI<FILE>\fR
+Import the age identity in FILE before applying, so encrypted files decrypt
+.TP
+\fB\-\-force\fR
+With \-\-age\-key\-file: replace a different existing identity, after backing it up
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show verbose output
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress informational messages
+.TP
+\fB\-\-no\-pager\fR
+Disable pager output
+.TP
+\fB\-\-allow\-root\fR
+Allow running as root

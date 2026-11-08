@@ -1,0 +1,29 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dotman-edit 1  "edit "
+.SH NAME
+dotman\-edit \- Open a managed file\*(Aqs source in $VISUAL or $EDITOR, then apply it
+.SH SYNOPSIS
+\fBdotman edit\fR [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIPATH\fR>
+.SH DESCRIPTION
+Open a managed file\*(Aqs source in $VISUAL or $EDITOR, then apply it
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIPATH\fR>
+The managed file to edit
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show verbose output
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress informational messages
+.TP
+\fB\-\-no\-pager\fR
+Disable pager output
+.TP
+\fB\-\-allow\-root\fR
+Allow running as root

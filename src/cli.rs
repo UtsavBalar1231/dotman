@@ -16,19 +16,19 @@ pub struct Cli {
     pub command: Commands,
 
     /// Show verbose output
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, help_heading = "Global options")]
     pub verbose: bool,
 
     /// Suppress informational messages
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, help_heading = "Global options")]
     pub quiet: bool,
 
     /// Disable pager output
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub no_pager: bool,
 
     /// Allow running as root
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub allow_root: bool,
 }
 
@@ -42,6 +42,11 @@ pub enum Commands {
     /// Stop managing files or directories, keeping them in $HOME
     Forget(ForgetArgs),
     /// List the managed files
+    #[command(long_about = concat!(
+        "List the managed files.\n\n",
+        "With --porcelain, each record is `<kind>\\t<key>\\0`: a kind word, a tab, the key and a NUL. ",
+        "It carries no source or flags, and the layout is stable for scripts."
+    ))]
     List(ListArgs),
     /// Compare $HOME, the repo and the last applied state
     Status(StatusArgs),
@@ -90,74 +95,90 @@ pub struct SystemWriteArgs {
 #[allow(clippy::struct_excessive_bools)]
 pub struct InitArgs {
     /// Git URL or local path of an existing dotman repo to clone and apply
-    #[arg(value_name = "URL_OR_PATH")]
+    #[arg(value_name = "URL_OR_PATH", help_heading = "Source")]
     pub source: Option<String>,
     /// Set or replace the `origin` remote
-    #[arg(long, value_name = "URL", conflicts_with = "source")]
+    #[arg(
+        long,
+        value_name = "URL",
+        conflicts_with = "source",
+        help_heading = "Remote"
+    )]
     pub remote: Option<String>,
     /// Create a fresh repo without looking for an existing setup to import
-    #[arg(long, conflicts_with = "source")]
+    #[arg(long, conflicts_with = "source", help_heading = "Source")]
     pub no_import: bool,
     /// Keep the local version of files that differ from the repo
-    #[arg(long, requires = "source", conflicts_with = "take_repo")]
+    #[arg(
+        long,
+        requires = "source",
+        conflicts_with = "take_repo",
+        help_heading = "Decisions"
+    )]
     pub keep_local: bool,
     /// Take the repo version of files that differ, after backing them up
-    #[arg(long, requires = "source")]
+    #[arg(long, requires = "source", help_heading = "Decisions")]
     pub take_repo: bool,
     /// Approve the `[hooks]` table of the cloned repo on this machine and run its hooks
-    #[arg(long, requires = "source")]
+    #[arg(long, requires = "source", help_heading = "Decisions")]
     pub approve_hooks: bool,
     /// Show what would be created and change nothing
     #[arg(long)]
     pub dry_run: bool,
     /// Do not write install.sh, the script that sets up `dotman` in a container
-    #[arg(long, conflicts_with_all = ["source", "refresh_bootstrap"])]
+    #[arg(long, conflicts_with_all = ["source", "refresh_bootstrap"], help_heading = "This machine")]
     pub no_bootstrap: bool,
     /// Rewrite install.sh with this version's script, unless it was edited
-    #[arg(long, conflicts_with = "source")]
+    #[arg(long, conflicts_with = "source", help_heading = "This machine")]
     pub refresh_bootstrap: bool,
     /// Git `user.name` to set when git has no identity
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help_heading = "This machine")]
     pub git_name: Option<String>,
     /// Git `user.email` to set when git has no identity
-    #[arg(long, value_name = "EMAIL")]
+    #[arg(long, value_name = "EMAIL", help_heading = "This machine")]
     pub git_email: Option<String>,
     /// Store --git-name and --git-email in the global git config instead of the repo's
-    #[arg(long)]
+    #[arg(long, help_heading = "This machine")]
     pub git_global: bool,
     /// Create the private GitHub repo `OWNER/NAME` with `gh` and make it `origin`
     #[arg(
         long,
         value_name = "OWNER/NAME",
-        conflicts_with_all = ["source", "remote", "no_remote"]
+        conflicts_with_all = ["source", "remote", "no_remote"],
+        help_heading = "Remote"
     )]
     pub create_github: Option<String>,
     /// Do not ask for a remote
-    #[arg(long, conflicts_with_all = ["source", "remote"])]
+    #[arg(long, conflicts_with_all = ["source", "remote"], help_heading = "Remote")]
     pub no_remote: bool,
     /// Host name of this machine, written to `[identity]` in the machine config
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help_heading = "This machine")]
     pub host: Option<String>,
     /// A profile this machine opts into, written to the machine config; repeatable
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help_heading = "This machine")]
     pub profile: Vec<String>,
     /// A directory outside $HOME whose files this machine manages, added to `[system] roots`; repeatable
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", help_heading = "This machine")]
     pub system_root: Vec<PathBuf>,
     /// Do not ask about system files
-    #[arg(long, conflicts_with = "system_root")]
+    #[arg(long, conflicts_with = "system_root", help_heading = "This machine")]
     pub no_system: bool,
     /// Create an age identity for encrypted files
-    #[arg(long, conflicts_with_all = ["source", "no_key"])]
+    #[arg(long, conflicts_with_all = ["source", "no_key"], help_heading = "This machine")]
     pub create_key: bool,
     /// Do not ask about an age identity
-    #[arg(long, conflicts_with = "source")]
+    #[arg(long, conflicts_with = "source", help_heading = "This machine")]
     pub no_key: bool,
     /// Import the age identity in FILE before applying, so encrypted files decrypt
-    #[arg(long, value_name = "FILE", requires = "source")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "source",
+        help_heading = "This machine"
+    )]
     pub age_key_file: Option<PathBuf>,
     /// With --age-key-file: replace a different existing identity, after backing it up
-    #[arg(long, requires = "age_key_file")]
+    #[arg(long, requires = "age_key_file", help_heading = "This machine")]
     pub force: bool,
 }
 
@@ -167,22 +188,22 @@ pub struct InitArgs {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Decisions {
     /// Keep the local version of conflicting and existing files
-    #[arg(long, conflicts_with = "take_repo")]
+    #[arg(long, help_heading = "Decisions", conflicts_with = "take_repo")]
     pub keep_local: bool,
     /// Take the repo version of conflicting and existing files, after backing them up
-    #[arg(long)]
+    #[arg(long, help_heading = "Decisions")]
     pub take_repo: bool,
     /// Stop managing files deleted locally; they stay deleted
-    #[arg(long, conflicts_with = "restore_deleted")]
+    #[arg(long, help_heading = "Decisions", conflicts_with = "restore_deleted")]
     pub forget_deleted: bool,
     /// Write files deleted locally back from the repo
-    #[arg(long)]
+    #[arg(long, help_heading = "Decisions")]
     pub restore_deleted: bool,
     /// Accept a changed machine identity and use the variants it selects
-    #[arg(long)]
+    #[arg(long, help_heading = "Decisions")]
     pub accept_identity: bool,
     /// Approve the current `[hooks]` table on this machine and run its hooks
-    #[arg(long)]
+    #[arg(long, help_heading = "Decisions")]
     pub approve_hooks: bool,
 }
 

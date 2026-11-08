@@ -1,0 +1,489 @@
+#compdef dotman
+
+autoload -U is-at-least
+
+_dotman() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_dotman_commands" \
+"*::: :->dotman" \
+&& ret=0
+    case $state in
+    (dotman)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:dotman-command-$line[1]:"
+        case $line[1] in
+            (init)
+_arguments "${_arguments_options[@]}" : \
+'()--remote=[Set or replace the \`origin\` remote]:URL:_default' \
+'--git-name=[Git \`user.name\` to set when git has no identity]:NAME:_default' \
+'--git-email=[Git \`user.email\` to set when git has no identity]:EMAIL:_default' \
+'(--remote --no-remote)--create-github=[Create the private GitHub repo \`OWNER/NAME\` with \`gh\` and make it \`origin\`]:OWNER/NAME:_default' \
+'--host=[Host name of this machine, written to \`\[identity\]\` in the machine config]:NAME:_default' \
+'*--profile=[A profile this machine opts into, written to the machine config; repeatable]:NAME:_default' \
+'*--system-root=[A directory outside \$HOME whose files this machine manages, added to \`\[system\] roots\`; repeatable]:DIR:_files' \
+'--age-key-file=[Import the age identity in FILE before applying, so encrypted files decrypt]:FILE:_files' \
+'()--no-import[Create a fresh repo without looking for an existing setup to import]' \
+'(--take-repo)--keep-local[Keep the local version of files that differ from the repo]' \
+'--take-repo[Take the repo version of files that differ, after backing them up]' \
+'--approve-hooks[Approve the \`\[hooks\]\` table of the cloned repo on this machine and run its hooks]' \
+'--dry-run[Show what would be created and change nothing]' \
+'(--refresh-bootstrap)--no-bootstrap[Do not write install.sh, the script that sets up \`dotman\` in a container]' \
+'()--refresh-bootstrap[Rewrite install.sh with this version'\''s script, unless it was edited]' \
+'--git-global[Store --git-name and --git-email in the global git config instead of the repo'\''s]' \
+'(--remote)--no-remote[Do not ask for a remote]' \
+'(--system-root)--no-system[Do not ask about system files]' \
+'(--no-key)--create-key[Create an age identity for encrypted files]' \
+'()--no-key[Do not ask about an age identity]' \
+'--force[With --age-key-file\: replace a different existing identity, after backing it up]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::source -- Git URL or local path of an existing dotman repo to clone and apply:_default' \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+'--for=[Add the files as variants that apply only where these \`+\`-joined conditions hold, such as \`host=laptop+os!=macos\`]:CONDITIONS:_default' \
+'--encrypt[Store the files encrypted to the \`\[age\] recipients\` in .dotman.toml]' \
+'(--encrypt)--allow-plain[Add files in plain text although their names match \`\[guard\] secret_names\` and the remote is public]' \
+'--yes[Do not ask before adding directories]' \
+'--dry-run[Show what would be added and change nothing]' \
+'--system[Add regular files outside \$HOME that you can read, such as /etc/keyd/default.conf]' \
+'--package-owned[With --system\: the file belongs to a package; manage it anyway]' \
+'--add-root[With --system\: add the top-level directory to \`\[system\] roots\` without asking]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::paths -- Files, symlinks or directories under $HOME; with --system, files outside it:_files' \
+&& ret=0
+;;
+(forget)
+_arguments "${_arguments_options[@]}" : \
+'--dry-run[Show what would be forgotten and change nothing]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::paths -- Files, symlinks or directories to stop managing:_files' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'--porcelain[Print \`<kind>\\t<key>\\0\` records]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'--porcelain[Print \`<status>\\t<key>\\0\` records for every managed path]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::paths -- Limit the report to these paths:_files' \
+&& ret=0
+;;
+(apply)
+_arguments "${_arguments_options[@]}" : \
+'(--take-repo)--keep-local[Keep the local version of conflicting and existing files]' \
+'--take-repo[Take the repo version of conflicting and existing files, after backing them up]' \
+'(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \
+'--restore-deleted[Write files deleted locally back from the repo]' \
+'--accept-identity[Accept a changed machine identity and use the variants it selects]' \
+'--approve-hooks[Approve the current \`\[hooks\]\` table on this machine and run its hooks]' \
+'--in-place[Rewrite files in place when a rename cannot replace them, as on a bind mount]' \
+'(--approve-hooks)--no-hooks[Run no hooks]' \
+'--dry-run[Show what would be written and change nothing]' \
+'--system[Also write the system files outside \$HOME, through one sudo, doas or run0 call]' \
+'--yes[With --system\: write the system files without asking]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::paths -- Apply only these files or directories, with --system system files too; every managed path when none are given:_files' \
+&& ret=0
+;;
+(diff)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::paths -- Compare only these files or directories; every managed path when none are given:_files' \
+&& ret=0
+;;
+(edit)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':path -- The managed file to edit:_files' \
+&& ret=0
+;;
+(sync)
+_arguments "${_arguments_options[@]}" : \
+'-m+[Commit message, replacing the generated \`sync(<host>)\: ...\` line]:MSG:_default' \
+'--message=[Commit message, replacing the generated \`sync(<host>)\: ...\` line]:MSG:_default' \
+'(--take-repo)--keep-local[Keep the local version of conflicting and existing files]' \
+'--take-repo[Take the repo version of conflicting and existing files, after backing them up]' \
+'(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \
+'--restore-deleted[Write files deleted locally back from the repo]' \
+'--accept-identity[Accept a changed machine identity and use the variants it selects]' \
+'--approve-hooks[Approve the current \`\[hooks\]\` table on this machine and run its hooks]' \
+'(--approve-hooks)--no-hooks[Run no hooks]' \
+'--dry-run[Show what would be captured, committed, pulled, applied and pushed; change nothing]' \
+'--system[After the pull, also write the system files outside \$HOME, through one sudo, doas or run0 call]' \
+'--yes[With --system\: write the system files without asking]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(log)
+_arguments "${_arguments_options[@]}" : \
+'-n+[Show at most this many commits]:N:_default' \
+'--max-count=[Show at most this many commits]:N:_default' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::paths -- Files, directories or globs to filter by; a trailing `/` means the whole subtree:_default' \
+&& ret=0
+;;
+(restore)
+_arguments "${_arguments_options[@]}" : \
+'--from=[Revision or date to restore from; \`HEAD\` when omitted]:REV_OR_DATE:_default' \
+'--dry-run[Show what would be written and change nothing]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':path -- The managed file or symlink to restore:_files' \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'--overlay=[Add what SOURCE has and the repo lacks as one commit\: modes, and with \`--include-missing\` files]:SOURCE:_default' \
+'--include-missing[With \`--overlay\`, add the files the repo lacks without asking]' \
+'(--overlay)--render-templates[For a chezmoi source, run its templates and import this host'\''s rendering]' \
+'(--overlay --include-missing --render-templates)--swap[Replace the symlinks of an imported farm with real files holding the same bytes]' \
+'--yes[Do not ask before writing]' \
+'--no-bootstrap[Do not write install.sh, the script that sets up \`dotman\` in a container]' \
+'--dry-run[Show the report and change nothing]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::source -- Legacy dotman repo, chezmoi source, symlink-farm directory, yadm, bare or vcsh repo, or git URL to convert; found in $HOME when omitted:_default' \
+&& ret=0
+;;
+(git)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'*::args -- Passed to git as given:_default' \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+'--online[Also ask the remote with \`git ls-remote\`]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(key)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_dotman__key_commands" \
+"*::: :->key" \
+&& ret=0
+
+    case $state in
+    (key)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:dotman-key-command-$line[1]:"
+        case $line[1] in
+            (init)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'--add-recipient[Add the identity'\''s recipient to \`\[age\] recipients\` in .dotman.toml if it is missing]' \
+'--force[Replace an existing, different identity, after backing it up]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::file -- Identity file to import; `-` reads standard input:_files' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(completion)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':shell -- Shell to generate completions for:(bash elvish fish powershell zsh)' \
+&& ret=0
+;;
+(system-write)
+_arguments "${_arguments_options[@]}" : \
+'--plan=[The plan file that \`apply --system\` wrote]:FILE:_files' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_dotman_commands] )) ||
+_dotman_commands() {
+    local commands; commands=(
+'init:Create the dotman repo or set its remote, or clone a repo and apply it' \
+'add:Start managing files or directories' \
+'forget:Stop managing files or directories, keeping them in \$HOME' \
+'list:List the managed files' \
+'status:Compare \$HOME, the repo and the last applied state' \
+'apply:Write the repo'\''s files into \$HOME' \
+'diff:Show how \$HOME differs from the repo' \
+'edit:Open a managed file'\''s source in \$VISUAL or \$EDITOR, then apply it' \
+'sync:Capture local changes, commit, pull, apply what arrived and push' \
+'log:Show the repo'\''s history' \
+'restore:Write an earlier version of a file into \$HOME, keeping the current one as a backup' \
+'import:Convert another setup into the repo, or add what the repo lacks from one' \
+'git:Run git in the repo' \
+'doctor:Check the environment and the repo for problems' \
+'key:Create or import the age identity that decrypts encrypted files' \
+'completion:Generate shell completion scripts' \
+'system-write:Write the system files a plan names; \`apply --system\` starts it through sudo, doas or run0' \
+    )
+    _describe -t commands 'dotman commands' commands "$@"
+}
+(( $+functions[_dotman__add_commands] )) ||
+_dotman__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman add commands' commands "$@"
+}
+(( $+functions[_dotman__apply_commands] )) ||
+_dotman__apply_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman apply commands' commands "$@"
+}
+(( $+functions[_dotman__completion_commands] )) ||
+_dotman__completion_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman completion commands' commands "$@"
+}
+(( $+functions[_dotman__diff_commands] )) ||
+_dotman__diff_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman diff commands' commands "$@"
+}
+(( $+functions[_dotman__doctor_commands] )) ||
+_dotman__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman doctor commands' commands "$@"
+}
+(( $+functions[_dotman__edit_commands] )) ||
+_dotman__edit_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman edit commands' commands "$@"
+}
+(( $+functions[_dotman__forget_commands] )) ||
+_dotman__forget_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman forget commands' commands "$@"
+}
+(( $+functions[_dotman__git_commands] )) ||
+_dotman__git_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman git commands' commands "$@"
+}
+(( $+functions[_dotman__import_commands] )) ||
+_dotman__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman import commands' commands "$@"
+}
+(( $+functions[_dotman__init_commands] )) ||
+_dotman__init_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman init commands' commands "$@"
+}
+(( $+functions[_dotman__key_commands] )) ||
+_dotman__key_commands() {
+    local commands; commands=(
+'init:Generate an age identity and add its recipient to .dotman.toml' \
+'import:Copy an existing age identity into place and check that its recipient is listed' \
+    )
+    _describe -t commands 'dotman key commands' commands "$@"
+}
+(( $+functions[_dotman__key__import_commands] )) ||
+_dotman__key__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman key import commands' commands "$@"
+}
+(( $+functions[_dotman__key__init_commands] )) ||
+_dotman__key__init_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman key init commands' commands "$@"
+}
+(( $+functions[_dotman__list_commands] )) ||
+_dotman__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman list commands' commands "$@"
+}
+(( $+functions[_dotman__log_commands] )) ||
+_dotman__log_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman log commands' commands "$@"
+}
+(( $+functions[_dotman__restore_commands] )) ||
+_dotman__restore_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman restore commands' commands "$@"
+}
+(( $+functions[_dotman__status_commands] )) ||
+_dotman__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman status commands' commands "$@"
+}
+(( $+functions[_dotman__sync_commands] )) ||
+_dotman__sync_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman sync commands' commands "$@"
+}
+(( $+functions[_dotman__system-write_commands] )) ||
+_dotman__system-write_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman system-write commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_dotman" ]; then
+    _dotman "$@"
+else
+    compdef _dotman dotman
+fi

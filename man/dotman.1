@@ -1,0 +1,80 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dotman 1  "dotman 0.1.0"
+.SH NAME
+dotman \- Git\-like dotfiles manager
+.SH SYNOPSIS
+\fBdotman\fR [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Git\-like dotfiles manager
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show verbose output
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress informational messages
+.TP
+\fB\-\-no\-pager\fR
+Disable pager output
+.TP
+\fB\-\-allow\-root\fR
+Allow running as root
+.SH SUBCOMMANDS
+.TP
+dotman\-init(1)
+Create the dotman repo or set its remote, or clone a repo and apply it
+.TP
+dotman\-add(1)
+Start managing files or directories
+.TP
+dotman\-forget(1)
+Stop managing files or directories, keeping them in $HOME
+.TP
+dotman\-list(1)
+List the managed files
+.TP
+dotman\-status(1)
+Compare $HOME, the repo and the last applied state
+.TP
+dotman\-apply(1)
+Write the repo\*(Aqs files into $HOME
+.TP
+dotman\-diff(1)
+Show how $HOME differs from the repo
+.TP
+dotman\-edit(1)
+Open a managed file\*(Aqs source in $VISUAL or $EDITOR, then apply it
+.TP
+dotman\-sync(1)
+Capture local changes, commit, pull, apply what arrived and push
+.TP
+dotman\-log(1)
+Show the repo\*(Aqs history
+.TP
+dotman\-restore(1)
+Write an earlier version of a file into $HOME, keeping the current one as a backup
+.TP
+dotman\-import(1)
+Convert another setup into the repo, or add what the repo lacks from one
+.TP
+dotman\-git(1)
+Run git in the repo
+.TP
+dotman\-doctor(1)
+Check the environment and the repo for problems
+.TP
+dotman\-key(1)
+Create or import the age identity that decrypts encrypted files
+.TP
+dotman\-completion(1)
+Generate shell completion scripts
+.SH VERSION
+v0.1.0

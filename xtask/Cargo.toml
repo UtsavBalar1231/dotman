@@ -9,3 +9,7 @@ dotman = { package = "dotman-cli", path = "..", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 clap_mangen = "0.2"
 anyhow = "1.0"
+clap_complete = "4.5"
+
+[dev-dependencies]
+tempfile = "3.23"

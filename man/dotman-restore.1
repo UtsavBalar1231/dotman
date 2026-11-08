@@ -1,0 +1,35 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dotman-restore 1  "restore "
+.SH NAME
+dotman\-restore \- Write an earlier version of a file into $HOME, keeping the current one as a backup
+.SH SYNOPSIS
+\fBdotman restore\fR [\fB\-\-from\fR] [\fB\-\-dry\-run\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIPATH\fR>
+.SH DESCRIPTION
+Write an earlier version of a file into $HOME, keeping the current one as a backup
+.SH OPTIONS
+.TP
+\fB\-\-from\fR \fI<REV_OR_DATE>\fR
+Revision or date to restore from; `HEAD` when omitted
+.TP
+\fB\-\-dry\-run\fR
+Show what would be written and change nothing
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIPATH\fR>
+The managed file or symlink to restore
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show verbose output
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress informational messages
+.TP
+\fB\-\-no\-pager\fR
+Disable pager output
+.TP
+\fB\-\-allow\-root\fR
+Allow running as root
