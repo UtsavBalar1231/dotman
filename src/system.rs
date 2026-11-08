@@ -6,7 +6,11 @@
 //! that starts with `/`. Never join the absolute form onto a directory: `Path::join` would discard
 //! the directory.
 //!
-//! Nothing here writes outside the repo and the state dir. Writing system paths is `apply --system`.
+//! Nothing here writes outside the repo and the state dir. `apply --system` writes system paths
+//! through `escalate`, which runs [`helper`] as root.
+
+pub(crate) mod escalate;
+pub mod helper;
 
 use crate::commands::add::ensure_worktree_parents;
 use crate::config::Config;
@@ -190,6 +194,13 @@ impl Scope {
 
     fn base(&self) -> &Path {
         self.prefix.as_deref().unwrap_or_else(|| Path::new("/"))
+    }
+
+    /// The path a plan names for the key, the one [`Scope::disk`] reads below the prefix: the
+    /// canonical form, so `/private/etc/x` for `/etc/x` on macOS, except under a prefix.
+    #[must_use]
+    pub fn target(&self, key: &str) -> String {
+        format!("/{}", self.walk_rel(key))
     }
 
     // The aliases are real symlinks on macOS, so without a prefix the walk goes through the

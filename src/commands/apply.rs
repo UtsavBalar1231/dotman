@@ -8,9 +8,9 @@ use crate::commands::{Outcome, diff, forget};
 use crate::context::Context;
 use crate::engine::status::{Content, Row, Source, SourceEntry, Variants, Worktree, classify};
 use crate::engine::write::{
-    Skip, WriteOptions, WriteOutcome, backup_run_dir, safe_symlink, safe_write,
+    Skip, WriteOptions, WriteOutcome, back_up_bytes, backup_run_dir, safe_symlink, safe_write,
 };
-use crate::engine::{Home, Tuple, observe, observe_portable};
+use crate::engine::{Home, Node, Tuple, hash_hex, observe, observe_portable};
 use crate::hooks::{self, Policy};
 use crate::identity;
 use crate::lock::Lock;
@@ -19,9 +19,12 @@ use crate::prompt;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{HoldsKey, Locked};
 use crate::state::{IdentitySnapshot, Kind, State};
-use crate::system::{self, Verdict};
+use crate::sys;
+use crate::system::escalate::{Escalator, Tool};
+use crate::system::helper::{self, Plan, PlanEntry, Reported};
+use crate::system::{self, Scope, Verdict};
 use crate::variant::{Selection, Sources};
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -35,6 +38,8 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
         dry_run: args.dry_run,
         in_place: args.in_place,
         decisions: args.decisions,
+        system: args.system,
+        yes: args.yes,
         ..Options::default()
     };
     let applied = apply(&ctx, &args.paths, &opts)?;
@@ -78,6 +83,10 @@ pub(crate) struct Options {
     pub take_drift: bool,
     /// Keys left alone, because an earlier pass already reported them undecided.
     pub skip: BTreeSet<String>,
+    /// Write system files too, after the home files, through one escalation.
+    pub system: bool,
+    /// Write them without asking.
+    pub yes: bool,
 }
 
 pub(crate) struct Applied {
@@ -125,7 +134,17 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     } else {
         Scan::default()
     };
-    let mut keys = ctx.select(inputs, keys)?;
+    let (home_inputs, system_filters) = if opts.system {
+        system::split_inputs(&ctx.paths, inputs)?
+    } else {
+        (inputs.to_vec(), Vec::new())
+    };
+    let only_system = !inputs.is_empty() && home_inputs.is_empty();
+    let mut keys = if only_system {
+        BTreeSet::new()
+    } else {
+        ctx.select(&home_inputs, keys)?
+    };
     keys.retain(|key| !opts.skip.contains(key));
 
     let mut run = Run {
@@ -143,8 +162,13 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         dir_modes: BTreeMap::new(),
         accepted: false,
         locked: Vec::new(),
+        system_writes: Vec::new(),
+        forget_system: BTreeSet::new(),
     };
     let mut items = run.classify(&sources, &state, &keys);
+    if opts.system && (inputs.is_empty() || !system_filters.is_empty()) {
+        items.extend(run.system_items(&state, &repo_config, &system_filters)?);
+    }
     run.report_locked();
     if opts.summary {
         summarize(&items, run.locked.len());
@@ -156,12 +180,15 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
             run.execute(item, action, &mut state, &mut repo_config);
         }
     }
-    if inputs.is_empty() {
+    if inputs.is_empty() && !opts.system {
         run.system(&mut state, &mut repo_config);
     }
+    run.write_system(&mut state, &repo_config);
     run.capture_new(&scan, &mut state, &mut repo_config);
 
-    let repo_saved = if opts.dry_run || (run.forget.is_empty() && run.captured.is_empty()) {
+    let unchanged =
+        run.forget.is_empty() && run.forget_system.is_empty() && run.captured.is_empty();
+    let repo_saved = if opts.dry_run || unchanged {
         Ok(())
     } else {
         let removed = if run.forget.is_empty() {
@@ -169,7 +196,11 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         } else {
             forget::remove_keys(ctx, &mut repo_config, &mut state, &run.forget)
         };
-        removed.and_then(|()| repo_config.save(&ctx.repo_config_file(), false))
+        removed
+            .and_then(|()| {
+                forget::remove_system_keys(ctx, &mut repo_config, &mut state, &run.forget_system)
+            })
+            .and_then(|()| repo_config.save(&ctx.repo_config_file(), false))
     };
     if !opts.dry_run && (state.identity.is_none() || run.accepted) {
         state.identity = Some(ctx.identity().clone());
@@ -202,6 +233,27 @@ pub(crate) struct Item {
     /// The identity change since the snapshot moved this key to another source. Until the change
     /// is accepted, the key is left alone.
     identity: bool,
+    /// An absolute key outside `$HOME`, which only the system-write helper writes.
+    system: bool,
+}
+
+/// A system key that is to be written once every home write is done.
+struct SystemWrite {
+    key: String,
+    r: SourceEntry,
+    h: Home,
+}
+
+/// A [`SystemWrite`] that was read again and found unchanged, with what the plan needs.
+struct Ready {
+    key: String,
+    target: String,
+    r: SourceEntry,
+    bytes: Vec<u8>,
+    owner: String,
+    group: String,
+    /// The file there now, which is backed up first: bytes, mode, uid and gid.
+    current: Option<(Vec<u8>, u32, u32, u32)>,
 }
 
 impl Item {
@@ -348,6 +400,8 @@ struct Run<'a> {
     dir_modes: BTreeMap<String, u32>,
     accepted: bool,
     locked: Vec<(String, String)>,
+    system_writes: Vec<SystemWrite>,
+    forget_system: BTreeSet<String>,
 }
 
 impl Run<'_> {
@@ -626,11 +680,14 @@ impl Run<'_> {
     }
 
     fn show_diffs(&self, items: &[&Item]) {
-        let entries: Vec<(&str, &SourceEntry)> = items
-            .iter()
-            .filter_map(|item| item.r.as_ref().map(|r| (item.key.as_str(), r)))
-            .collect();
-        if let Err(e) = diff::show(self.ctx, &entries, true) {
+        let entries = |system: bool| -> Vec<(&str, &SourceEntry)> {
+            items
+                .iter()
+                .filter(|item| item.system == system)
+                .filter_map(|item| item.r.as_ref().map(|r| (item.key.as_str(), r)))
+                .collect()
+        };
+        if let Err(e) = diff::show(self.ctx, &entries(false), &entries(true)) {
             output::warning(&format!("cannot show the diffs: {e:#}"));
         }
     }
@@ -642,6 +699,10 @@ impl Run<'_> {
         state: &mut State,
         repo_config: &mut RepoConfig,
     ) {
+        if item.system {
+            self.execute_system(item, action, state);
+            return;
+        }
         let key = &item.key;
         match action {
             Action::DropState => {
@@ -705,10 +766,324 @@ impl Run<'_> {
         }
         if pending > 0 {
             output::info(&format!(
-                "{pending} system {} differ from the repo; `dot apply --system` will write them, but it is not available yet",
-                if pending == 1 { "file" } else { "files" }
+                "{} {} from the repo; `dot apply --system` writes {}",
+                system_files(pending),
+                if pending == 1 { "differs" } else { "differ" },
+                if pending == 1 { "it" } else { "them" }
             ));
         }
+    }
+
+    /// The system keys `filters` select, as items for the same questions home keys get. A key
+    /// outside every root is listed and left alone.
+    fn system_items(
+        &mut self,
+        state: &State,
+        repo_config: &RepoConfig,
+        filters: &[String],
+    ) -> Result<Vec<Item>> {
+        let found = system::evaluate(self.ctx, repo_config, state)?;
+        let all = found.iter().map(|item| item.key.clone()).collect();
+        let wanted = system::select_keys(filters, &all)?;
+        let mut items = Vec::new();
+        for item in found {
+            let key = item.key;
+            if !wanted.contains(&key) || self.opts.skip.contains(&key) {
+                continue;
+            }
+            match item.verdict {
+                Verdict::Refused(why) => {
+                    self.attention = true;
+                    output::warning(&format!("{key}: skipped, {why}"));
+                }
+                Verdict::Invalid(problems) => {
+                    self.attention = true;
+                    for (source, reason) in problems {
+                        output::warning(&format!("{key}: skipped, {source}: {reason}"));
+                    }
+                }
+                Verdict::Ambiguous(tied) => {
+                    self.attention = true;
+                    output::warning(&format!(
+                        "{key}: {} are equally specific here; skipped until one is removed",
+                        tied.join(", ")
+                    ));
+                }
+                _ if item.off => {
+                    output::info(&format!(
+                        "{key}: system-off, outside [system] roots; skipped"
+                    ));
+                }
+                Verdict::Unreadable(why) => {
+                    self.attention = true;
+                    output::warning(&format!(
+                        "{key}: refused, it cannot be read: {why}; {}",
+                        system::SECRETS_NOTE
+                    ));
+                }
+                Verdict::Row { row, r, h } => {
+                    let s = state.system.get(&key).map(Tuple::from_entry).transpose()?;
+                    let local_changes = matches!(&h, Home::Present(h) if s.as_ref() != Some(h));
+                    items.push(Item {
+                        key,
+                        row,
+                        r,
+                        raw: h,
+                        local_changes,
+                        identity: false,
+                        system: true,
+                    });
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    /// S changes at once; writes wait for [`Run::write_system`].
+    fn execute_system(&mut self, item: &Item, action: Action, state: &mut State) {
+        let key = &item.key;
+        match (action, &item.r) {
+            (Action::DropState, _) => {
+                state.system.remove(key);
+            }
+            (Action::Forget, _) => {
+                self.announce("forget", key);
+                self.forget_system.insert(key.clone());
+            }
+            (Action::Write, Some(r)) => self.system_writes.push(SystemWrite {
+                key: key.clone(),
+                r: r.clone(),
+                h: item.raw.clone(),
+            }),
+            (Action::KeepLocal | Action::Record, Some(r)) => {
+                if action == Action::KeepLocal {
+                    self.announce("keep local", key);
+                }
+                state.system.insert(key.clone(), r.tuple.entry(&r.source));
+            }
+            // Only `sync`'s pass before the pull captures, and it never takes system items.
+            (Action::Capture, _) | (_, None) => {}
+        }
+    }
+
+    /// Reads each target again as the user, shows what changes, asks once, backs up, then
+    /// writes them all through one escalation. S follows only what the helper reports written.
+    fn write_system(&mut self, state: &mut State, repo_config: &RepoConfig) {
+        let pending = std::mem::take(&mut self.system_writes);
+        if pending.is_empty() {
+            return;
+        }
+        let scope = self.ctx.system_scope();
+        let ready: Vec<Ready> = pending
+            .into_iter()
+            .filter_map(|write| self.reread(&scope, repo_config, write))
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        show_system(self.ctx, &ready);
+        if self.opts.dry_run {
+            for item in &ready {
+                self.announce("write", &item.key);
+            }
+            if !self.opts.yes {
+                self.unconfirmed(&ready);
+            }
+            return;
+        }
+        let machine = &self.ctx.machine.system;
+        let escalator =
+            match Escalator::choose(machine.escalate.as_deref(), &self.ctx.paths.config_file) {
+                Ok(escalator) => escalator,
+                Err(e) => {
+                    output::warning(&format!("{e:#}"));
+                    self.failed = self.failed.saturating_add(ready.len());
+                    return;
+                }
+            };
+        if !self.confirmed(&ready) {
+            return;
+        }
+        let ready = self.back_up_system(ready);
+        if ready.is_empty() {
+            return;
+        }
+        let plan = match plan_of(self.ctx, &scope, &ready) {
+            Ok(plan) => plan,
+            Err(e) => {
+                output::warning(&format!("system files: {e:#}"));
+                self.failed = self.failed.saturating_add(ready.len());
+                return;
+            }
+        };
+        let name = escalator.tool.name();
+        let ran = match escalator.run(&self.ctx.paths.state_dir, &plan, prompt::interactive()) {
+            Ok(ran) => ran,
+            Err(e) => {
+                output::warning(&format!("system files not written: {e:#}"));
+                self.failed = self.failed.saturating_add(ready.len());
+                return;
+            }
+        };
+        let mut silent = true;
+        for item in &ready {
+            let key = &item.key;
+            match helper::reported(&ran.stdout, &item.target) {
+                Some((Reported::Written | Reported::OwnerSkipped, _)) => {
+                    silent = false;
+                    self.announce("apply", key);
+                    state
+                        .system
+                        .insert(key.clone(), item.r.tuple.entry(&item.r.source));
+                    self.written.insert(key.clone());
+                    if escalator.tool == Tool::None {
+                        output::info(&format!(
+                            "{key}: owner and group left as they are, because escalate = \"none\""
+                        ));
+                    }
+                }
+                Some((Reported::Failed, why)) => {
+                    silent = false;
+                    self.failed = self.failed.saturating_add(1);
+                    output::warning(&format!("{key}: cannot be applied: {why}"));
+                }
+                Some((Reported::NotWritten, _)) => {
+                    silent = false;
+                    self.failed = self.failed.saturating_add(1);
+                    output::warning(&format!(
+                        "{key}: not written, an earlier system file failed"
+                    ));
+                }
+                None => self.failed = self.failed.saturating_add(1),
+            }
+        }
+        if silent && !ran.status.success() {
+            output::warning(&format!(
+                "{name} did not run system-write, or it refused the plan ({}); {}",
+                ran.status, ran.hint
+            ));
+        }
+    }
+
+    /// The target as the user reads it now. Anything other than what was classified skips the
+    /// key as a conflict; a file the user cannot read is refused, because it is likely a secret.
+    fn reread(
+        &mut self,
+        scope: &Scope,
+        repo_config: &RepoConfig,
+        write: SystemWrite,
+    ) -> Option<Ready> {
+        let key = write.key;
+        let current = match scope.node(&key) {
+            Ok(Node::File {
+                bytes,
+                mode,
+                uid,
+                gid,
+                ..
+            }) => Some((bytes, mode & 0o777, uid, gid)),
+            Ok(Node::Missing) => None,
+            Ok(_) => {
+                self.attention = true;
+                output::warning(&format!("{key}: {}", Skip::Changed));
+                return None;
+            }
+            Err(e) if system::is_unreadable(&e) => {
+                self.attention = true;
+                output::warning(&format!(
+                    "{key}: refused, you cannot read it: {}",
+                    system::SECRETS_NOTE
+                ));
+                return None;
+            }
+            Err(e) => {
+                self.failed = self.failed.saturating_add(1);
+                output::warning(&format!("{key}: cannot be applied: {e:#}"));
+                return None;
+            }
+        };
+        let now = current.as_ref().map_or(Home::Missing, |(bytes, mode, ..)| {
+            Home::Present(Tuple::of_file(bytes, *mode))
+        });
+        let Content::Bytes(bytes) = &write.r.content else {
+            return None;
+        };
+        if now != write.h {
+            self.attention = true;
+            output::warning(&format!("{key}: {}", Skip::Changed));
+            return None;
+        }
+        // A source that arrived without a [system] record belongs to root, as system files do.
+        let record = repo_config.system.get(&key);
+        let named = |name: Option<&String>| name.filter(|name| !name.is_empty()).cloned();
+        let owner = named(record.map(|file| &file.owner)).unwrap_or_else(|| "root".to_owned());
+        let group = named(record.map(|file| &file.group)).unwrap_or_else(|| {
+            sys::group_by_gid(0).map_or_else(|| "root".to_owned(), |group| group.name)
+        });
+        Some(Ready {
+            target: scope.target(&key),
+            key,
+            bytes: bytes.clone(),
+            r: write.r,
+            owner,
+            group,
+            current,
+        })
+    }
+
+    fn confirmed(&mut self, ready: &[Ready]) -> bool {
+        if self.opts.yes {
+            return true;
+        }
+        if prompt::interactive() {
+            let question = format!("write {} as root? [y/N]", system_files(ready.len()));
+            match prompt::confirm(&question) {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(e) => output::warning(&format!("{e:#}")),
+            }
+        }
+        self.unconfirmed(ready);
+        false
+    }
+
+    fn unconfirmed(&mut self, ready: &[Ready]) {
+        self.attention = true;
+        output::warning(&format!(
+            "{} left unwritten; answer with --yes:",
+            system_files(ready.len())
+        ));
+        for item in ready {
+            output::warning(&format!("  {}", item.key));
+            self.undecided.insert(item.key.clone());
+        }
+    }
+
+    /// Copies each current target into the run's backups as `.dotman/system/<path>`, so it can
+    /// never land on a home key. A target that cannot be backed up is not written.
+    fn back_up_system(&mut self, ready: Vec<Ready>) -> Vec<Ready> {
+        let mut kept = Vec::new();
+        for item in ready {
+            let Some((bytes, ..)) = &item.current else {
+                kept.push(item);
+                continue;
+            };
+            let rel = system::source_path(item.key.trim_start_matches('/'));
+            match back_up_bytes(&self.backups, &rel, bytes) {
+                Ok(path) => {
+                    self.backed_up(&path);
+                    kept.push(item);
+                }
+                Err(e) => {
+                    self.failed = self.failed.saturating_add(1);
+                    output::warning(&format!(
+                        "{}: not written, the backup failed: {e:#}",
+                        item.key
+                    ));
+                }
+            }
+        }
+        kept
     }
 
     fn capture_system(
@@ -935,7 +1310,60 @@ pub(crate) fn classify_key(
         raw,
         local_changes,
         identity,
+        system: false,
     }))
+}
+
+fn system_files(n: usize) -> String {
+    format!("{n} system {}", if n == 1 { "file" } else { "files" })
+}
+
+/// Each target with the owner, group and mode it gets and has now, then the diff.
+fn show_system(ctx: &Context, ready: &[Ready]) {
+    let user = |uid: u32| sys::passwd_by_uid(uid).map_or_else(|| uid.to_string(), |pw| pw.name);
+    let group = |gid: u32| sys::group_by_gid(gid).map_or_else(|| gid.to_string(), |gr| gr.name);
+    output::info(&format!("{} to write as root:", system_files(ready.len())));
+    for item in ready {
+        let now = item.current.as_ref().map_or_else(
+            || "new".to_owned(),
+            |(_, mode, uid, gid)| format!("now {}:{} {mode:04o}", user(*uid), group(*gid)),
+        );
+        output::info(&format!(
+            "  {}  {}:{} {:04o}  ({now})",
+            item.key, item.owner, item.group, item.r.tuple.mode
+        ));
+    }
+    let entries: Vec<(&str, &SourceEntry)> = ready
+        .iter()
+        .map(|item| (item.key.as_str(), &item.r))
+        .collect();
+    if let Err(e) = diff::show(ctx, &[], &entries) {
+        output::warning(&format!("cannot show the diffs: {e:#}"));
+    }
+}
+
+fn plan_of(ctx: &Context, scope: &Scope, ready: &[Ready]) -> Result<Plan> {
+    let utf8 = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("{} is not valid UTF-8", path.display()))
+    };
+    Ok(Plan {
+        config: utf8(&ctx.paths.config_file)?,
+        roots: helper::usable_roots(scope),
+        prefix: scope.prefix().map(utf8).transpose()?,
+        entries: ready
+            .iter()
+            .map(|item| PlanEntry {
+                target: item.target.clone(),
+                bytes: helper::hex(&item.bytes),
+                xxh3: hash_hex(&item.bytes),
+                owner: item.owner.clone(),
+                group: item.group.clone(),
+                mode: format!("{:04o}", item.r.tuple.mode),
+            })
+            .collect(),
+    })
 }
 
 fn summarize(items: &[Item], locked: usize) {

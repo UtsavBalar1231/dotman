@@ -7,7 +7,7 @@ use dotman::commands::{
 };
 use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
-use dotman::{paths, sys};
+use dotman::{paths, sys, system};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
@@ -33,9 +33,11 @@ fn main() {
         Verbosity::Normal
     });
 
+    // The helper is the one command meant to run as root, under sudo, doas or run0.
+    let helper = matches!(cli.command, Commands::SystemWrite(_));
     if let Err(e) = paths::ensure_not_root(
         sys::geteuid(),
-        cli.allow_root,
+        cli.allow_root || helper,
         std::env::var_os("DOTMAN_ALLOW_ROOT").as_deref(),
     ) {
         output::error(&format!("{e:#}"));
@@ -70,6 +72,7 @@ fn main() {
         }),
         Commands::Key(args) => key::run(&args),
         Commands::Git(args) => git::run(&args).map(|code| -> Outcome { std::process::exit(code) }),
+        Commands::SystemWrite(args) => done(system::helper::run(&args.plan)),
     };
     match result {
         Ok(Outcome::Done) => {}

@@ -94,6 +94,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         &Options {
             decisions: args.decisions,
             skip: first.undecided,
+            system: args.system,
+            yes: args.yes,
             ..Options::default()
         },
     )?;
@@ -131,6 +133,8 @@ fn without_remote(
             dry_run,
             decisions: args.decisions,
             skip,
+            system: args.system,
+            yes: args.yes,
             ..Options::default()
         },
     )?;

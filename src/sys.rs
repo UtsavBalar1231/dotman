@@ -1,7 +1,10 @@
 //! Platform-specific calls. The only module allowed to use `unsafe`.
 
 use std::ffi::{CStr, CString, OsStr, c_char};
+use std::fs::File;
+use std::io;
 use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr;
@@ -67,6 +70,97 @@ impl Drop for SignalsIgnored {
 pub fn geteuid() -> u32 {
     // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
     unsafe { libc::geteuid() }
+}
+
+/// Opens the directory `name` inside `dir`. A symlink is never followed: it fails with ELOOP, or
+/// ENOTDIR on some systems.
+pub fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is an open descriptor and `name` is NUL-terminated; both outlive the call.
+    owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) })
+}
+
+/// Creates `name` inside `dir` for writing at `mode`. Fails if anything is there, a symlink
+/// included.
+pub fn create_excl(dir: BorrowedFd<'_>, name: &CStr, mode: u32) -> io::Result<File> {
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: as in `openat_dir`; with O_CREAT, openat reads one more variadic argument, the mode,
+    // which is passed as an unsigned int as C's default promotion of mode_t expects.
+    owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode) }).map(File::from)
+}
+
+fn owned(fd: libc::c_int) -> io::Result<OwnedFd> {
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a non-negative return from open is a new descriptor that nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn check(rc: libc::c_int) -> io::Result<()> {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    File,
+    Symlink,
+    Other,
+}
+
+/// What `name` inside `dir` is, without following a symlink; `None` when nothing is there.
+pub(crate) fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Option<EntryKind>> {
+    let mut stat = MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: `stat` is writable for a whole `stat`; `dir` is open and `name` NUL-terminated, and
+    // all three outlive the call.
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    match check(rc) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    // SAFETY: zeroed memory is a valid `stat`, and fstatat succeeded, so it is filled in.
+    let stat = unsafe { stat.assume_init() };
+    Ok(Some(match stat.st_mode & libc::S_IFMT {
+        libc::S_IFREG => EntryKind::File,
+        libc::S_IFLNK => EntryKind::Symlink,
+        _ => EntryKind::Other,
+    }))
+}
+
+/// Changes the owner and group of an open file.
+pub fn fchown(file: BorrowedFd<'_>, uid: u32, gid: u32) -> io::Result<()> {
+    std::os::unix::fs::fchown(file, Some(uid), Some(gid))
+}
+
+/// Renames `from` to `to`, both inside `dir`, replacing `to` atomically.
+pub fn renameat(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> io::Result<()> {
+    let fd = dir.as_raw_fd();
+    // SAFETY: `dir` is open and both names are NUL-terminated; all outlive the call.
+    check(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) })
+}
+
+/// Removes the file `name` inside `dir`.
+pub fn unlinkat(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+    // SAFETY: `dir` is open and `name` is NUL-terminated; both outlive the call.
+    check(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) })
+}
+
+/// Flushes a directory, so that a rename inside it survives a crash.
+pub fn fsync_dir(dir: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: `fsync` only takes the open descriptor `dir`.
+    check(unsafe { libc::fsync(dir.as_raw_fd()) })
 }
 
 /// The node name `uname -n` prints, unshortened. `None` when the call fails or the name does not

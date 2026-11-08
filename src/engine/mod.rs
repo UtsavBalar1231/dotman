@@ -251,7 +251,7 @@ pub(crate) fn recorded_mode(modes: &BTreeMap<String, String>, key: &str) -> Resu
 }
 
 // `.dotman.toml` is shared, so a malformed mode is an error rather than a default.
-fn parse_mode(text: &str) -> Result<u32> {
+pub(crate) fn parse_mode(text: &str) -> Result<u32> {
     if text.is_empty() || !text.bytes().all(|b| matches!(b, b'0'..=b'7')) {
         bail!("`{text}` is not an octal mode");
     }

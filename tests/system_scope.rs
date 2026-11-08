@@ -1,12 +1,17 @@
 mod common;
 
-use common::{Entry, TestEnv, tree_checksum};
+use common::{Entry, TestEnv, mode_of, tree_checksum};
 use dotman::config::Config;
+use dotman::repo_config::SystemFile;
 use dotman::state::State;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
 use std::process::Output;
+use xxhash_rust::xxh3::xxh3_128;
 
 const KEYD: &str = "/etc/keyd/default.conf";
 
@@ -447,4 +452,539 @@ fn paths_outside_home_and_inside_it_are_told_apart() {
     let home_file = env.home().join(".bashrc");
     let err = exits(&env, 1, &["add", "--system", &home_file.to_string_lossy()]);
     assert!(err.contains("$HOME"), "{err}");
+}
+
+/// Replaces the machine config at 0644, so a umask of 002 cannot leave it group-writable, which
+/// the helper refuses.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn configure(env: &TestEnv, text: &str) {
+    env.write_machine_config(text);
+    fs::set_permissions(machine_config(env), fs::Permissions::from_mode(0o644))
+        .expect("chmod the machine config");
+}
+
+fn system_config(roots: &[&str], escalate: &str) -> String {
+    let list: Vec<String> = roots.iter().map(|r| format!("\"{r}\"")).collect();
+    format!(
+        "[system]\nroots = [{}]\nescalate = \"{escalate}\"\n",
+        list.join(", ")
+    )
+}
+
+/// `setup` with `escalate = "none"`, so the helper runs unprivileged below the prefix.
+fn setup_none(roots: &[&str]) -> TestEnv {
+    let env = setup(&[]);
+    configure(&env, &system_config(roots, "none"));
+    env
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+fn xxh3(bytes: &[u8]) -> String {
+    format!("{:032x}", xxh3_128(bytes))
+}
+
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn root_group() -> String {
+    dotman::sys::group_by_gid(0).expect("gid 0").name
+}
+
+fn entry_hashed(target: &str, bytes: &[u8], mode: &str, hash: &str) -> Value {
+    json!({
+        "target": target,
+        "bytes": hex(bytes),
+        "xxh3": hash,
+        "owner": "root",
+        "group": root_group(),
+        "mode": mode,
+    })
+}
+
+fn entry(target: &str, bytes: &[u8], mode: &str) -> Value {
+    entry_hashed(target, bytes, mode, &xxh3(bytes))
+}
+
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn plan_json(env: &TestEnv, roots: &[&str], entries: &[Value]) -> Value {
+    let prefix = fs::canonicalize(env.system_root()).expect("canonical system root");
+    json!({
+        "config": machine_config(env),
+        "roots": roots,
+        "prefix": prefix,
+        "entries": entries,
+    })
+}
+
+/// Writes `plan` as `apply --system` would: 0600, in 0700 directories under the state dir.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn write_plan(env: &TestEnv, plan: &Value) -> PathBuf {
+    let parent = env.state_dir().join("system-plan");
+    let dir = parent.join("by-hand");
+    fs::create_dir_all(&dir).expect("create the plan dir");
+    for private in [&parent, &dir] {
+        fs::set_permissions(private, fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
+    let file = dir.join("plan.json");
+    fs::write(&file, serde_json::to_vec(plan).expect("plan JSON")).expect("write the plan");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("chmod the plan");
+    file
+}
+
+fn system_write(env: &TestEnv, plan: &Path) -> Output {
+    env.run(&["system-write", "--plan", &plan.to_string_lossy()])
+}
+
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The plan directories left under the state dir.
+fn plans_left(env: &TestEnv) -> Vec<String> {
+    let parent = env.state_dir().join("system-plan");
+    if parent.exists() {
+        names_in(&parent)
+    } else {
+        Vec::new()
+    }
+}
+
+#[test]
+fn a_valid_plan_writes_the_file_with_its_mode_and_skips_the_owner() {
+    let env = setup_none(&["/etc"]);
+    env.write_system(KEYD, b"old\n", 0o600);
+    let plan = plan_json(&env, &["/etc"], &[entry(KEYD, b"[ids]\n", "0640")]);
+    let out = system_write(&env, &write_plan(&env, &plan));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("skipped-owner {KEYD}\n"));
+    assert_eq!(fs::read(env.system_path(KEYD)).expect("read"), b"[ids]\n");
+    assert_eq!(mode_of(&env.system_path(KEYD)), 0o640);
+    assert_eq!(names_in(&env.system_path("/etc/keyd")), ["default.conf"]);
+}
+
+#[test]
+fn hand_made_plans_are_rejected_with_no_write() {
+    let env = setup_none(&["/etc"]);
+    env.write_system("/etc/keep.conf", b"keep", 0o644);
+    env.write_system("/elsewhere/y.conf", b"y", 0o644);
+    env.write_system("/opt/x.conf", b"x", 0o644);
+    symlink(env.system_path("/elsewhere"), env.system_path("/etc/sub")).expect("symlink");
+    let good = entry("/etc/new.conf", b"new", "0644");
+    let cases = [
+        (
+            "/etc/../etc/dotdot.conf",
+            entry("/etc/../etc/dotdot.conf", b"x", "0644"),
+            "`..` component",
+        ),
+        (
+            "/etc/sub/y.conf",
+            entry("/etc/sub/y.conf", b"x", "0644"),
+            "symlink",
+        ),
+        ("/opt/x.conf", entry("/opt/x.conf", b"x", "0644"), "outside"),
+        ("/proc/x", entry("/proc/x", b"x", "0644"), "never-allowed"),
+        (
+            "/etc/hash.conf",
+            entry_hashed("/etc/hash.conf", b"one", "0644", &xxh3(b"two")),
+            "xxh3",
+        ),
+    ];
+    let before = tree_checksum(&env.system_root());
+    for (target, bad, why) in cases {
+        let plan = plan_json(&env, &["/etc"], &[good.clone(), bad]);
+        let out = system_write(&env, &write_plan(&env, &plan));
+        assert_eq!(out.status.code(), Some(1), "{target}: {}", stderr(&out));
+        let text = stdout(&out);
+        assert!(
+            text.contains("not-written /etc/new.conf\n"),
+            "{target}: {text}"
+        );
+        let failed = format!("failed {target}: ");
+        let reason = text
+            .lines()
+            .find_map(|line| line.strip_prefix(&failed))
+            .unwrap_or_default();
+        assert!(reason.contains(why), "{target}: {text}");
+        assert!(stderr(&out).contains("nothing was written"), "{target}");
+        assert_eq!(tree_checksum(&env.system_root()), before, "{target}");
+    }
+
+    let plan = plan_json(&env, &["/etc", "/opt"], &[good]);
+    let out = system_write(&env, &write_plan(&env, &plan));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("differ from [system] roots"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(stdout(&out), "");
+    assert_eq!(tree_checksum(&env.system_root()), before);
+}
+
+#[test]
+fn a_mode_of_4755_is_written_as_0755() {
+    let env = setup_none(&["/etc"]);
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    let plan = plan_json(
+        &env,
+        &["/etc"],
+        &[entry("/etc/tool", b"#!/bin/sh\n", "4755")],
+    );
+    let out = system_write(&env, &write_plan(&env, &plan));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(mode_of(&env.system_path("/etc/tool")), 0o755);
+}
+
+#[test]
+fn a_plan_at_0644_or_behind_a_symlink_is_refused() {
+    let env = setup_none(&["/etc"]);
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    let plan = write_plan(
+        &env,
+        &plan_json(&env, &["/etc"], &[entry("/etc/x.conf", b"x", "0644")]),
+    );
+    fs::set_permissions(&plan, fs::Permissions::from_mode(0o644)).expect("chmod");
+    let out = system_write(&env, &plan);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("not 0600"), "{}", stderr(&out));
+
+    fs::set_permissions(&plan, fs::Permissions::from_mode(0o600)).expect("chmod");
+    let link = plan.with_file_name("link.json");
+    symlink(&plan, &link).expect("symlink");
+    let out = system_write(&env, &link);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("is a symlink"), "{}", stderr(&out));
+    assert!(!env.system_path("/etc/x.conf").exists());
+}
+
+#[test]
+fn a_group_writable_config_is_refused() {
+    let env = setup_none(&["/etc"]);
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    let plan = write_plan(
+        &env,
+        &plan_json(&env, &["/etc"], &[entry("/etc/x.conf", b"x", "0644")]),
+    );
+    fs::set_permissions(machine_config(&env), fs::Permissions::from_mode(0o664)).expect("chmod");
+    let out = system_write(&env, &plan);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("writable by group or others"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!env.system_path("/etc/x.conf").exists());
+}
+
+#[test]
+fn under_sudo_the_helper_refuses_to_run_as_a_user() {
+    if !not_root() {
+        return;
+    }
+    let env = setup(&[]);
+    configure(&env, &system_config(&["/etc"], "sudo"));
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    let plan = write_plan(
+        &env,
+        &plan_json(&env, &["/etc"], &[entry("/etc/x.conf", b"x", "0644")]),
+    );
+    let out = system_write(&env, &plan);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("runs as root"), "{}", stderr(&out));
+    assert!(!env.system_path("/etc/x.conf").exists());
+}
+
+/// A stub escalator named `name`: it appends its arguments to the returned log, then runs what
+/// follows its options, unprivileged.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn stub_escalator(env: &TestEnv, name: &str) -> PathBuf {
+    let log = env.root().join(format!("{name}.log"));
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --) shift; exec \"$@\" ;;\n    -*) shift ;;\n    *) exec \"$@\" ;;\n  esac\ndone\n",
+        log.display()
+    );
+    let stub = env.root().join("stubs").join(name);
+    fs::write(&stub, body).expect("write the stub");
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod the stub");
+    log
+}
+
+/// A managed system file whose repo side changed, so `apply --system` has one write to do.
+fn one_pending_write(env: &TestEnv) {
+    env.write_system(KEYD, b"old\n", 0o644);
+    env.ok(&["add", "--system", KEYD]);
+    env.write_repo(".dotman/system/etc/keyd/default.conf", b"new\n");
+}
+
+#[test]
+fn each_escalator_gets_its_non_interactive_flags_and_the_exe() {
+    let exe = fs::canonicalize(env!("CARGO_BIN_EXE_dot")).expect("the dot binary");
+    let run = format!("{} system-write --plan ", exe.display());
+    let cases: [(&str, Vec<String>); 3] = [
+        ("sudo", vec!["-n -v".to_owned(), format!("-n -- {run}")]),
+        ("doas", vec![format!("-n -- {run}")]),
+        ("run0", vec![format!("--no-ask-password -- {run}")]),
+    ];
+    for (tool, expected) in cases {
+        let env = setup(&[]);
+        configure(&env, &system_config(&["/etc"], tool));
+        let log = stub_escalator(&env, tool);
+        one_pending_write(&env);
+        let before = tree_checksum(&env.system_root());
+
+        let out = env.run(&["apply", "--system", "--yes"]);
+        assert_eq!(out.status.code(), Some(1), "{tool}: {}", stderr(&out));
+        let err = stderr(&out);
+        assert!(err.contains("runs as root"), "{tool}: {err}");
+        assert!(
+            err.contains(&format!("{tool} did not run system-write")),
+            "{tool}: {err}"
+        );
+        let calls = fs::read_to_string(&log).expect("the stub log");
+        let calls: Vec<&str> = calls.lines().collect();
+        assert_eq!(calls.len(), expected.len(), "{tool}: {calls:?}");
+        for (call, prefix) in calls.iter().zip(&expected) {
+            assert!(
+                call.starts_with(prefix.as_str()),
+                "{tool}: {call} vs {prefix}"
+            );
+        }
+        let last = calls.last().copied().unwrap_or_default();
+        assert!(last.contains("/system-plan/"), "{tool}: {last}");
+        assert!(last.ends_with("/plan.json"), "{tool}: {last}");
+        assert_eq!(plans_left(&env), Vec::<String>::new(), "{tool}");
+        assert_eq!(tree_checksum(&env.system_root()), before, "{tool}");
+        assert!(
+            state(&env)
+                .system
+                .get(KEYD)
+                .is_some_and(|s| s.hash == xxh3(b"old\n"))
+        );
+    }
+}
+
+#[test]
+fn with_no_escalator_on_path_the_run_exits_1_with_the_hint() {
+    let env = setup(&["/etc"]);
+    one_pending_write(&env);
+    let bin = env.root().join("gitbin");
+    fs::create_dir_all(&bin).expect("mkdir");
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git on PATH");
+    symlink(git, bin.join("git")).expect("symlink git");
+    let path = format!("{}:{}", env.root().join("stubs").display(), bin.display());
+    let before = tree_checksum(&env.system_root());
+
+    let out = env.run_with(&[("PATH", &path)], &["apply", "--system", "--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("no sudo, doas or run0 is on PATH"), "{err}");
+    assert!(err.contains("escalate"), "{err}");
+    assert_eq!(tree_checksum(&env.system_root()), before);
+    assert_eq!(plans_left(&env), Vec::<String>::new());
+}
+
+#[test]
+fn apply_system_yes_writes_backs_up_records_and_status_turns_clean() {
+    let env = setup_none(&["/etc"]);
+    one_pending_write(&env);
+    let mut config = env.repo_config();
+    if let Some(file) = config.system.get_mut(KEYD) {
+        file.mode = "0640".to_owned();
+    }
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+
+    let before = tree_checksum(&env.system_root());
+    env.ok(&["apply"]);
+    assert_eq!(tree_checksum(&env.system_root()), before);
+
+    let err = env.ok(&["apply", "--system", "--yes"]);
+    assert!(err.contains("owner and group left as they are"), "{err}");
+    assert_eq!(fs::read(env.system_path(KEYD)).expect("read"), b"new\n");
+    assert_eq!(mode_of(&env.system_path(KEYD)), 0o640);
+    assert_eq!(
+        env.backups(".dotman/system/etc/keyd/default.conf"),
+        [(b"old\n".to_vec(), 0o600)]
+    );
+    let recorded = state(&env).system.get(KEYD).cloned().expect("S entry");
+    assert_eq!(recorded.hash, xxh3(b"new\n"));
+    assert_eq!(recorded.mode, "0640");
+    assert_eq!(env.token_of("status", KEYD).as_deref(), Some("clean"));
+    assert_eq!(plans_left(&env), Vec::<String>::new());
+}
+
+#[test]
+fn apply_system_without_yes_exits_3_when_it_cannot_ask_and_writes_nothing() {
+    let env = setup_none(&["/etc"]);
+    one_pending_write(&env);
+    let before = snapshot(&env);
+    let err = exits(&env, 3, &["apply", "--system"]);
+    assert!(err.contains("--yes"), "{err}");
+    assert_eq!(snapshot(&env), before);
+    assert_eq!(fs::read(env.system_path(KEYD)).expect("read"), b"old\n");
+}
+
+#[test]
+fn a_dry_run_of_apply_system_changes_nothing() {
+    let env = setup_none(&["/etc"]);
+    one_pending_write(&env);
+    let before = snapshot(&env);
+    let err = env.ok(&["apply", "--system", "--dry-run", "--yes"]);
+    assert!(err.contains(&format!("would write {KEYD}")), "{err}");
+    assert_eq!(snapshot(&env), before);
+    exits(&env, 3, &["apply", "--system", "--dry-run"]);
+    assert_eq!(snapshot(&env), before);
+}
+
+#[test]
+fn sync_system_yes_writes_what_the_pull_brought() {
+    let a = setup_none(&["/etc"]);
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write_system(KEYD, b"one\n", 0o644);
+    a.ok(&["add", "--system", KEYD]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+
+    let mut b = a.second_device();
+    b.use_system_root();
+    configure(&b, &system_config(&["/etc"], "none"));
+    fs::create_dir_all(b.system_path("/etc/keyd")).expect("mkdir");
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    assert!(
+        !b.system_path(KEYD).exists(),
+        "init <url> applied a system file"
+    );
+
+    a.write_system(KEYD, b"two\n", 0o644);
+    a.ok(&["sync"]);
+    b.ok(&["sync", "--system", "--yes"]);
+    assert_eq!(fs::read(b.system_path(KEYD)).expect("read"), b"two\n");
+    assert_eq!(b.token_of("status", KEYD).as_deref(), Some("clean"));
+}
+
+/// The one test that uses real sudo. It runs only inside a container that sets
+/// `DOTMAN_REAL_SUDO_TEST=1`, so it can never run on a developer machine or a CI host runner.
+#[test]
+fn real_sudo_writes_a_root_owned_file() {
+    const TARGET: &str = "/etc/dotman-ci/test.conf";
+    let wanted = std::env::var_os("DOTMAN_REAL_SUDO_TEST").is_some_and(|v| v == "1");
+    let container = ["/.dockerenv", "/run/.containerenv"]
+        .iter()
+        .any(|marker| Path::new(marker).exists());
+    if !wanted || !container {
+        println!(
+            "skipped: the real-sudo test needs DOTMAN_REAL_SUDO_TEST=1 ({}) and a container marker, /.dockerenv or /run/.containerenv ({})",
+            if wanted { "set" } else { "not set" },
+            if container { "found" } else { "not found" }
+        );
+        return;
+    }
+    let sudo = |args: &[&str]| {
+        let status = std::process::Command::new("sudo")
+            .arg("-n")
+            .args(args)
+            .status()
+            .expect("run sudo");
+        assert!(status.success(), "sudo -n {args:?}: {status}");
+    };
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    configure(
+        &env,
+        "[system]\nroots = [\"/etc/dotman-ci\"]\nescalate = \"sudo\"\n",
+    );
+    sudo(&["mkdir", "-p", "/etc/dotman-ci"]);
+    env.write_repo(".dotman/system/etc/dotman-ci/test.conf", b"ci\n");
+    let mut config = env.repo_config();
+    config.system.insert(
+        TARGET.to_owned(),
+        SystemFile {
+            owner: "root".to_owned(),
+            group: "root".to_owned(),
+            mode: "0640".to_owned(),
+            package_owned: false,
+        },
+    );
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+
+    let out = env.run(&["apply", "--system", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stat = std::process::Command::new("stat")
+        .args(["-c", "%U:%G %a", TARGET])
+        .output()
+        .expect("run stat");
+    assert_eq!(
+        String::from_utf8_lossy(&stat.stdout).trim(),
+        "root:root 640"
+    );
+    sudo(&["rm", "-rf", "/etc/dotman-ci"]);
+}
+
+#[test]
+fn an_existing_system_file_needs_take_repo_like_a_home_file() {
+    let env = setup_none(&["/etc"]);
+    env.write_system("/etc/x.conf", b"local\n", 0o644);
+    env.write_repo(".dotman/system/etc/x.conf", b"repo\n");
+    assert_eq!(
+        env.token_of("status", "/etc/x.conf").as_deref(),
+        Some("existing")
+    );
+    let err = exits(&env, 3, &["apply", "--system", "--yes"]);
+    assert!(err.contains("--take-repo"), "{err}");
+    assert_eq!(
+        fs::read(env.system_path("/etc/x.conf")).expect("read"),
+        b"local\n"
+    );
+
+    env.ok(&["apply", "--system", "--yes", "--take-repo"]);
+    assert_eq!(
+        fs::read(env.system_path("/etc/x.conf")).expect("read"),
+        b"repo\n"
+    );
+    assert_eq!(
+        env.backups(".dotman/system/etc/x.conf"),
+        [(b"local\n".to_vec(), 0o600)]
+    );
+}
+
+#[test]
+fn a_system_path_argument_limits_the_write() {
+    let env = setup_none(&["/etc"]);
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    env.write_repo(".dotman/system/etc/a.conf", b"a\n");
+    env.write_repo(".dotman/system/etc/b.conf", b"b\n");
+    env.ok(&["apply", "--system", "--yes", "/etc/a.conf"]);
+    assert!(env.system_path("/etc/a.conf").exists());
+    assert!(!env.system_path("/etc/b.conf").exists());
+    let err = exits(&env, 1, &["apply", "--system", "--yes", "/etc/none.conf"]);
+    assert!(err.contains("not managed"), "{err}");
 }

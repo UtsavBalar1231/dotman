@@ -86,9 +86,14 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     show_all(&ctx, &refs, &system_refs, no_pager)
 }
 
-/// One `git diff` from `a/<key>` (H) to `b/<key>` (R) over the keys whose H differs from R.
-pub(crate) fn show(ctx: &Context, entries: &[(&str, &SourceEntry)], no_pager: bool) -> Result<()> {
-    show_all(ctx, entries, &[], no_pager)
+/// One `git diff`, without a pager, from `a/<key>` (H) to `b/<key>` (R) over the keys whose H
+/// differs from R; system keys are read through the system scope.
+pub(crate) fn show(
+    ctx: &Context,
+    entries: &[(&str, &SourceEntry)],
+    system_entries: &[(&str, &SourceEntry)],
+) -> Result<()> {
+    show_all(ctx, entries, system_entries, true)
 }
 
 // System keys go under `system/` in both trees, so one can never land on a home key.

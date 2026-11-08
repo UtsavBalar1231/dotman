@@ -8,6 +8,7 @@ use crate::output;
 use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
 use crate::state::State;
+use crate::system;
 use anyhow::{Context as _, Result, bail};
 use glob::Pattern;
 use std::collections::BTreeSet;
@@ -96,14 +97,7 @@ pub(crate) fn remove_keys(
     let sources = ctx.sources()?;
     for key in keys {
         for source in sources.sources_of(key) {
-            let path = ctx.paths.repo.join(source);
-            match fs::remove_file(&path) {
-                Ok(()) => remove_empty_parents(&ctx.paths.repo, &path),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(e).with_context(|| format!("cannot remove {}", path.display()));
-                }
-            }
+            remove_source(&ctx.paths.repo, source)?;
             repo_config.modes.remove(source);
         }
         repo_config.modes.remove(key);
@@ -116,6 +110,34 @@ pub(crate) fn remove_keys(
     repo_config.modes.retain(|key, _| {
         !key.ends_with('/') || remaining.keys().any(|k| k.starts_with(key.as_str()))
     });
+    Ok(())
+}
+
+/// Removes system `keys`, every variant included, from `.dotman/system`, `[system]` and the state.
+pub(crate) fn remove_system_keys(
+    ctx: &Context,
+    repo_config: &mut RepoConfig,
+    state: &mut State,
+    keys: &BTreeSet<String>,
+) -> Result<()> {
+    let sources = ctx.system_sources()?;
+    for key in keys {
+        for source in sources.sources_of(system::rel(key)?) {
+            remove_source(&ctx.paths.repo, &system::source_path(source))?;
+        }
+        repo_config.system.remove(key);
+        state.system.remove(key);
+    }
+    Ok(())
+}
+
+fn remove_source(repo: &Path, source: &str) -> Result<()> {
+    let path = repo.join(source);
+    match fs::remove_file(&path) {
+        Ok(()) => remove_empty_parents(repo, &path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("cannot remove {}", path.display())),
+    }
     Ok(())
 }
 

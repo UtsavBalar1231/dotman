@@ -23,8 +23,13 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         return is_executable(Path::new(name)).then(|| PathBuf::from(name));
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    find_program_in(name, &std::env::var_os("PATH")?)
+}
+
+/// Like [`find_program`], searching `path` instead of `PATH`.
+#[must_use]
+pub fn find_program_in(name: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable(candidate))
@@ -74,5 +79,7 @@ mod tests {
         assert!(find_program("sh").is_some());
         assert_eq!(find_program("/nonexistent/dotman-x"), None);
         assert_eq!(find_program("dotman-no-such-program"), None);
+        assert_eq!(find_program_in("sh", OsStr::new("relative:")), None);
+        assert!(find_program_in("sh", OsStr::new("/nonexistent:/bin:/usr/bin")).is_some());
     }
 }

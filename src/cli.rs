@@ -71,6 +71,17 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Write the system files a plan names; `apply --system` starts it through sudo, doas or run0
+    #[command(hide = true)]
+    SystemWrite(SystemWriteArgs),
+}
+
+/// Arguments of the hidden `dot system-write`.
+#[derive(Args)]
+pub struct SystemWriteArgs {
+    /// The plan file that `apply --system` wrote
+    #[arg(long, value_name = "FILE")]
+    pub plan: PathBuf,
 }
 
 /// Arguments of `dot init`.
@@ -128,8 +139,10 @@ pub struct Decisions {
 
 /// Arguments of `dot apply`.
 #[derive(Args)]
+// reason: independent flags, not a state machine
+#[allow(clippy::struct_excessive_bools)]
 pub struct ApplyArgs {
-    /// Apply only these files or directories; every managed path when none are given
+    /// Apply only these files or directories, with --system system files too; every managed path when none are given
     pub paths: Vec<PathBuf>,
     /// Answers that replace the prompts, which a non-interactive run never shows.
     #[command(flatten)]
@@ -143,6 +156,12 @@ pub struct ApplyArgs {
     /// Show what would be written and change nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// Also write the system files outside $HOME, through one sudo, doas or run0 call
+    #[arg(long)]
+    pub system: bool,
+    /// With --system: write the system files without asking
+    #[arg(long, requires = "system")]
+    pub yes: bool,
 }
 
 /// Arguments of `dot edit`.
@@ -154,6 +173,8 @@ pub struct EditArgs {
 
 /// Arguments of `dot sync`.
 #[derive(Args)]
+// reason: independent flags, not a state machine
+#[allow(clippy::struct_excessive_bools)]
 pub struct SyncArgs {
     /// Commit message, replacing the generated `sync(<host>): ...` line
     #[arg(short = 'm', long, value_name = "MSG")]
@@ -167,6 +188,12 @@ pub struct SyncArgs {
     /// Show what would be captured, committed, pulled, applied and pushed; change nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call
+    #[arg(long)]
+    pub system: bool,
+    /// With --system: write the system files without asking
+    #[arg(long, requires = "system")]
+    pub yes: bool,
 }
 
 /// Arguments of `dot diff`.
