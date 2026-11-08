@@ -470,7 +470,11 @@ fn a_damaged_ciphertext_is_skipped_and_fails_the_run() {
     a.write_repo(".plain", b"p\n");
     let err = exits(&a.run(&["apply", "--restore-deleted"]), 1);
     assert!(err.contains(".config/gh/hosts.yml: skipped:"), "{err}");
-    assert!(err.contains("failed to read header"), "{err}");
+    // age says "failed to read header"; rage says "failed to fill whole buffer".
+    assert!(
+        err.contains("failed to read header") || err.contains("failed to fill whole buffer"),
+        "{err}"
+    );
     assert!(err.contains("1 path could not be applied"), "{err}");
     assert!(!err.contains("locked"), "{err}");
     assert!(!a.home().join(HOSTS).exists());

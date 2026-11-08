@@ -421,7 +421,8 @@ fn work_tree(env: &TestEnv, name: &str) -> R<PathBuf> {
     fs::create_dir_all(&dir)?;
     fs::write(dir.join(".vimrc"), "set number\n")?;
     let dir_arg = dir.to_string_lossy().into_owned();
-    env.git(&["-C", &dir_arg, "init", "-q", "-b", "main"]);
+    env.git(&["-C", &dir_arg, "init", "-q"]);
+    env.git(&["-C", &dir_arg, "symbolic-ref", "HEAD", "refs/heads/main"]);
     env.git(&["-C", &dir_arg, "add", "-A"]);
     env.git(&["-C", &dir_arg, "commit", "-q", "-m", "first"]);
     Ok(dir)

@@ -39,6 +39,9 @@ pub struct Entry {
     pub target: Option<PathBuf>,
 }
 
+/// `GIT_CONFIG_PARAMETERS` that rewrites every http(s) URL to a missing local path.
+pub const NO_NETWORK: &str = "'url.file:///dotman-tests-no-network/.insteadOf=https://' 'url.file:///dotman-tests-no-network/.insteadOf=http://'";
+
 pub struct TestEnv {
     root: Arc<TempDir>,
     /// Owner of `remote.git`; differs from `root` on a second device.
@@ -196,17 +199,11 @@ impl TestEnv {
             ("XDG_DATA_HOME", self.xdg_data().into()),
             ("GIT_CONFIG_NOSYSTEM", "1".into()),
             // Every http(s) URL points at a path that does not exist, so no test reaches the network.
-            ("GIT_CONFIG_COUNT", "2".into()),
-            (
-                "GIT_CONFIG_KEY_0",
-                "url.file:///dotman-tests-no-network/.insteadOf".into(),
-            ),
-            ("GIT_CONFIG_VALUE_0", "https://".into()),
-            (
-                "GIT_CONFIG_KEY_1",
-                "url.file:///dotman-tests-no-network/.insteadOf".into(),
-            ),
-            ("GIT_CONFIG_VALUE_1", "http://".into()),
+            // GIT_CONFIG_PARAMETERS is what `git -c` sets; unlike GIT_CONFIG_COUNT (git 2.31) it
+            // works on the 2.25 floor.
+            ("GIT_CONFIG_PARAMETERS", NO_NETWORK.into()),
+            // Fails closed if a rewrite is ever missed: only local transports may run.
+            ("GIT_ALLOW_PROTOCOL", "file".into()),
             ("DOTMAN_NON_INTERACTIVE", "1".into()),
             ("NO_PAGER", "1".into()),
             ("LC_ALL", "C".into()),
@@ -730,7 +727,8 @@ pub type File<'a> = (&'a str, &'a str, bool);
 pub fn work_tree(env: &TestEnv, name: &str, files: &[File], gitlink: Option<&str>) -> PathBuf {
     let dir = env.root().join("work").join(name);
     fs::create_dir_all(&dir).expect("create work tree");
-    git_in(env, &dir, &["init", "-q", "-b", "main"]);
+    git_in(env, &dir, &["init", "-q"]);
+    git_in(env, &dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     for (path, text, executable) in files {
         let full = dir.join(path);
         fs::create_dir_all(full.parent().expect("parent")).expect("create parents");

@@ -89,27 +89,12 @@ fn repo_git(env: &TestEnv, args: &[&str]) -> String {
 /// and every other https URL fail.
 fn public_remote_vars(env: &TestEnv) -> Vec<(String, String)> {
     let local = env.remote_path().to_string_lossy().into_owned();
-    [
-        ("GIT_CONFIG_COUNT", "3".to_owned()),
-        (
-            "GIT_CONFIG_KEY_0",
-            "url.file:///dotman-tests-no-network/.insteadOf".to_owned(),
-        ),
-        ("GIT_CONFIG_VALUE_0", "https://".to_owned()),
-        ("GIT_CONFIG_KEY_1", format!("url.{local}.insteadOf")),
-        (
-            "GIT_CONFIG_VALUE_1",
-            "https://example.org/me/dots.git".to_owned(),
-        ),
-        (
-            "GIT_CONFIG_KEY_2",
-            "url.file:///dotman-tests-no-network/.insteadOf".to_owned(),
-        ),
-        ("GIT_CONFIG_VALUE_2", "http://".to_owned()),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v))
-    .collect()
+    let parameters = format!(
+        "'url.file:///dotman-tests-no-network/.insteadOf=https://' \
+         'url.{local}.insteadOf=https://example.org/me/dots.git' \
+         'url.file:///dotman-tests-no-network/.insteadOf=http://'"
+    );
+    vec![("GIT_CONFIG_PARAMETERS".to_owned(), parameters)]
 }
 
 fn run_public(env: &TestEnv, args: &[&str]) -> Output {
@@ -628,7 +613,8 @@ fn an_import_records_the_remote_it_brought() {
     let work = env.root().join("work");
     fs::create_dir_all(&work).expect("create the work tree");
     let work_arg = work.to_string_lossy().into_owned();
-    env.git(&["-C", &work_arg, "init", "-q", "-b", "main"]);
+    env.git(&["-C", &work_arg, "init", "-q"]);
+    env.git(&["-C", &work_arg, "symbolic-ref", "HEAD", "refs/heads/main"]);
     fs::write(work.join(".vimrc"), "v\n").expect("write a file");
     env.git(&["-C", &work_arg, "add", "-A"]);
     env.git(&["-C", &work_arg, "commit", "-q", "-m", "first"]);

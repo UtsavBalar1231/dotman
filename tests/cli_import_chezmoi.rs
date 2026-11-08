@@ -423,7 +423,8 @@ fn a_git_checkout_of_a_source_is_still_a_chezmoi_source_and_its_origin_is_report
     let env = TestEnv::new();
     let source = source(&env, "cz", &[("dot_bashrc", "export A=1\n")]);
     let dir = source.to_string_lossy().into_owned();
-    env.git(&["-C", &dir, "init", "-q", "-b", "main"]);
+    env.git(&["-C", &dir, "init", "-q"]);
+    env.git(&["-C", &dir, "symbolic-ref", "HEAD", "refs/heads/main"]);
     env.git(&["-C", &dir, "add", "-A"]);
     env.git(&["-C", &dir, "commit", "-q", "-m", "chezmoi history"]);
     env.git(&[

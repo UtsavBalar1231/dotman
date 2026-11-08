@@ -602,7 +602,10 @@ fn a_credential_in_a_url_never_reaches_the_report() {
     // Port 9 on localhost refuses at once; the harness's https rewrite would put the credential
     // into git's own error text.
     let out = env.run_with(
-        &[("GIT_CONFIG_COUNT", "0")],
+        &[
+            ("GIT_CONFIG_PARAMETERS", ""),
+            ("GIT_ALLOW_PROTOCOL", "file:https"),
+        ],
         &[
             "import",
             "--dry-run",

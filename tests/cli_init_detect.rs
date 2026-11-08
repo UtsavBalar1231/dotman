@@ -21,7 +21,8 @@ fn bare_home_repo(env: &TestEnv, dest: &Path) {
         .join(dest.file_name().expect("name"));
     fs::create_dir_all(&work).expect("create work tree");
     let work_arg = work.to_string_lossy().into_owned();
-    env.git(&["-C", &work_arg, "init", "-q", "-b", "main"]);
+    env.git(&["-C", &work_arg, "init", "-q"]);
+    env.git(&["-C", &work_arg, "symbolic-ref", "HEAD", "refs/heads/main"]);
     fs::write(work.join(".bashrc"), "bash\n").expect("write file");
     env.git(&["-C", &work_arg, "add", "-A"]);
     env.git(&["-C", &work_arg, "commit", "-q", "-m", "first"]);

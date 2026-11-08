@@ -554,7 +554,8 @@ fn a_farm_that_is_a_git_checkout_is_still_a_farm() {
     let env = TestEnv::new();
     stow(&env);
     let farm = farm_dir(&env, "dotfiles").to_string_lossy().into_owned();
-    env.git(&["-C", &farm, "init", "-q", "-b", "main"]);
+    env.git(&["-C", &farm, "init", "-q"]);
+    env.git(&["-C", &farm, "symbolic-ref", "HEAD", "refs/heads/main"]);
     env.git(&["-C", &farm, "add", "-A"]);
     env.git(&["-C", &farm, "commit", "-q", "-m", "farm"]);
     env.git(&[

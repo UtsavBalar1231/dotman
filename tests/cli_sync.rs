@@ -131,7 +131,10 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
         !pull.status.success(),
         "the pull should stop on the conflict"
     );
-    assert!(b.repo().join(".git/rebase-merge").exists());
+    // git before 2.26 rebases with the apply backend.
+    assert!(
+        b.repo().join(".git/rebase-merge").exists() || b.repo().join(".git/rebase-apply").exists()
+    );
     exits(&b, 4, &["status"]);
     b.write_repo(".a", b"resolved\n");
     b.git(&["-C", &repo, "add", ".a"]);
