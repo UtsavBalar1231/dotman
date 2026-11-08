@@ -171,8 +171,8 @@ fn is_url(text: &str) -> bool {
 
 /// Runs `dot import`. The caller holds the lock and has run the in-progress guard.
 ///
-/// A fresh import then writes `install.sh`, uncommitted: the next `dot sync` commits it, and an
-/// `--overlay` needs that sync first.
+/// A fresh import then writes `install.sh`, uncommitted: the next `dot sync` commits it, or an
+/// `--overlay` takes it into its commit while it is still unedited.
 pub fn run(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
     let outcome = convert(ctx, args)?;
     if args.overlay.is_some() || args.swap || args.no_bootstrap {
