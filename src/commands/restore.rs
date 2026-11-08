@@ -1,4 +1,4 @@
-//! `dot restore`: write an earlier version of a managed file into `$HOME`.
+//! `dotman restore`: write an earlier version of a managed file into `$HOME`.
 //!
 //! Only `$HOME` changes. The repo and the state stay as they were, so the next `status` shows the
 //! file as changed locally and `sync` records it as a new commit. A template's source is restored
@@ -12,7 +12,7 @@ use crate::engine::{Home, Tuple, hash_hex, observe, observe_portable, recorded_m
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::{create_private_dir, derive_key, private_temp_dir};
-use crate::secrets::{KEY_HINT, Locked};
+use crate::secrets::{Locked, key_hint};
 use crate::state::Kind;
 use crate::template;
 use crate::variant::Flag;
@@ -25,7 +25,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::SystemTime;
 
-/// Runs `dot restore`.
+/// Runs `dotman restore`.
 pub fn run(args: &RestoreArgs) -> Result<()> {
     let ctx = Context::resolve("restore")?;
     let dry_run = args.dry_run;
@@ -148,14 +148,15 @@ fn convert(
                 .with_context(|| format!("{source} in {short} is not valid UTF-8"))?;
             Some(template::render(source, text, ctx.template_vars())?.into_bytes())
         }
-        Flag::Age => Some(decrypt(ctx, blob, dry_run).map_err(|e| {
-            match e.downcast::<Locked>() {
+        Flag::Age => Some(decrypt(ctx, blob, dry_run).map_err(
+            |e| match e.downcast::<Locked>() {
                 Ok(Locked(why)) => anyhow!(
-                    "{source} in {short} is encrypted and cannot be decrypted here ({why}); {KEY_HINT}"
+                    "{source} in {short} is encrypted and cannot be decrypted here ({why}); {}",
+                    key_hint()
                 ),
                 Err(e) => e.context(format!("cannot decrypt {source} in {short}")),
-            }
-        })?),
+            },
+        )?),
     })
 }
 

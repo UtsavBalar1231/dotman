@@ -1,4 +1,4 @@
-//! `dot init` with no source looks for an existing setup before it creates a repo.
+//! `dotman init` with no source looks for an existing setup before it creates a repo.
 
 mod common;
 
@@ -51,10 +51,10 @@ fn a_non_interactive_init_finds_a_yadm_repo_prints_the_import_and_creates_nothin
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(3), "{err}");
     assert!(
-        err.contains(&format!("dot import {}", yadm_repo(&env).display())),
+        err.contains(&format!("dotman import {}", yadm_repo(&env).display())),
         "{err}"
     );
-    assert!(err.contains("dot init --no-import"), "{err}");
+    assert!(err.contains("dotman init --no-import"), "{err}");
     assert!(!env.repo().exists());
     assert_eq!(env.four_trees(), before);
 }
@@ -70,12 +70,12 @@ fn several_setups_are_all_printed() {
     assert_eq!(out.status.code(), Some(3), "{err}");
     for path in [yadm_repo(&env), cfg] {
         assert!(
-            err.contains(&format!("dot import {}", path.display())),
+            err.contains(&format!("dotman import {}", path.display())),
             "{err}"
         );
     }
     assert!(
-        err.contains("dot init --no-import --remote git@example.invalid:me/dots.git"),
+        err.contains("dotman init --no-import --remote git@example.invalid:me/dots.git"),
         "{err}"
     );
     assert!(!env.repo().exists());

@@ -1,4 +1,4 @@
-//! `dot init` flags, `gh` repo creation and the remote visibility check, through the binary. No
+//! `dotman init` flags, `gh` repo creation and the remote visibility check, through the binary. No
 //! test reaches the network or the real `gh`: remotes are local, https URLs are rewritten to local
 //! paths by `git config` environment variables, and `gh` is a stub.
 

@@ -1,4 +1,4 @@
-//! `dot list`: the managed set.
+//! `dotman list`: the managed set.
 
 use crate::cli::ListArgs;
 use crate::context::Context;
@@ -8,8 +8,8 @@ use crate::variant::{Flag, Sources};
 use anyhow::{Context as _, Result};
 use std::io::Write;
 
-/// Runs `dot list`. Takes no lock and writes nothing. A key is listed with the source this machine
-/// applies; one with none, or with ambiguous or invalid variants, is left to `dot status`.
+/// Runs `dotman list`. Takes no lock and writes nothing. A key is listed with the source this machine
+/// applies; one with none, or with ambiguous or invalid variants, is left to `dotman status`.
 pub fn run(args: &ListArgs) -> Result<()> {
     let ctx = Context::resolve("list")?;
     ctx.guard()?;

@@ -1,4 +1,4 @@
-//! The per-user process lock, so two `dot` runs never write at once.
+//! The per-user process lock, so two `dotman` runs never write at once.
 
 use crate::output;
 use crate::paths::create_private_dir;
@@ -47,7 +47,7 @@ impl Lock {
         };
         match file.try_lock_exclusive() {
             Ok(true) => Ok(Self { file: Some(file) }),
-            Ok(false) => bail!("another dot process is running"),
+            Ok(false) => bail!("another {} process is running", crate::name::bin()),
             Err(e) if cannot_lock(&e) => {
                 output::warning(&format!(
                     "{} does not support locking; continuing without the lock",
@@ -98,7 +98,7 @@ mod tests {
         let first = Lock::acquire(&path, false).unwrap();
         assert!(first.is_held());
         let err = Lock::acquire(&path, false).unwrap_err().to_string();
-        assert_eq!(err, "another dot process is running");
+        assert_eq!(err, "another dotman process is running");
         drop(first);
         assert!(acquire_after_release(&path, false).is_held());
     }

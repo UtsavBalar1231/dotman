@@ -20,7 +20,7 @@ pub(crate) struct Policy {
     pub approve: bool,
     pub no_hooks: bool,
     pub dry_run: bool,
-    /// `dot init <url>` never prompts: nobody has read the cloned table yet.
+    /// `dotman init <url>` never prompts: nobody has read the cloned table yet.
     pub never_ask: bool,
 }
 

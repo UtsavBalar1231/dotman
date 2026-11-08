@@ -1,4 +1,4 @@
-//! `dot sync`: capture local changes, commit them, pull with rebase, apply what arrived and push.
+//! `dotman sync`: capture local changes, commit them, pull with rebase, apply what arrived and push.
 //!
 //! Capture and apply are two passes of `apply`, split by the pull. A rebase conflict aborts the
 //! pull and leaves everything as it was, with the recovery steps printed. Encrypted files are
@@ -12,6 +12,7 @@ use crate::context::Context;
 use crate::git::PullOutcome;
 use crate::hooks::{self, Policy};
 use crate::lock::Lock;
+use crate::name;
 use crate::output;
 use crate::remote;
 use crate::secrets;
@@ -24,9 +25,14 @@ const REMOTE: &str = "origin";
 // Paths named in the generated commit message; the rest are counted.
 const LISTED: usize = 3;
 
-pub(crate) const IDENTITY_FIX: &str = "git has no user.name and user.email to commit with; set them with:\n  dot git config --global user.name \"Your Name\"\n  dot git config --global user.email \"you@example.com\"";
+pub(crate) fn identity_fix() -> String {
+    let bin = name::bin();
+    format!(
+        "git has no user.name and user.email to commit with; set them with:\n  {bin} git config --global user.name \"Your Name\"\n  {bin} git config --global user.email \"you@example.com\""
+    )
+}
 
-/// Runs `dot sync`.
+/// Runs `dotman sync`.
 pub fn run(args: &SyncArgs) -> Result<Outcome> {
     if args.message.as_deref().is_some_and(|m| m.trim().is_empty()) {
         bail!("the commit message is empty");
@@ -63,7 +69,10 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         None => None,
     };
     let Some(branch) = branch else {
-        output::info("no remote is set; add one with `dot init --remote <url>`");
+        output::info(&format!(
+            "no remote is set; add one with `{} init --remote <url>`",
+            name::bin()
+        ));
         return without_remote(&ctx, args, first, policy);
     };
     if !dry_run {
@@ -199,7 +208,7 @@ fn commit(
         return Ok(());
     }
     if !ctx.git.identity_configured()? {
-        bail!(IDENTITY_FIX);
+        bail!(identity_fix());
     }
     if ctx.git.commit(&message)?.is_some() {
         output::success(&format!("committed: {message}"));
@@ -241,14 +250,15 @@ fn report_conflict(ctx: &Context, paths: &[PathBuf]) {
     output::warning(
         "the pull conflicts with your changes. It was aborted, and your files and commits are as they were. To resolve it:",
     );
-    output::warning("  1. dot git pull --rebase");
+    let bin = name::bin();
+    output::warning(&format!("  1. {bin} git pull --rebase"));
     output::warning(&format!(
         "  2. Edit the conflicting files under {}.",
         ctx.paths.repo.display()
     ));
-    output::warning(&format!("  3. dot git add {add}"));
-    output::warning("  4. dot git rebase --continue");
-    output::warning("  5. dot sync");
+    output::warning(&format!("  3. {bin} git add {add}"));
+    output::warning(&format!("  4. {bin} git rebase --continue"));
+    output::warning(&format!("  5. {bin} sync"));
     output::warning("conflicting paths:");
     for path in paths {
         output::warning(&format!("  {}", path.display()));

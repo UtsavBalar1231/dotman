@@ -1,4 +1,4 @@
-//! The questions `dot init` asks, each answered by a flag or, in an interactive run, by the user.
+//! The questions `dotman init` asks, each answered by a flag or, in an interactive run, by the user.
 //!
 //! Answers are gathered first and applied afterwards, so a refused flag or a failed `gh auth`
 //! check stops the run before anything is created, and a dry run applies nothing.
@@ -7,6 +7,7 @@ use crate::cli::InitArgs;
 use crate::commands::key::{self, Incoming};
 use crate::config::Config;
 use crate::context::Context;
+use crate::name;
 use crate::output;
 use crate::proc;
 use crate::prompt;
@@ -18,8 +19,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 const GH_INSTALL: &str = "https://cli.github.com/, or pacman -S github-cli, apt install gh, dnf install gh or brew install gh";
-const GH_LOGIN: &str =
-    "gh is not logged in to github.com; run `gh auth login`, then `dot init` again";
 const KEY_PREFIXES: [&str; 2] = ["AGE-SECRET-KEY-", "AGE-PLUGIN-"];
 
 /// What to do about `origin`.
@@ -160,9 +159,10 @@ impl Wizard<'_> {
             }
         }
         if identity.name.is_none() && identity.email.is_none() {
-            output::info(
-                "git has no user.name and user.email; pass --git-name and --git-email, or set them with `dot git config user.name \"Your Name\"` before `dot sync`",
-            );
+            output::info(&format!(
+                "git has no user.name and user.email; pass --git-name and --git-email, or set them with `{bin} git config user.name \"Your Name\"` before `{bin} sync`",
+                bin = name::bin()
+            ));
             return Ok(None);
         }
         Ok(Some(identity))
@@ -700,7 +700,10 @@ fn require_auth(program: &Path) -> Result<()> {
     {
         Ok(())
     } else {
-        bail!(GH_LOGIN)
+        bail!(
+            "gh is not logged in to github.com; run `gh auth login`, then `{} init` again",
+            name::bin()
+        )
     }
 }
 
@@ -724,8 +727,9 @@ fn create_private(program: &Path, slug: &str) -> Result<String> {
     let viewed = gh(program, &["repo", "view", slug, "--json", "sshUrl"])?;
     if !viewed.status.success() {
         bail!(
-            "{slug} was created, but gh repo view failed: {}; set origin with `dot init --remote <url>`",
-            String::from_utf8_lossy(&viewed.stderr).trim()
+            "{slug} was created, but gh repo view failed: {}; set origin with `{} init --remote <url>`",
+            String::from_utf8_lossy(&viewed.stderr).trim(),
+            name::bin()
         );
     }
     ssh_url_of(&String::from_utf8_lossy(&viewed.stdout))

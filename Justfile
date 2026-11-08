@@ -71,17 +71,17 @@ profile-perf:
     #!/usr/bin/env bash
     set -e
     cargo build --profile release-with-debug
-    perf record --call-graph=dwarf target/release-with-debug/dot --help
+    perf record --call-graph=dwarf target/release-with-debug/dotman --help
     perf report
 
 profile-flame:
-    cargo flamegraph --bin dot -- --help
+    cargo flamegraph --bin dotman -- --help
 
 profile-memory:
     #!/usr/bin/env bash
     set -e
     cargo build --profile release-with-debug
-    valgrind --tool=massif target/release-with-debug/dot --help
+    valgrind --tool=massif target/release-with-debug/dotman --help
 
 docs:
     cargo doc --no-deps --all-features --open

@@ -1,4 +1,4 @@
-//! `dot import` and `dot import --overlay` against the legacy-v2 fixture, which is read-only.
+//! `dotman import` and `dotman import --overlay` against the legacy-v2 fixture, which is read-only.
 
 mod common;
 
@@ -84,7 +84,10 @@ fn import_rebuilds_the_history_and_matches_the_readme_manifest() {
     let err = env.ok(&["import", FIXTURE, "--no-bootstrap"]);
 
     assert_eq!(accounting(&err), (6, 6, 0), "{err}");
-    assert!(err.contains("run `dot status`, then `dot apply`"), "{err}");
+    assert!(
+        err.contains("run `dotman status`, then `dotman apply`"),
+        "{err}"
+    );
     assert!(err.contains("remote-mappings.toml is ignored"), "{err}");
     assert!(err.contains("/home/legacyuser/.config/abs.conf as .config/abs.conf"));
 
@@ -192,7 +195,7 @@ fn without_a_source_the_legacy_repo_in_home_is_used() {
     let pristine = legacy_fixture();
     let env = TestEnv::new();
     let err = env.fails(&["import"]);
-    assert!(err.contains("dot import <source>"), "{err}");
+    assert!(err.contains("dotman import <source>"), "{err}");
     assert!(!env.repo().exists());
 
     copy_dir(Path::new(FIXTURE), &env.home().join(".dotman"));
@@ -540,7 +543,7 @@ fn overlay_needs_a_clean_repo_that_exists() {
     let pristine = legacy_fixture();
     let env = TestEnv::new();
     let err = env.fails(&["import", "--overlay", FIXTURE]);
-    assert!(err.contains("dot init"), "{err}");
+    assert!(err.contains("dotman init"), "{err}");
 
     let env = overlay_env(0o644, BASHRC);
     env.write_repo("untracked", b"x");

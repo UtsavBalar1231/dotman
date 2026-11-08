@@ -125,7 +125,7 @@ fn log_notes_a_shallow_history() {
     assert!(out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("history is shallow; run `dot git fetch --unshallow`"),
+        err.contains("history is shallow; run `dotman git fetch --unshallow`"),
         "{err}"
     );
 }

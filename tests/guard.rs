@@ -1,4 +1,4 @@
-//! Every subcommand listed in `dot --help` needs a row in `MINIMAL_ARGS`; add one with the command.
+//! Every subcommand listed in `dotman --help` needs a row in `MINIMAL_ARGS`; add one with the command.
 
 mod common;
 
@@ -92,8 +92,11 @@ fn every_subcommand_exits_4_while_a_rebase_is_in_progress() {
         let (code, err) = stderr_of(&env, &full);
         assert_eq!(code, Some(4), "`dot {full:?}`: {err}");
         assert!(err.contains("a rebase is in progress"), "{name}: {err}");
-        assert!(err.contains("dot git rebase --continue"), "{name}: {err}");
-        assert!(err.contains("dot git rebase --abort"), "{name}: {err}");
+        assert!(
+            err.contains("dotman git rebase --continue"),
+            "{name}: {err}"
+        );
+        assert!(err.contains("dotman git rebase --abort"), "{name}: {err}");
     }
 }
 
@@ -110,6 +113,6 @@ fn the_other_markers_are_refused_and_named() {
     let (code, err) = stderr_of(&env, &["status"]);
     assert_eq!(code, Some(4), "{err}");
     assert!(err.contains("a merge is in progress"), "{err}");
-    assert!(err.contains("dot git merge --continue"), "{err}");
-    assert!(err.contains("dot git merge --abort"), "{err}");
+    assert!(err.contains("dotman git merge --continue"), "{err}");
+    assert!(err.contains("dotman git merge --abort"), "{err}");
 }

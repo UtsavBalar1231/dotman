@@ -26,7 +26,7 @@ log_warning() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 COMPLETIONS_DIR="$PROJECT_ROOT/completions"
-BINARY_PATH="$PROJECT_ROOT/target/release/dot"
+BINARY_PATH="$PROJECT_ROOT/target/release/dotman"
 
 # Create completions directory
 mkdir -p "$COMPLETIONS_DIR"
@@ -35,7 +35,7 @@ log_info "Building dotman binary..."
 
 # Build the binary first
 cd "$PROJECT_ROOT"
-if ! cargo build --release --bin dot; then
+if ! cargo build --release --bin dotman; then
     echo "Error: Failed to build dotman binary" >&2
     exit 1
 fi

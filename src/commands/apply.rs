@@ -1,4 +1,4 @@
-//! `dot apply`: write R into `$HOME`. Paths that need a decision are asked about once per
+//! `dotman apply`: write R into `$HOME`. Paths that need a decision are asked about once per
 //! category, never per file unless the user picks that; a run that cannot ask leaves them alone.
 
 use crate::cli::{ApplyArgs, Decisions};
@@ -14,6 +14,7 @@ use crate::engine::{Home, Node, Tuple, hash_hex, observe, observe_portable};
 use crate::hooks::{self, Policy};
 use crate::identity;
 use crate::lock::Lock;
+use crate::name;
 use crate::output;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
@@ -29,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Runs `dot apply`.
+/// Runs `dotman apply`.
 pub fn run(args: &ApplyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("apply")?;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;
@@ -283,7 +284,7 @@ enum Action {
     /// H already equals R; S catches up silently.
     Record,
     DropState,
-    /// Remove the key from the repo, as `dot forget` does.
+    /// Remove the key from the repo, as `dotman forget` does.
     Forget,
     /// Copy H into the repo, so that S, R and H agree.
     Capture,
@@ -590,7 +591,8 @@ impl Run<'_> {
                 // `sync` reports it in its capture pass; the pass after the pull leaves it alone.
                 self.undecided.insert(key.clone());
                 output::warning(&format!(
-                    "{key}: template-drift; edit the template: dot edit {key}, or discard the local change: dot apply --take-repo {key}"
+                    "{key}: template-drift; edit the template: {bin} edit {key}, or discard the local change: {bin} apply --take-repo {key}",
+                    bin = name::bin()
                 ));
                 None
             }
@@ -604,14 +606,18 @@ impl Run<'_> {
             Row::ForgottenEdited => {
                 self.attention = true;
                 output::warning(&format!(
-                    "{key}: forgotten upstream but edited here; `dot add` keeps it, `dot forget` accepts the removal"
+                    "{key}: forgotten upstream but edited here; `{bin} add` keeps it, `{bin} forget` accepts the removal",
+                    bin = name::bin()
                 ));
                 None
             }
             Row::Clean { update_state } => update_state.then_some(Action::Record),
             Row::NotApplied | Row::ChangedInRepo => Some(Action::Write),
             Row::ChangedLocally => {
-                output::info(&format!("{key}: changed locally; `dot sync` captures it"));
+                output::info(&format!(
+                    "{key}: changed locally; `{} sync` captures it",
+                    name::bin()
+                ));
                 None
             }
             Row::Blocked => {
@@ -766,9 +772,10 @@ impl Run<'_> {
         }
         if pending > 0 {
             output::info(&format!(
-                "{} {} from the repo; `dot apply --system` writes {}",
+                "{} {} from the repo; `{} apply --system` writes {}",
                 system_files(pending),
                 if pending == 1 { "differs" } else { "differ" },
+                name::bin(),
                 if pending == 1 { "it" } else { "them" }
             ));
         }
@@ -1040,7 +1047,8 @@ impl Run<'_> {
             && let Some(named) = setting.filter(|name| *name != "none")
         {
             output::info(&format!(
-                "dot runs as root, so `escalate = \"{named}\"` is not used"
+                "{} runs as root, so `escalate = \"{named}\"` is not used",
+                name::bin()
             ));
         }
         Some(escalator)
@@ -1143,8 +1151,9 @@ impl Run<'_> {
         if !scan.held.is_empty() {
             self.attention = true;
             output::warning(&format!(
-                "{} new files held back; `dot add <file>` keeps one, an [ignore] pattern in .dotman.toml silences it:",
-                scan.held.len()
+                "{} new files held back; `{} add <file>` keeps one, an [ignore] pattern in .dotman.toml silences it:",
+                scan.held.len(),
+                name::bin()
             ));
             for (key, hold) in &scan.held {
                 output::warning(&format!("  {key} ({})", hold.reason()));

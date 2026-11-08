@@ -1,4 +1,4 @@
-//! The symlink-farm importer and `dot import --swap`.
+//! The symlink-farm importer and `dotman import --swap`.
 //!
 //! A farm is a directory of dotfiles that Stow, dotbot, rcm or a script links into `$HOME`. The
 //! importer copies what `$HOME` shows through those links and changes nothing: not `$HOME`, not
@@ -28,6 +28,7 @@ use crate::engine::write::{
 };
 use crate::engine::{parents, portable_link_target};
 use crate::git::Git;
+use crate::name;
 use crate::output;
 use crate::paths::{find_collisions, refuse_non_nfc, validate_key, write_atomic};
 use crate::repo_config::RepoConfig;
@@ -76,7 +77,7 @@ const DANGLING_LINK: &str = "dangling links";
 const OUTSIDE: &str = "links that resolve outside the farm";
 const ODD: &str = "links to something that is neither a regular file nor a directory";
 const HELD: &str =
-    "files held back, as `dot add` holds them: check each, then `dot add` the ones you want";
+    "files held back, as `{bin} add` holds them: check each, then `{bin} add` the ones you want";
 const UNREADABLE: &str = "files that could not be read";
 const UNMANAGEABLE: &str = "paths dotman cannot manage";
 const CLASH: &str = "paths that clash with another path of the import";
@@ -849,9 +850,10 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
     }
     ensure!(
         !planner.too_big,
-        "the farm holds more than {} entries or {} MiB; `dot import` will not read a tree that large",
+        "the farm holds more than {} entries or {} MiB; `{} import` will not read a tree that large",
         MAX_ENTRIES,
-        MAX_BYTES >> 20
+        MAX_BYTES >> 20,
+        name::bin()
     );
     ensure!(
         !planner.writes.is_empty() || !planner.items.is_empty(),
@@ -903,9 +905,10 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
         .commit(&format!("import: symlink farm {}", root.display()))?;
     install_keeping_origin(ctx, &staging, edited.as_ref())?;
     output::success(&format!("imported {files} into {}", repo.display()));
-    output::info(
-        "next: run `dot status`, then `dot import --swap` to replace the links with real files; run `dot apply` after that",
-    );
+    let bin = name::bin();
+    output::info(&format!(
+        "next: run `{bin} status`, then `{bin} import --swap` to replace the links with real files; run `{bin} apply` after that"
+    ));
     Ok(report.outcome())
 }
 
@@ -919,15 +922,15 @@ fn notes(
         "imported from the symlink farm {}; the farm and $HOME are not changed",
         root.display()
     )];
-    notes.push(
-        "the links in $HOME still stand until `dot import --swap` replaces them with real files; after that, do not run `stow -D`, dotbot or a link script on the swapped paths"
-            .to_owned(),
-    );
+    let bin = name::bin();
+    notes.push(format!(
+        "the links in $HOME still stand until `{bin} import --swap` replaces them with real files; after that, do not run `stow -D`, dotbot or a link script on the swapped paths"
+    ));
     notes.push(farm_remote(root).map_or_else(
-        || "the new repo has no remote; add one with `dot init --remote <url>`".to_owned(),
+        || format!("the new repo has no remote; add one with `{bin} init --remote <url>`"),
         |url| {
             format!(
-                "the farm's git history is not imported, and its origin is {url} (`dot init --remote {url}` sets it here)"
+                "the farm's git history is not imported, and its origin is {url} (`{bin} init --remote {url}` sets it here)"
             )
         },
     ));
@@ -1309,7 +1312,7 @@ fn restore_all(home: &Path, swaps: &[Swap]) -> (usize, usize) {
     (restored, kept)
 }
 
-/// `dot import --swap`: replaces the links at managed keys with real files holding the same
+/// `dotman import --swap`: replaces the links at managed keys with real files holding the same
 /// bytes, or puts every link back when one replacement fails. A link whose content differs from
 /// the repo is reported and kept.
 pub(super) fn swap(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {

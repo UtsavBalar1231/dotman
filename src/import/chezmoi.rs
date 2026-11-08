@@ -22,6 +22,7 @@ use crate::commands::add::{MATCH, ensure_worktree_parents, record_mode};
 use crate::context::{Context, is_real_dir};
 use crate::engine::{parents, portable_link_target};
 use crate::git::Git;
+use crate::name;
 use crate::output;
 use crate::paths::{
     create_private_dir, find_collisions, is_reserved_root_name, private_temp_dir, validate_key,
@@ -63,12 +64,12 @@ const SCRIPT: &str =
     "scripts, which dotman never runs: turn them into `[hooks]` or run them by hand";
 const MODIFY: &str = "modify_ scripts, not run: dotman has no equivalent";
 const ENCRYPTED: &str =
-    "encrypted files: decrypt them with chezmoi, then store each with `dot add --encrypt`";
+    "encrypted files: decrypt them with chezmoi, then store each with `{bin} add --encrypt`";
 const EXTERNAL: &str = "externals, which dotman never fetches: install them separately";
 const REMOVE: &str = "removals chezmoi performs, which dotman never does";
 const IGNORED: &str =
-    "ignored by .chezmoiignore on some or all machines; add it with `dot add` if you want it";
-const SOURCE_LINK: &str = "symlinks inside the source, which chezmoi reads through and dotman does not follow; add the file they point to with `dot add`";
+    "ignored by .chezmoiignore on some or all machines; add it with `{bin} add` if you want it";
+const SOURCE_LINK: &str = "symlinks inside the source, which chezmoi reads through and dotman does not follow; add the file they point to with `{bin} add`";
 const ODD: &str = "entries that are not regular files or symlinks, or whose names are not UTF-8";
 const NO_TARGET: &str = "entries chezmoi produced no file for";
 const UNMANAGEABLE: &str = "paths dotman cannot manage";
@@ -370,7 +371,8 @@ fn scan(root: &Path, rel: &str, prefix: &str, zone: Zone, tree: &mut Tree) -> Re
         tree.seen = tree.seen.saturating_add(1);
         ensure!(
             tree.seen <= MAX_ENTRIES,
-            "the source has more than {MAX_ENTRIES} entries; `dot import` will not read a tree that large"
+            "the source has more than {MAX_ENTRIES} entries; `{} import` will not read a tree that large",
+            name::bin()
         );
         visit(root, rel, prefix, zone, &os, tree)?;
     }
@@ -451,8 +453,9 @@ fn visit(
                 tree.bytes = tree.bytes.saturating_add(meta.len());
                 ensure!(
                     tree.bytes <= MAX_BYTES,
-                    "the source holds more than {} GiB of files; `dot import` will not read a tree that large",
-                    MAX_BYTES >> 30
+                    "the source holds more than {} GiB of files; `{} import` will not read a tree that large",
+                    MAX_BYTES >> 30,
+                    name::bin()
                 );
             }
             tree.entries.push(leaf(class, target, decoded.attrs));
@@ -1195,13 +1198,14 @@ fn notes(
         "imported from {}; chezmoi's git history is not imported{}",
         source.display(),
         origin.map_or_else(String::new, |url| format!(
-            ", and the source's own origin is {url} (`dot init --remote {url}` sets it here)"
+            ", and the source's own origin is {url} (`{bin} init --remote {url}` sets it here)",
+            bin = name::bin()
         ))
     ));
-    notes.push(
-        "the new repo has no remote, as a local path is no use as one; add one with `dot init --remote <url>`"
-            .to_owned(),
-    );
+    notes.push(format!(
+        "the new repo has no remote, as a local path is no use as one; add one with `{} init --remote <url>`",
+        name::bin()
+    ));
     if !tree.ignores.is_empty() {
         let unusable = ignore.map_or(0, |ignore| ignore.unusable.len());
         notes.push(format!(
@@ -1465,7 +1469,7 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
         .commit(&format!("import: chezmoi {}", source.display()))?;
     install_keeping_origin(ctx, &staging, edited.as_ref())?;
     output::success(&format!("imported {files} into {}", repo.display()));
-    output::info("next: run `dot status`, then `dot apply`");
+    super::print_next_steps();
     Ok(plan.report.outcome())
 }
 

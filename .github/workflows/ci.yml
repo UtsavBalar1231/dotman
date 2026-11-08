@@ -275,7 +275,7 @@ jobs:
           # Export PATH to ensure cargo is available in act
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo build --release --target ${{ matrix.target }} --all-features
-          cp target/${{ matrix.target }}/release/dot ${{ matrix.artifact_name }}
+          cp target/${{ matrix.target }}/release/dotman ${{ matrix.artifact_name }}
 
       - name: Strip binary (Linux/macOS)
         if: runner.os != 'Windows'

@@ -8,7 +8,7 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// Runs `dot`, asserts the exit code and returns stderr.
+/// Runs `dotman`, asserts the exit code and returns stderr.
 fn exits(env: &TestEnv, code: i32, args: &[&str]) -> String {
     let out = env.run(args);
     assert_eq!(
@@ -99,10 +99,10 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
     b.write(".a", b"from b\n", 0o644);
     let err = exits(&b, 4, &["sync"]);
     for step in [
-        "1. dot git pull --rebase",
-        "dot git add .a",
-        "4. dot git rebase --continue",
-        "5. dot sync",
+        "1. dotman git pull --rebase",
+        "dotman git add .a",
+        "4. dotman git rebase --continue",
+        "5. dotman sync",
     ] {
         assert!(err.contains(step), "{step}: {err}");
     }
@@ -161,7 +161,7 @@ fn a_rebase_conflict_wins_over_a_skipped_path() {
     fs::remove_file(b.home().join(".d")).expect("delete .d");
     let err = exits(&b, 4, &["sync"]);
     assert!(err.contains("local deletions left undecided (1)"), "{err}");
-    assert!(err.contains("dot git rebase --continue"), "{err}");
+    assert!(err.contains("dotman git rebase --continue"), "{err}");
     assert!(!b.home().join(".d").exists());
 }
 
@@ -264,11 +264,11 @@ fn a_missing_git_identity_exits_1_with_the_fix_and_commits_nothing() {
     fs::remove_file(env.home().join(".gitconfig")).expect("remove the identity");
     let err = env.fails(&["sync"]);
     assert!(
-        err.contains("dot git config --global user.name \"Your Name\""),
+        err.contains("dotman git config --global user.name \"Your Name\""),
         "{err}"
     );
     assert!(
-        err.contains("dot git config --global user.email \"you@example.com\""),
+        err.contains("dotman git config --global user.email \"you@example.com\""),
         "{err}"
     );
     assert!(!env.repo().join(".git/refs/heads/main").exists());
@@ -305,7 +305,7 @@ fn without_a_remote_sync_commits_and_prints_the_hint() {
     env.write(".a", b"a\n", 0o644);
     env.ok(&["add", ".a"]);
     let err = exits(&env, 0, &["sync"]);
-    assert!(err.contains("dot init --remote <url>"), "{err}");
+    assert!(err.contains("dotman init --remote <url>"), "{err}");
     let repo = repo_path(&env);
     let log = env.git(&["-C", &repo, "log", "--format=%s"]);
     assert_eq!(log.lines().count(), 1, "{log}");

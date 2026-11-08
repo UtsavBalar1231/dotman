@@ -1,4 +1,4 @@
-//! `dot git`: git in the repo with dotman's isolation flags. Unguarded and unlocked, because it is
+//! `dotman git`: git in the repo with dotman's isolation flags. Unguarded and unlocked, because it is
 //! how a rebase gets resolved.
 
 use crate::cli::GitArgs;

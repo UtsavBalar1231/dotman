@@ -1,4 +1,4 @@
-//! `dot diff`: how `$HOME` differs from the repo, shown by `git diff --no-index`.
+//! `dotman diff`: how `$HOME` differs from the repo, shown by `git diff --no-index`.
 //!
 //! The comparison runs on copies in a private temp tree, so the user's pager, colours and external
 //! diff tool never see a path inside `$HOME` or the repo.
@@ -22,7 +22,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
-/// Runs `dot diff`. Takes no lock and writes nothing outside its temp tree; differences are not an error.
+/// Runs `dotman diff`. Takes no lock and writes nothing outside its temp tree; differences are not an error.
 pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     let ctx = Context::resolve("diff")?;
     ctx.guard()?;
@@ -162,7 +162,7 @@ fn show_all(
     ]);
     let mut child = cmd.spawn().context("failed to run git diff")?;
     // Ctrl-C reaches the whole foreground group. Ignored here only after the spawn, so git and the
-    // pager keep their default actions, and dot outlives them to remove the temp dir; only SIGKILL
+    // pager keep their default actions, and dotman outlives them to remove the temp dir; only SIGKILL
     // can still leave it behind.
     let status = {
         let _ignored = sys::ignore_signals(&[SIGINT, SIGQUIT, SIGHUP, SIGTERM]);

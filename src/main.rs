@@ -1,4 +1,4 @@
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
 use dotman::commands::{
@@ -7,7 +7,7 @@ use dotman::commands::{
 };
 use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
-use dotman::{paths, sys, system};
+use dotman::{name, paths, sys, system};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
@@ -23,7 +23,9 @@ fn main() {
         .compact()
         .init();
 
-    let cli = Cli::parse();
+    name::init(std::env::args_os().next().as_deref());
+    let cli = Cli::from_arg_matches(&Cli::command().bin_name(name::bin()).get_matches())
+        .unwrap_or_else(|e| e.exit());
 
     output::set_verbosity(if cli.quiet {
         Verbosity::Quiet
@@ -48,8 +50,7 @@ fn main() {
     let result = match cli.command {
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
-            let name = cmd.get_name().to_string();
-            generate(shell, &mut cmd, name, &mut io::stdout());
+            generate(shell, &mut cmd, name::bin(), &mut io::stdout());
             Ok(Outcome::Done)
         }
         Commands::Init(args) => init::run(&args),

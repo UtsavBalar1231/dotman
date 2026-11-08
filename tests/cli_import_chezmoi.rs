@@ -1,4 +1,4 @@
-//! `dot import` on chezmoi sources. The tests that need chezmoi skip with a printed reason when
+//! `dotman import` on chezmoi sources. The tests that need chezmoi skip with a printed reason when
 //! it is not on `PATH`, and fail when `DOTMAN_REQUIRE_CHEZMOI=1`. Every test checks that the
 //! source is untouched.
 
@@ -286,7 +286,7 @@ fn a_plain_chezmoiignore_reports_the_files_it_matches() {
         assert!(!repo_has(&env, ignored), "{ignored}");
     }
     assert!(err.contains("ignored by .chezmoiignore"), "{err}");
-    assert!(err.contains("add it with `dot add`"), "{err}");
+    assert!(err.contains("add it with `dotman add`"), "{err}");
     assert!(err.contains("never run"), "the caveat is given: {err}");
 }
 

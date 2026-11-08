@@ -11,8 +11,8 @@ die() {
     exit 1
 }
 
-# Sets major, minor and patch. Strict because Graphviz also ships a `dot`: anything that is
-# not exactly X.Y.Z, with an optional -pre or +build suffix, is not dotman.
+# Sets major, minor and patch. Strict because other tools ship a `dotman` or a `dot` (Graphviz):
+# anything that is not exactly X.Y.Z, with an optional -pre or +build suffix, is not this dotman.
 parse_semver() {
     core=${1%%[-+]*}
     case $core in
@@ -41,14 +41,14 @@ at_least_pinned() {
     [ "$patch" -ge "$want_patch" ]
 }
 
-is_current_dot() {
+is_current_dotman() {
     [ -x "$1" ] || return 1
     out=$("$1" --version 2>/dev/null </dev/null) || return 1
     case $out in
-        "dot "*) ;;
+        "dotman "*) ;;
         *) return 1 ;;
     esac
-    parse_semver "${out#dot }" && at_least_pinned
+    parse_semver "${out#dotman }" && at_least_pinned
 }
 
 fetch() {
@@ -72,19 +72,19 @@ verify() {
     fi
 }
 
-install_dot() {
+install_dotman() {
     case $(uname -s) in
         Linux) ;;
         Darwin)
             cat <<EOM
-dot is not installed. Download the macOS build from
+dotman is not installed. Download the macOS build from
   https://github.com/UtsavBalar1231/dotman/releases/tag/v$pinned
 put it on your PATH, then run:
-  dot init "$dir" --take-repo
+  dotman init "$dir" --take-repo
 EOM
             exit 0
             ;;
-        *) die "unsupported platform $(uname -s); build dot from source and run: dot init \"$dir\" --take-repo" ;;
+        *) die "unsupported platform $(uname -s); build dotman from source and run: dotman init \"$dir\" --take-repo" ;;
     esac
     case $(uname -m) in
         x86_64 | amd64) arch=x86_64 ;;
@@ -104,13 +104,13 @@ EOM
     (cd "$tmp" && verify) >/dev/null || die "cannot verify $archive; nothing was installed"
 
     mkdir "$tmp/out"
-    tar -xzf "$tmp/$archive" -C "$tmp/out" dot || die "cannot extract dot from $archive"
+    tar -xzf "$tmp/$archive" -C "$tmp/out" dotman || die "cannot extract dotman from $archive"
     mkdir -p "$bin_dir"
-    # The rename is atomic, so an interrupted copy never leaves a truncated file named dot.
-    staged=$bin_dir/.dot.$$
-    if ! { cp "$tmp/out/dot" "$staged" && chmod 0755 "$staged" && mv -f "$staged" "$bin_dir/dot"; }; then
+    # The rename is atomic, so an interrupted copy never leaves a truncated file named dotman.
+    staged=$bin_dir/.dotman.$$
+    if ! { cp "$tmp/out/dotman" "$staged" && chmod 0755 "$staged" && mv -f "$staged" "$bin_dir/dotman"; }; then
         rm -f "$staged"
-        die "cannot install dot into $bin_dir"
+        die "cannot install dotman into $bin_dir"
     fi
 }
 
@@ -119,20 +119,39 @@ want_major=$major
 want_minor=$minor
 want_patch=$patch
 
-dot=
-for candidate in "$bin_dir/dot" "$(command -v dot || true)"; do
+dotman=
+for candidate in "$bin_dir/dotman" "$(command -v dotman || true)"; do
     case $candidate in
         /*) ;;
         *) continue ;;
     esac
-    if is_current_dot "$candidate"; then
-        dot=$candidate
+    if is_current_dotman "$candidate"; then
+        dotman=$candidate
         break
     fi
 done
-if [ -z "$dot" ]; then
-    install_dot
-    dot=$bin_dir/dot
+if [ -z "$dotman" ]; then
+    install_dotman
+    dotman=$bin_dir/dotman
+fi
+
+# `dot` is only ever an alias. Graphviz or another tool may own the name, and ~/.local/bin is often
+# not on PATH yet, so a file already there counts too: nothing is replaced or shadowed.
+add_alias() {
+    if [ "$(readlink "$bin_dir/dot" 2>/dev/null || true)" = dotman ]; then
+        return 0
+    fi
+    if command -v dot >/dev/null 2>&1 || [ -e "$bin_dir/dot" ] || [ -L "$bin_dir/dot" ]; then
+        echo "install.sh: dot is already taken, so dotman is the command" >&2
+    elif ln -s dotman "$bin_dir/dot" 2>/dev/null; then
+        echo "install.sh: dot is an alias for dotman" >&2
+    else
+        echo "install.sh: could not add the dot alias, so dotman is the command" >&2
+    fi
+}
+
+if [ "$dotman" = "$bin_dir/dotman" ]; then
+    add_alias
 fi
 
 DOTMAN_NON_INTERACTIVE=1
@@ -143,7 +162,7 @@ if [ "$(id -u)" = 0 ]; then
 fi
 # A rerun must not clobber edits: with a repo present, apply skips conflicting files when
 # non-interactive, where init --take-repo would overwrite them.
-if "$dot" status >/dev/null 2>&1; then
+if "$dotman" status >/dev/null 2>&1; then
     set -- apply
 else
     set -- init "$dir" --take-repo
@@ -153,7 +172,7 @@ if [ "${DOTMAN_APPROVE_HOOKS:-}" = 1 ]; then
 fi
 
 code=0
-"$dot" "$@" || code=$?
+"$dotman" "$@" || code=$?
 # Exit 3 means some paths need attention after a successful init. A nonzero exit would make
 # DevPod run the next candidate script on top of this one.
 case $code in

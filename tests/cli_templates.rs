@@ -1,4 +1,4 @@
-//! Templates and `dot edit`, through the binary. The identity is never relied on: templates read
+//! Templates and `dotman edit`, through the binary. The identity is never relied on: templates read
 //! only `[vars]` and the allowlisted environment.
 
 mod common;
@@ -90,7 +90,7 @@ fn a_local_edit_is_template_drift_and_is_never_captured() {
     let err = exits(&env.run(&["apply"]), 3);
     assert!(
         err.contains(
-            "template-drift; edit the template: dot edit .config/kitty/kitty.conf, or discard the local change: dot apply --take-repo .config/kitty/kitty.conf"
+            "template-drift; edit the template: dotman edit .config/kitty/kitty.conf, or discard the local change: dotman apply --take-repo .config/kitty/kitty.conf"
         ),
         "{err}"
     );
@@ -196,7 +196,7 @@ fn add_never_overwrites_a_template_with_its_rendering() {
     let env = kitty("font_size {{ vars.font }}\n");
     exits(&env.run(&["apply"]), 0);
     let err = exits(&env.run(&["add", KEY]), 1);
-    assert!(err.contains("dot edit"), "{err}");
+    assert!(err.contains("dotman edit"), "{err}");
     assert_eq!(
         fs::read(env.repo().join(SOURCE)).unwrap(),
         b"font_size {{ vars.font }}\n"

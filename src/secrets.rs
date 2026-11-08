@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::context::Context;
 use crate::engine::observe;
 use crate::engine::write::{WriteOptions, WriteOutcome, safe_write};
+use crate::name;
 use crate::output;
 use crate::paths::{Paths, write_atomic};
 use crate::proc::{self, AGE_KEY_VAR};
@@ -32,8 +33,20 @@ const RECORD: &str = ".dotman/age-recipients";
 const INSTALL: &str =
     "pacman -S age, apt install age, dnf install age, apk add age or brew install age";
 /// Where a key can come from, for messages about a missing one.
-pub const KEY_HINT: &str = "set DOTMAN_AGE_KEY or DOTMAN_AGE_KEY_FILE, or run `dot key import`";
-pub(crate) const NO_RECIPIENTS: &str = "[age] recipients in .dotman.toml is empty; `dot key init` creates a key and adds its recipient";
+#[must_use]
+pub fn key_hint() -> String {
+    format!(
+        "set DOTMAN_AGE_KEY or DOTMAN_AGE_KEY_FILE, or run `{} key import`",
+        name::bin()
+    )
+}
+
+pub(crate) fn no_recipients() -> String {
+    format!(
+        "[age] recipients in .dotman.toml is empty; `{} key init` creates a key and adds its recipient",
+        name::bin()
+    )
+}
 
 /// Whether `bytes` contain an age identity.
 #[must_use]
@@ -61,8 +74,10 @@ pub struct HoldsKey;
 
 impl fmt::Display for HoldsKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(
-            "holds an age secret key (AGE-SECRET-KEY-), which dotman never stores in plain text; `dot add --encrypt` stores it encrypted",
+        write!(
+            f,
+            "holds an age secret key (AGE-SECRET-KEY-), which dotman never stores in plain text; `{} add --encrypt` stores it encrypted",
+            name::bin()
         )
     }
 }
@@ -198,7 +213,8 @@ impl Age {
             }
             Some(Err(why)) => {
                 notes.push(format!(
-                    "{AGE_KEY_VAR} is set but cannot be used: {why}; install age 1.1.0 or newer, or use DOTMAN_AGE_KEY_FILE or `dot key import`"
+                    "{AGE_KEY_VAR} is set but cannot be used: {why}; install age 1.1.0 or newer, or use DOTMAN_AGE_KEY_FILE or `{} key import`",
+                    name::bin()
                 ));
                 false
             }
@@ -222,7 +238,7 @@ impl Age {
             if self.key.is_some() {
                 format!("{AGE_KEY_VAR} cannot be used here and there is no identity file")
             } else {
-                format!("no age key; {KEY_HINT}")
+                format!("no age key; {}", key_hint())
             }
         });
         Reader {
@@ -285,7 +301,7 @@ impl Age {
     pub fn encrypt(&self, plaintext: &[u8], recipients: &[String]) -> Result<Vec<u8>> {
         let recipients = recipient_set(recipients);
         if recipients.is_empty() {
-            bail!(NO_RECIPIENTS);
+            bail!(no_recipients());
         }
         let program = &self.cli()?.program;
         let mut cmd = proc::command(program);
@@ -565,9 +581,10 @@ pub(crate) fn reencrypt(ctx: &Context, dry_run: bool) -> Result<usize> {
     }
     if !unreadable.is_empty() {
         output::warning(&format!(
-            "the recipients in .dotman.toml changed, but this machine cannot decrypt {} of the {count} encrypted {}, so none was re-encrypted. The new recipients cannot read them until a machine whose key can runs `dot sync`:",
+            "the recipients in .dotman.toml changed, but this machine cannot decrypt {} of the {count} encrypted {}, so none was re-encrypted. The new recipients cannot read them until a machine whose key can runs `{} sync`:",
             unreadable.len(),
-            files(count)
+            files(count),
+            name::bin()
         ));
         for line in unreadable {
             output::warning(&format!("  {line}"));
@@ -672,6 +689,6 @@ mod tests {
     fn zero_recipients_name_key_init() {
         let age = Age::new(None, PathBuf::from("/nonexistent"), None, None);
         let err = format!("{:#}", age.encrypt(b"x", &[]).unwrap_err());
-        assert!(err.contains("dot key init"), "{err}");
+        assert!(err.contains("dotman key init"), "{err}");
     }
 }

@@ -34,8 +34,8 @@ check() {
 package() {
     cd "$pkgname-$pkgver"
 
-    # Install binary
-    install -Dm755 target/release/dot "$pkgdir/usr/bin/dot"
+    # Only dotman: /usr/bin/dot belongs to Graphviz, so no dot alias is packaged
+    install -Dm755 target/release/dotman "$pkgdir/usr/bin/dotman"
 
     # Install documentation
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
@@ -46,16 +46,16 @@ package() {
 
     # Generate and install shell completions
     mkdir -p "$pkgdir/usr/share/bash-completion/completions"
-    ./target/release/dot completion bash > "$pkgdir/usr/share/bash-completion/completions/dot"
+    ./target/release/dotman completion bash > "$pkgdir/usr/share/bash-completion/completions/dotman"
 
     mkdir -p "$pkgdir/usr/share/zsh/site-functions"
-    ./target/release/dot completion zsh > "$pkgdir/usr/share/zsh/site-functions/_dot"
+    ./target/release/dotman completion zsh > "$pkgdir/usr/share/zsh/site-functions/_dotman"
 
     mkdir -p "$pkgdir/usr/share/fish/vendor_completions.d"
-    ./target/release/dot completion fish > "$pkgdir/usr/share/fish/vendor_completions.d/dot.fish"
+    ./target/release/dotman completion fish > "$pkgdir/usr/share/fish/vendor_completions.d/dotman.fish"
 
     # Generate and install man page
     mkdir -p "$pkgdir/usr/share/man/man1"
     help2man --no-info --name="dotfiles manager" \
-        --version-string="$pkgver" ./target/release/dot > "$pkgdir/usr/share/man/man1/dot.1"
+        --version-string="$pkgver" ./target/release/dotman > "$pkgdir/usr/share/man/man1/dotman.1"
 }

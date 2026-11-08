@@ -172,8 +172,9 @@ impl State {
 
 fn corrupt(path: &Path, detail: &str) -> anyhow::Error {
     anyhow!(
-        "{} cannot be used: {detail}; run `dot doctor`",
-        path.display()
+        "{} cannot be used: {detail}; run `{} doctor`",
+        path.display(),
+        crate::name::bin()
     )
 }
 
@@ -269,7 +270,7 @@ mod tests {
         for bad in bad_inputs {
             fs::write(&path, bad).unwrap();
             let err = State::load(&path, ID_A).unwrap_err().to_string();
-            assert!(err.contains("dot doctor"), "{err}");
+            assert!(err.contains("dotman doctor"), "{err}");
         }
         fs::write(&path, b"").unwrap();
         assert!(State::load(&path, ID_A).is_ok());

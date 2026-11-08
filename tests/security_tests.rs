@@ -1,10 +1,10 @@
-//! The security regression suite, through the `dot` binary. AGENTS.md points auditors here.
+//! The security regression suite, through the `dotman` binary. AGENTS.md points auditors here.
 //!
 //! Each test's doc comment states what must hold for it to pass. Cases that are decided by a
 //! value the binary cannot be given live in unit tests, and are named where they apply:
 //!
 //! - Running as root is refused (`paths::tests::root_needs_flag_or_env`, and
-//!   `running_as_root_is_refused_unless_allowed` below through the library). The `dot` binary as
+//!   `running_as_root_is_refused_unless_allowed` below through the library). The `dotman` binary as
 //!   uid 0 runs in the T29 container job.
 //! - As root, `system-write` ignores `DOTMAN_SYSTEM_ROOT` and refuses a plan that carries a
 //!   prefix (`system::helper::tests::a_prefix_never_reaches_root`).
@@ -938,7 +938,7 @@ fn install_sh_is_never_applied() {
 }
 
 /// A checksum that does not match the downloaded archive, a missing checksum entry and an
-/// archive swapped after its checksum was published each make `install.sh` exit 1 with no `dot`
+/// archive swapped after its checksum was published each make `install.sh` exit 1 with no `dotman`
 /// installed and nothing applied.
 #[test]
 fn a_bootstrap_checksum_mismatch_installs_nothing() -> R {

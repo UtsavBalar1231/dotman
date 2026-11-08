@@ -1,4 +1,4 @@
-//! `dot doctor`: reads the environment and the repo, writes nothing and never stops at the first problem.
+//! `dotman doctor`: reads the environment and the repo, writes nothing and never stops at the first problem.
 
 use crate::VERSION;
 use crate::bootstrap::{self, Found};
@@ -6,6 +6,7 @@ use crate::cli::DoctorArgs;
 use crate::context::Context;
 use crate::git::Git;
 use crate::lock::Lock;
+use crate::name;
 use crate::secrets::{self, Locked};
 use crate::state::State;
 use crate::sys;
@@ -59,7 +60,7 @@ fn info(what: &str, detail: &str) -> Check {
     }
 }
 
-/// Runs `dot doctor`. Returns false when any check failed. Takes no lock and skips the in-progress guard.
+/// Runs `dotman doctor`. Returns false when any check failed. Takes no lock and skips the in-progress guard.
 pub fn run(args: &DoctorArgs) -> Result<bool> {
     let checks = collect(args.online);
     let mut out = std::io::stdout().lock();
@@ -127,7 +128,7 @@ fn collect(online: bool) -> Vec<Check> {
             checks.push(fail(
                 "repo",
                 &format!("not found at {}", ctx.paths.repo.display()),
-                "run dot init",
+                &format!("run {} init", name::bin()),
             ));
         }
     }
@@ -157,7 +158,7 @@ fn remote(git: &Git, online: bool) -> Check {
             return fail(
                 "remote",
                 "origin is not configured",
-                "run dot init --remote <url>",
+                &format!("run {} init --remote <url>", name::bin()),
             );
         }
         Ok(Some(_)) if !online => return pass("remote configured"),
@@ -232,7 +233,11 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
     }
     let state_file = ctx.paths.state_file();
     match ctx.repo_id() {
-        Err(e) => checks.push(fail("repo id", &format!("{e:#}"), "run dot init")),
+        Err(e) => checks.push(fail(
+            "repo id",
+            &format!("{e:#}"),
+            &format!("run {} init", name::bin()),
+        )),
         Ok(id) => match State::read(&state_file) {
             Err(e) => checks.push(fail(
                 "state",
@@ -253,7 +258,10 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
         Some(op) => checks.push(fail(
             "git operation",
             &format!("a {} is in progress", op.name()),
-            "run dot git rebase --continue or dot git rebase --abort",
+            &format!(
+                "run {bin} git rebase --continue or {bin} git rebase --abort",
+                bin = name::bin()
+            ),
         )),
         None => checks.push(pass("no git operation in progress")),
     }
@@ -266,12 +274,16 @@ fn install_script(ctx: &Context) -> Option<Check> {
         Ok(Found::Missing) => None,
         Ok(Found::Edited) => Some(info(
             "install.sh",
-            "edited by hand, so `dot init --refresh-bootstrap` leaves it as it is",
+            &format!(
+                "edited by hand, so `{} init --refresh-bootstrap` leaves it as it is",
+                name::bin()
+            ),
         )),
         Ok(Found::Unedited { version }) if bootstrap::is_older(&version) => Some(warn(
             "install.sh",
             &format!(
-                "pins dot {version}, older than {VERSION}; run `dot init --refresh-bootstrap`"
+                "pins dotman {version}, older than {VERSION}; run `{} init --refresh-bootstrap`",
+                name::bin()
             ),
         )),
         Ok(Found::Unedited { .. }) => Some(pass("install.sh")),
@@ -318,7 +330,10 @@ fn encryption(ctx: &Context) -> Vec<Check> {
         Some(Err(why)) => checks.push(fail(
             "DOTMAN_AGE_KEY",
             &why,
-            "install age 1.1.0 or newer, or use DOTMAN_AGE_KEY_FILE or dot key import",
+            &format!(
+                "install age 1.1.0 or newer, or use DOTMAN_AGE_KEY_FILE or {} key import",
+                name::bin()
+            ),
         )),
         None => {}
     }
@@ -327,7 +342,10 @@ fn encryption(ctx: &Context) -> Vec<Check> {
     {
         checks.push(warn(
             "age recipients",
-            "only one; if its identity is lost, the encrypted files cannot be recovered. Add a second key: dot key init on another machine, or dot key import --add-recipient",
+            &format!(
+                "only one; if its identity is lost, the encrypted files cannot be recovered. Add a second key: {bin} key init on another machine, or {bin} key import --add-recipient",
+                bin = name::bin()
+            ),
         ));
     }
     let Ok(sources) = ctx.sources() else {

@@ -1,4 +1,4 @@
-//! `dot forget`: stop managing a path. Only the repo and the state change, never `$HOME`.
+//! `dotman forget`: stop managing a path. Only the repo and the state change, never `$HOME`.
 
 use crate::cli::ForgetArgs;
 use crate::commands::add::Ignore;
@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-/// Runs `dot forget`.
+/// Runs `dotman forget`.
 pub fn run(args: &ForgetArgs) -> Result<()> {
     let ctx = Context::resolve("forget")?;
     let dry_run = args.dry_run;

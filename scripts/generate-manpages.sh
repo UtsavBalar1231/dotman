@@ -31,7 +31,7 @@ log_error() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 MAN_DIR="$PROJECT_ROOT/man"
-BINARY_PATH="$PROJECT_ROOT/target/release/dot"
+BINARY_PATH="$PROJECT_ROOT/target/release/dotman"
 VERSION=$(grep '^version = ' "$PROJECT_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
 
 # Create man pages directory
@@ -41,7 +41,7 @@ log_info "Building dotman binary..."
 
 # Build the binary first
 cd "$PROJECT_ROOT"
-if ! cargo build --release --bin dot; then
+if ! cargo build --release --bin dotman; then
     log_error "Failed to build dotman binary"
     exit 1
 fi

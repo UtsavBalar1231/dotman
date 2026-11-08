@@ -226,9 +226,10 @@ fn check_home(
     // sudo keeps or rewrites HOME depending on the distro, so under root or sudo HOME is checked against passwd.
     match passwd_home() {
         Some(pw) if !same_dir(&pw, home) => bail!(
-            "$HOME ({}) differs from the passwd home of uid {euid} ({}); run dot with the user's own environment",
+            "$HOME ({}) differs from the passwd home of uid {euid} ({}); run {} with the user's own environment",
             home.display(),
-            pw.display()
+            pw.display(),
+            crate::name::bin()
         ),
         Some(_) => {}
         None => output::warning(&format!(

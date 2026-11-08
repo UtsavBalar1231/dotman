@@ -36,7 +36,7 @@ const ISOLATION: [&str; 14] = [
     "color.ui=false",
 ];
 
-/// Variables that make git ignore `-C`, as when `dot` runs inside a git hook.
+/// Variables that make git ignore `-C`, as when `dotman` runs inside a git hook.
 const LOCAL_REPO_ENV: [&str; 7] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -214,7 +214,8 @@ impl Git {
         cmd.output().map_err(|err| {
             if err.kind() == io::ErrorKind::NotFound {
                 anyhow!(
-                    "`dot {}` needs git, but no `git` executable was found in PATH. Install it with: {}",
+                    "`{} {}` needs git, but no `git` executable was found in PATH. Install it with: {}",
+                    crate::name::bin(),
                     self.dot_command,
                     install_hint(cfg!(target_os = "macos"), read_os_release().as_deref())
                 )
@@ -310,7 +311,7 @@ impl Git {
 
     /// Feeds a `git fast-import` stream that ends in `done` to git. Git moves the refs the stream
     /// names only after it has read the whole stream. A file, not a pipe: if git exits early, a
-    /// write to a closed pipe would kill `dot` with SIGPIPE.
+    /// write to a closed pipe would kill `dotman` with SIGPIPE.
     pub fn fast_import(&self, stream: File) -> Result<()> {
         self.check_version()?;
         let args = ["fast-import", "--quiet", "--done"];
@@ -947,7 +948,7 @@ mod tests {
         let git = sb.git("repo").with_env([("PATH", empty.as_os_str())]);
         let err = git.status().expect_err("git is not on PATH");
         let msg = err.to_string();
-        assert!(msg.contains("`dot test` needs git"), "{msg}");
+        assert!(msg.contains("`dotman test` needs git"), "{msg}");
         assert!(msg.contains("Install it with:"), "{msg}");
     }
 

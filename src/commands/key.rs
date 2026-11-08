@@ -1,4 +1,4 @@
-//! `dot key`: the age identity that decrypts `{age}` files on this machine.
+//! `dotman key`: the age identity that decrypts `{age}` files on this machine.
 //!
 //! Nothing here prints an identity, and replacing one always keeps a backup, because losing the
 //! only identity makes every file encrypted to it unrecoverable.
@@ -8,6 +8,7 @@ use crate::commands::Outcome;
 use crate::context::Context;
 use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::lock::Lock;
+use crate::name;
 use crate::output;
 use crate::paths::{create_private_dir, write_atomic};
 use crate::prompt;
@@ -19,9 +20,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::SystemTime;
 
-const GUIDANCE: &str = "Back the identity up now: keep it in a password manager plus one offline copy, because without it the encrypted files cannot be recovered. On a new machine, supply it with DOTMAN_AGE_KEY or `dot key import`.";
-
-/// Runs `dot key`.
+/// Runs `dotman key`.
 pub fn run(args: &KeyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("key")?;
     match &args.command {
@@ -44,8 +43,9 @@ pub(crate) fn create_identity(ctx: &Context) -> Result<()> {
     let identity = &ctx.paths.age_identity;
     if fs::symlink_metadata(identity).is_ok() {
         bail!(
-            "an age identity already exists at {}; dotman never overwrites one. `dot key import --force <file>` replaces it after a backup",
-            identity.display()
+            "an age identity already exists at {}; dotman never overwrites one. `{} key import --force <file>` replaces it after a backup",
+            identity.display(),
+            name::bin()
         );
     }
     if let Some(dir) = identity.parent() {
@@ -72,7 +72,10 @@ pub(crate) fn create_identity(ctx: &Context) -> Result<()> {
         };
         output::info(&format!("  recipient {recipient}{note}"));
     }
-    output::info(GUIDANCE);
+    output::info(&format!(
+        "Back the identity up now: keep it in a password manager plus one offline copy, because without it the encrypted files cannot be recovered. On a new machine, supply it with DOTMAN_AGE_KEY or `{} key import`.",
+        name::bin()
+    ));
     Ok(())
 }
 
@@ -200,12 +203,14 @@ fn check_recipients(ctx: &Context, recipients: Option<Vec<String>>, add: bool) -
     if add || (prompt::interactive() && prompt::confirm(&question)?) {
         add_recipients(ctx, &missing)?;
         output::success(&format!(
-            "added {named} to [age] recipients; the next `dot sync` on a machine whose key reads the encrypted files re-encrypts them"
+            "added {named} to [age] recipients; the next `{} sync` on a machine whose key reads the encrypted files re-encrypts them",
+            name::bin()
         ));
         return Ok(Outcome::Done);
     }
     output::warning(&format!(
-        "the recipient {named} of this identity is not in [age] recipients in .dotman.toml, so no file is encrypted to it; `dot key import --add-recipient` adds it"
+        "the recipient {named} of this identity is not in [age] recipients in .dotman.toml, so no file is encrypted to it; `{} key import --add-recipient` adds it",
+        name::bin()
     ));
     Ok(Outcome::Attention)
 }

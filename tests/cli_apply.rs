@@ -11,7 +11,7 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// Runs `dot`, asserts exit 3 and returns stderr.
+/// Runs `dotman`, asserts exit 3 and returns stderr.
 fn attention(env: &TestEnv, args: &[&str]) -> String {
     let out = env.run(args);
     assert_eq!(out.status.code(), Some(3), "dot {args:?}: {}", stderr(&out));
@@ -64,7 +64,7 @@ fn row_3_forgotten_with_local_edits_is_reported_and_kept() {
     env.write(".bashrc", b"edited\n", 0o644);
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("forgotten-edited"));
     let err = attention(&env, &["apply", "--take-repo"]);
-    assert!(err.contains("`dot add` keeps it"), "{err}");
+    assert!(err.contains("`dotman add` keeps it"), "{err}");
     assert_eq!(env.read(".bashrc"), b"edited\n");
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("forgotten-edited"));
 }
@@ -468,7 +468,7 @@ fn a_second_apply_fails_while_the_lock_is_held() {
     assert!(held.is_held());
     for args in [&["apply"][..], &["apply", "--dry-run"]] {
         let err = env.fails(args);
-        assert!(err.contains("another dot process is running"), "{err}");
+        assert!(err.contains("another dotman process is running"), "{err}");
     }
     assert_eq!(env.read(".bashrc"), b"one\n");
 }

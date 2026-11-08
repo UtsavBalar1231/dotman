@@ -13,10 +13,11 @@ mod yadm;
 use crate::bootstrap;
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
-use crate::commands::sync::IDENTITY_FIX;
+use crate::commands::sync::identity_fix;
 use crate::context::Context;
 use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::git::redact_credentials;
+use crate::name;
 use crate::output;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
@@ -32,7 +33,7 @@ use std::time::SystemTime;
 /// An entry the import could not carry over by itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
-    /// Items with the same reason are printed together.
+    /// Items with the same reason are printed together. `{bin}` prints as the invoked command.
     pub reason: &'static str,
     /// The entry and what to do about it.
     pub detail: String,
@@ -91,7 +92,11 @@ impl Report {
                 .push(item.detail.as_str());
         }
         for (reason, details) in groups {
-            output::warning(&format!("{reason} ({}):", details.len()));
+            output::warning(&format!(
+                "{} ({}):",
+                reason.replace("{bin}", crate::name::bin()),
+                details.len()
+            ));
             for detail in details {
                 output::warning(&format!("  {detail}"));
             }
@@ -99,19 +104,24 @@ impl Report {
     }
 }
 
+pub(crate) fn print_next_steps() {
+    let bin = name::bin();
+    output::info(&format!("next: run `{bin} status`, then `{bin} apply`"));
+}
+
 /// `1 file`, `2 files`.
 pub(crate) fn count(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
-/// The legacy repo `dot import` takes when no source is given.
+/// The legacy repo `dotman import` takes when no source is given.
 #[must_use]
 pub fn find_legacy(home: &Path) -> Option<PathBuf> {
     let dir = home.join(".dotman");
     legacy::is_legacy(&dir).then_some(dir)
 }
 
-/// The kind and path of every setup `dot import` finds when given no source.
+/// The kind and path of every setup `dotman import` finds when given no source.
 pub fn detect(ctx: &Context) -> Result<Vec<(&'static str, PathBuf)>> {
     Ok(gittree::candidates(ctx)?
         .into_iter()
@@ -119,7 +129,7 @@ pub fn detect(ctx: &Context) -> Result<Vec<(&'static str, PathBuf)>> {
         .collect())
 }
 
-/// What `dot import` reads: a path, or a URL that git clones.
+/// What `dotman import` reads: a path, or a URL that git clones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
     /// A directory, made absolute.
@@ -169,9 +179,9 @@ fn is_url(text: &str) -> bool {
         .is_some_and(|(host, path)| !path.is_empty() && host.contains('@') && !host.contains('/'))
 }
 
-/// Runs `dot import`. The caller holds the lock and has run the in-progress guard.
+/// Runs `dotman import`. The caller holds the lock and has run the in-progress guard.
 ///
-/// A fresh import then writes `install.sh`, uncommitted: the next `dot sync` commits it, or an
+/// A fresh import then writes `install.sh`, uncommitted: the next `dotman sync` commits it, or an
 /// `--overlay` takes it into its commit while it is still unedited.
 pub fn run(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
     let outcome = convert(ctx, args)?;
@@ -222,7 +232,8 @@ fn convert(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
         if chezmoi::is_source(path) {
             ensure!(
                 args.overlay.is_none(),
-                "--overlay does not take a chezmoi source; import it into a fresh repo with `dot import`"
+                "--overlay does not take a chezmoi source; import it into a fresh repo with `{} import`",
+                name::bin()
             );
             return chezmoi::import(ctx, path, args);
         }
@@ -251,9 +262,10 @@ fn refuse_overlap(repo: &Path, source: &Path) -> Result<()> {
     let (repo_real, source_real) = (resolved(repo), resolved(source));
     if source_real.starts_with(&repo_real) || repo_real.starts_with(&source_real) {
         bail!(
-            "the source {} is, contains or lies inside the dotman repo {}; point `dot import` at a different directory",
+            "the source {} is, contains or lies inside the dotman repo {}; point `{} import` at a different directory",
             source.display(),
-            repo.display()
+            repo.display(),
+            name::bin()
         );
     }
     Ok(())
@@ -300,8 +312,9 @@ pub(crate) fn require_clean(ctx: &Context) -> Result<()> {
         });
     ensure!(
         !dirty,
-        "the repo at {} has uncommitted changes; run `dot sync` first, so the overlay commit holds only the overlay",
-        ctx.paths.repo.display()
+        "the repo at {} has uncommitted changes; run `{} sync` first, so the overlay commit holds only the overlay",
+        ctx.paths.repo.display(),
+        name::bin()
     );
     Ok(())
 }
@@ -311,8 +324,9 @@ pub(crate) fn require_fresh(ctx: &Context) -> Result<()> {
     if !is_fresh(ctx)? {
         let repo = &ctx.paths.repo;
         bail!(
-            "the repo at {} already has files or history, and `dot import` needs a fresh repo. To add what a source has and the repo lacks, use `dot import --overlay <source>`",
-            repo.display()
+            "the repo at {} already has files or history, and `{bin} import` needs a fresh repo. To add what a source has and the repo lacks, use `{bin} import --overlay <source>`",
+            repo.display(),
+            bin = name::bin()
         );
     }
     Ok(())
@@ -320,7 +334,9 @@ pub(crate) fn require_fresh(ctx: &Context) -> Result<()> {
 
 /// Read from the global config while the repo does not exist yet.
 pub(crate) fn author_email(ctx: &Context) -> Result<String> {
-    ctx.git.author_email()?.ok_or_else(|| anyhow!(IDENTITY_FIX))
+    ctx.git
+        .author_email()?
+        .ok_or_else(|| anyhow!(identity_fix()))
 }
 
 /// `$HOME` as given and as resolved: the prefixes stripped from absolute keys.
@@ -335,7 +351,7 @@ pub(crate) fn proceed(args: &ImportArgs, question: &str) -> Result<bool> {
     Ok(args.yes || !prompt::interactive() || prompt::confirm(question)?)
 }
 
-/// A `.dotman.toml` in the worktree that is not what `dot init` writes: an import copies it
+/// A `.dotman.toml` in the worktree that is not what `dotman init` writes: an import copies it
 /// before the imported one replaces it.
 pub(crate) struct EditedConfig {
     bytes: Vec<u8>,
@@ -343,7 +359,7 @@ pub(crate) struct EditedConfig {
 }
 
 impl EditedConfig {
-    /// `None` when the worktree has no `.dotman.toml`, or has exactly what `dot init` writes.
+    /// `None` when the worktree has no `.dotman.toml`, or has exactly what `dotman init` writes.
     pub(crate) fn find(ctx: &Context) -> Result<Option<Self>> {
         let bytes = match fs::read(ctx.repo_config_file()) {
             Ok(bytes) => bytes,

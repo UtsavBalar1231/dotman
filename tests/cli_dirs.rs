@@ -99,7 +99,7 @@ fn big_binary_and_secret_named_files_are_held_and_sync_exits_3_but_pushes_the_re
     }
     assert!(status.contains(&("new".to_owned(), ".config/nvim/foo.lua".to_owned())));
     let human = String::from_utf8_lossy(&a.run(&["status"]).stdout).into_owned();
-    assert!(human.contains("dot add <file>"), "{human}");
+    assert!(human.contains("dotman add <file>"), "{human}");
     assert!(
         human.contains("hosts.yml (name matches [guard] secret_names)"),
         "{human}"

@@ -333,7 +333,7 @@ fn commands_need_an_initialised_repo() {
         &["status"],
         &["forget", ".bashrc"],
     ] {
-        assert!(env.fails(args).contains("dot init"), "{args:?}");
+        assert!(env.fails(args).contains("dotman init"), "{args:?}");
     }
     assert!(!env.repo().exists());
 }

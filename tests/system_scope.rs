@@ -630,7 +630,7 @@ fn one_pending_write(env: &TestEnv) {
 
 #[test]
 fn each_escalator_gets_its_non_interactive_flags_and_the_exe() {
-    let exe = fs::canonicalize(env!("CARGO_BIN_EXE_dot")).expect("the dot binary");
+    let exe = fs::canonicalize(env!("CARGO_BIN_EXE_dotman")).expect("the dotman binary");
     let run = format!("{} system-write --plan ", exe.display());
     let cases: [(&str, Vec<String>); 3] = [
         ("sudo", vec!["-n -v".to_owned(), format!("-n -- {run}")]),
@@ -787,7 +787,7 @@ fn sync_system_yes_writes_what_the_pull_brought() {
 
 /// The one test that uses real sudo. It runs only inside a container that sets
 /// `DOTMAN_REAL_SUDO_TEST=1`, so it can never run on a developer machine or a CI host runner.
-/// A root-only container, where `dot apply --system --allow-root` starts `system-write` without
+/// A root-only container, where `dotman apply --system --allow-root` starts `system-write` without
 /// an escalator, reaches the helper through the same root path.
 #[test]
 fn real_sudo_writes_a_root_owned_file() {

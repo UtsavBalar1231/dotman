@@ -129,8 +129,9 @@ pub fn refresh(ctx: &Context, state: &mut State, origin: &str) {
     let probe = |url: &str| ctx.git.ls_remote_anonymous(url, TIMEOUT).unwrap_or(false);
     if check(state, origin, now(), probe) {
         output::warning(&format!(
-            "{} is public: it answers without credentials. `dot add` refuses files that match [guard] secret_names unless you pass --encrypt or --allow-plain",
-            redact_credentials(origin)
+            "{} is public: it answers without credentials. `{} add` refuses files that match [guard] secret_names unless you pass --encrypt or --allow-plain",
+            redact_credentials(origin),
+            crate::name::bin()
         ));
     }
 }

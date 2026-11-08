@@ -97,7 +97,7 @@ name = "dotman"
 path = "src/lib.rs"
 
 [[bin]]
-name = "dot"
+name = "dotman"
 path = "src/main.rs"
 
 [package.metadata.docs.rs]

@@ -1,4 +1,4 @@
-//! `dot init`: create the repo or set its remote, or clone an existing repo and apply it.
+//! `dotman init`: create the repo or set its remote, or clone an existing repo and apply it.
 
 use crate::bootstrap;
 use crate::cli::{Decisions, ImportArgs, InitArgs};
@@ -8,6 +8,7 @@ use crate::context::Context;
 use crate::hooks::Policy;
 use crate::import;
 use crate::lock::Lock;
+use crate::name;
 use crate::output;
 use crate::paths::private_temp_dir;
 use crate::prompt;
@@ -16,7 +17,7 @@ use crate::repo_config::RepoConfig;
 use anyhow::{Result, anyhow, bail};
 use std::path::PathBuf;
 
-/// Runs `dot init`.
+/// Runs `dotman init`.
 pub fn run(args: &InitArgs) -> Result<Outcome> {
     let ctx = Context::resolve("init")?;
     if let Some(source) = &args.source {
@@ -96,8 +97,9 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let repo = &ctx.paths.repo;
     if repo.join(".git").exists() {
         bail!(
-            "a repo already exists at {}; `dot apply` applies it",
-            repo.display()
+            "a repo already exists at {}; `{} apply` applies it",
+            repo.display(),
+            name::bin()
         );
     }
     // Everything a flag can get wrong is refused before the clone, which would be left behind.
@@ -184,13 +186,15 @@ fn offer_import(
         output::info("import one with:");
         for (label, path) in found {
             output::info(&format!(
-                "  dot import {}    # {label}",
+                "  {} import {}    # {label}",
+                name::bin(),
                 shell_words::quote(&path.to_string_lossy())
             ));
         }
         if let Some(url) = &args.remote {
             output::info(&format!(
-                "then run `dot init --remote {}`",
+                "then run `{} init --remote {}`",
+                name::bin(),
                 shell_words::quote(url)
             ));
         }
@@ -198,7 +202,7 @@ fn offer_import(
         let remote = args.remote.as_ref().map_or_else(String::new, |url| {
             format!(" --remote {}", shell_words::quote(url))
         });
-        output::info(&format!("  dot init --no-import{remote}"));
+        output::info(&format!("  {} init --no-import{remote}", name::bin()));
         return Ok(Some(Outcome::Attention));
     }
     let fresh = found.len().saturating_add(1);

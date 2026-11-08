@@ -5,9 +5,9 @@ use clap_complete::Shell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// Top-level arguments for `dot`.
+/// Top-level arguments for `dotman`.
 #[derive(Parser)]
-#[command(name = "dot", version = crate::VERSION, about = "Git-like dotfiles manager")]
+#[command(name = "dotman", version = crate::VERSION, about = "Git-like dotfiles manager")]
 // reason: independent global flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
@@ -76,7 +76,7 @@ pub enum Commands {
     SystemWrite(SystemWriteArgs),
 }
 
-/// Arguments of the hidden `dot system-write`.
+/// Arguments of the hidden `dotman system-write`.
 #[derive(Args)]
 pub struct SystemWriteArgs {
     /// The plan file that `apply --system` wrote
@@ -84,7 +84,7 @@ pub struct SystemWriteArgs {
     pub plan: PathBuf,
 }
 
-/// Arguments of `dot init`.
+/// Arguments of `dotman init`.
 #[derive(Args)]
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -110,7 +110,7 @@ pub struct InitArgs {
     /// Show what would be created and change nothing
     #[arg(long)]
     pub dry_run: bool,
-    /// Do not write install.sh, the script that sets up `dot` in a container
+    /// Do not write install.sh, the script that sets up `dotman` in a container
     #[arg(long, conflicts_with_all = ["source", "refresh_bootstrap"])]
     pub no_bootstrap: bool,
     /// Rewrite install.sh with this version's script, unless it was edited
@@ -186,7 +186,7 @@ pub struct Decisions {
     pub approve_hooks: bool,
 }
 
-/// Arguments of `dot apply`.
+/// Arguments of `dotman apply`.
 #[derive(Args)]
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -213,14 +213,14 @@ pub struct ApplyArgs {
     pub yes: bool,
 }
 
-/// Arguments of `dot edit`.
+/// Arguments of `dotman edit`.
 #[derive(Args)]
 pub struct EditArgs {
     /// The managed file to edit
     pub path: PathBuf,
 }
 
-/// Arguments of `dot sync`.
+/// Arguments of `dotman sync`.
 #[derive(Args)]
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -245,14 +245,14 @@ pub struct SyncArgs {
     pub yes: bool,
 }
 
-/// Arguments of `dot diff`.
+/// Arguments of `dotman diff`.
 #[derive(Args)]
 pub struct DiffArgs {
     /// Compare only these files or directories; every managed path when none are given
     pub paths: Vec<PathBuf>,
 }
 
-/// Arguments of `dot add`.
+/// Arguments of `dotman add`.
 #[derive(Args)]
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -287,7 +287,7 @@ pub struct AddArgs {
     pub add_root: bool,
 }
 
-/// Arguments of `dot forget`.
+/// Arguments of `dotman forget`.
 #[derive(Args)]
 pub struct ForgetArgs {
     /// Files, symlinks or directories to stop managing
@@ -298,7 +298,7 @@ pub struct ForgetArgs {
     pub dry_run: bool,
 }
 
-/// Arguments of `dot list`.
+/// Arguments of `dotman list`.
 #[derive(Args)]
 pub struct ListArgs {
     /// Print `<kind>\t<key>\0` records
@@ -306,7 +306,7 @@ pub struct ListArgs {
     pub porcelain: bool,
 }
 
-/// Arguments of `dot status`.
+/// Arguments of `dotman status`.
 #[derive(Args)]
 pub struct StatusArgs {
     /// Limit the report to these paths
@@ -316,7 +316,7 @@ pub struct StatusArgs {
     pub porcelain: bool,
 }
 
-/// Arguments of `dot log`.
+/// Arguments of `dotman log`.
 #[derive(Args)]
 pub struct LogArgs {
     /// Files, directories or globs to filter by; a trailing `/` means the whole subtree
@@ -326,7 +326,7 @@ pub struct LogArgs {
     pub max_count: Option<usize>,
 }
 
-/// Arguments of `dot restore`.
+/// Arguments of `dotman restore`.
 #[derive(Args)]
 pub struct RestoreArgs {
     /// The managed file or symlink to restore
@@ -339,7 +339,7 @@ pub struct RestoreArgs {
     pub dry_run: bool,
 }
 
-/// Arguments of `dot import`.
+/// Arguments of `dotman import`.
 #[derive(Args)]
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -365,7 +365,7 @@ pub struct ImportArgs {
     /// Do not ask before writing
     #[arg(long)]
     pub yes: bool,
-    /// Do not write install.sh, the script that sets up `dot` in a container
+    /// Do not write install.sh, the script that sets up `dotman` in a container
     #[arg(long)]
     pub no_bootstrap: bool,
     /// Show the report and change nothing
@@ -373,7 +373,7 @@ pub struct ImportArgs {
     pub dry_run: bool,
 }
 
-/// Arguments of `dot doctor`.
+/// Arguments of `dotman doctor`.
 #[derive(Args)]
 pub struct DoctorArgs {
     /// Also ask the remote with `git ls-remote`
@@ -381,7 +381,7 @@ pub struct DoctorArgs {
     pub online: bool,
 }
 
-/// Arguments of `dot key`.
+/// Arguments of `dotman key`.
 #[derive(Args)]
 pub struct KeyArgs {
     /// What to do with the identity.
@@ -389,7 +389,7 @@ pub struct KeyArgs {
     pub command: KeyCommand,
 }
 
-/// Subcommands of `dot key`.
+/// Subcommands of `dotman key`.
 #[derive(Subcommand)]
 pub enum KeyCommand {
     /// Generate an age identity and add its recipient to .dotman.toml
@@ -398,7 +398,7 @@ pub enum KeyCommand {
     Import(KeyImportArgs),
 }
 
-/// Arguments of `dot key import`.
+/// Arguments of `dotman key import`.
 #[derive(Args)]
 pub struct KeyImportArgs {
     /// Identity file to import; `-` reads standard input
@@ -412,7 +412,7 @@ pub struct KeyImportArgs {
     pub force: bool,
 }
 
-/// Arguments of `dot git`.
+/// Arguments of `dotman git`.
 #[derive(Args)]
 #[command(disable_help_flag = true)]
 pub struct GitArgs {

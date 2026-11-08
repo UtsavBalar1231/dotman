@@ -36,8 +36,9 @@ impl fmt::Display for InProgress {
         let name = self.operation.name();
         write!(
             f,
-            "a {name} is in progress in {}; finish it with `dot git {name} --continue` or undo it with `dot git {name} --abort`",
-            self.repo.display()
+            "a {name} is in progress in {}; finish it with `{bin} git {name} --continue` or undo it with `{bin} git {name} --abort`",
+            self.repo.display(),
+            bin = crate::name::bin()
         )
     }
 }
@@ -167,13 +168,14 @@ impl Context {
         self.paths.repo.join(".dotman.toml")
     }
 
-    /// The repo's `.git/dotman-id`, trimmed. Fails when `dot init` has not run.
+    /// The repo's `.git/dotman-id`, trimmed. Fails when `dotman init` has not run.
     pub fn repo_id(&self) -> Result<String> {
         match fs::read_to_string(self.paths.repo.join(".git/dotman-id")) {
             Ok(id) => Ok(id.trim().to_owned()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => bail!(
-                "no dotman repo at {}; run `dot init` first",
-                self.paths.repo.display()
+                "no dotman repo at {}; run `{} init` first",
+                self.paths.repo.display(),
+                crate::name::bin()
             ),
             Err(e) => Err(e).context("cannot read .git/dotman-id"),
         }

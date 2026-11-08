@@ -25,6 +25,7 @@ use crate::context::{Context, is_real_dir};
 use crate::engine::{Node, read_node};
 use crate::git::{Git, TreeEntry, redact_credentials};
 use crate::identity;
+use crate::name;
 use crate::output;
 use crate::paths::{
     create_private_dir, is_reserved_root_name, private_temp_dir, validate_key, write_atomic,
@@ -57,7 +58,7 @@ const BLOCKED: &str = "files the repo holds in another form";
 const MAX_PROBED: usize = 500;
 const SHOWN: usize = 10;
 
-/// A source `dot import` found by itself.
+/// A source `dotman import` found by itself.
 pub(super) struct Candidate {
     pub(super) label: &'static str,
     pub(super) path: PathBuf,
@@ -197,21 +198,26 @@ fn works_on_home(ctx: &Context, dir: &Path) -> bool {
     !probed.is_empty() && present.saturating_mul(2) >= probed.len()
 }
 
-/// The one source `dot import` takes when none is given, or the exit code after listing several.
+/// The one source `dotman import` takes when none is given, or the exit code after listing several.
 pub(super) fn find(ctx: &Context) -> Result<ControlFlow<Outcome, Source>> {
     let found = candidates(ctx)?;
     match found.as_slice() {
         [] => bail!(
-            "no source given and none found: looked for a legacy dotman repo in {home}/.dotman, a yadm repo, bare repos directly under {home}, vcsh repos in {vcsh}, a chezmoi source, and links in {home} that resolve under one directory; run `dot import <source>` with a path or a git URL",
+            "no source given and none found: looked for a legacy dotman repo in {home}/.dotman, a yadm repo, bare repos directly under {home}, vcsh repos in {vcsh}, a chezmoi source, and links in {home} that resolve under one directory; run `{bin} import <source>` with a path or a git URL",
             home = ctx.paths.home.display(),
-            vcsh = vcsh_dir(ctx).display()
+            vcsh = vcsh_dir(ctx).display(),
+            bin = name::bin()
         ),
         [one] => Ok(ControlFlow::Continue(Source::Path(one.path.clone()))),
         many => {
-            output::warning("several sources found; `dot import` will not pick one for you:");
+            output::warning(&format!(
+                "several sources found; `{} import` will not pick one for you:",
+                name::bin()
+            ));
             for candidate in many {
                 output::warning(&format!(
-                    "  dot import {}    # {}",
+                    "  {} import {}    # {}",
+                    name::bin(),
                     shell_words::quote(&candidate.path.to_string_lossy()),
                     candidate.label
                 ));
@@ -632,8 +638,9 @@ fn tally(found: &Analysis, recover: bool) -> Report {
     for left in &found.left {
         let detail = if left.remove && recover {
             format!(
-                "{}; left out of the repo, `dot git show {}` prints it",
+                "{}; left out of the repo, `{} git show {}` prints it",
                 left.detail,
+                name::bin(),
                 shell_words::quote(&format!("HEAD~1:{}", left.path))
             )
         } else {
@@ -723,15 +730,16 @@ pub(super) fn check_target(repo: &Path) -> Result<()> {
             && matches!(bootstrap::inspect(repo)?, bootstrap::Found::Unedited { .. });
         ensure!(
             generated || name == ".git" || name == ".dotman.toml",
-            "{} holds {}, which `dot import` would not keep; move it away and run the import again",
+            "{} holds {}, which `{} import` would not keep; move it away and run the import again",
             repo.display(),
-            name.to_string_lossy()
+            name.to_string_lossy(),
+            name::bin()
         );
     }
     Ok(())
 }
 
-/// Moves the staging clone to the repo path. An empty repo that `dot init` made is replaced; its
+/// Moves the staging clone to the repo path. An empty repo that `dotman init` made is replaced; its
 /// `origin` survives when the import brings none.
 fn install(
     ctx: &Context,
@@ -767,7 +775,7 @@ fn install(
     Ok(prior_origin)
 }
 
-/// [`install`], then the `origin` that `dot init` had set when the import brings none.
+/// [`install`], then the `origin` that `dotman init` had set when the import brings none.
 pub(super) fn install_keeping_origin(
     ctx: &Context,
     staging: &Staging,
@@ -779,8 +787,9 @@ pub(super) fn install_keeping_origin(
     {
         ctx.git.set_remote_url("origin", &url)?;
         output::info(&format!(
-            "origin is {} again, as `dot init` set it",
-            redact_credentials(&url)
+            "origin is {} again, as `{} init` set it",
+            redact_credentials(&url),
+            name::bin()
         ));
     }
     Ok(())
@@ -856,7 +865,8 @@ fn yadm_files(ctx: &Context, found: &Analysis) -> Vec<String> {
             },
         );
         notes.push(format!(
-            "{which}. dotman does not read yadm archives: decrypt them with `yadm decrypt`, then store each file with `dot add --encrypt <path>`"
+            "{which}. dotman does not read yadm archives: decrypt them with `yadm decrypt`, then store each file with `{} add --encrypt <path>`",
+            name::bin()
         ));
     }
     let bootstrap = yadm_dir.join("bootstrap");
@@ -892,8 +902,9 @@ fn home_notes(ctx: &Context, found: &Analysis) -> Vec<String> {
     let mut notes = Vec::new();
     if !links.is_empty() {
         notes.push(format!(
-            "yadm's alternate links in $HOME ({}) block the converted files until `dot import --swap` replaces them: {}",
+            "yadm's alternate links in $HOME ({}) block the converted files until `{} import --swap` replaces them: {}",
             links.len(),
+            name::bin(),
             shown(&links)
         ));
     }
@@ -922,7 +933,8 @@ fn vcsh_siblings(ctx: &Context, source: &Path) -> Option<String> {
         .filter(|path| !same(path, source))
         .map(|path| {
             format!(
-                "dot import --overlay {}",
+                "{} import --overlay {}",
+                name::bin(),
                 shell_words::quote(&path.to_string_lossy())
             )
         })
@@ -942,11 +954,12 @@ fn remote_notes(source: &Source, source_origin: Option<&str>, found: &Analysis) 
     match source {
         Source::Path(_) => {
             let advice = source_origin.map_or_else(
-                || "add one with `dot init --remote <url>`".to_owned(),
+                || format!("add one with `{} init --remote <url>`", name::bin()),
                 |url| {
                     let url = redact_credentials(url);
                     format!(
-                        "the source's own origin is {url}; `dot init --remote {url}` sets it here"
+                        "the source's own origin is {url}; `{} init --remote {url}` sets it here",
+                        name::bin()
                     )
                 },
             );
@@ -955,8 +968,9 @@ fn remote_notes(source: &Source, source_origin: Option<&str>, found: &Analysis) 
             ));
         }
         Source::Url(_) => notes.push(format!(
-            "origin is {}; the conversion commit is pushed by the next `dot sync`",
-            source.display()
+            "origin is {}; the conversion commit is pushed by the next `{} sync`",
+            source.display(),
+            name::bin()
         )),
     }
     if !found.alternates.is_empty() {
@@ -1099,7 +1113,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     }
     let total = count(ctx.git.log(&[], None)?.len(), "commit");
     output::success(&format!("imported {total} into {}", repo.display()));
-    output::info("next: run `dot status`, then `dot apply`");
+    super::print_next_steps();
     Ok(report.outcome())
 }
 
@@ -1117,8 +1131,9 @@ fn check_source(source: &Source) -> Result<()> {
     if let Source::Path(path) = source {
         ensure!(
             is_git_source(path),
-            "{} is not a source `dot import` understands; a legacy dotman repo holds index.bin or commits/, and a git source is a repo, a bare repo or a URL",
-            path.display()
+            "{} is not a source `{} import` understands; a legacy dotman repo holds index.bin or commits/, and a git source is a repo, a bare repo or a URL",
+            path.display(),
+            name::bin()
         );
     }
     Ok(())
@@ -1263,7 +1278,7 @@ pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Resu
     }
     let Overlay { report, files, .. } = compared;
     if !files.is_empty() && !ctx.git.identity_configured()? {
-        bail!(crate::commands::sync::IDENTITY_FIX);
+        bail!(crate::commands::sync::identity_fix());
     }
     report.print();
     let message = overlay_message(ctx, source);
@@ -1295,7 +1310,7 @@ pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Resu
     ctx.git.stage_all()?;
     if ctx.git.commit(&message)?.is_some() {
         output::success(&format!("committed: {message} ({summary})"));
-        output::info("next: run `dot status`, then `dot apply`");
+        super::print_next_steps();
     } else {
         output::info("nothing to overlay; no commit made");
     }
@@ -1379,7 +1394,7 @@ mod tests {
         assert_eq!(report.converted, 3);
         let detail = &report.needs_action.first().expect("an item").detail;
         assert!(
-            detail.contains("dot git show 'HEAD~1:c##h.my.host'"),
+            detail.contains("dotman git show 'HEAD~1:c##h.my.host'"),
             "{detail}"
         );
     }

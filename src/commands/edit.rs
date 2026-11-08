@@ -1,4 +1,4 @@
-//! `dot edit`: open the source of a managed file in the user's editor, then apply that one path.
+//! `dotman edit`: open the source of a managed file in the user's editor, then apply that one path.
 
 use crate::cli::EditArgs;
 use crate::commands::Outcome;
@@ -12,7 +12,7 @@ use crate::variant::Flag;
 use anyhow::{Context as _, Result, bail};
 use std::fs;
 
-/// Runs `dot edit`. The lock is taken only after the editor exits, so a long edit blocks nothing.
+/// Runs `dotman edit`. The lock is taken only after the editor exits, so a long edit blocks nothing.
 pub fn run(args: &EditArgs) -> Result<Outcome> {
     let ctx = Context::resolve("edit")?;
     ctx.guard()?;
@@ -30,7 +30,10 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
     }
     let source = sources.select(&key, ctx.identity()).require(&key)?;
     if sources.flag(&key, source) == Flag::Age {
-        bail!("edit `~/{key}` directly, then `dot sync`");
+        bail!(
+            "edit `~/{key}` directly, then `{} sync`",
+            crate::name::bin()
+        );
     }
     let path = ctx.paths.repo.join(source);
     if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {

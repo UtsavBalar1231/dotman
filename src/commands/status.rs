@@ -1,10 +1,11 @@
-//! `dot status`: each managed key's row in the three-way model.
+//! `dotman status`: each managed key's row in the three-way model.
 
 use crate::cli::StatusArgs;
 use crate::commands::add::{self, Hold};
 use crate::commands::apply::{Classified, classify_key};
 use crate::context::{Context, is_under};
 use crate::engine::status::{Row, Variants, Worktree};
+use crate::name;
 use crate::output;
 use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
@@ -37,7 +38,7 @@ pub const fn token(row: Row) -> &'static str {
 
 const UNREADABLE: &str = "unreadable";
 
-/// Runs `dot status`. Takes no lock, writes nothing and always exits 0 when it can read the repo.
+/// Runs `dotman status`. Takes no lock, writes nothing and always exits 0 when it can read the repo.
 pub fn run(args: &StatusArgs) -> Result<()> {
     let ctx = Context::resolve("status")?;
     ctx.guard()?;
@@ -140,7 +141,7 @@ fn list_new(
     held: &[(&String, Hold)],
 ) -> std::io::Result<()> {
     if !new.is_empty() {
-        writeln!(out, "\nnew files, which `dot sync` captures:")?;
+        writeln!(out, "\nnew files, which `{} sync` captures:", name::bin())?;
         for key in new {
             writeln!(out, "  {key}")?;
         }
@@ -148,7 +149,8 @@ fn list_new(
     if !held.is_empty() {
         writeln!(
             out,
-            "\nheld back; `dot add <file>` keeps one, or add an [ignore] pattern to .dotman.toml:"
+            "\nheld back; `{} add <file>` keeps one, or add an [ignore] pattern to .dotman.toml:",
+            name::bin()
         )?;
         for (key, hold) in held {
             writeln!(out, "  {key} ({})", hold.reason())?;

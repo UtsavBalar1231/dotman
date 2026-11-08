@@ -87,9 +87,9 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p stage dist
-          cp "target/${TARGET}/release/dot" LICENSE README.md stage/
-          chmod 0755 stage/dot
-          tar -czf "dist/dotman-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C stage dot LICENSE README.md
+          cp "target/${TARGET}/release/dotman" LICENSE README.md stage/
+          chmod 0755 stage/dotman
+          tar -czf "dist/dotman-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C stage dotman LICENSE README.md
 
       - name: Upload tarball
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0

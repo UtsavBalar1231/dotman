@@ -9,7 +9,7 @@ REPO_URL="https://github.com/UtsavBalar1231/dotman"
 API_URL="https://api.github.com/repos/UtsavBalar1231/dotman"
 DOWNLOAD_BASE="${DOTMAN_INSTALL_BASE_URL:-}"
 FALLBACK_VERSION="0.1.0"
-BINARY_NAME="dot"
+BINARY_NAME="dotman"
 INSTALL_DIR="${DOTMAN_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors for output
@@ -174,6 +174,22 @@ install_from_github() {
 	log_success "dotman installed to $binary_path"
 }
 
+# `dot` is only ever an alias. Graphviz or another tool may own the name, and the install directory
+# may not be on PATH yet, so a file already there counts too: nothing is replaced or shadowed.
+add_dot_alias() {
+	local alias_path="$INSTALL_DIR/dot"
+	if [[ "$(readlink "$alias_path" 2>/dev/null || true)" == "$BINARY_NAME" ]]; then
+		return 0
+	fi
+	if command_exists dot || [[ -e "$alias_path" || -L "$alias_path" ]]; then
+		log_info "dot is already taken, so dotman is the command"
+	elif ln -s "$BINARY_NAME" "$alias_path" 2>/dev/null; then
+		log_info "dot is an alias for dotman"
+	else
+		log_info "could not add the dot alias, so dotman is the command"
+	fi
+}
+
 # Add to PATH
 add_to_path() {
 	local shell_rc
@@ -242,19 +258,19 @@ ${BOLD}SHELL COMPLETION SETUP:${NC}
 Enable shell completions for better usability:
 
 ${YELLOW}Bash:${NC}
-  echo 'eval "\$(dot completion bash)"' >> ~/.bashrc
+  echo 'eval "\$(dotman completion bash)"' >> ~/.bashrc
 
 ${YELLOW}Zsh:${NC}
-  echo 'eval "\$(dot completion zsh)"' >> ~/.zshrc
+  echo 'eval "\$(dotman completion zsh)"' >> ~/.zshrc
 
 ${YELLOW}Fish:${NC}
-  dot completion fish | source
+  dotman completion fish | source
   # Or permanently:
-  dot completion fish > ~/.config/fish/completions/dot.fish
+  dotman completion fish > ~/.config/fish/completions/dotman.fish
 
 ${YELLOW}PowerShell:${NC}
   Add to your profile:
-  Invoke-Expression (& dot completion powershell)
+  Invoke-Expression (& dotman completion powershell)
 
 EOF
 }
@@ -269,6 +285,7 @@ main() {
 
 	if install_from_github "$platform"; then
 		log_success "Installed from GitHub releases"
+		add_dot_alias
 		add_to_path
 	else
 		log_error "All installation methods failed"
@@ -321,6 +338,7 @@ EOF
 --force-github)
 	platform=$(detect_platform)
 	install_from_github "$platform"
+	add_dot_alias
 	add_to_path
 	verify_installation
 	show_completion_setup

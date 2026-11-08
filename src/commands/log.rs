@@ -1,4 +1,4 @@
-//! `dot log`: one line per commit.
+//! `dotman log`: one line per commit.
 
 use crate::cli::LogArgs;
 use crate::context::Context;
@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Runs `dot log`. Takes no lock and writes nothing.
+/// Runs `dotman log`. Takes no lock and writes nothing.
 pub fn run(args: &LogArgs) -> Result<()> {
     let ctx = Context::resolve("log")?;
     ctx.guard()?;
@@ -37,7 +37,10 @@ pub fn run(args: &LogArgs) -> Result<()> {
         .context("cannot write to stdout")?;
     }
     if ctx.git.is_shallow()? {
-        output::info("history is shallow; run `dot git fetch --unshallow` for the full log");
+        output::info(&format!(
+            "history is shallow; run `{} git fetch --unshallow` for the full log",
+            crate::name::bin()
+        ));
     }
     Ok(())
 }

@@ -3,6 +3,7 @@
 
 use super::helper::Plan;
 use crate::engine::write::backup_run_dir;
+use crate::name;
 use crate::paths::{create_private_dir, write_atomic};
 use crate::proc;
 use crate::sys;
@@ -24,7 +25,7 @@ pub enum Tool {
     Sudo,
     Doas,
     Run0,
-    /// dot already runs as root, so the helper starts without an escalator.
+    /// dotman already runs as root, so the helper starts without an escalator.
     Root,
 }
 
@@ -39,22 +40,31 @@ impl Tool {
         }
     }
 
-    const fn hint(self, interactive: bool) -> &'static str {
+    fn hint(self, interactive: bool) -> String {
+        let bin = name::bin();
         match (self, interactive) {
-            (Self::None, _) => "system-write ran unprivileged, as `escalate = \"none\"` asks",
-            (Self::Root, _) => "dot runs as root, so system-write ran without an escalator",
-            (Self::Sudo, true) => "check that your user may run commands with sudo; see sudoers(5)",
-            (Self::Sudo, false) => {
-                "sudo -n cannot ask for a password; run `sudo -v` in this terminal first, or run dot interactively"
+            (Self::None, _) => {
+                "system-write ran unprivileged, as `escalate = \"none\"` asks".into()
             }
-            (Self::Doas, true) => "check that doas.conf(5) permits your user",
-            (Self::Doas, false) => "doas -n cannot ask for a password; run dot interactively",
+            (Self::Root, _) => {
+                format!("{bin} runs as root, so system-write ran without an escalator")
+            }
+            (Self::Sudo, true) => {
+                "check that your user may run commands with sudo; see sudoers(5)".into()
+            }
+            (Self::Sudo, false) => format!(
+                "sudo -n cannot ask for a password; run `sudo -v` in this terminal first, or run {bin} interactively"
+            ),
+            (Self::Doas, true) => "check that doas.conf(5) permits your user".into(),
+            (Self::Doas, false) => {
+                format!("doas -n cannot ask for a password; run {bin} interactively")
+            }
             (Self::Run0, true) => {
-                "run0 asks polkit; check that a polkit authentication agent is running"
+                "run0 asks polkit; check that a polkit authentication agent is running".into()
             }
-            (Self::Run0, false) => {
-                "run0 --no-ask-password cannot ask polkit for a password; run dot interactively"
-            }
+            (Self::Run0, false) => format!(
+                "run0 --no-ask-password cannot ask polkit for a password; run {bin} interactively"
+            ),
         }
     }
 }
@@ -158,7 +168,7 @@ impl Escalator {
     pub fn run(&self, state_dir: &Path, plan: &Plan, interactive: bool) -> Result<Ran> {
         let exe = std::env::current_exe()
             .and_then(fs::canonicalize)
-            .context("cannot find the dot executable")?;
+            .with_context(|| format!("cannot find the {} executable", name::bin()))?;
         let (_dir, file) = write_plan(state_dir, plan)?;
         let steps = self.steps(&exe, &file, interactive);
         let Some(((program, args), checks)) = steps.split_last() else {
@@ -195,10 +205,10 @@ impl Escalator {
 pub struct Ran {
     pub stdout: String,
     pub status: ExitStatus,
-    pub hint: &'static str,
+    pub hint: String,
 }
 
-// Ctrl-C at a password prompt reaches dot too; it has to outlive the child to remove the plan.
+// Ctrl-C at a password prompt reaches dotman too; it has to outlive the child to remove the plan.
 fn wait_ignoring_signals(child: std::process::Child) -> Result<std::process::Output> {
     let _ignored = sys::ignore_signals(&[SIGINT, SIGQUIT, SIGHUP, SIGTERM]);
     child
@@ -240,7 +250,11 @@ mod tests {
             program: (tool != Tool::None).then(|| PathBuf::from(tool.name())),
         };
         escalator
-            .steps(Path::new("/x/dot"), Path::new("/p/plan.json"), interactive)
+            .steps(
+                Path::new("/x/dotman"),
+                Path::new("/p/plan.json"),
+                interactive,
+            )
             .into_iter()
             .map(|(program, args)| {
                 std::iter::once(program.display().to_string())
@@ -252,7 +266,7 @@ mod tests {
 
     #[test]
     fn each_tool_gets_its_own_flags() {
-        let run = "/x/dot system-write --plan /p/plan.json";
+        let run = "/x/dotman system-write --plan /p/plan.json";
         let shown = |tool, interactive| -> Vec<String> {
             argv(tool, interactive)
                 .iter()
@@ -297,11 +311,11 @@ mod tests {
         for setting in [None, Some("sudo"), Some("none"), Some("pkexec")] {
             let escalator = Escalator::choose(setting, config, 0).unwrap();
             assert_eq!(escalator.tool, Tool::Root, "{setting:?}");
-            let steps = escalator.steps(Path::new("/x/dot"), Path::new("/p/plan.json"), false);
+            let steps = escalator.steps(Path::new("/x/dotman"), Path::new("/p/plan.json"), false);
             let [(program, args)] = steps.as_slice() else {
                 unreachable!("one step: {steps:?}");
             };
-            assert_eq!(program, Path::new("/x/dot"));
+            assert_eq!(program, Path::new("/x/dotman"));
             assert_eq!(args, &["system-write", "--plan", "/p/plan.json"]);
             let command = escalator.command(program, args);
             for name in ESCALATOR_VARS {
@@ -312,7 +326,7 @@ mod tests {
             }
         }
         let user = Escalator::choose(Some("none"), config, 1000).unwrap();
-        let command = user.command(Path::new("/x/dot"), &[]);
+        let command = user.command(Path::new("/x/dotman"), &[]);
         assert!(
             !command
                 .get_envs()

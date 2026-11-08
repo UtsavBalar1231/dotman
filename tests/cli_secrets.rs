@@ -1,4 +1,4 @@
-//! Encrypted `{age}` files and `dot key`, through the binary. Tests that need an age CLI print why
+//! Encrypted `{age}` files and `dotman key`, through the binary. Tests that need an age CLI print why
 //! they skip when neither age nor rage is on PATH; `DOTMAN_REQUIRE_AGE=1` makes that a failure.
 
 mod common;
@@ -659,7 +659,7 @@ fn edit_of_an_encrypted_file_points_at_the_file_itself() {
     let out = env.run_with(&[("EDITOR", editor.to_str().unwrap())], &["edit", HOSTS]);
     let err = exits(&out, 1);
     assert!(
-        err.contains("edit `~/.config/gh/hosts.yml` directly, then `dot sync`"),
+        err.contains("edit `~/.config/gh/hosts.yml` directly, then `dotman sync`"),
         "{err}"
     );
     assert!(!opened.exists());
@@ -699,7 +699,7 @@ fn restore_decrypts_an_earlier_version_and_leaves_the_repo_alone() {
     let b = a.second_device();
     exits(&b.run(&["init", &b.remote_url()]), 0);
     let err = exits(&b.run(&["restore", HOSTS, "--from", "HEAD~1"]), 1);
-    assert!(err.contains("dot key import"), "{err}");
+    assert!(err.contains("dotman key import"), "{err}");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! `dot import` and `dot import --overlay` on git trees laid out relative to `$HOME`. Every
+//! `dotman import` and `dotman import --overlay` on git trees laid out relative to `$HOME`. Every
 //! fixture is built with git commands, and every test checks that the source is untouched.
 
 mod common;
@@ -114,11 +114,14 @@ fn yadm_alternates_become_one_commit_and_the_accounting_holds() {
     );
     assert!(err.contains("never applied"), "{err}");
     assert!(
-        err.contains("dot git show 'HEAD~1:host.conf##h.my.host'"),
+        err.contains("dotman git show 'HEAD~1:host.conf##h.my.host'"),
         "{err}"
     );
     assert!(err.contains("other yadm machines"), "{err}");
-    assert!(err.contains("run `dot status`, then `dot apply`"), "{err}");
+    assert!(
+        err.contains("run `dotman status`, then `dotman apply`"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -187,7 +190,7 @@ fn yadm_leftovers_in_home_are_listed_and_left_alone() {
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(3), "{err}");
     assert!(err.contains(".zshrc -> .zshrc##o.Linux"), "{err}");
-    assert!(err.contains("dot import --swap"), "{err}");
+    assert!(err.contains("dotman import --swap"), "{err}");
     assert!(err.contains("can be removed once yadm is gone"), "{err}");
     assert_eq!(tree_checksum(&env.home()), home_before);
 }
@@ -202,7 +205,7 @@ fn yadm_encrypt_patterns_and_bootstrap_are_reported() {
     fs::write(dir.join("bootstrap"), "#!/bin/sh\n").expect("bootstrap");
     let err = stderr(&env.run(&["import"]));
     assert!(err.contains(".ssh/id_*, .gnupg/**"), "{err}");
-    assert!(err.contains("dot add --encrypt"), "{err}");
+    assert!(err.contains("dotman add --encrypt"), "{err}");
     assert!(err.contains("no run-once scripts"), "{err}");
 }
 
@@ -388,11 +391,11 @@ fn several_candidates_are_listed_with_their_commands_and_nothing_is_picked() {
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(3), "{err}");
     assert!(
-        err.contains(&format!("dot import {}", yadm_repo(&env).display())),
+        err.contains(&format!("dotman import {}", yadm_repo(&env).display())),
         "{err}"
     );
     assert!(
-        err.contains(&format!("dot import {}", dir.display())),
+        err.contains(&format!("dotman import {}", dir.display())),
         "{err}"
     );
     let after = env.four_trees();
@@ -441,11 +444,11 @@ fn two_vcsh_repos_are_listed_without_a_source() {
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(3), "{err}");
     assert!(
-        err.contains(&format!("dot import {}", zsh.display())),
+        err.contains(&format!("dotman import {}", zsh.display())),
         "{err}"
     );
     assert!(
-        err.contains(&format!("dot import {}", vim.display())),
+        err.contains(&format!("dotman import {}", vim.display())),
         "{err}"
     );
 }
@@ -458,7 +461,7 @@ fn another_vcsh_repo_is_reported_and_added_by_overlay_as_one_commit() {
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_eq!(accounting(&err), (2, 2, 0), "{err}");
-    let command = format!("dot import --overlay {}", vim.display());
+    let command = format!("dotman import --overlay {}", vim.display());
     assert!(err.contains(&command), "{err}");
 
     let repo = env.repo();
@@ -574,7 +577,7 @@ fn a_local_path_import_has_no_origin_and_reports_the_sources_own() {
     source.seal();
     let err = env.ok(&["import", &source.to_string_lossy()]);
     assert!(err.contains("https://example.invalid/dots.git"), "{err}");
-    assert!(err.contains("dot init --remote"), "{err}");
+    assert!(err.contains("dotman init --remote"), "{err}");
     let remotes = git_in(&env, &env.repo(), &["remote"]);
     assert_eq!(remotes.trim(), "");
 }
@@ -586,7 +589,7 @@ fn a_url_import_keeps_the_url_as_origin() {
     let source = bare(&env, &work, &env.root().join("src.git"), None);
     let url = format!("file://{}", source.display());
     let err = env.ok(&["import", &url]);
-    assert!(err.contains("pushed by the next `dot sync`"), "{err}");
+    assert!(err.contains("pushed by the next `dotman sync`"), "{err}");
     assert!(err.contains("other yadm machines"), "{err}");
     let origin = git_in(&env, &env.repo(), &["config", "remote.origin.url"]);
     assert_eq!(origin.trim(), url);

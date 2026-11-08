@@ -1,4 +1,4 @@
-//! `dot import` on symlink farms, and `dot import --swap`. Every farm is built with `mkdir` and
+//! `dotman import` on symlink farms, and `dotman import --swap`. Every farm is built with `mkdir` and
 //! `ln -s` equivalents in the harness's temp home, and every adoption test checks that the farm is
 //! untouched.
 
@@ -152,7 +152,7 @@ fn a_stow_farm_is_found_and_every_file_is_imported_with_home_unchanged() {
             farm_dir(&env, "dotfiles").display()
         )
     );
-    assert!(err.contains("dot import --swap"), "{err}");
+    assert!(err.contains("dotman import --swap"), "{err}");
     assert!(err.contains("stow -D"), "{err}");
     assert!(
         err.contains("files: 2"),
@@ -541,7 +541,7 @@ fn two_farms_exit_3_and_name_the_command_for_each() {
     let (out, err) = run_import(&env, &[]);
     assert_eq!(out.status.code(), Some(3), "{err}");
     for name in ["one", "two"] {
-        let command = format!("dot import {}", farm_dir(&env, name).display());
+        let command = format!("dotman import {}", farm_dir(&env, name).display());
         assert!(err.contains(&command), "{command} missing from:\n{err}");
     }
     assert!(err.contains("symlink farm"), "{err}");

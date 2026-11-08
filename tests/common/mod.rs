@@ -222,7 +222,7 @@ impl TestEnv {
     }
 
     pub fn dot(&self) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("dot");
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("dotman");
         cmd.env_clear();
         for (k, v) in self.vars() {
             cmd.env(k, v);
@@ -231,9 +231,15 @@ impl TestEnv {
         cmd
     }
 
-    /// `dot` as a std command, for what `assert_cmd` does not expose, such as a process group.
+    /// `dotman` as a std command, for what `assert_cmd` does not expose, such as a process group.
     pub fn dot_process(&self) -> std::process::Command {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dot"));
+        self.process_for(Path::new(env!("CARGO_BIN_EXE_dotman")))
+    }
+
+    /// The program at `exe` with the harness environment. A link or copy of the binary under
+    /// another name runs as that name.
+    pub fn process_for(&self, exe: &Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new(exe);
         cmd.env_clear();
         for (k, v) in self.vars() {
             cmd.env(k, v);
@@ -925,6 +931,57 @@ pub const BOOTSTRAP_BASHRC: &[u8] = b"export EDITOR=vi\n";
 
 const SYSTEM_DIRS: [&str; 2] = ["/usr/bin", "/bin"];
 
+/// The tools `install.sh` and the `dotman` it starts need, besides `dot`.
+pub const INSTALLER_TOOLS: &[&str] = &[
+    "sh",
+    "bash",
+    "dirname",
+    "uname",
+    "mktemp",
+    "curl",
+    "wget",
+    "awk",
+    "tar",
+    "gzip",
+    "cp",
+    "mv",
+    "rm",
+    "mkdir",
+    "chmod",
+    "ln",
+    "readlink",
+    "id",
+    "cat",
+    "tr",
+    "grep",
+    "head",
+    "cut",
+    "sed",
+    "sha256sum",
+    "shasum",
+    "git",
+];
+
+/// A directory under `dir` holding links to `tools` and nothing else. Hosts ship a `dot` of their
+/// own (Graphviz), and a system directory cannot hide it, so a test of "no `dot` on `PATH`" runs
+/// with only this directory.
+pub fn toolbox(dir: &Path, tools: &[&str]) -> R<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for tool in tools {
+        let found = std::env::split_paths(&path)
+            .chain(SYSTEM_DIRS.iter().map(PathBuf::from))
+            .map(|d| d.join(tool))
+            .find(|candidate| candidate.is_file());
+        if let Some(found) = found
+            && fs::symlink_metadata(dir.join(tool)).is_err()
+        {
+            unix_symlink(found, dir.join(tool))?;
+        }
+    }
+    Ok(dir.to_path_buf())
+}
+
 /// stdout and stderr of `out`, in one text.
 pub fn text(out: &Output) -> String {
     format!(
@@ -976,7 +1033,7 @@ pub fn write_exe(path: &Path, body: &str) -> R {
 }
 
 /// The release directory a mirror would serve, built once per test run: a tarball whose top level
-/// holds the built `dot`, and `checksums.txt` with a line for another architecture beside it.
+/// holds the built `dotman`, and `checksums.txt` with a line for another architecture beside it.
 pub fn release() -> R<PathBuf> {
     static RELEASE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     RELEASE
@@ -997,7 +1054,7 @@ fn build_release() -> R<PathBuf> {
     }
     let pkg = dir.join("pkg");
     fs::create_dir_all(&pkg)?;
-    fs::copy(env!("CARGO_BIN_EXE_dot"), pkg.join("dot"))?;
+    fs::copy(env!("CARGO_BIN_EXE_dotman"), pkg.join("dotman"))?;
     let name = archive_name();
     check(
         StdCommand::new("tar")
@@ -1006,7 +1063,7 @@ fn build_release() -> R<PathBuf> {
             .arg(dir.join(&name))
             .arg("-C")
             .arg(&pkg)
-            .arg("dot"),
+            .arg("dotman"),
     )?;
     let other = "0".repeat(64);
     fs::write(
@@ -1059,9 +1116,9 @@ impl Setup {
         self.machine.home()
     }
 
-    /// Whether the script put a `dot` in `~/.local/bin`.
+    /// Whether the script put a `dotman` in `~/.local/bin`.
     pub fn installed(&self) -> bool {
-        self.home().join(".local/bin/dot").exists()
+        self.home().join(".local/bin/dotman").exists()
     }
 
     /// Whether `~/.bashrc` holds what the repo holds.
@@ -1076,7 +1133,12 @@ impl Setup {
             .map(|dir| dir.to_path_buf())
             .chain(SYSTEM_DIRS.iter().map(PathBuf::from))
             .collect();
-        let mut cmd = self.machine.command_with_path("/bin/sh", &dirs);
+        self.shell_on(base, &dirs)
+    }
+
+    /// `sh` with `PATH` set to exactly `dirs`, and no script yet.
+    pub fn shell_on(&self, base: &Path, dirs: &[PathBuf]) -> StdCommand {
+        let mut cmd = self.machine.command_with_path("/bin/sh", dirs);
         cmd.env(
             "DOTMAN_BOOTSTRAP_BASE_URL",
             format!("file://{}", base.display()),

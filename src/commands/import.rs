@@ -1,4 +1,4 @@
-//! `dot import`: convert another setup into the repo, or overlay one onto it.
+//! `dotman import`: convert another setup into the repo, or overlay one onto it.
 
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
@@ -8,7 +8,7 @@ use crate::lock::Lock;
 use crate::remote;
 use anyhow::Result;
 
-/// Runs `dot import`.
+/// Runs `dotman import`.
 pub fn run(args: &ImportArgs) -> Result<Outcome> {
     let ctx = Context::resolve("import")?;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;

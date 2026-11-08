@@ -1,4 +1,4 @@
-//! `dot add`: copy files and symlinks into the repo worktree and record their modes.
+//! `dotman add`: copy files and symlinks into the repo worktree and record their modes.
 //!
 //! Planning reads `$HOME` and changes nothing, so a refused path leaves the repo untouched.
 
@@ -10,6 +10,7 @@ use crate::engine::{
     Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
 };
 use crate::lock::Lock;
+use crate::name;
 use crate::output;
 use crate::paths::{
     absolute_input, derive_key, find_collisions, refuse_non_nfc, validate_key, write_atomic,
@@ -119,7 +120,7 @@ impl Ignore {
     }
 }
 
-/// Runs `dot add`.
+/// Runs `dotman add`.
 pub fn run(args: &AddArgs) -> Result<Outcome> {
     let ctx = Context::resolve("add")?;
     let dry_run = args.dry_run;
@@ -157,7 +158,8 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     };
     for key in &held {
         output::warning(&format!(
-            "held {key}: name matches [guard] secret_names and the remote is public; `dot add --encrypt {key}` stores it encrypted, `--allow-plain` stores it as it is"
+            "held {key}: name matches [guard] secret_names and the remote is public; `{} add --encrypt {key}` stores it encrypted, `--allow-plain` stores it as it is",
+            name::bin()
         ));
     }
 
@@ -287,7 +289,7 @@ impl Targets<'_> {
                 bail!("{key} is a symlink; --encrypt takes regular files");
             }
             if secrets::recipient_set(&repo_config.age.recipients).is_empty() {
-                bail!(secrets::NO_RECIPIENTS);
+                bail!(secrets::no_recipients());
             }
             ctx.age().require_cli()?;
             for key in plan.files.keys() {
@@ -353,7 +355,8 @@ impl Targets<'_> {
         match self.sources.select(key, self.identity) {
             Selection::None => Ok(key.to_owned()),
             Selection::Winner(source) if self.sources.flag(key, source) == Flag::Tmpl => bail!(
-                "{source} is a template, so the file cannot replace it; edit the template with `dot edit {key}`"
+                "{source} is a template, so the file cannot replace it; edit the template with `{} edit {key}`",
+                name::bin()
             ),
             Selection::Winner(source) => Ok(source.to_owned()),
             Selection::Ambiguous(tied) => bail!(
@@ -401,7 +404,8 @@ impl Targets<'_> {
             }
             repo_config.modes.remove(plain);
             output::warning(&format!(
-                "{plain} held {key} in plain text and is removed, but git history still has it; to purge it, rewrite the history with a tool such as git filter-repo, run in the repo through `dot git`"
+                "{plain} held {key} in plain text and is removed, but git history still has it; to purge it, rewrite the history with a tool such as git filter-repo, run in the repo through `{} git`",
+                name::bin()
             ));
         }
         if self.applies(key, &source, replaced.as_deref()) {
@@ -454,7 +458,7 @@ fn shown(key: &str, source: &str) -> String {
     }
 }
 
-/// Why a new file waits for an explicit `dot add`.
+/// Why a new file waits for an explicit `dotman add`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Hold {
     Large,
@@ -1009,7 +1013,7 @@ struct Planned {
     package_owned: bool,
 }
 
-/// `dot add --system`: copies readable regular files outside `$HOME` into `.dotman/system`.
+/// `dotman add --system`: copies readable regular files outside `$HOME` into `.dotman/system`.
 /// Exits 3 without writing anything when a root is missing and cannot be asked about.
 fn add_system(ctx: &Context, args: &AddArgs) -> Result<Outcome> {
     if args.encrypt {

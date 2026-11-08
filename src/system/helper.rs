@@ -1,4 +1,4 @@
-//! `dot system-write --plan <file>`, the only code that runs as root.
+//! `dotman system-write --plan <file>`, the only code that runs as root.
 //!
 //! The plan and every file of the invoking user are treated as hostile. The helper takes nothing
 //! from the caller's environment: the roots come from the user's own machine config, every entry
@@ -137,7 +137,7 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Runs `dot system-write --plan <file>`.
+/// Runs `dotman system-write --plan <file>`.
 pub fn run(plan_path: &Path) -> Result<()> {
     let euid = sys::geteuid();
     let invoking = invoking_user(

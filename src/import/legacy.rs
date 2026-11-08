@@ -14,7 +14,7 @@ use super::{
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::add::ensure_worktree_parents;
-use crate::commands::sync::IDENTITY_FIX;
+use crate::commands::sync::identity_fix;
 use crate::context::Context;
 use crate::engine::{Node, read_node, recorded_mode};
 use crate::output;
@@ -260,7 +260,7 @@ fn strip_home<'a>(source: &'a str, homes: &[&Path]) -> Option<&'a str> {
     (!user.is_empty()).then_some(below)
 }
 
-/// The repo key for a stored key: a home prefix is stripped, then the rules `dot add` applies.
+/// The repo key for a stored key: a home prefix is stripped, then the rules `dotman add` applies.
 /// A `.git` component is refused at any depth, because git cannot store one.
 fn target_key(source: &str, homes: &[&Path]) -> Result<String, Refusal> {
     let key = if source.starts_with('/') {
@@ -315,7 +315,7 @@ struct Selection {
 }
 
 /// Splits a snapshot into the files that can be imported and the keys that cannot. Two keys that
-/// reach one path keep the one stored relative, which is what `dot add` wrote. A file that is also
+/// reach one path keep the one stored relative, which is what `dotman add` wrote. A file that is also
 /// a directory in the same snapshot is dropped, because fast-import would silently replace it.
 fn select(snapshot: &Snapshot, homes: &[&Path], has_object: &dyn Fn(&str) -> bool) -> Selection {
     let mut dropped = Vec::new();
@@ -659,7 +659,7 @@ pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Ou
     ctx.git.fast_import(stream)?;
     ctx.git.checkout_head()?;
     output::success(&format!("imported {commits} into {}", repo.display()));
-    output::info("next: run `dot status`, then `dot apply`");
+    super::print_next_steps();
     Ok(plan.report.outcome())
 }
 
@@ -866,7 +866,7 @@ pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<O
     } = found;
     let changed = !fixes.is_empty() || !files.is_empty();
     if changed && !ctx.git.identity_configured()? {
-        bail!(IDENTITY_FIX);
+        bail!(identity_fix());
     }
     report.print();
     let summary = format!(
@@ -909,7 +909,7 @@ pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<O
     ctx.git.stage_all()?;
     if ctx.git.commit(OVERLAY_MESSAGE)?.is_some() {
         output::success(&format!("committed: {OVERLAY_MESSAGE} ({summary})"));
-        output::info("next: run `dot status`, then `dot apply`");
+        super::print_next_steps();
     } else {
         output::info("nothing to overlay; no commit made");
     }

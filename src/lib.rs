@@ -16,6 +16,7 @@ pub mod hooks;
 pub mod identity;
 pub mod import;
 pub mod lock;
+pub mod name;
 pub mod output;
 pub mod paths;
 pub mod proc;

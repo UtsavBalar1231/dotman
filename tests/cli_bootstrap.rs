@@ -1,28 +1,28 @@
-//! The `install.sh` that `dot init` and `dot import` write, and the script run the way a container
+//! The `install.sh` that `dotman init` and `dotman import` write, and the script run the way a container
 //! platform runs it: `sh install.sh` in a depth-1 clone, with a PATH that has no dotman.
 
 mod common;
 
 use common::{
-    BOOTSTRAP_BASHRC as BASHRC, R, Setup, TestEnv, archive_name, curl_available, release, text,
-    write_exe,
+    BOOTSTRAP_BASHRC as BASHRC, INSTALLER_TOOLS, R, Setup, TestEnv, archive_name, curl_available,
+    release, text, toolbox, write_exe,
 };
 use dotman::VERSION;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use xxhash_rust::xxh3::xxh3_128;
 
 const SCRIPT: &str = include_str!("../src/bootstrap/install.sh.in");
 
-/// A `dot` that answers `--version` as `version` and, for anything else, logs its arguments and
+/// A `dotman` that answers `--version` as `version` and, for anything else, logs its arguments and
 /// environment to `log` and exits `code`.
-fn fake_dot(dir: &Path, version: &str, code: i32, log: &Path) -> R {
+fn fake_dotman(dir: &Path, version: &str, code: i32, log: &Path) -> R {
     write_exe(
-        &dir.join("dot"),
+        &dir.join("dotman"),
         &format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'dot {version}';;\n  *) echo \"$*\" > '{log}'\n     echo \"${{DOTMAN_NON_INTERACTIVE:-unset}} ${{DOTMAN_ALLOW_ROOT:-unset}}\" >> '{log}'\n     exit {code};;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'dotman {version}';;\n  *) echo \"$*\" > '{log}'\n     echo \"${{DOTMAN_NON_INTERACTIVE:-unset}} ${{DOTMAN_ALLOW_ROOT:-unset}}\" >> '{log}'\n     exit {code};;\nesac\n",
             log = log.display()
         ),
     )
@@ -36,12 +36,14 @@ fn the_script_installs_the_release_and_applies_the_repo() -> R {
     let setup = Setup::new()?;
     let out = setup.run(&[])?;
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let dot = setup.home().join(".local/bin/dot");
-    assert_eq!(fs::metadata(&dot)?.permissions().mode() & 0o777, 0o755);
+    let dotman = setup.home().join(".local/bin/dotman");
+    assert_eq!(fs::metadata(&dotman)?.permissions().mode() & 0o777, 0o755);
     assert!(setup.applied(), "{}", text(&out));
     assert!(!setup.home().join("install.sh").exists());
-    let leftovers: Vec<_> = fs::read_dir(setup.home().join(".local/bin"))?.collect();
-    assert_eq!(leftovers.len(), 1, "a temp copy was left behind");
+    for entry in fs::read_dir(setup.home().join(".local/bin"))? {
+        let name = entry?.file_name();
+        assert!(name == "dotman" || name == "dot", "left behind: {name:?}");
+    }
     Ok(())
 }
 
@@ -76,7 +78,7 @@ fn a_dotman_of_the_pinned_version_on_path_is_reused_without_a_download() -> R {
     let setup = Setup::new()?;
     let bin = setup.stubs("bin");
     fs::create_dir_all(&bin)?;
-    symlink(release()?.join("pkg/dot"), bin.join("dot"))?;
+    symlink(release()?.join("pkg/dotman"), bin.join("dotman"))?;
     let out = setup.command(&setup.empty_base()?, &[&bin]).output()?;
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert!(!setup.installed());
@@ -85,11 +87,41 @@ fn a_dotman_of_the_pinned_version_on_path_is_reused_without_a_download() -> R {
 }
 
 #[test]
-fn a_dot_that_is_not_dotman_or_is_older_is_not_reused() -> R {
+fn a_dotman_that_is_foreign_or_older_is_not_reused() -> R {
     if !curl_available() {
         return Ok(());
     }
     let log = |setup: &Setup| setup.machine.root().join("fake.log");
+    let setup = Setup::new()?;
+    let foreign = setup.stubs("foreign");
+    write_exe(
+        &foreign.join("dotman"),
+        "#!/bin/sh\necho 'dotman - some other tool 14.0.0'\nexit 0\n",
+    )?;
+    let out = setup.run(&[&foreign])?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(setup.installed(), "the download did not happen");
+    assert!(setup.applied());
+
+    let setup = Setup::new()?;
+    let older = setup.stubs("older");
+    fake_dotman(&older, "0.0.0", 7, &log(&setup))?;
+    let out = setup.run(&[&older])?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(setup.installed());
+    assert!(!log(&setup).exists(), "the older dotman ran init");
+    Ok(())
+}
+
+fn dot_alias(setup: &Setup) -> PathBuf {
+    setup.home().join(".local/bin/dot")
+}
+
+#[test]
+fn a_dot_on_path_is_never_shadowed() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
     let setup = Setup::new()?;
     let graphviz = setup.stubs("graphviz");
     write_exe(
@@ -98,28 +130,78 @@ fn a_dot_that_is_not_dotman_or_is_older_is_not_reused() -> R {
     )?;
     let out = setup.run(&[&graphviz])?;
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    assert!(setup.installed(), "the download did not happen");
+    assert!(setup.installed());
     assert!(setup.applied());
+    assert!(
+        fs::symlink_metadata(dot_alias(&setup)).is_err(),
+        "a dot alias was created"
+    );
+    assert!(
+        text(&out).contains("dotman is the command"),
+        "{}",
+        text(&out)
+    );
+    Ok(())
+}
 
+/// Runs the script with a `PATH` of only the tools it needs, so no `dotman` can be found.
+fn run_without_dot(setup: &Setup) -> R<Output> {
+    let tools = toolbox(&setup.machine.root().join("tools"), INSTALLER_TOOLS)?;
+    Ok(setup
+        .shell_on(&release()?, &[tools])
+        .arg(setup.dotfiles.join("install.sh"))
+        .output()?)
+}
+
+#[test]
+fn with_no_dot_on_path_dot_becomes_a_symlink_to_dotman() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
     let setup = Setup::new()?;
-    let older = setup.stubs("older");
-    fake_dot(&older, "0.0.0", 7, &log(&setup))?;
-    let out = setup.run(&[&older])?;
+    let out = run_without_dot(&setup)?;
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert!(setup.installed());
-    assert!(!log(&setup).exists(), "the older dot ran init");
+    assert!(setup.applied(), "{}", text(&out));
+    assert_eq!(fs::read_link(dot_alias(&setup))?, Path::new("dotman"));
+    let said = String::from_utf8(
+        Command::new(dot_alias(&setup))
+            .arg("--version")
+            .output()?
+            .stdout,
+    )?;
+    assert_eq!(said, format!("dotman {VERSION}\n"));
+
+    let again = run_without_dot(&setup)?;
+    assert_eq!(again.status.code(), Some(0), "{}", text(&again));
+    assert_eq!(fs::read_link(dot_alias(&setup))?, Path::new("dotman"));
     Ok(())
 }
 
 #[test]
-fn dot_gets_the_directory_and_the_environment_and_exit_3_is_success() -> R {
+fn a_file_named_dot_that_path_cannot_see_is_left_alone() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    fs::create_dir_all(setup.home().join(".local/bin"))?;
+    fs::write(dot_alias(&setup), "mine\n")?;
+    let out = run_without_dot(&setup)?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(setup.installed());
+    assert_eq!(fs::read_to_string(dot_alias(&setup))?, "mine\n");
+    Ok(())
+}
+
+#[test]
+fn dotman_gets_the_directory_and_the_environment_and_exit_3_is_success() -> R {
     if !curl_available() {
         return Ok(());
     }
     let setup = Setup::new()?;
     let log = setup.machine.root().join("fake.log");
     let bin = setup.stubs("bin");
-    fake_dot(&bin, VERSION, 3, &log)?;
+    fake_dotman(&bin, VERSION, 3, &log)?;
     let root = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim() == "0";
     let allow_root = if root { "1" } else { "unset" };
     let dir = setup.dotfiles.display();
@@ -145,7 +227,7 @@ fn dot_gets_the_directory_and_the_environment_and_exit_3_is_success() -> R {
         format!("init {dir} --take-repo --approve-hooks\n1 {allow_root}\n")
     );
 
-    fake_dot(&bin, VERSION, 7, &log)?;
+    fake_dotman(&bin, VERSION, 7, &log)?;
     let out = setup.command(&setup.empty_base()?, &[&bin]).output()?;
     assert_eq!(out.status.code(), Some(7), "{}", text(&out));
     Ok(())
@@ -180,7 +262,7 @@ fn macos_prints_the_install_command_and_exits_0() -> R {
     assert!(said.contains(&format!("releases/tag/v{VERSION}")), "{said}");
     assert!(
         said.contains(&format!(
-            "dot init \"{}\" --take-repo",
+            "dotman init \"{}\" --take-repo",
             setup.dotfiles.display()
         )),
         "{said}"
@@ -214,7 +296,7 @@ fn header_of(path: &Path) -> R<String> {
         .to_owned())
 }
 
-/// Rewrites the script as an older `dot` wrote it: the pinned version changed everywhere, and
+/// Rewrites the script as an older `dotman` wrote it: the pinned version changed everywhere, and
 /// the hash recomputed, so it still counts as unedited.
 fn pin_old(path: &Path) -> R {
     let old = fs::read_to_string(path)?.replace(VERSION, "0.0.0");
@@ -223,7 +305,7 @@ fn pin_old(path: &Path) -> R {
     let hash = format!("{:032x}", xxh3_128(format!("{shebang}\n{body}").as_bytes()));
     fs::write(
         path,
-        format!("{shebang}\n# generated by dot 0.0.0 sha:{hash}\n{body}"),
+        format!("{shebang}\n# generated by dotman 0.0.0 sha:{hash}\n{body}"),
     )?;
     Ok(())
 }
@@ -237,7 +319,7 @@ fn init_writes_an_executable_script_with_the_hash_header() -> R {
     assert_eq!(body.lines().next(), Some("#!/bin/sh"));
     let header = header_of(&path)?;
     assert!(
-        header.starts_with(&format!("# generated by dot {VERSION} sha:")),
+        header.starts_with(&format!("# generated by dotman {VERSION} sha:")),
         "{header}"
     );
     assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o755);
@@ -279,7 +361,7 @@ fn an_unedited_script_is_refreshed_on_request_and_an_edited_one_never() -> R {
     assert_ne!(fs::read_to_string(&path)?, current);
     env.ok(&["init"]);
     assert!(
-        header_of(&path)?.contains("dot 0.0.0"),
+        header_of(&path)?.contains("dotman 0.0.0"),
         "a plain init on an existing repo leaves the script alone"
     );
     env.ok(&["init", "--refresh-bootstrap"]);
@@ -428,7 +510,10 @@ fn doctor_warns_about_an_old_pin_and_only_notes_an_edited_script() -> R {
     let warned = line(&env);
     assert!(warned.starts_with("warn"), "{warned}");
     assert!(warned.contains("0.0.0"), "{warned}");
-    assert!(warned.contains("dot init --refresh-bootstrap"), "{warned}");
+    assert!(
+        warned.contains("dotman init --refresh-bootstrap"),
+        "{warned}"
+    );
 
     fs::write(&path, format!("{}# mine\n", fs::read_to_string(&path)?))?;
     let noted = line(&env);
