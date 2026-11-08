@@ -891,16 +891,9 @@ impl Run<'_> {
             }
             return;
         }
-        let machine = &self.ctx.machine.system;
-        let escalator =
-            match Escalator::choose(machine.escalate.as_deref(), &self.ctx.paths.config_file) {
-                Ok(escalator) => escalator,
-                Err(e) => {
-                    output::warning(&format!("{e:#}"));
-                    self.failed = self.failed.saturating_add(ready.len());
-                    return;
-                }
-            };
+        let Some(escalator) = self.escalator(ready.len()) else {
+            return;
+        };
         if !self.confirmed(&ready) {
             return;
         }
@@ -1029,6 +1022,28 @@ impl Run<'_> {
             group,
             current,
         })
+    }
+
+    /// `None` counts the `pending` writes as failed.
+    fn escalator(&mut self, pending: usize) -> Option<Escalator> {
+        let setting = self.ctx.machine.system.escalate.as_deref();
+        let escalator =
+            match Escalator::choose(setting, &self.ctx.paths.config_file, sys::geteuid()) {
+                Ok(escalator) => escalator,
+                Err(e) => {
+                    output::warning(&format!("{e:#}"));
+                    self.failed = self.failed.saturating_add(pending);
+                    return None;
+                }
+            };
+        if escalator.tool == Tool::Root
+            && let Some(named) = setting.filter(|name| *name != "none")
+        {
+            output::info(&format!(
+                "dot runs as root, so `escalate = \"{named}\"` is not used"
+            ));
+        }
+        Some(escalator)
     }
 
     fn confirmed(&mut self, ready: &[Ready]) -> bool {

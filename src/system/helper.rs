@@ -280,7 +280,7 @@ fn gate(euid: u32, escalate: Option<&str>, plan_prefix: bool, env_prefix: bool) 
 }
 
 /// Who asked for the write: the caller itself when not root, else what sudo, run0 or doas
-/// recorded, else the owner of the plan's directory when that is not root.
+/// recorded, else the owner of the plan's directory.
 fn invoking_user(
     euid: u32,
     env: impl Fn(&str) -> Option<OsString>,
@@ -304,12 +304,9 @@ fn invoking_user(
             .map(|entry| entry.uid)
             .ok_or_else(|| anyhow!("DOAS_USER ({name}) has no passwd entry"));
     }
-    let owner = plan_dir_owner()?;
-    ensure!(
-        owner != 0,
-        "cannot tell who started system-write: SUDO_UID and DOAS_USER are unset and root owns the plan's directory"
-    );
-    Ok(owner)
+    // No other user can create a root-owned directory, so a root-owned plan directory means root
+    // wrote the plan and started system-write itself.
+    plan_dir_owner()
 }
 
 fn read_plan(path: &Path, uid: u32) -> Result<Plan> {
@@ -634,8 +631,11 @@ mod tests {
         );
         assert!(invoking_user(0, env(&[("SUDO_UID", "x")]), unasked).is_err());
         assert!(invoking_user(0, env(&[("DOAS_USER", "no-such-user-dotman")]), unasked).is_err());
-        assert_eq!(invoking_user(0, env(&[]), || Ok(1002)).unwrap(), 1002);
-        assert!(invoking_user(0, env(&[("SUDO_UID", "")]), || Ok(0)).is_err());
+        assert_eq!(
+            invoking_user(0, env(&[("SUDO_UID", "")]), || Ok(1002)).unwrap(),
+            1002
+        );
+        assert_eq!(invoking_user(0, env(&[]), || Ok(0)).unwrap(), 0);
     }
 
     #[test]

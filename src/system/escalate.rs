@@ -12,8 +12,11 @@ use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::SystemTime;
+
+// Where sudo, run0 and doas name the user who called them.
+const ESCALATOR_VARS: [&str; 4] = ["SUDO_UID", "SUDO_USER", "SUDO_GID", "DOAS_USER"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -21,6 +24,8 @@ pub enum Tool {
     Sudo,
     Doas,
     Run0,
+    /// dot already runs as root, so the helper starts without an escalator.
+    Root,
 }
 
 impl Tool {
@@ -30,12 +35,14 @@ impl Tool {
             Self::Sudo => "sudo",
             Self::Doas => "doas",
             Self::Run0 => "run0",
+            Self::Root => "root",
         }
     }
 
     const fn hint(self, interactive: bool) -> &'static str {
         match (self, interactive) {
             (Self::None, _) => "system-write ran unprivileged, as `escalate = \"none\"` asks",
+            (Self::Root, _) => "dot runs as root, so system-write ran without an escalator",
             (Self::Sudo, true) => "check that your user may run commands with sudo; see sudoers(5)",
             (Self::Sudo, false) => {
                 "sudo -n cannot ask for a password; run `sudo -v` in this terminal first, or run dot interactively"
@@ -59,8 +66,15 @@ pub struct Escalator {
 }
 
 impl Escalator {
-    /// `[system] escalate` when set, else the first of sudo, doas and run0 on `PATH`.
-    pub fn choose(setting: Option<&str>, config_file: &Path) -> Result<Self> {
+    /// No escalator when `euid` is root; else `[system] escalate` when set, else the first of
+    /// sudo, doas and run0 on `PATH`.
+    pub fn choose(setting: Option<&str>, config_file: &Path, euid: u32) -> Result<Self> {
+        if euid == 0 {
+            return Ok(Self {
+                tool: Tool::Root,
+                program: None,
+            });
+        }
         let config = config_file.display();
         let tool = match setting {
             None => {
@@ -106,7 +120,7 @@ impl Escalator {
             return vec![(exe.to_path_buf(), helper)];
         };
         let quiet: &[&str] = match (self.tool, interactive) {
-            (_, true) | (Tool::None, false) => &[],
+            (_, true) | (Tool::None | Tool::Root, false) => &[],
             (Tool::Sudo | Tool::Doas, false) => &["-n"],
             // run0(1), systemd 262: `--no-ask-password` does not query for authentication;
             // `-n`/`--non-interactive` is documented as equivalent but only exists since 262.
@@ -127,6 +141,19 @@ impl Escalator {
         steps
     }
 
+    fn command(&self, program: &Path, args: &[OsString]) -> Command {
+        let mut command = proc::command(program);
+        command.args(args);
+        if self.tool == Tool::Root {
+            // A root shell entered with `sudo -i` still names the user here, and the helper would
+            // then expect that user, not root, to own the plan.
+            for name in ESCALATOR_VARS {
+                command.env_remove(name);
+            }
+        }
+        command
+    }
+
     /// Writes the plan under `state_dir`, runs the helper on it once and removes the plan again.
     pub fn run(&self, state_dir: &Path, plan: &Plan, interactive: bool) -> Result<Ran> {
         let exe = std::env::current_exe()
@@ -140,8 +167,7 @@ impl Escalator {
         let name = self.tool.name();
         for (check, check_args) in checks {
             let status = wait_ignoring_signals(
-                proc::command(check)
-                    .args(check_args)
+                self.command(check, check_args)
                     .spawn()
                     .with_context(|| format!("cannot run {name}"))?,
             )?
@@ -151,8 +177,8 @@ impl Escalator {
             }
         }
         // stdout is a pipe, so run0 passes it through instead of allocating a pseudo TTY.
-        let child = proc::command(program)
-            .args(args)
+        let child = self
+            .command(program, args)
             .stdout(Stdio::piped())
             .spawn()
             .with_context(|| format!("cannot run {name}"))?;
@@ -254,14 +280,43 @@ mod tests {
     #[test]
     fn an_unknown_escalator_is_refused() {
         let config = Path::new("/c/config.toml");
-        let err = Escalator::choose(Some("pkexec"), config)
+        let err = Escalator::choose(Some("pkexec"), config, 1000)
             .err()
             .unwrap()
             .to_string();
         assert!(err.contains("pkexec"), "{err}");
         assert_eq!(
-            Escalator::choose(Some("none"), config).unwrap().tool,
+            Escalator::choose(Some("none"), config, 1000).unwrap().tool,
             Tool::None
+        );
+    }
+
+    #[test]
+    fn root_runs_the_helper_directly_without_the_escalators_variables() {
+        let config = Path::new("/c/config.toml");
+        for setting in [None, Some("sudo"), Some("none"), Some("pkexec")] {
+            let escalator = Escalator::choose(setting, config, 0).unwrap();
+            assert_eq!(escalator.tool, Tool::Root, "{setting:?}");
+            let steps = escalator.steps(Path::new("/x/dot"), Path::new("/p/plan.json"), false);
+            let [(program, args)] = steps.as_slice() else {
+                unreachable!("one step: {steps:?}");
+            };
+            assert_eq!(program, Path::new("/x/dot"));
+            assert_eq!(args, &["system-write", "--plan", "/p/plan.json"]);
+            let command = escalator.command(program, args);
+            for name in ESCALATOR_VARS {
+                let removed = command
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none());
+                assert!(removed, "{name}");
+            }
+        }
+        let user = Escalator::choose(Some("none"), config, 1000).unwrap();
+        let command = user.command(Path::new("/x/dot"), &[]);
+        assert!(
+            !command
+                .get_envs()
+                .any(|(key, _)| ESCALATOR_VARS.iter().any(|name| key == *name))
         );
     }
 }

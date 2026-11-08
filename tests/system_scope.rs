@@ -891,6 +891,8 @@ fn sync_system_yes_writes_what_the_pull_brought() {
 
 /// The one test that uses real sudo. It runs only inside a container that sets
 /// `DOTMAN_REAL_SUDO_TEST=1`, so it can never run on a developer machine or a CI host runner.
+/// A root-only container, where `dot apply --system --allow-root` starts `system-write` without
+/// an escalator, reaches the helper through the same root path.
 #[test]
 fn real_sudo_writes_a_root_owned_file() {
     const TARGET: &str = "/etc/dotman-ci/test.conf";
