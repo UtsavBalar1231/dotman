@@ -6,6 +6,7 @@ resolver = "2"
 name = "dotman-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 authors = ["Utsav Balar <utsavbalar1231@gmail.com>"]
 description = "Dotfiles manager with git-like semantics"
 # documentation = "https://docs.rs/dotman"

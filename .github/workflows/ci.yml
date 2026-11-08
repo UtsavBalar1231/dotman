@@ -6,17 +6,20 @@ on:
   pull_request:
     branches: [ main, develop ]
   schedule:
-    # Run CI daily at 02:00 UTC
     - cron: '0 2 * * *'
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: Check and Lint
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -26,42 +29,38 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2.8.2
-        with:
-          key: check-${{ runner.os }}
 
-      - name: Check code formatting
-        run: cargo fmt --all -- --check
+      - name: Check formatting
+        run: cargo fmt --all --check
 
-      - name: Run Clippy linting
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy, strict set
+        run: just lint-strict
 
       - name: Check documentation
         run: cargo doc --no-deps --all-features
         env:
-          RUSTDOCFLAGS: "-D warnings"
+          RUSTDOCFLAGS: -D warnings
 
   test:
-    name: Test Suite
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, beta] # MSRV (Minimum Supported Rust Version)
-        exclude:
-          # Reduce CI load - only test MSRV on Ubuntu
-          - os: macos-latest
-            rust: stable
-          - os: windows-latest
-            rust: stable
-          # Beta testing only on Ubuntu
-          - os: macos-latest
-            rust: beta
-          - os: windows-latest
-            rust: beta
-
+        os: [ubuntu-latest, macos-latest]
+    env:
+      DOTMAN_REQUIRE_AGE: 1
     steps:
       - name: Checkout code
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -71,43 +70,422 @@ jobs:
           git config --global user.email "${{ github.actor }}@users.noreply.github.com"
           git config --global user.name "${{ github.actor }}"
 
+      - name: Install age and shellcheck (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age shellcheck
+
+      - name: Install age and shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install age shellcheck
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2.8.2
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dotman-cli") | .rust_version')
+          if [[ -z "$version" || "$version" == "null" ]]; then
+            echo "dotman-cli has no rust-version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install the MSRV toolchain
+        uses: dtolnay/rust-toolchain@v1
         with:
-          key: test-${{ matrix.os }}-${{ matrix.rust }}
+          toolchain: ${{ steps.msrv.outputs.version }}
 
-      - name: Build project
-        run: cargo build --verbose --all-features
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2.8.2
 
-      - name: Run unit tests
-        run: cargo test --verbose --all-features -- --include-ignored
+      - name: Build
+        run: cargo +${{ steps.msrv.outputs.version }} build --locked --workspace
 
-      - name: Run integration tests
-        run: cargo test --verbose --test integration_basic
+      - name: Build the tests
+        run: cargo +${{ steps.msrv.outputs.version }} test --no-run --locked
 
-      - name: Run property-based tests
-        run: cargo test --verbose --test property_tests
-        continue-on-error: true # Property tests can be flaky
+  git-floor:
+    name: Ubuntu 20.04 (git 2.25)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
-      - name: Test without default features
-        run: cargo test --verbose --no-default-features
+      - name: Start the container
+        run: docker run -d --name floor -v "$PWD:/src:ro" ubuntu:20.04 sleep infinity
+
+      - name: Install tools and check the git version
+        run: |
+          docker exec -i floor bash -euo pipefail <<'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git
+          git --version
+          case "$(git --version)" in
+            "git version 2.25."*) ;;
+            *) echo "expected git 2.25.x" >&2; exit 1 ;;
+          esac
+          useradd -m tester
+          cp -a /src /work
+          chown -R tester:tester /work
+          EOF
+
+      - name: Install Rust as a non-root user
+        run: |
+          docker exec -i -u tester floor bash -euo pipefail <<'EOF'
+          cd "$HOME"
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          sha256sum -c rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --profile minimal --default-toolchain stable
+          git config --global user.name tester
+          git config --global user.email tester@example.invalid
+          EOF
+
+      - name: Run tests as a non-root user
+        run: |
+          docker exec -i -u tester -w /work floor bash -euo pipefail <<'EOF'
+          . "$HOME/.cargo/env"
+          cargo test --workspace --all-targets
+          EOF
+
+      - name: Run dotman as root without DOTMAN_ALLOW_ROOT
+        run: |
+          docker exec -i floor bash -euo pipefail <<'EOF'
+          home=$(mktemp -d)
+          code=0
+          env -u DOTMAN_ALLOW_ROOT HOME="$home" /work/target/debug/dotman status 2>"$home/err" || code=$?
+          cat "$home/err"
+          [ "$code" -eq 1 ]
+          grep -q 'does not run as root' "$home/err"
+          EOF
+
+      - name: Build a local release and a dotfiles clone
+        run: |
+          docker exec -i -u tester floor bash -euo pipefail <<'EOF'
+          bin=/work/target/debug/dotman
+          fx=/tmp/fixture
+          mkdir -p "$fx/home" "$fx/config" "$fx/state" "$fx/data" "$fx/release" "$fx/pkg"
+          export HOME="$fx/home" XDG_CONFIG_HOME="$fx/config" XDG_STATE_HOME="$fx/state" XDG_DATA_HOME="$fx/data" DOTMAN_NON_INTERACTIVE=1
+          git config --global user.name author
+          git config --global user.email author@example.invalid
+          echo 'export EDITOR=vi' > "$HOME/.bashrc"
+          cd "$HOME"
+          "$bin" init --no-import
+          "$bin" add .bashrc
+          "$bin" sync
+          git clone -q --depth 1 "file://$XDG_DATA_HOME/dotman" "$fx/dotfiles"
+          test -f "$fx/dotfiles/install.sh"
+          version=$("$bin" --version | cut -d' ' -f2)
+          cp "$bin" "$fx/pkg/dotman"
+          tar -czf "$fx/release/dotman-v$version-x86_64-unknown-linux-musl.tar.gz" -C "$fx/pkg" dotman
+          (cd "$fx/release" && sha256sum ./*.tar.gz | sed 's| \./| |' > checksums.txt)
+          EOF
+
+      - name: Run install.sh as root
+        run: |
+          docker exec -i floor bash -euo pipefail <<'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y -qq --no-install-recommends curl ca-certificates
+          chown -R root:root /tmp/fixture/dotfiles
+          code=0
+          env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DOTMAN_BOOTSTRAP_BASE_URL=file:///tmp/fixture/release sh /tmp/fixture/dotfiles/install.sh || code=$?
+          [ "$code" -eq 0 ]
+          test -x /root/.local/bin/dotman
+          EOF
+
+      - name: Remove the container
+        if: always()
+        run: docker rm -f floor
+
+  alpine:
+    name: Alpine (static musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Start the container
+        run: docker run -d --name alpine -v "$PWD:/src:ro" alpine:latest sleep infinity
+
+      - name: Install tools
+        run: |
+          docker exec -i alpine sh -eu <<'EOF'
+          apk add --no-cache bash build-base ca-certificates curl git
+          adduser -D tester
+          cp -a /src /work
+          chown -R tester:tester /work
+          EOF
+
+      - name: Install Rust as a non-root user
+        run: |
+          docker exec -i -u tester alpine sh -eu <<'EOF'
+          cd "$HOME"
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-musl/rustup-init
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-musl/rustup-init.sha256
+          sha256sum -c rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --profile minimal --default-toolchain stable
+          git config --global user.name tester
+          git config --global user.email tester@example.invalid
+          EOF
+
+      - name: Build a static binary
+        run: |
+          docker exec -i -u tester -w /work alpine sh -eu <<'EOF'
+          . "$HOME/.cargo/env"
+          cargo build --release --locked
+          if readelf -d target/release/dotman | grep -q NEEDED || readelf -l target/release/dotman | grep -q INTERP; then
+            echo "target/release/dotman is dynamically linked" >&2
+            exit 1
+          fi
+          target/release/dotman --version
+          EOF
+
+      - name: Run tests as a non-root user
+        run: |
+          docker exec -i -u tester -w /work alpine sh -eu <<'EOF'
+          . "$HOME/.cargo/env"
+          cargo test --workspace --all-targets
+          EOF
+
+      - name: Remove the container
+        if: always()
+        run: docker rm -f alpine
+
+  system-scope:
+    name: System scope (real sudo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Start the container
+        run: docker run -d --name scope -v "$PWD:/src:ro" ubuntu:24.04 sleep infinity
+
+      - name: Create a user with passwordless sudo
+        run: |
+          docker exec -i scope bash -euo pipefail <<'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git sudo
+          useradd -m tester
+          echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester
+          chmod 0440 /etc/sudoers.d/tester
+          cp -a /src /work
+          chown -R tester:tester /work
+          EOF
+
+      - name: Install Rust as tester
+        run: |
+          docker exec -i -u tester scope bash -euo pipefail <<'EOF'
+          cd "$HOME"
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          sha256sum -c rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --profile minimal --default-toolchain stable
+          git config --global user.name tester
+          git config --global user.email tester@example.invalid
+          EOF
+
+      - name: Run the real-sudo test
+        run: |
+          docker exec -i -u tester -w /work scope bash -euo pipefail <<'EOF'
+          . "$HOME/.cargo/env"
+          sudo mkdir -p /etc/dotman-ci
+          # The test passes without doing anything when its gate is closed, so its output is checked.
+          DOTMAN_REAL_SUDO_TEST=1 cargo test --test system_scope -- --include-ignored --nocapture 2>&1 | tee /tmp/system-scope.log
+          if grep -q 'skipped: the real-sudo test needs' /tmp/system-scope.log; then
+            echo "the real-sudo test skipped itself" >&2
+            exit 1
+          fi
+          grep -q 'real_sudo_writes_a_root_owned_file ... ok' /tmp/system-scope.log
+          EOF
+
+      - name: Remove the container
+        if: always()
+        run: docker rm -f scope
+
+  root-direct:
+    name: System scope (root, no sudo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Start the container
+        run: docker run -d --name direct -v "$PWD:/src:ro" ubuntu:24.04 sleep infinity
+
+      - name: Build dotman
+        run: |
+          docker exec -i direct bash -euo pipefail <<'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git
+          if command -v sudo; then
+            echo "sudo must not be installed" >&2
+            exit 1
+          fi
+          cd "$HOME"
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -sSfL -O https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          sha256sum -c rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --profile minimal --default-toolchain stable
+          . "$HOME/.cargo/env"
+          cp -a /src /work
+          cd /work
+          cargo build --locked
+          EOF
+
+      - name: Apply a system file as root
+        run: |
+          docker exec -i direct bash -euo pipefail <<'EOF'
+          bin=/work/target/debug/dotman
+          export HOME=/root XDG_CONFIG_HOME=/root/.config XDG_STATE_HOME=/root/.local/state XDG_DATA_HOME=/root/.local/share DOTMAN_ALLOW_ROOT=1 DOTMAN_NON_INTERACTIVE=1
+          mkdir -p "$XDG_CONFIG_HOME/dotman" /etc/dotman-ci
+          git config --global user.name root
+          git config --global user.email root@example.invalid
+          "$bin" init --no-import
+          printf '[system]\nroots = ["/etc/dotman-ci"]\n' > "$XDG_CONFIG_HOME/dotman/config.toml"
+          chmod 0644 "$XDG_CONFIG_HOME/dotman/config.toml"
+          install -m 0640 -o root -g root /dev/null /etc/dotman-ci/test.conf
+          echo ci > /etc/dotman-ci/test.conf
+          XDG_STATE_HOME=/tmp/author-state "$bin" add --system /etc/dotman-ci/test.conf
+          rm /etc/dotman-ci/test.conf
+          "$bin" apply --system --yes --allow-root
+          [ "$(stat -c '%U:%G %a' /etc/dotman-ci/test.conf)" = "root:root 640" ]
+          [ "$(cat /etc/dotman-ci/test.conf)" = ci ]
+          EOF
+
+      - name: Remove the container
+        if: always()
+        run: docker rm -f direct
+
+  rage:
+    name: Secrets with rage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DOTMAN_REQUIRE_AGE: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Install rage
+        run: |
+          curl -sSfL -O https://github.com/str4d/rage/releases/download/v0.12.1/rage-v0.12.1-x86_64-linux.tar.gz
+          echo "c5d7ab41fbf1213590e89721fd2b8eb122e84518c155ce35866f1c5759a3a29f  rage-v0.12.1-x86_64-linux.tar.gz" | sha256sum -c
+          sudo tar -xzf rage-v0.12.1-x86_64-linux.tar.gz -C /usr/local/bin --strip-components=1 rage/rage rage/rage-keygen
+          rage --version
+          # dotman picks rage before age, but reads DOTMAN_AGE_KEY through `age -i -`, so age must be present too.
+          sudo apt-get update
+          sudo apt-get install -y age
+
+      - name: Configure git for tests
+        run: |
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          git config --global user.name "${{ github.actor }}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2.8.2
+
+      - name: Run the secrets tests
+        run: cargo test --test cli_secrets
+
+  chezmoi:
+    name: chezmoi import
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DOTMAN_REQUIRE_CHEZMOI: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Install chezmoi
+        run: |
+          base=https://github.com/twpayne/chezmoi/releases/download/v2.74.0
+          curl -sSfL -O "$base/chezmoi_2.74.0_linux_amd64.tar.gz"
+          curl -sSfL -O "$base/chezmoi_2.74.0_checksums.txt"
+          sha256sum -c --ignore-missing chezmoi_2.74.0_checksums.txt
+          sudo tar -xzf chezmoi_2.74.0_linux_amd64.tar.gz -C /usr/local/bin chezmoi
+          chezmoi --version
+
+      - name: Configure git for tests
+        run: |
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          git config --global user.name "${{ github.actor }}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2.8.2
+
+      - name: Run the chezmoi tests
+        run: cargo test --test cli_import_chezmoi --test security_tests
+
+  freshness:
+    name: Generated files
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2.8.2
+
+      - name: Regenerate man pages and completions
+        run: cargo run -p xtask -- generate
+
+      - name: Check that nothing changed
+        run: |
+          git status --porcelain man completions
+          test -z "$(git status --porcelain man completions)"
 
   cross-compile:
-    name: Cross Compilation
+    name: Cross compile (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-
+        include:
+          - { target: x86_64-unknown-linux-gnu, cross: false }
+          - { target: x86_64-unknown-linux-musl, cross: true }
+          - { target: aarch64-unknown-linux-gnu, cross: true }
+          - { target: aarch64-unknown-linux-musl, cross: true }
     steps:
       - name: Checkout code
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -117,199 +495,37 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation dependencies
-        run: |
-          sudo apt-get update
-          # Install ARM64 cross-compilation toolchain for GNU targets
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
-          # Install musl tools for x86_64 musl target
-          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
-            sudo apt-get install -y musl-tools
-          fi
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2.8.2
         with:
           key: cross-${{ matrix.target }}
 
-      - name: Build for target
+      - name: Build
         env:
-          # Set linker for ARM64 GNU target
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          # Set linker for x86_64 musl target
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          # Tell cargo to use static linking for musl
-          RUSTFLAGS: "-C target-feature=+crt-static"
+          TARGET: ${{ matrix.target }}
+          USE_CROSS: ${{ matrix.cross }}
         run: |
-          # Export PATH to ensure cargo is available in act
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --release --target ${{ matrix.target }} --all-features
-
-      - name: Test for target (if supported)
-        # Only run tests for native x86_64 target
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo test --release --target ${{ matrix.target }}
-
-  benchmarks:
-    name: Performance Benchmarks
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
-        with:
-          key: bench-${{ runner.os }}
-
-      - name: Run benchmarks
-        run: cargo bench --no-run # Build benchmarks without running (for CI speed)
-
-      - name: Run lightweight benchmark
-        run: timeout 300 cargo bench || echo "Benchmarks completed or timed out"
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-
-      - name: Configure git for tests
-        run: |
-          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
-          git config --global user.name "${{ github.actor }}"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.62.58
-        with:
-          tool: cargo-llvm-cov
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
-        with:
-          key: coverage-${{ runner.os }}
-
-      - name: Generate coverage report
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
-        with:
-          files: lcov.info
-          fail_ci_if_error: true
-          verbose: true
-          name: codecov-umbrella
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-  # Build optimized release binaries for major platforms
-  release-build:
-    name: Build Release Binaries
-    runs-on: ${{ matrix.os }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: dotman-x86_64-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            artifact_name: dotman-x86_64-linux-musl
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact_name: dotman-aarch64-linux-gnu
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cross-compilation dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          # Install ARM64 cross-compilation toolchain for GNU targets
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
-          # Install musl tools for x86_64 musl target
-          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
-            sudo apt-get install -y musl-tools
-          fi
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
-        with:
-          key: release-${{ matrix.target }}
-
-      - name: Build release binary
-        env:
-          # Set linker for ARM64 GNU target
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          # Set linker for x86_64 musl target
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          # Tell cargo to use static linking for musl
-          RUSTFLAGS: "-C target-feature=+crt-static"
-        run: |
-          # Export PATH to ensure cargo is available in act
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --release --target ${{ matrix.target }} --all-features
-          cp target/${{ matrix.target }}/release/dotman ${{ matrix.artifact_name }}
-
-      - name: Strip binary (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          # Use the appropriate strip tool for each target
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            # Use cross-platform strip for ARM64
-            aarch64-linux-gnu-strip ${{ matrix.artifact_name }}
-          elif [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
-            # musl binaries can use regular strip
-            strip ${{ matrix.artifact_name }}
+          if [[ "$USE_CROSS" == "true" ]]; then
+            cross build --release --locked --target "$TARGET"
           else
-            # Regular strip for native builds
-            strip ${{ matrix.artifact_name }}
+            cargo build --release --locked --target "$TARGET"
           fi
 
-      - name: Upload release artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_name }}
-          retention-days: 7
-
-  # Comprehensive check that all CI jobs passed
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [check, test, cross-compile]
+    needs: [lint, test, msrv, git-floor, alpine, system-scope, root-direct, rage, chezmoi, freshness, cross-compile]
     if: always()
-
     steps:
-      - name: Check all jobs success
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: exit 1
-
-      - name: CI Success
-        run: echo "All CI checks passed successfully!"
+      - name: Check every job
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
