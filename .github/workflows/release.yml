@@ -18,7 +18,7 @@ jobs:
 
       - name: Check the tag matches Cargo.toml
         run: |
-          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dotman") | .version')
+          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dotman-cli") | .version')
           if [[ "${GITHUB_REF_NAME#v}" != "$crate_version" ]]; then
             echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate_version}" >&2
             exit 1

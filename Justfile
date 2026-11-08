@@ -119,7 +119,7 @@ install:
     cargo install --path . --force
 
 uninstall:
-    cargo uninstall dotman
+    cargo uninstall dotman-cli
 
 # Bumps Cargo.toml, Cargo.lock, the PKGBUILD and install.sh's fallback version. The
 # src/bootstrap/install.sh.in template pins CARGO_PKG_VERSION itself and is not touched.
@@ -128,7 +128,7 @@ release-prepare version:
     set -e
     sed -i 's/^version = ".*"/version = "{{ version }}"/' Cargo.toml
     sed -i 's/^pkgver=.*/pkgver={{ version }}/' packaging/arch/PKGBUILD
-    sed -i 's/echo "[0-9][0-9.]*"$/echo "{{ version }}"/' install/install.sh
+    sed -i 's/^FALLBACK_VERSION=.*/FALLBACK_VERSION="{{ version }}"/' install/install.sh
     cargo check --workspace
     just test
     just lint

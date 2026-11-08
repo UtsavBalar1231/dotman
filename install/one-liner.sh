@@ -10,43 +10,11 @@
 # Or with wget:
 # wget -qO- https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash
 
-# Cargo installation (if Rust is installed):
-# cargo install dotman
+# From source with Cargo (the workspace has an xtask package, so name the package):
+# cargo install --git https://github.com/UtsavBalar1231/dotman --locked dotman-cli
 
-# Platform-specific package managers:
-
-# Arch Linux (AUR):
-# yay -S dotman
-# paru -S dotman
-
-# macOS (Homebrew):
-# brew install UtsavBalar1231/tap/dotman
-
-# Alpine Linux:
-# apk add dotman  # (once available)
-
-# Debian/Ubuntu:
-# apt install dotman  # (once available)
-
-# Fedora/RHEL/CentOS:
-# dnf install dotman  # (once available)
-
-# NixOS/Nix:
-# nix-env -iA nixpkgs.dotman  # (once available)
-# nix profile install nixpkgs#dotman
-
-# Gentoo:
-# emerge app-admin/dotman  # (once available)
-
-# Windows (Scoop):
-# scoop bucket add utsav https://github.com/UtsavBalar1231/scoop-bucket
-# scoop install dotman
-
-# Windows (winget):
-# winget install UtsavBalar1231.dotman
-
-# Windows (Chocolatey):
-# choco install dotman  # (once available)
+# Arch Linux, local build from a checkout:
+# cd packaging/arch && makepkg -si
 
 echo "This file contains one-liner installation commands for dotman"
 echo "Use these commands for quick installation on various platforms"

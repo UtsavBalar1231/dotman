@@ -6,6 +6,9 @@ set -euo pipefail
 
 # Configuration
 REPO_URL="https://github.com/UtsavBalar1231/dotman"
+API_URL="https://api.github.com/repos/UtsavBalar1231/dotman"
+DOWNLOAD_BASE="${DOTMAN_INSTALL_BASE_URL:-}"
+FALLBACK_VERSION="0.1.0"
 BINARY_NAME="dot"
 INSTALL_DIR="${DOTMAN_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -79,13 +82,50 @@ command_exists() {
 
 # Get latest release version
 get_latest_version() {
+	local json="" version=""
+	if [[ -n "$DOWNLOAD_BASE" ]]; then
+		echo "$FALLBACK_VERSION"
+		return
+	fi
 	if command_exists curl; then
-		curl -sL "$REPO_URL/releases/latest" | grep -oE '"tag_name":\s*"[^"]*"' | cut -d'"' -f4 | sed 's/^v//'
+		json=$(curl -fsSL "$API_URL/releases/latest" 2>/dev/null || true)
 	elif command_exists wget; then
-		wget -qO- "$REPO_URL/releases/latest" | grep -oE '"tag_name":\s*"[^"]*"' | cut -d'"' -f4 | sed 's/^v//'
+		json=$(wget -qO- "$API_URL/releases/latest" 2>/dev/null || true)
+	fi
+	version=$(printf '%s' "$json" | grep -oE '"tag_name":[[:space:]]*"[^"]*"' | head -n1 | cut -d'"' -f4 | sed 's/^v//')
+	if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		echo "$version"
 	else
-		# Fallback to a default version
-		echo "0.1.0"
+		echo "$FALLBACK_VERSION"
+	fi
+}
+
+# Fetch $1 into $2
+fetch() {
+	if command_exists curl; then
+		curl -fsSL "$1" -o "$2"
+	elif command_exists wget; then
+		wget -q "$1" -O "$2"
+	else
+		log_error "Neither curl nor wget found. Cannot download release."
+		return 1
+	fi
+}
+
+# Check the tarball in $1 against its line in checksums.txt, so a tampered or truncated download installs nothing
+verify_checksum() {
+	local dir="$1" archive="$2"
+	grep -F "  $archive" "$dir/checksums.txt" >"$dir/expected" || {
+		log_error "No checksum for $archive in checksums.txt"
+		return 1
+	}
+	if command_exists sha256sum; then
+		(cd "$dir" && sha256sum -c expected >/dev/null)
+	elif command_exists shasum; then
+		(cd "$dir" && shasum -a 256 -c expected >/dev/null)
+	else
+		log_error "Neither sha256sum nor shasum is installed; cannot verify the download"
+		return 1
 	fi
 }
 
@@ -103,99 +143,35 @@ install_from_github() {
 	macos-*) target="${platform#macos-}-apple-darwin" ;;
 	esac
 
-	local download_url="$REPO_URL/releases/download/v$version/dotman-v$version-$target.tar.gz"
+	local archive="dotman-v$version-$target.tar.gz"
+	local base="${DOWNLOAD_BASE:-$REPO_URL/releases/download/v$version}"
 	local temp_dir
 	temp_dir=$(mktemp -d)
 
-	log_info "Downloading from $download_url"
-
-	# Download the release
-	if command_exists curl; then
-		curl -L "$download_url" -o "$temp_dir/dotman.tar.gz"
-	elif command_exists wget; then
-		wget "$download_url" -O "$temp_dir/dotman.tar.gz"
-	else
-		log_error "Neither curl nor wget found. Cannot download release."
-		exit 1
+	log_info "Downloading from $base/$archive"
+	if ! fetch "$base/$archive" "$temp_dir/$archive" || ! fetch "$base/checksums.txt" "$temp_dir/checksums.txt"; then
+		log_error "Download failed"
+		rm -rf "$temp_dir"
+		return 1
 	fi
 
-	# Extract and install
-	tar -xzf "$temp_dir/dotman.tar.gz" -C "$temp_dir"
+	if ! verify_checksum "$temp_dir" "$archive"; then
+		log_error "Checksum verification failed; nothing was installed"
+		rm -rf "$temp_dir"
+		return 1
+	fi
 
-	# Create install directory
+	tar -xzf "$temp_dir/$archive" -C "$temp_dir"
+
 	mkdir -p "$INSTALL_DIR"
 
 	cp "$temp_dir/$BINARY_NAME" "$INSTALL_DIR/"
 	chmod +x "$INSTALL_DIR/$BINARY_NAME"
 	binary_path="$INSTALL_DIR/$BINARY_NAME"
 
-	# Cleanup
 	rm -rf "$temp_dir"
 
 	log_success "dotman installed to $binary_path"
-}
-
-# Install via package manager
-install_via_package_manager() {
-	local platform="$1"
-
-	case "$platform" in
-	linux-*)
-		# Try different package managers
-		if command_exists pacman; then
-			log_info "Installing via pacman (AUR)..."
-			if command_exists yay; then
-				yay -S dotman
-			elif command_exists paru; then
-				paru -S dotman
-			else
-				log_warning "AUR helper not found. Please install yay or paru first."
-				return 1
-			fi
-		elif command_exists apt; then
-			log_warning "Debian package not yet available. Using GitHub release."
-			return 1
-		elif command_exists dnf; then
-			log_warning "RPM package not yet available. Using GitHub release."
-			return 1
-		elif command_exists apk; then
-			log_warning "Alpine package not yet available. Using GitHub release."
-			return 1
-		else
-			log_warning "No supported package manager found. Using GitHub release."
-			return 1
-		fi
-		;;
-	macos-*)
-		if command_exists brew; then
-			log_info "Installing via Homebrew..."
-			brew install UtsavBalar1231/tap/dotman || {
-				log_warning "Homebrew formula not yet available. Using GitHub release."
-				return 1
-			}
-		else
-			log_warning "Homebrew not found. Using GitHub release."
-			return 1
-		fi
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
-# Install via Cargo (if available)
-install_via_cargo() {
-	if command_exists cargo; then
-		log_info "Installing via Cargo..."
-		cargo install dotman || {
-			log_warning "Cargo installation failed. Using GitHub release."
-			return 1
-		}
-		log_success "dotman installed via Cargo"
-		return 0
-	fi
-	return 1
 }
 
 # Add to PATH
@@ -291,12 +267,7 @@ main() {
 	local platform
 	platform=$(detect_platform)
 
-	# Try installation methods in order of preference
-	if install_via_package_manager "$platform"; then
-		log_success "Installed via package manager"
-	elif install_via_cargo; then
-		log_success "Installed via Cargo"
-	elif install_from_github "$platform"; then
+	if install_from_github "$platform"; then
 		log_success "Installed from GitHub releases"
 		add_to_path
 	else
@@ -329,11 +300,11 @@ OPTIONS:
     --help, -h          Show this help message
     --version, -v       Show version information
     --force-github      Force installation from GitHub releases
-    --force-cargo       Force installation via Cargo
     --install-dir DIR   Custom installation directory (default: ~/.local/bin)
 
 ENVIRONMENT VARIABLES:
-    DOTMAN_INSTALL_DIR  Custom installation directory
+    DOTMAN_INSTALL_DIR       Custom installation directory
+    DOTMAN_INSTALL_BASE_URL  Download tarball and checksums.txt from here instead of GitHub
 
 EXAMPLES:
     $0                                      # Auto-detect and install
@@ -351,11 +322,6 @@ EOF
 	platform=$(detect_platform)
 	install_from_github "$platform"
 	add_to_path
-	verify_installation
-	show_completion_setup
-	;;
---force-cargo)
-	install_via_cargo
 	verify_installation
 	show_completion_setup
 	;;

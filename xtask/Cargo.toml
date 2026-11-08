@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-dotman = { path = "..", default-features = false }
+dotman = { package = "dotman-cli", path = "..", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 clap_mangen = "0.2"
 anyhow = "1.0"

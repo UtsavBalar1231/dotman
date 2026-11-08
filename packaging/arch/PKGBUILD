@@ -1,6 +1,6 @@
 # Maintainer: Utsav Balar <utsavbalar1231@gmail.com>
 
-pkgname=dotman
+pkgname=dotman-cli
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Dotfiles manager with git-like semantics"
@@ -9,8 +9,6 @@ url="https://github.com/UtsavBalar1231/dotman"
 license=('MIT')
 depends=('gcc-libs' 'glibc')
 makedepends=('rust' 'cargo' 'help2man')
-provides=('dotman')
-conflicts=('dotman-git')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/UtsavBalar1231/dotman/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')  # Updated by CI/release workflow
 

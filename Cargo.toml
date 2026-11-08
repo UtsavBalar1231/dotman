@@ -3,7 +3,7 @@ members = [".", "xtask"]
 resolver = "2"
 
 [package]
-name = "dotman"
+name = "dotman-cli"
 version = "0.1.0"
 edition = "2024"
 authors = ["Utsav Balar <utsavbalar1231@gmail.com>"]
@@ -91,6 +91,10 @@ panic = "abort"
 inherits = "dist"
 debug = true
 strip = "none"
+
+[lib]
+name = "dotman"
+path = "src/lib.rs"
 
 [[bin]]
 name = "dot"
