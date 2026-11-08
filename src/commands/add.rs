@@ -215,9 +215,12 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     repo_config.save(&ctx.repo_config_file(), false)?;
     state.save(&ctx.paths.state_file(), false)?;
     if failed > 0 {
-        bail!("{failed} of {} paths could not be added", items.len());
+        bail!(
+            "{failed} of {} could not be added",
+            crate::import::count(items.len(), "path")
+        );
     }
-    output::success(&format!("added {added} paths"));
+    output::success(&format!("added {}", crate::import::count(added, "path")));
     Ok(if held.is_empty() {
         Outcome::Done
     } else {

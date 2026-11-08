@@ -1,73 +1,100 @@
 # Project knowledge base
 
 ## Overview
-dotman is a dotfiles manager with Git-like semantics, in Rust (edition 2024). The crate is `dotman` and the binary is `dot`. A large rewrite is planned, so when this file and the code disagree, trust the code.
+dotman is a dotfiles manager in Rust (edition 2024, MSRV 1.88). The repo is an ordinary git repo whose root maps to `$HOME`; dotman copies files in and out and compares three sides (repo R, home H, recorded state S). The package is `dotman-cli`, the library crate is `dotman`, and the binary is `dotman` (`dot` is an optional alias). When this file and the code disagree, trust the code.
 
 ## Structure
 ```
-src/cli.rs         clap definitions; xtask imports it to build man pages
-src/main.rs        dispatch only (match cli.command)
-src/commands/      one module per subcommand
-src/mirror.rs      git transport: dotman <-> bare mirror in ~/.dotman/mirrors/<remote> <-> remote
-src/sync.rs        git importer (`dot import`), not remote sync
-xtask/             man page generator (cargo run -p xtask -- generate-man-pages)
-completions/       dot.* are clap-generated; *-enhanced* are hand-written
-man/               generated output, tracked in git
-packaging/         Arch PKGBUILD only
+src/cli.rs              clap definitions; xtask imports it
+src/main.rs             dispatch, root refusal, exit codes
+src/commands/           one module per subcommand
+src/engine/             status model (status.rs) and the safe write path (write.rs)
+src/import/             importers: legacy, gittree (yadm, bare, vcsh), chezmoi, farm
+src/system.rs           system scope: roots, verdicts, never-allowed paths
+src/system/             helper.rs (root `system-write`) and escalate.rs (sudo, doas, run0)
+src/variant.rs          brace-block variant grammar and ranking
+src/template.rs         minijinja rendering
+src/secrets.rs          age and rage handling
+src/hooks.rs            hook approval and the one spawn site
+src/git.rs              the git layer and its isolation flags
+src/proc.rs             every child process starts here
+src/name.rs             the invoked name (`dot` or `dotman`) for hints
+src/sys.rs              the only module with `unsafe`
+src/output/             stderr status output
+src/bootstrap/          the install.sh template written by `init`
+tests/                  integration tests; tests/common is the harness
+xtask/                  man page and completion generator
+man/                    generated man pages
+completions/            generated shell completions
+packaging/arch/         PKGBUILD
+install/                install.sh for users
+scripts/                release helper scripts
 ```
 
 ## Finding your way
 | To change | Look in | Why it is not obvious |
 |---|---|---|
-| A CLI flag or subcommand | `src/cli.rs` | `main.rs` only dispatches |
-| Which commands get man pages | `subcommands` array in `xtask/src/main.rs` | The list is hard-coded, so a new command gets no page until you add it |
-| Pager selection | `resolve_pager_command` in `src/utils/pager/config.rs` | The precedence spans env vars and config |
-| Committed file contents | `SnapshotManager::load_snapshot` | The index holds only staged and deleted entries |
-| Path validation | `DotmanContext::validate_user_path` in `src/lib.rs` | It is an inherent method, not part of the `CommandContext` trait |
+| A flag or subcommand | `src/cli.rs` | `main.rs` only dispatches |
+| What a row or category means | `src/engine/status.rs` | Eleven rows are evaluated in order; categories drive prompts |
+| How a file reaches `$HOME` | `src/engine/write.rs` | `safe_write` is the only home write path |
+| Variant selection | `src/variant.rs` | Pure; the status model calls it |
+| Template variables | `src/template.rs` | `env` holds only `[template] env` names |
+| Encryption, keys, recipients | `src/secrets.rs`, `src/commands/key.rs` | The key goes to age's stdin only |
+| An importer | `src/import/` | `import::run` routes by detection order |
+| System files, the helper | `src/system.rs`, `src/system/helper.rs`, `src/system/escalate.rs` | The helper runs as root and trusts nothing from the caller |
+| Hook approval | `src/hooks.rs` | The state stores a hash of the `[hooks]` table |
+| Invoked name in hints | `src/name.rs` | Never hard-code `dot` or `dotman` in a hint |
+| Running a child process | `src/proc.rs` | It strips `DOTMAN_AGE_KEY` |
+| Man pages and completions | `cargo run -p xtask -- generate`, or `just generate` | Output is tracked; CI checks freshness |
+| Security regressions | `tests/security_tests.rs` | Hostile-repo and hostile-plan cases |
+| Subcommand coverage | `tests/guard.rs` | Every subcommand needs a row |
 
 ## House rules
-- New code should pass `just lint-strict`, which is the clippy set the pre-commit hook runs. `just lint` is pedantic + nursery, and CI runs only `-D warnings`, so a change can pass CI and still be rejected at commit time.
-- No `.unwrap()`, `.expect()` or `panic!` in `src/`, because lint-strict denies them. `clippy.toml` allows them in tests only.
-- Every item needs a `///` doc comment, including private items and `pub mod` lines. `src/lib.rs` warns on `missing_docs` and `missing_docs_in_private_items`, and lint runs with `-D warnings`.
-- Status output goes through `crate::output` (`success`, `info`, `warning`, `error`, `start_progress`), which writes to stderr in the git convention. stdout is for command output.
-- Destructive commands take `--dry-run`. New ones should too, to match checkout, reset, revert, restore, merge, rm, push and clean.
-- Code that reads working-tree files for staged or tracked paths must cope with a file that has since been deleted from disk.
-- The CLI does not mirror git's flag shapes. Some examples: `dot branch rename [-o old] -n new`, `dot branch create <name> -f <start>`, `dot log [refs...] [--] [paths or globs...]`.
-- Adding a command takes these steps:
+- New code passes `just lint-strict`, the clippy set the pre-commit hook runs. CI runs only `-D warnings`, so a change can pass CI and fail at commit.
+- No `.unwrap()`, `.expect()` or `panic!` in `src/`. `clippy.toml` allows `unwrap` and `expect` in tests only.
+- Comments and docs only where they carry what the code cannot: a constraint, invariant, unit, safety reason, or why. No doc that restates an item's name, no narrating comments. `missing_docs` covers public items only, so a public item carries a one-line `///` and a private one needs none.
+- Status output goes through `crate::output` to stderr. stdout is for command output.
+- Destructive commands take `--dry-run`, and a dry run changes nothing.
+- Every child process starts from `proc::command`.
+- Hints print `name::bin()`, never a hard-coded `dotman` or `dot`; `tests/names.rs` guards it.
+- Every prompt has a flag that answers it. There is no hidden test switch.
+- Code that reads working-tree files for tracked paths must cope with one deleted from disk.
+- Commits follow Conventional Commits with a scope, such as `feat(sync): ...`. Use `!` for breaking changes.
+- Adding a command:
   1. Add a `Commands` variant in `src/cli.rs`.
   2. Add a match arm in `src/main.rs`.
-  3. Add a documented `pub mod` in `src/commands/mod.rs`.
-  4. If it needs a man page, add it to the xtask array.
-  5. Update the hand-written `completions/*-enhanced*` files. Clap regenerates only the basic ones.
-- Commits follow Conventional Commits with a scope, for example `feat(log): ...` or `refactor(storage)!: ...`. Use `!` for breaking changes.
-- Tests that change `HOME` must be `#[serial]`, because `set_var` is process-global (and `unsafe` in edition 2024). `integration_basic.rs` avoids this by running the `dot` binary through `assert_cmd` and passing `HOME`/`DOTMAN_REPO_PATH` with `.env()`.
-- `DotmanContext::new_explicit` is the test constructor. It sets `no_pager` and `non_interactive`, so prompts never block; `new_with_explicit_paths` sets neither. Prompts are also skipped when `DOTMAN_NON_INTERACTIVE` is set or stdin is not a TTY, and in that case `add` refuses large files unless `--force` is passed.
+  3. Add a module in `src/commands/mod.rs`.
+  4. Add a row to `tests/guard.rs`, which checks the in-progress-operation guard.
+  5. Run `cargo run -p xtask -- generate`.
 
 ## Invariants
-- The index (v2) holds only the staging area: `staged_entries` and `deleted_entries`. Committed files come from the HEAD snapshot, and `Snapshot.files` maps paths to `SnapshotFile`, not `FileEntry`.
-- Tracking intent (which directories and files to watch) lives in `TrackingManifest` (`tracking.bin`), separate from the index.
-- `parents[0]` is the mainline. `HEAD~n` and `dag::build_first_parent_chain` follow first parents only; `dag::is_ancestor` walks all parents.
-- Hashing is xxh3-128 (32 hex chars) and non-cryptographic. Objects are stored as `objects/{hash}.zst`, commits as `commits/{id}.zst`.
-- Git and dotman commit IDs are mapped in `remote-mappings.toml` (`src/mapping.rs`). `pull` runs inside `Transaction` (`src/transaction.rs`), which rolls back on drop unless `commit()` is called.
-
-## Do not
-- Do not run commands against the real `~/.dotman` or `$HOME`, because it holds the user's actual dotfiles. Use a throwaway home: `HOME=/tmp/dotman-x DOTMAN_REPO_PATH=/tmp/dotman-x/.dotman ./target/debug/dot ...`.
-- Do not change the `Index`, `FileEntry` or `TrackingManifest` structs casually. They are bincode-serialized and `Index::load` never checks the version field, so existing repos break silently.
-- Do not weaken the security defaults. Paths must be validated against `allowed_directories`, which defaults to `$HOME` only. Setuid, setgid and sticky bits are stripped on add, and restore always passes `allow_dangerous: false` to `apply_to_path`. Regression tests belong in `tests/security_tests.rs`.
-- Do not commit proptest regression files. They are gitignored on purpose.
-- Do not hand-edit `man/*.1` or the clap-generated `completions/dot.*`. Regenerate them instead.
-- `just release-prepare <ver>` bumps Cargo.toml, Cargo.lock, the PKGBUILD and the fallback version in `install/install.sh`. `src/bootstrap/install.sh.in` pins `CARGO_PKG_VERSION` itself.
+- **Isolation flags.** Every git call carries `-c core.excludesFile= -c core.hooksPath=/dev/null` and the other flags in `src/git.rs`, and parsed output uses `-z`. A user's global excludes or hooks never affect the repo.
+- **Attributes file.** `init` and every clone write `.git/info/attributes` (`* -text -filter -ident -working-tree-encoding`), so a tracked `.gitattributes` cannot transform content.
+- **State and repo ID.** `$XDG_STATE_HOME/dotman/state.toml` is never synced and is written through temp, fsync and rename. `.git/dotman-id` identifies the repo; a state whose `repo_id` differs is treated as empty. A state file that fails to parse is never treated as empty.
+- **Repo root names.** `.git`, `.dotman.toml`, `.dotman/`, `README*`, `LICENSE*` and `install.sh` are never applied. `.git` is refused as a key component at any depth.
+- **Home writes.** Only `safe_write` writes into `$HOME`: no symlinked parent, no write through a symlink, temp file at 0600, setuid, setgid and sticky stripped, backup first.
+- **System scope.** `system-write` is the only path that runs as root. It rereads `[system] roots` from the invoking user's config, never honors `DOTMAN_SYSTEM_ROOT` or a plan prefix when euid is 0, and walks every target with `openat(O_NOFOLLOW)`.
+- **`unsafe`.** Only in `src/sys.rs`, each block with a `// SAFETY:` comment. The crate root denies it.
+- **Arithmetic.** `arithmetic_side_effects`, `float_arithmetic` and `indexing_slicing` are errors under lint-strict, in `tests/` too. Use checked or saturating integer arithmetic and `.get()`. A local `#[allow]` goes on one item with a `// reason:` comment that proves the bound.
+- **Plaintext.** Decrypted content is never written into the repo. `DOTMAN_AGE_KEY` is removed from every child except age, and refused in `[template] env`.
+- **Threat model.** A hostile repo, import source or plan must never cause a write outside `$HOME` or the roots, a write through a symlink, a setuid bit, an unapproved hook, a template command, or a silent loss of a file.
 
 ## Commands
 ```bash
-cargo test test_reset_hard --test command_tests   # single test
-cargo test -- --include-ignored                   # also runs the 2 slow #[ignore] remote tests; CI does this
-cargo test --test integration_basic               # `just test-integration` points at a missing file
-cargo test --test property_tests                  # `just test-property` points at a missing file
-just lint-strict                                  # pre-commit clippy set
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-just generate-manpages
+cargo test --workspace --all-targets          # the full suite; run before every commit
+cargo test --test cli_sync                    # one test file
+just lint-strict                              # pre-commit clippy set
+cargo fmt --check
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo run -p xtask -- generate                # man pages and completions
 ```
-Tests shell out to `git`, which must be installed with `user.name` and `user.email` set.
+- `DOTMAN_REQUIRE_AGE=1` and `DOTMAN_REQUIRE_CHEZMOI=1` turn a skipped age or chezmoi test into a failure. CI sets them.
+- The real-sudo test in `tests/system_scope.rs` runs only with `DOTMAN_REAL_SUDO_TEST=1` and a container marker (`/.dockerenv` or `/run/.containerenv`). Only CI's `system-scope` job sets both; elsewhere it returns early.
+- Tests shell out to `git`, which needs `user.name` and `user.email` set. The harness in `tests/common` gives each test its own HOME and XDG dirs.
 
-Environment: `DOTMAN_REPO_PATH` (default `~/.dotman`) and `DOTMAN_CONFIG_PATH` (default `~/.config/dotman/config`, TOML) override locations; `DOTMAN_NON_INTERACTIVE` skips prompts; `NO_PAGER` disables paging. Logging uses `RUST_LOG=dotman::<module path>` (default `warn`), but tracing exists only in `main.rs`, `diff/` and `utils/pager/`.
+## Do not
+- Do not run `dotman` or tests against the real `~/.dotman`, `~/.config/dotman`, `~/.local/share/dotman`, `~/.local/state/dotman`, `/etc` or `$HOME`. Use `tests/common`, or a temp root with a HOME and every `XDG_*` pointing inside it.
+- Do not weaken the defaults: paths stay confined to `$HOME` and the opted-in roots, and setuid, setgid and sticky bits stay stripped. Regression tests go in `tests/security_tests.rs`.
+- Do not hand-edit `man/*.1` or `completions/` (except `completions/README.md`). Regenerate them.
+- Do not commit proptest regression files. They are gitignored.
+- Do not add a dependency that is not already in `Cargo.toml` without raising it first.

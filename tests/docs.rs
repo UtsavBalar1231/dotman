@@ -1,0 +1,108 @@
+//! The README names only commands that exist, and AGENTS.md names only paths that exist.
+
+use clap::CommandFactory;
+use dotman::cli::Cli;
+use std::collections::BTreeSet;
+use std::error::Error;
+use std::fs;
+use std::path::Path;
+
+type R = Result<(), Box<dyn Error>>;
+
+fn read(name: &str) -> Result<String, Box<dyn Error>> {
+    Ok(fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(name),
+    )?)
+}
+
+/// The word after each `dotman ` or `dot ` in the code spans and fenced blocks of `text`.
+fn commands_in(text: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        let code: Vec<&str> = if fenced {
+            vec![line]
+        } else {
+            line.split('`').skip(1).step_by(2).collect()
+        };
+        for span in code {
+            let words: Vec<&str> = span.split_whitespace().collect();
+            for pair in words.windows(2) {
+                let [first, second] = pair else { continue };
+                if matches!(*first, "dotman" | "dot")
+                    && second.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+                {
+                    found.insert((*second).to_owned());
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn every_readme_command_exists() -> R {
+    let known: BTreeSet<String> = Cli::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_owned())
+        .collect();
+    let used = commands_in(&read("README.md")?);
+    assert!(used.len() > 10, "the extractor found only {used:?}");
+    for cmd in &used {
+        assert!(
+            known.contains(cmd),
+            "README names `dotman {cmd}`, which is not a subcommand"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn every_structure_path_in_agents_exists() -> R {
+    let text = read("AGENTS.md")?;
+    let section = text
+        .split("## Structure")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .ok_or("AGENTS.md has no Structure section")?;
+    let mut checked = 0_usize;
+    for line in section.lines() {
+        let Some(path) = line.split_whitespace().next().filter(|w| w.contains('/')) else {
+            continue;
+        };
+        let full = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        assert!(
+            full.exists(),
+            "AGENTS.md structure lists {path}, which does not exist"
+        );
+        checked = checked.saturating_add(1);
+    }
+    assert!(checked > 10, "only {checked} paths were checked");
+    Ok(())
+}
+
+#[test]
+fn agents_has_no_private_item_doc_rule() -> R {
+    assert!(!read("AGENTS.md")?.contains("including private items"));
+    Ok(())
+}
+
+#[test]
+fn readme_installs_only_this_project() -> R {
+    let readme = read("README.md")?;
+    for line in readme.lines() {
+        if line.contains("cargo install dotman ") || line.trim_end() == "cargo install dotman" {
+            assert!(
+                line.contains("--git"),
+                "plain `cargo install dotman` installs another project: {line}"
+            );
+        }
+    }
+    assert!(!readme.contains("yay -S dotman"));
+    assert!(!readme.contains("SECURITY_MIGRATION"));
+    Ok(())
+}

@@ -1,266 +1,186 @@
 # dotman
 
-[![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/UtsavBalar1231/dotman/ci.yml?branch=main)](https://github.com/UtsavBalar1231/dotman/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/UtsavBalar1231/dotman/ci.yml?branch=main)](https://github.com/UtsavBalar1231/dotman/actions)
 
-High-performance dotfiles manager with Git-like semantics, built in Rust.
+A dotfiles manager with no learning curve, safe by default, for Linux and macOS.
 
-## Why dotman?
+Your dotfiles live in an ordinary git repo. dotman copies them into `$HOME`, notices which side changed, and asks before it overwrites anything. Every file it replaces is backed up first. It never writes through a symlink, never runs a hook you have not approved, and never runs a template command.
 
-Dotman brings the power of Git to dotfiles management with a focus on **performance** and **simplicity**.
+## Install
 
-- **Git-like workflow** - Familiar commands: `add`, `commit`, `push`, `pull`, `branch`
-- **Content deduplication** - Identical files stored once via xxHash3 (~30GB/s)
-- **Blazing fast** - SIMD acceleration, parallel processing, memory-mapped I/O
-- **Branch-based configs** - Different setups for different machines
-- **Git remote support** - Backup to GitHub/GitLab/Bitbucket
+The binary is `dotman`. Installers also add a `dot` symlink, but only when no other `dot` is on `PATH`, because `/usr/bin/dot` is usually Graphviz.
 
-## Installation
-
-### From Source
 ```bash
-git clone https://github.com/UtsavBalar1231/dotman.git
-cd dotman
-cargo install --path .
-```
-
-### Installation Script
-```bash
+# release tarball, checksum-verified (Linux and macOS)
 curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash
+
+# from source (Rust 1.88 or newer)
+cargo install --git https://github.com/UtsavBalar1231/dotman --locked dotman-cli
+
+# Arch Linux, from a checkout
+cd packaging/arch && makepkg -si
 ```
 
-### Pre-built Binaries
+Release tarballs are on the [releases page](https://github.com/UtsavBalar1231/dotman/releases).
 
-Download from [releases](https://github.com/UtsavBalar1231/dotman/releases):
+## Quick start
 
-| Platform | Binary |
-|----------|--------|
-| Linux x86_64 (glibc) | `dotman-v{version}-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux x86_64 (musl) | `dotman-v{version}-x86_64-unknown-linux-musl.tar.gz` |
-| Linux aarch64 | `dotman-v{version}-aarch64-unknown-linux-gnu.tar.gz` |
-
-## Quick Start
+On the first machine, `init` asks only what it cannot detect: git identity, a remote (it can create a private GitHub repo through `gh`), host name and profiles, system files, and an encryption key.
 
 ```bash
-# Initialize repository
-dot init
-
-# Track dotfiles
-dot add ~/.zshrc ~/.vimrc ~/.config/nvim
-dot commit -m "Initial dotfiles"
-
-# Create machine-specific branch
-dot checkout -b laptop
-dot add ~/.config/i3
-dot commit -m "Add laptop configs"
-
-# Set up remote backup
-dot remote add origin git@github.com:username/dotfiles.git
-dot push -u origin main
-
-# Restore on new machine
-dot init
-dot remote add origin git@github.com:username/dotfiles.git
-dot pull origin main
+dotman init
+dotman add ~/.zshrc ~/.config/nvim
+dotman sync
 ```
+
+On a second machine:
+
+```bash
+dotman init <url>
+```
+
+Every day, edit files where they are, then run `dotman sync`. It captures local edits, commits, pulls, applies what arrived and pushes. `dotman status` shows what differs, and `dotman diff` shows how.
 
 ## Commands
 
-| Category | Commands |
-|----------|----------|
-| **Getting Started** | `init`, `add`, `commit`, `status` |
-| **History** | `log`, `diff`, `show` |
-| **Branching** | `branch`, `checkout`, `merge`, `rebase` |
-| **Recovery** | `reset`, `restore`, `stash`, `revert` |
-| **Remote** | `remote`, `push`, `pull`, `fetch` |
-| **Utility** | `clean`, `config`, `tag`, `reflog`, `fsck` |
+| Command | Purpose |
+|---|---|
+| `dotman init` | Create the repo, or clone one and apply it. Safe to rerun |
+| `dotman add` | Start managing files or directories |
+| `dotman forget` | Stop managing files, keeping them in `$HOME` |
+| `dotman list` | List the managed files |
+| `dotman status` | Compare `$HOME`, the repo and the last applied state |
+| `dotman apply` | Write the repo's files into `$HOME` |
+| `dotman diff` | Show how `$HOME` differs from the repo |
+| `dotman edit` | Open a managed file's source in `$VISUAL` or `$EDITOR`, then apply it |
+| `dotman sync` | Capture, commit, pull, apply and push |
+| `dotman log` | Show the repo's history |
+| `dotman restore` | Write an earlier version of a file, backing up the current one |
+| `dotman import` | Convert another setup into the repo |
+| `dotman git` | Run git in the repo |
+| `dotman doctor` | Check the environment and the repo |
+| `dotman key` | Create or import the age identity |
+| `dotman completion` | Generate shell completions |
 
-**Global flags:** `--verbose`, `--quiet`, `--no-pager`
+Destructive commands take `--dry-run`, which changes nothing. Exit codes: 1 error, 3 some paths were left undecided, held, blocked or reported for action, 4 a rebase conflict (`sync` aborts it and prints the steps to resolve it), 0 otherwise.
 
-Run `dot <command> --help` or `man dot-<command>` for detailed usage.
+Backups go to `$XDG_STATE_HOME/dotman/backups/`.
 
-## Configuration
+## Variants
 
-Config file: `~/.config/dotman/config` (TOML)
+A repo file can carry one brace block in its final name component, such as `monitors{host=laptop}.conf`. It targets `monitors.conf` and applies only where its conditions hold. Any other brace text is a literal file name.
 
-```toml
-[user]
-name = "Your Name"
-email = "you@example.com"
+- Keys: `host`, `user`, `profile`, `distro`, `like` (any `ID_LIKE` token), `os` (`linux`, `macos`, `wsl`), `arch`. Join conditions with `+`. `key!=value` negates.
+- Flags: `tmpl` renders the file as a template; `age` stores it encrypted. Example: `.zshrc{profile=work+os=linux}`, `hosts{age}.yml`.
+- Ranking: the variant with the most specific positive key wins (`host` beats `user` beats `profile` and so on down to `arch`), and a longer list of matching keys beats a shorter one. A variant with any condition beats the plain file. Anything still tied is ambiguous: `status` reports it and `apply` skips it.
 
-[core]
-compression_level = 3  # 1-22 (default: 3)
+`dotman add --for host=laptop <file>` creates the variant name for you.
 
-[tracking]
-ignore_patterns = [".git", "*.swp", "*.tmp", "node_modules"]
+## Templates
 
-[security]
-# Path validation (default: enforce with $HOME only)
-allowed_directories = ["/home/user"]
-enforce_path_validation = true
+A `{tmpl}` file is rendered with minijinja in strict mode: an undefined variable is an error that names the file and the variable. There is no `include` and no command execution.
 
-# Permission sanitization (default: strip dangerous bits)
-strip_dangerous_permissions = true
-max_file_mode = 0o777
-```
+Variables: `host`, `user`, `distro`, `os`, `arch`, `home`; the lists `profiles` and `like`; `vars` (the `[vars]` table of the machine config); and `env`, which holds only the names listed in `[template] env` of the machine config. The allowlist is empty by default.
 
-**Environment variables:**
-- `DOTMAN_CONFIG_PATH` - Override config location
-- `DOTMAN_REPO_PATH` - Override repository location (default: `~/.dotman`)
+dotman never captures a local edit into a template. If both sides changed, the path is reported as template drift and the run exits 3. Fix it with `dotman edit <path>`, which writes the new rendering over the file when the source changed, or discard the local change with `dotman apply --take-repo <path>`.
 
-## Security
+## Hooks
 
-Dotman includes built-in security features to prevent common attacks:
+`[hooks]` in `.dotman.toml` maps a glob over managed paths to a shell command, for example `".config/hypr/**" = "hyprctl reload"`. After `apply` or `sync` changes a matching path, the command runs once with `$HOME` as the working directory.
 
-### Path Traversal Protection
+A hook table needs approval on each machine. The prompt shows every command, and `--approve-hooks` answers it. Approved hooks run in unattended `sync`; a table that changed after a pull is skipped with a warning until you approve it again. `init <url>` runs hooks only with `--approve-hooks`. `--no-hooks` never runs them. Approval covers the command text, not the scripts it calls.
 
-Prevents tracking files outside allowed directories (default: `$HOME` only).
+## System files
 
-```toml
-[security]
-# Allowed directories for tracking files
-allowed_directories = ["/home/user", "/opt/custom"]
-
-# Enforce path validation (default: true)
-enforce_path_validation = true
-```
-
-**What's blocked:**
-- `../../../etc/passwd` - Parent directory traversal
-- `/etc/shadow` - Absolute paths outside allowed directories
-- `~/../../../root` - Tilde bypass patterns
-- Symlinks pointing outside allowed directories
-
-**Error message example:**
-```
-Error: Path '/etc/passwd' is outside allowed directories.
-Allowed directories:
-  - /home/user
-
-To track files in additional directories, edit ~/.config/dotman/config
-```
-
-### Permission Sanitization
-
-Strips dangerous permission bits (setuid/setgid/sticky) from tracked files by default.
-
-```toml
-[security]
-# Strip dangerous permission bits when storing (default: true)
-strip_dangerous_permissions = true
-
-# Maximum allowed file mode (default: 0o777)
-max_file_mode = 0o777
-```
-
-**What's stripped:**
-- `setuid (0o4000)` - Set user ID on execution
-- `setgid (0o2000)` - Set group ID on execution
-- `sticky (0o1000)` - Sticky bit
-
-**Warning displayed when dangerous bits are stripped:**
-```
-Stripped dangerous permission bits from ~/.local/bin/script
-  Original: 0o4755
-  Sanitized: 0o755
-  Removed: setuid (0o4000)
-
-This is a security feature. Dangerous bits are stripped by default.
-To disable: Set strip_dangerous_permissions = false in ~/.config/dotman/config (NOT RECOMMENDED)
-```
-
-**Security guarantees:**
-- Dangerous bits are ALWAYS stripped on restore (even if disabled for storage)
-- Normal permissions (rwxrwxrwx) are fully preserved
-- Configuration allows opt-out for edge cases (with warnings)
-
-### Why These Defaults?
-
-**Path validation:** Prevents privilege escalation via unauthorized file access. Tracking `/etc/sudoers` or `/root/.ssh/authorized_keys` could allow attackers to gain root access when dotfiles are restored on a compromised system.
-
-**Permission stripping:** Prevents setuid/setgid exploits. A malicious dotfile with setuid bit could run as root, enabling privilege escalation attacks.
-
-### Migrating to 2.0.0
-
-See `SECURITY_MIGRATION.md` for upgrading from older versions.
-
-## Repository Structure
-
-```
-~/.dotman/
-├── index.bin           # Staging area (staged files only)
-├── tracking.bin        # Tracked directories/files manifest
-├── commits/            # Zstd-compressed snapshots
-├── objects/            # Content-addressed file storage
-├── refs/
-│   ├── heads/          # Local branches
-│   ├── tags/           # Tags
-│   └── remotes/        # Remote tracking refs (origin/*)
-├── logs/HEAD           # Reflog for recovery
-├── remote-mappings.toml # Git ↔ dotman commit mappings
-├── MERGE_HEAD          # (merge in progress)
-├── REBASE_STATE        # (rebase in progress)
-└── HEAD                # Current branch pointer
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│           CLI (clap)                │
-├─────────────────────────────────────┤
-│     Staging-Only Index (v2)         │  Git-style two-stage model
-│     • Staged files in index.bin     │
-│     • Committed files in snapshots  │
-├─────────────────────────────────────┤
-│     Content Store (xxHash3)         │  Deduplication
-│     Snapshots (Zstd compressed)     │  Full file storage
-├─────────────────────────────────────┤
-│     Performance Optimizations       │
-│     • SIMD acceleration             │
-│     • Parallel processing (rayon)   │
-│     • Memory-mapped I/O (>1MB)      │
-│     • Hash caching (size + mtime)   │
-└─────────────────────────────────────┘
-```
-
-## Development
+Files outside `$HOME`, such as `/etc/keyd/default.conf`, are opt-in. Nothing happens until the machine config lists `[system] roots = ["/etc"]` (`init --system-root /etc`, or answer the prompt in `add --system`). A cloned repo cannot enable it.
 
 ```bash
-# Build
-cargo build --release
-
-# Test
-cargo test
-
-# Lint
-cargo fmt && cargo clippy
-
-# Run
-./target/release/dot <command>
-
-# Debug logging
-RUST_LOG=debug ./target/release/dot status
+dotman add --system /etc/keyd/default.conf
+dotman apply --system
 ```
 
-Using [Just](https://github.com/casey/just) (recommended):
+- A file owned by a package needs `--package-owned`. Files you cannot read are refused, since system scope does not encrypt.
+- `apply --system` (and `sync --system`) shows each path with its diff, owner and mode, asks once, then escalates once through `sudo`, `doas` or `run0` to write.
+- Never allowed: `/`, `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, and on macOS the SIP-protected paths.
+- `sync` captures local edits to system files but does not write them without `--system`.
+
+See [SECURITY.md](SECURITY.md) before adding a sudoers rule.
+
+## Secrets
+
+`dotman add --encrypt <file>` stores the file as age ciphertext, encrypted to every recipient in `.dotman.toml`. `apply` decrypts it to `$HOME` at mode 0600 unless you set `[modes]` by hand. Plaintext is never written into the repo.
+
+Without a key, encrypted files are reported as `locked` and skipped.
+
 ```bash
-just build-release    # Release build
-just test             # All tests
-just lint             # Format + clippy
-just ci               # Full CI suite
+dotman key init                  # new identity at ~/.config/dotman/age-identity.txt
+dotman key import key.txt        # use an existing identity (--add-recipient lists it)
 ```
+
+On a machine where you cannot place a file, set `DOTMAN_AGE_KEY` to the key text, or `DOTMAN_AGE_KEY_FILE` to a path. The key goes only to age's stdin and is stripped from every other child process. It is refused in `[template] env`. Without an env var, the identity file is `$XDG_CONFIG_HOME/dotman/age-identity.txt`.
+
+Back the identity up now: keep it in a password manager and one offline copy. If every identity is lost, the encrypted data is lost, and no one can recover it. Add a second recipient (`dotman key init` on another machine, or `dotman key import --add-recipient`); `dotman doctor` warns while there is only one. The next `sync` on a machine with a key re-encrypts every file to the new set.
+
+dotman refuses to add a file that contains `AGE-SECRET-KEY-`, and holds back new files whose names look like secrets (`.env`, `*.pem`, `id_ed25519*` and so on; the list is `[guard] secret_names`). When the remote is public, `add` refuses those names unless you pass `--encrypt` or `--allow-plain`.
+
+## Codespaces, Dev Containers and DevPod
+
+`init` writes an `install.sh` at the repo root. It downloads a pinned, checksum-verified static `dotman` and runs a non-interactive `dotman init` on the checkout. Point each tool at the dotfiles repo:
+
+- **GitHub Codespaces:** Settings, Codespaces, enable "Automatically import dotfiles" and choose the repo.
+- **VS Code Dev Containers:** set `dotfiles.repository` (and optionally `dotfiles.installCommand`) in your VS Code user settings.
+- **DevPod:** `devpod context set-options -o DOTFILES_URL=<repo url>`, or Settings, Dotfiles.
+
+For encrypted files, add a `DOTMAN_AGE_KEY` Codespaces secret holding the identity text. Whether the secret reaches `install.sh` is not documented by GitHub. If it did not, the encrypted files show as `locked`: open a terminal that has the key and run `dotman apply`.
+
+Containers that run as root are handled by the script. Set `DOTMAN_APPROVE_HOOKS=1` in the environment to let it approve the repo's hooks. Refresh an old script with `dotman init --refresh-bootstrap`; `dotman doctor` warns when it is stale.
+
+## Prompt-answer flags
+
+Every prompt has a flag, so unattended runs never guess. A run is non-interactive when stdin is not a TTY or `DOTMAN_NON_INTERACTIVE` is set; unanswered paths are skipped and listed, and the run exits 3.
+
+| Prompt | Flag |
+|---|---|
+| Conflicts and existing files | `--keep-local` or `--take-repo` |
+| Local deletions | `--forget-deleted` or `--restore-deleted` |
+| Machine identity changed | `--accept-identity` |
+| Hook approval | `--approve-hooks` |
+| Overlay: add missing files | `--include-missing` |
+| System apply, symlink swap, directory preview | `--yes` |
+| System root in `add --system` | `--add-root` |
+| Source choice in `init` | `--no-import` |
+| `init` questions | `--git-name`, `--git-email`, `--git-global`, `--remote`, `--create-github <owner/name>`, `--no-remote`, `--host`, `--profile`, `--system-root`, `--no-system`, `--create-key`, `--no-key`, `--age-key-file` |
+| Replacing an identity | `--force` (backs up the old one first) |
+| Adding a recipient | `--add-recipient` |
+
+## Migration
+
+`dotman import [<source>]` converts a setup into a fresh repo. It never modifies the source and reports every entry as converted or needing action (exit 3 if any need it). `--dry-run` prints the report and changes nothing. `dotman init` with no argument detects the setups below and offers the import; `--no-import` skips that.
+
+- **Legacy dotman** (`~/.dotman` from before 0.1.0): converts every commit, keeping parents, author, time and message. `--overlay <source>` instead adds what the current repo lacks as one commit: it restores modes, and adds missing files only with `--include-missing`.
+- **yadm, bare repos and vcsh, or any git URL**: for trees laid out relative to `$HOME`. yadm `##` alternates become variants, and its default-processor templates become `{tmpl}`. Other templates, yadm encrypt archives and precedence differences are reported. yadm links are replaced by `--swap`. Further vcsh repos go in through `--overlay`.
+- **chezmoi**: plain files and symlinks only. Templates never run by default. `.chezmoiignore` is read as text, so any file it might exclude is reported, not imported. `--render-templates` opts in to running the real chezmoi after a warning.
+- **Symlink farms** (Stow, dotbot, rcm and similar): content is read through the links. `--swap` then replaces the links with real files, recording them so a failure rolls back. Home-manager links into `/nix/store` are report-only.
+
+## Requirements
+
+- git 2.25 or newer.
+- age 1.1 or newer, or rage, for encrypted files (optional).
+- Rust 1.88 or newer, to build from source.
+- Linux or macOS. Native Windows is not supported; WSL counts as Linux.
+- dotman refuses to run as root unless you pass `--allow-root` or set `DOTMAN_ALLOW_ROOT=1`.
+- Paths follow XDG: the repo is `$XDG_DATA_HOME/dotman`, state is `$XDG_STATE_HOME/dotman`, and the machine config is `$XDG_CONFIG_HOME/dotman/config.toml`. `DOTMAN_REPO_PATH` and `DOTMAN_CONFIG_PATH` override the first and last.
+
+## Limitations
+
+- Two machines with keys that re-encrypt at the same moment can hit a sync conflict. Syncing again resolves it.
+- Windows is not supported.
 
 ## Contributing
 
-1. Fork and create a feature branch
-2. Make changes with tests
-3. Run `just ci` (or `cargo fmt && cargo clippy && cargo test`)
-4. Open a Pull Request
-
-See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+See [AGENTS.md](AGENTS.md) for the layout, rules and commands. Run `just lint-strict` and `cargo test --workspace --all-targets` before opening a pull request. See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE).

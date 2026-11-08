@@ -1,287 +1,68 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+## Supported versions
 
-dotman is currently in pre-release development (version 0.0.1). We actively support the current development version and provide security updates as needed.
+dotman 0.1.0 is the first release. Only the latest release receives fixes.
 
-### Platform Support
+## Reporting a vulnerability
 
-**Tier 1 Platforms** (Binary releases provided):
-- Linux x86_64 (glibc-based distributions: Debian, Ubuntu, Fedora, etc.)
-- Linux x86_64 (musl-based distributions: Alpine Linux)
-- Linux aarch64 (glibc-based distributions)
-- Linux aarch64 (musl-based distributions)
+Use [GitHub private vulnerability reporting](https://github.com/UtsavBalar1231/dotman/security/advisories/new). If you cannot, email utsavbalar1231@gmail.com with the subject `[SECURITY] <short description>`.
 
-**Tier 2 Platforms** (Source builds supported):
-- macOS (x86_64 and aarch64)
-- Windows (x86_64)
+Please include what you found, the steps to reproduce it, the versions affected and what an attacker gains. Expect an acknowledgment within 48 hours and an assessment within 7 days. For high and critical issues, the aim is a fix within 90 days, with disclosure coordinated with you. Reporters are credited in the advisory unless they ask not to be.
 
-| Version | Supported          | Status                    |
-| ------- | ------------------ | ------------------------- |
-| 0.0.1   | :white_check_mark: | Pre-release, active dev   |
+## Threat model
 
-## Reporting a Vulnerability
+Applying a repo is as trusting as running its shell rc files, because a repo can ship any `.bashrc`. dotman guarantees where it writes and what it runs, not the content it writes.
 
-We take security vulnerabilities seriously and appreciate responsible disclosure from the security community.
+A hostile repo, import source or system-write plan must never cause:
 
-### How to Report
+- a write outside `$HOME`, or outside the roots in `[system] roots`;
+- a write through a symlink;
+- a setuid, setgid or sticky bit;
+- a hook run without approval on that machine;
+- a template command execution;
+- the silent loss of a file.
 
-**Preferred Method: GitHub Security Advisories**
+How this is enforced:
 
-Use [GitHub's private vulnerability reporting](https://github.com/UtsavBalar1231/dotman/security/advisories/new) for secure, private disclosure. This is the recommended approach as it provides:
-- Private communication channel
-- Coordinated disclosure workflow
-- Integration with GitHub's security features
+- Every home write goes through one path. It validates the key, refuses a symlinked parent, never writes through a symlink at the target, creates a temp file at 0600, strips setuid, setgid and sticky bits, and backs up what it replaces first.
+- Git runs with the user's excludes, hooks and filters disabled, so a global config or a tracked `.gitattributes` cannot change what is read or written. A `.git` path component is refused at any depth.
+- Hooks run only when the hash of the `[hooks]` table matches the one approved on this machine. Approval covers the command text, not the scripts it calls.
+- Templates use minijinja with no loader and no command functions. Environment variables are visible only if listed in `[template] env`.
+- Importers do not execute the source. The chezmoi importer copies only plain files to a scratch directory and runs chezmoi there with an empty config. `--render-templates` is the explicit opt-in to run chezmoi's templates.
+- System files are opt-in per machine, read as the user, and written by a helper that rechecks everything (below).
 
-**Alternative Method: Email**
+## The system-write helper
 
-If you cannot use GitHub Security Advisories, please email security reports to:
-- **Email**: utsavbalar1231@gmail.com
-- **Subject**: [SECURITY] Brief description of the vulnerability
+`apply --system` builds a plan as the user, then escalates once through `sudo`, `doas` or `run0` to run `dotman system-write`. The helper runs with root's power, so it trusts nothing from the caller. It accepts a plan only if:
 
-### What to Include
+- the plan is a regular file, not a symlink, at mode 0600, owned by the invoking user (`SUDO_UID`, else the user from `DOAS_USER`); when root starts the helper directly, the plan directory must be root-owned;
+- the roots embedded in the plan equal `[system] roots` in the invoking user's machine config, which must be a regular file, not a symlink, owned by that user and not writable by group or others;
+- each target is absolute and canonical, is not on the never-allowed list (`/`, `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, and the SIP paths on macOS), and lies inside a root;
+- the bytes match the embedded hash, owner and group resolve, and the mode has setuid, setgid and sticky stripped.
 
-Please provide the following information in your report:
+It then walks each target from `/` with `openat(O_NOFOLLOW | O_DIRECTORY)`, creates no directories, and writes through a temp file and `renameat` in that directory descriptor. When it runs as root, it ignores `DOTMAN_SYSTEM_ROOT` and refuses any plan that carries a prefix; the prefix exists only for tests under `escalate = "none"`.
 
-1. **Description**: Clear explanation of the vulnerability
-2. **Reproduction Steps**: Detailed steps to reproduce the issue
-3. **Impact Assessment**: Your analysis of the potential security impact
-4. **Affected Versions**: Versions where the vulnerability exists
-5. **Proof of Concept**: Code or commands demonstrating the issue (if applicable)
-6. **Suggested Fix**: Any recommendations for fixing the vulnerability (optional)
+**Do not add a `NOPASSWD` sudoers rule for `dotman system-write`.** The user controls `[system] roots` in a file they own, so such a rule lets that user write any root-allowed file, such as `/etc/sudoers.d/`, which is full root. Let the escalator ask for a password.
 
-### Response Timeline
+## age key handling
 
-- **Acknowledgment**: Within 48 hours of receiving your report
-- **Initial Assessment**: Within 7 days with our evaluation of severity
-- **Fix Timeline**: Within 90 days for high/critical severity issues
-- **Public Disclosure**: Coordinated with the reporter after fix is released
+- `DOTMAN_AGE_KEY` reaches age only on its stdin (`-i -`). Every other child process, including git, `gh`, hooks, the editor, chezmoi and the escalator, starts without it. It is refused in `[template] env`.
+- Identity files are created at 0600. `key import` refuses to overwrite a different identity without `--force`, and backs the old one up first.
+- Any plain capture (`add`, `sync` of a new file, a local edit) checks the content for `AGE-SECRET-KEY-`. `add` refuses the file; `sync` holds it back and never commits it.
+- Plaintext goes to age on stdin and ciphertext comes back on stdout, so decrypted content never sits in the repo. `diff` decrypts into a 0700 temp directory that is removed afterwards.
+- A lost identity cannot be recovered. Keep it in a password manager plus one offline copy, and add a second recipient.
+- dotman keeps ciphertext in git history. Removing an old recipient does not revoke access to what they could already read.
 
-## Security Measures
+## Container bootstrap
 
-dotman implements multiple security measures to maintain code and dependency security:
+The generated `install.sh` downloads a pinned release tarball and verifies it against `checksums.txt`. Both come from the same release URL, so the checksum proves integrity, not authenticity: it catches a corrupt or truncated download, not a compromised release. To verify who published the binary, build from a tagged checkout. `DOTMAN_BOOTSTRAP_BASE_URL` overrides the download base; set it only to a host you control.
 
-### Automated Security Scanning
+## Not tested
 
-- **cargo-audit**: Automated scanning for known vulnerabilities in dependencies
-- **cargo-deny**: License compliance and security advisory checking
-- **CI Integration**: Security checks run on every pull request and merge
-- **Static Analysis**: Clippy with security-focused lints enabled
+- `restorecon` runs after a system write when SELinux is enforcing, but it has never run: there is no SELinux in CI.
+- The real-root write path runs only in CI containers. Everything else about the helper is tested unprivileged with `escalate = "none"`.
 
-### Dependency Management
+## Dependencies
 
-- **Dependabot**: Weekly automated dependency updates
-- **Minimal Dependencies**: Careful evaluation of third-party crates
-- **Dependency Pinning**: Lock file ensures reproducible builds
-- **Regular Audits**: Periodic manual review of dependency tree
-
-### Security-Focused Testing
-
-- **Comprehensive Test Suite**: Unit, integration, and property-based tests
-- **Security Test Cases**: Tests specifically targeting security concerns
-- **Fuzzing**: Property-based testing with proptest for edge cases
-- **Continuous Integration**: All tests run on multiple platforms
-
-## Known Security Considerations
-
-The following areas require careful attention and are documented for transparency:
-
-### 1. Path Validation (Path Traversal Prevention)
-
-**Location**: `src/commands/add.rs` and path handling throughout codebase
-
-**Concern**: Potential path traversal vulnerabilities with relative paths like `../../.ssh/id_rsa`
-
-**Mitigation Status**: Under development
-- Need path canonicalization before processing
-- Validation against allowed directories (home directory scope)
-- Rejection of paths outside permitted boundaries
-
-**User Impact**: Users should avoid using relative paths with `..` components when adding files
-
-### 2. Permission Handling (Setuid/Setgid/Sticky Bits)
-
-**Location**: `src/storage/index.rs`, `src/utils/permissions.rs`
-
-**Concern**: Setuid, setgid, and sticky bits are currently preserved in file metadata
-
-**Mitigation Status**: Under review
-- Plan to strip dangerous permission bits (0o4000, 0o2000, 0o1000) during storage
-- Preserve only standard rwx permissions (0o777)
-- Add explicit permission validation before file restoration
-
-**User Impact**: Exercise caution when tracking files with special permission bits
-
-### 3. Repository Access Validation
-
-**Location**: All write operations throughout codebase
-
-**Concern**: Insufficient permission validation before write operations
-
-**Mitigation Status**: Under development
-- Early permission checks before repository modifications
-- Directory and file write permission validation
-- Use of `fs4` lock system to prevent race conditions
-
-**User Impact**: Ensure proper permissions on `~/.dotman` directory (recommended: 0700)
-
-## Disclosure Policy
-
-We follow a **90-day coordinated disclosure policy**:
-
-1. **Private Disclosure**: Report received and acknowledged privately
-2. **Fix Development**: Security fix developed and tested
-3. **Pre-Release Testing**: Fix validated across supported platforms
-4. **Coordinated Release**: Public release coordinated with reporter
-5. **Public Advisory**: Security advisory published after fix is available
-6. **Credit**: Reporters credited in release notes and security advisory (unless anonymity requested)
-
-### Disclosure Timeline
-
-- **Day 0**: Vulnerability reported
-- **Day 1-2**: Acknowledgment sent to reporter
-- **Day 1-7**: Initial assessment and severity determination
-- **Day 7-90**: Fix development, testing, and validation
-- **Day 90**: Public disclosure and release (or earlier if agreed upon)
-
-## Security Best Practices for Users
-
-### Safe Usage Guidelines
-
-1. **Avoid Tracking Sensitive Files**
-   - Never track SSH keys (`~/.ssh/id_rsa`, `~/.ssh/id_ed25519`)
-   - Exclude API keys and authentication tokens
-   - Don't track files containing passwords or credentials
-   - Review files before adding them to dotman
-
-2. **Secure Repository Permissions**
-   - Set appropriate permissions on `~/.dotman` directory:
-     ```bash
-     chmod 700 ~/.dotman
-     ```
-   - Restrict access to your user account only
-   - Avoid running dotman with elevated privileges unless necessary
-
-3. **Verify Binary Integrity**
-   - Download releases from official GitHub releases only
-   - Verify SHA256 checksums provided with releases:
-     ```bash
-     sha256sum -c checksums.txt
-     ```
-   - Consider verifying GPG signatures when available
-
-4. **Configuration Security**
-   - Review configuration file permissions (`~/.config/dotman/config`)
-   - Use environment variables for sensitive configuration (not config file)
-   - Regularly audit tracked files with `dot status`
-
-5. **Remote Repository Security**
-   - Use SSH keys for Git remote operations (not HTTPS passwords)
-   - Enable two-factor authentication on remote Git services
-   - Regularly rotate SSH keys used for remote access
-   - Review remote repository access logs periodically
-
-6. **Regular Updates**
-   - Keep dotman updated to the latest version
-   - Monitor release notes for security fixes
-   - Subscribe to security advisories on GitHub
-
-### Ignore Patterns for Sensitive Data
-
-Create or update `~/.dotman/ignore` to exclude sensitive patterns:
-
-```
-# SSH keys
-.ssh/id_*
-.ssh/*.pem
-
-# GPG keys
-.gnupg/private-keys-v1.d/*
-.gnupg/secring.gpg
-
-# Authentication tokens
-.aws/credentials
-.docker/config.json
-.netrc
-
-# API keys
-*.key
-*.pem
-*_key
-*_secret
-
-# Password files
-.password-store/*
-.pass/*
-
-# Browser data
-.mozilla/firefox/*/key*.db
-.config/google-chrome/Default/Login Data
-```
-
-## Security Audit Information
-
-For security researchers and auditors:
-
-### Code Organization
-
-- **Entry Point**: `src/main.rs` - CLI interface
-- **Core Context**: `src/lib.rs` - Central repository context
-- **Command Modules**: `src/commands/` - Individual command implementations
-- **Storage Layer**: `src/storage/` - File storage and indexing
-- **Security-Critical Paths**:
-  - Path handling: `src/commands/add.rs`, `src/utils/paths.rs`
-  - Permission handling: `src/utils/permissions.rs`, `src/storage/index.rs`
-  - Repository operations: All `src/commands/*.rs` files
-
-### Build and Test
-
-```bash
-# Clone repository
-git clone https://github.com/UtsavBalar1231/dotman.git
-cd dotman
-
-# Run security-focused tests
-cargo test --test comprehensive_unit_tests
-
-# Run all tests
-cargo test
-
-# Security audit dependencies
-cargo audit
-
-# Check for security lints
-cargo clippy -- -D warnings
-
-# Build for security testing
-cargo build --release
-```
-
-### Known Safe Practices
-
-- **No Unsafe Code**: Codebase avoids `unsafe` blocks where possible
-- **Memory Safety**: Rust's memory safety guarantees prevent common vulnerabilities
-- **Error Handling**: Uses `anyhow` for comprehensive error context
-- **Dependency Auditing**: Regular automated and manual dependency reviews
-- **Input Validation**: User input validation at command boundaries
-
-## Contact
-
-- **Security Issues**: Use GitHub Security Advisories or email utsavbalar1231@gmail.com
-- **General Issues**: Use [GitHub Issues](https://github.com/UtsavBalar1231/dotman/issues)
-- **Questions**: Use [GitHub Discussions](https://github.com/UtsavBalar1231/dotman/discussions)
-
-## Acknowledgments
-
-We appreciate the security research community's efforts in responsible disclosure. Security researchers who report valid vulnerabilities will be acknowledged in:
-
-- Release notes for the fixing version
-- Security advisories published on GitHub
-- This SECURITY.md file (Hall of Fame section, when applicable)
-
-Thank you for helping keep dotman secure!
-
----
-
-**Last Updated**: 2025-11-25
-**Version**: 0.0.1-pre
+CI runs `cargo deny`. The one accepted advisory, RUSTSEC-2025-0141 (`bincode`), is in the legacy importer, which reads local files you point it at.
