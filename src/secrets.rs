@@ -289,8 +289,8 @@ impl Age {
             return Ok(out.stdout);
         }
         let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
-        // age prints "no identity matched any of the recipients". rage's "no matching keys" is
-        // taken from its documentation and was not seen, because rage was not installed.
+        // Seen with age 1.3.2 ("no identity matched any of the recipients") and rage 0.12.1
+        // ("No matching keys found").
         if err.contains("no identity matched") || err.contains("no matching keys") {
             return Err(Locked("no key here matches its recipients".to_owned()).into());
         }
@@ -333,7 +333,8 @@ impl Age {
     }
 
     /// The recipients of the identities in `identity` (keygen `-y`, fed on stdin). Plugin
-    /// identities make age-keygen fail; rage-keygen's `-y` is unverified.
+    /// identities make age-keygen fail. `-y` on stdin was checked with age-keygen 1.3.2 and
+    /// rage-keygen 0.12.1.
     pub fn recipients_of(&self, identity: &[u8]) -> Result<Vec<String>> {
         let keygen = self.keygen()?;
         let mut cmd = proc::command(&keygen);
@@ -370,12 +371,13 @@ fn select(command: Option<&str>) -> Result<Cli, String> {
     Ok(Cli { program, rage })
 }
 
-// `-i -` was verified with age 1.3.2 only. rage was not installed when this was written, so its
-// `-i -` is unverified and an `age` on PATH reads the key instead.
+// `-i -` was checked with age 1.3.2 and rage 0.12.1 and works in both. With rage selected it still
+// goes through the `age` on PATH, never through rage.
 fn stdin_reader(cli: &Cli) -> Result<(PathBuf, String), String> {
     let age = if cli.rage {
         proc::find_program("age").ok_or_else(|| {
-            "rage is selected and its `-i -` is unverified, and no age is on PATH".to_owned()
+            "rage is selected, and reading the key from stdin goes through age, which is not on PATH"
+                .to_owned()
         })?
     } else {
         cli.program.clone()

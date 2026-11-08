@@ -288,7 +288,7 @@ _arguments "${_arguments_options[@]}" : \
 '--allow-root[Allow running as root]' \
 '-h[Print help]' \
 '--help[Print help]' \
-":: :_dotman__key_commands" \
+":: :_dotman__subcmd__key_commands" \
 "*::: :->key" \
 && ret=0
 
@@ -383,101 +383,101 @@ _dotman_commands() {
     )
     _describe -t commands 'dotman commands' commands "$@"
 }
-(( $+functions[_dotman__add_commands] )) ||
-_dotman__add_commands() {
+(( $+functions[_dotman__subcmd__add_commands] )) ||
+_dotman__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'dotman add commands' commands "$@"
 }
-(( $+functions[_dotman__apply_commands] )) ||
-_dotman__apply_commands() {
+(( $+functions[_dotman__subcmd__apply_commands] )) ||
+_dotman__subcmd__apply_commands() {
     local commands; commands=()
     _describe -t commands 'dotman apply commands' commands "$@"
 }
-(( $+functions[_dotman__completion_commands] )) ||
-_dotman__completion_commands() {
+(( $+functions[_dotman__subcmd__completion_commands] )) ||
+_dotman__subcmd__completion_commands() {
     local commands; commands=()
     _describe -t commands 'dotman completion commands' commands "$@"
 }
-(( $+functions[_dotman__diff_commands] )) ||
-_dotman__diff_commands() {
+(( $+functions[_dotman__subcmd__diff_commands] )) ||
+_dotman__subcmd__diff_commands() {
     local commands; commands=()
     _describe -t commands 'dotman diff commands' commands "$@"
 }
-(( $+functions[_dotman__doctor_commands] )) ||
-_dotman__doctor_commands() {
+(( $+functions[_dotman__subcmd__doctor_commands] )) ||
+_dotman__subcmd__doctor_commands() {
     local commands; commands=()
     _describe -t commands 'dotman doctor commands' commands "$@"
 }
-(( $+functions[_dotman__edit_commands] )) ||
-_dotman__edit_commands() {
+(( $+functions[_dotman__subcmd__edit_commands] )) ||
+_dotman__subcmd__edit_commands() {
     local commands; commands=()
     _describe -t commands 'dotman edit commands' commands "$@"
 }
-(( $+functions[_dotman__forget_commands] )) ||
-_dotman__forget_commands() {
+(( $+functions[_dotman__subcmd__forget_commands] )) ||
+_dotman__subcmd__forget_commands() {
     local commands; commands=()
     _describe -t commands 'dotman forget commands' commands "$@"
 }
-(( $+functions[_dotman__git_commands] )) ||
-_dotman__git_commands() {
+(( $+functions[_dotman__subcmd__git_commands] )) ||
+_dotman__subcmd__git_commands() {
     local commands; commands=()
     _describe -t commands 'dotman git commands' commands "$@"
 }
-(( $+functions[_dotman__import_commands] )) ||
-_dotman__import_commands() {
+(( $+functions[_dotman__subcmd__import_commands] )) ||
+_dotman__subcmd__import_commands() {
     local commands; commands=()
     _describe -t commands 'dotman import commands' commands "$@"
 }
-(( $+functions[_dotman__init_commands] )) ||
-_dotman__init_commands() {
+(( $+functions[_dotman__subcmd__init_commands] )) ||
+_dotman__subcmd__init_commands() {
     local commands; commands=()
     _describe -t commands 'dotman init commands' commands "$@"
 }
-(( $+functions[_dotman__key_commands] )) ||
-_dotman__key_commands() {
+(( $+functions[_dotman__subcmd__key_commands] )) ||
+_dotman__subcmd__key_commands() {
     local commands; commands=(
 'init:Generate an age identity and add its recipient to .dotman.toml' \
 'import:Copy an existing age identity into place and check that its recipient is listed' \
     )
     _describe -t commands 'dotman key commands' commands "$@"
 }
-(( $+functions[_dotman__key__import_commands] )) ||
-_dotman__key__import_commands() {
+(( $+functions[_dotman__subcmd__key__subcmd__import_commands] )) ||
+_dotman__subcmd__key__subcmd__import_commands() {
     local commands; commands=()
     _describe -t commands 'dotman key import commands' commands "$@"
 }
-(( $+functions[_dotman__key__init_commands] )) ||
-_dotman__key__init_commands() {
+(( $+functions[_dotman__subcmd__key__subcmd__init_commands] )) ||
+_dotman__subcmd__key__subcmd__init_commands() {
     local commands; commands=()
     _describe -t commands 'dotman key init commands' commands "$@"
 }
-(( $+functions[_dotman__list_commands] )) ||
-_dotman__list_commands() {
+(( $+functions[_dotman__subcmd__list_commands] )) ||
+_dotman__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'dotman list commands' commands "$@"
 }
-(( $+functions[_dotman__log_commands] )) ||
-_dotman__log_commands() {
+(( $+functions[_dotman__subcmd__log_commands] )) ||
+_dotman__subcmd__log_commands() {
     local commands; commands=()
     _describe -t commands 'dotman log commands' commands "$@"
 }
-(( $+functions[_dotman__restore_commands] )) ||
-_dotman__restore_commands() {
+(( $+functions[_dotman__subcmd__restore_commands] )) ||
+_dotman__subcmd__restore_commands() {
     local commands; commands=()
     _describe -t commands 'dotman restore commands' commands "$@"
 }
-(( $+functions[_dotman__status_commands] )) ||
-_dotman__status_commands() {
+(( $+functions[_dotman__subcmd__status_commands] )) ||
+_dotman__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'dotman status commands' commands "$@"
 }
-(( $+functions[_dotman__sync_commands] )) ||
-_dotman__sync_commands() {
+(( $+functions[_dotman__subcmd__sync_commands] )) ||
+_dotman__subcmd__sync_commands() {
     local commands; commands=()
     _describe -t commands 'dotman sync commands' commands "$@"
 }
-(( $+functions[_dotman__system-write_commands] )) ||
-_dotman__system-write_commands() {
+(( $+functions[_dotman__subcmd__system-write_commands] )) ||
+_dotman__subcmd__system-write_commands() {
     local commands; commands=()
     _describe -t commands 'dotman system-write commands' commands "$@"
 }

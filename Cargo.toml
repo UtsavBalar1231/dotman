@@ -38,22 +38,22 @@ exclude = [
 ]
 
 [dependencies]
-clap = { version = "4.5", features = ["derive", "env"] }
-clap_complete = "4.5"
+clap = { version = "4.6", features = ["derive", "env"] }
+clap_complete = "4.6"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.9"
+toml = "1.2"
 anyhow = "1.0"
 walkdir = "2.5"
 bincode = { version = "2.0", features = ["serde"] }
-zstd = "0.13"
+zstd = "0.14"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-colored = "3.0"
-fs4 = "0.13"
-tempfile = "3.23"
+colored = "3.1"
+fs4 = "1.1"
+tempfile = "3.27"
 libc = "0.2"
-glob = "0.3.3"
+glob = "0.3.4"
 unicode-normalization = "0.1.26"
-minijinja = "3.0.5"
+minijinja = "3.1.0"
 serde_json = "1.0"
 
 shell-words = "1.1"
@@ -61,9 +61,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-proptest = "1.9"
-tempfile = "3.23"
-assert_cmd = "2.1"
+proptest = "1.12"
+tempfile = "3.27"
+assert_cmd = "2.2"
 predicates = "3.1"
 
 [profile.release]

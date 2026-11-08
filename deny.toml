@@ -17,7 +17,7 @@ wildcards = "deny"
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2025-0141", reason = "bincode 2 is unmaintained, and only the legacy importer uses it; the plan's dependency table has no replacement" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 2 is unmaintained, and only the legacy importer uses it; 2.0.1 is the newest release that builds, since 3.0.0 is a compile_error tombstone with no serde API" },
 ]
 
 [sources]

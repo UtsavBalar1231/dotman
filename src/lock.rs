@@ -3,7 +3,7 @@
 use crate::output;
 use crate::paths::create_private_dir;
 use anyhow::{Context, Result, bail};
-use fs4::fs_std::FileExt;
+use fs4::{FileExt, TryLockError};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
@@ -45,17 +45,23 @@ impl Lock {
             }
             Err(e) => return Err(e).with_context(|| format!("cannot open {}", path.display())),
         };
-        match file.try_lock_exclusive() {
-            Ok(true) => Ok(Self { file: Some(file) }),
-            Ok(false) => bail!("another {} process is running", crate::name::bin()),
-            Err(e) if cannot_lock(&e) => {
+        // Not `file.try_lock()`: on Rust 1.89 and later that resolves to std's inherent method,
+        // which returns a different error type.
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { file: Some(file) }),
+            Err(TryLockError::WouldBlock) => {
+                bail!("another {} process is running", crate::name::bin())
+            }
+            Err(TryLockError::Error(e)) if cannot_lock(&e) => {
                 output::warning(&format!(
                     "{} does not support locking; continuing without the lock",
                     path.display()
                 ));
                 Ok(Self { file: None })
             }
-            Err(e) => Err(e).with_context(|| format!("cannot lock {}", path.display())),
+            Err(TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("cannot lock {}", path.display()))
+            }
         }
     }
 

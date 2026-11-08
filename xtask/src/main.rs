@@ -122,6 +122,6 @@ mod tests {
             .into()
         );
         let bash = fs::read_to_string(root.path().join("completions/dotman.bash")).unwrap();
-        assert!(bash.contains("dotman__edit") && bash.contains("dotman__key"));
+        assert!(bash.contains("dotman__subcmd__edit") && bash.contains("dotman__subcmd__key"));
     }
 }
