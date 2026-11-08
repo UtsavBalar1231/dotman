@@ -1,5 +1,7 @@
 //! `dot doctor`: reads the environment and the repo, writes nothing and never stops at the first problem.
 
+use crate::VERSION;
+use crate::bootstrap::{self, Found};
 use crate::cli::DoctorArgs;
 use crate::context::Context;
 use crate::git::Git;
@@ -120,6 +122,7 @@ fn collect(online: bool) -> Vec<Check> {
             checks.extend(variants(ctx));
             checks.extend(encryption(ctx));
             checks.extend(system_files(ctx));
+            checks.extend(install_script(ctx));
         } else {
             checks.push(fail(
                 "repo",
@@ -255,6 +258,24 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
         None => checks.push(pass("no git operation in progress")),
     }
     checks
+}
+
+fn install_script(ctx: &Context) -> Option<Check> {
+    match bootstrap::inspect(&ctx.paths.repo) {
+        Err(e) => Some(warn("install.sh", &format!("{e:#}"))),
+        Ok(Found::Missing) => None,
+        Ok(Found::Edited) => Some(info(
+            "install.sh",
+            "edited by hand, so `dot init --refresh-bootstrap` leaves it as it is",
+        )),
+        Ok(Found::Unedited { version }) if bootstrap::is_older(&version) => Some(warn(
+            "install.sh",
+            &format!(
+                "pins dot {version}, older than {VERSION}; run `dot init --refresh-bootstrap`"
+            ),
+        )),
+        Ok(Found::Unedited { .. }) => Some(pass("install.sh")),
+    }
 }
 
 // Ambiguity depends on this machine's identity; an invalid block is invalid everywhere.

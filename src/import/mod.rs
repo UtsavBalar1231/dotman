@@ -10,6 +10,7 @@ mod gittree;
 mod legacy;
 mod yadm;
 
+use crate::bootstrap;
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::sync::IDENTITY_FIX;
@@ -169,7 +170,27 @@ fn is_url(text: &str) -> bool {
 }
 
 /// Runs `dot import`. The caller holds the lock and has run the in-progress guard.
+///
+/// A fresh import then writes `install.sh`, uncommitted: the next `dot sync` commits it, and an
+/// `--overlay` needs that sync first.
 pub fn run(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
+    let outcome = convert(ctx, args)?;
+    if args.overlay.is_some() || args.swap || args.no_bootstrap {
+        return Ok(outcome);
+    }
+    let repo = &ctx.paths.repo;
+    if args.dry_run {
+        // Without a source, the dry run may only have listed candidates.
+        if args.source.is_some() {
+            bootstrap::write(repo, true)?;
+        }
+    } else if repo.join(".git").exists() && ctx.git.head()?.is_some() {
+        bootstrap::write(repo, false)?;
+    }
+    Ok(outcome)
+}
+
+fn convert(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
     if args.swap {
         return farm::swap(ctx, args);
     }

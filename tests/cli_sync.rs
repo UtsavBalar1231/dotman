@@ -221,7 +221,7 @@ fn commit_messages_name_three_paths_and_count_the_rest() {
         .map(|name| (format!("x/{name}"), b"1\n".as_slice(), 0o644))
         .collect();
     let env = TestEnv::new();
-    env.ok(&["init"]);
+    env.ok(&["init", "--no-bootstrap"]);
     let keys: Vec<&str> = files.iter().map(|(key, _, _)| key.as_str()).collect();
     for (key, bytes, mode) in &files {
         env.write(key, bytes, *mode);

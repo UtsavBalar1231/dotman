@@ -110,6 +110,12 @@ pub struct InitArgs {
     /// Show what would be created and change nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// Do not write install.sh, the script that sets up `dot` in a container
+    #[arg(long, conflicts_with_all = ["source", "refresh_bootstrap"])]
+    pub no_bootstrap: bool,
+    /// Rewrite install.sh with this version's script, unless it was edited
+    #[arg(long, conflicts_with = "source")]
+    pub refresh_bootstrap: bool,
     /// Git `user.name` to set when git has no identity
     #[arg(long, value_name = "NAME")]
     pub git_name: Option<String>,
@@ -359,6 +365,9 @@ pub struct ImportArgs {
     /// Do not ask before writing
     #[arg(long)]
     pub yes: bool,
+    /// Do not write install.sh, the script that sets up `dot` in a container
+    #[arg(long)]
+    pub no_bootstrap: bool,
     /// Show the report and change nothing
     #[arg(long)]
     pub dry_run: bool,

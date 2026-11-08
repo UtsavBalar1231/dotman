@@ -236,6 +236,19 @@ impl TestEnv {
         cmd
     }
 
+    /// `program` with the harness environment, but with `PATH` set to exactly `path`, so a `dot`
+    /// the developer has installed cannot be found.
+    pub fn command_with_path(&self, program: &str, path: &[PathBuf]) -> std::process::Command {
+        let mut cmd = std::process::Command::new(program);
+        cmd.env_clear();
+        for (k, v) in self.vars() {
+            cmd.env(k, v);
+        }
+        cmd.env("PATH", std::env::join_paths(path).expect("join PATH"));
+        cmd.current_dir(self.home());
+        cmd
+    }
+
     fn git_command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new("git");
         cmd.env_clear();

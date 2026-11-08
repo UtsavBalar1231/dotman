@@ -16,6 +16,7 @@ use super::{
     EditedConfig, Item, Report, Source, author_email, count, find_legacy, homes, legacy, proceed,
     require_fresh,
 };
+use crate::bootstrap;
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::add::ensure_worktree_parents;
@@ -704,7 +705,7 @@ fn convert(git: &Git, repo: &Path, found: &Analysis) -> Result<()> {
 }
 
 /// The repo directory can be replaced by the staging clone when it holds nothing but a `.git`
-/// without commits and a `.dotman.toml`.
+/// without commits, a `.dotman.toml` and an unedited `install.sh`.
 pub(super) fn check_target(repo: &Path) -> Result<()> {
     let entries = match fs::read_dir(repo) {
         Ok(entries) => entries,
@@ -718,8 +719,10 @@ pub(super) fn check_target(repo: &Path) -> Result<()> {
     );
     for entry in entries {
         let name = entry?.file_name();
+        let generated = name == bootstrap::FILE
+            && matches!(bootstrap::inspect(repo)?, bootstrap::Found::Unedited { .. });
         ensure!(
-            name == ".git" || name == ".dotman.toml",
+            generated || name == ".git" || name == ".dotman.toml",
             "{} holds {}, which `dot import` would not keep; move it away and run the import again",
             repo.display(),
             name.to_string_lossy()
@@ -745,10 +748,12 @@ fn install(
         if let Some(edited) = edited {
             edited.back_up()?;
         }
-        match fs::remove_file(repo.join(".dotman.toml")) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).context("cannot remove the old .dotman.toml"),
+        for name in [".dotman.toml", bootstrap::FILE] {
+            match fs::remove_file(repo.join(name)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("cannot remove the old {name}")),
+            }
         }
         let git_dir = repo.join(".git");
         if is_real_dir(&git_dir) {

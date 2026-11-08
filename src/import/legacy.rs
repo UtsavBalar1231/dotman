@@ -1280,6 +1280,7 @@ mod tests {
             render_templates: false,
             swap: false,
             yes,
+            no_bootstrap: false,
             dry_run,
         };
         let missing = ["a".to_owned()];

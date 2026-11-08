@@ -583,7 +583,7 @@ fn two_vcsh_repos_are_listed_without_a_source() {
 fn another_vcsh_repo_is_reported_and_added_by_overlay_as_one_commit() {
     let env = TestEnv::new();
     let (zsh, vim) = vcsh_fixture(&env);
-    let out = env.run(&["import", &zsh.to_string_lossy()]);
+    let out = env.run(&["import", &zsh.to_string_lossy(), "--no-bootstrap"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_eq!(accounting(&err), (2, 2, 0), "{err}");
@@ -626,7 +626,7 @@ fn overlay_reports_differing_files_converts_alternates_and_never_changes_content
     let env = TestEnv::new();
     let work = work_tree(&env, "base", &[(".vimrc", "mine\n", false)], None);
     let own = bare(&env, &work, &env.root().join("own.git"), None);
-    env.ok(&["import", &own.to_string_lossy()]);
+    env.ok(&["import", &own.to_string_lossy(), "--no-bootstrap"]);
     let other = work_tree(
         &env,
         "other",
@@ -662,7 +662,7 @@ fn overlay_reports_differing_files_converts_alternates_and_never_changes_content
 fn overlay_dry_run_and_a_dirty_repo() {
     let env = TestEnv::new();
     let (zsh, vim) = vcsh_fixture(&env);
-    env.ok(&["import", &zsh.to_string_lossy()]);
+    env.ok(&["import", &zsh.to_string_lossy(), "--no-bootstrap"]);
     let before = env.four_trees();
     let out = env.run(&[
         "import",

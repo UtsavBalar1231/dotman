@@ -1,5 +1,6 @@
 //! `dot init`: create the repo or set its remote, or clone an existing repo and apply it.
 
+use crate::bootstrap;
 use crate::cli::{Decisions, ImportArgs, InitArgs};
 use crate::commands::wizard::{self, Ask, Wizard};
 use crate::commands::{Outcome, apply};
@@ -49,6 +50,7 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
         (true, true) => Ask::Remote,
         (true, false) => Ask::Everything,
     };
+    let bootstrap = !args.no_bootstrap && (!exists || args.refresh_bootstrap);
     let wizard = Wizard {
         ctx: &ctx,
         args,
@@ -65,6 +67,9 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
         if !config_file.exists() {
             output::info(&format!("would write {}", config_file.display()));
         }
+        if bootstrap {
+            bootstrap::write(repo, true)?;
+        }
         wizard.describe(&answers);
         return Ok(Outcome::Done);
     }
@@ -75,6 +80,9 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
     }
     if !exists {
         output::success(&format!("created the repo at {}", repo.display()));
+    }
+    if bootstrap {
+        bootstrap::write(repo, false)?;
     }
     wizard.apply(&answers)?;
     Ok(Outcome::Done)
@@ -217,6 +225,7 @@ fn offer_import(
         render_templates: false,
         swap: false,
         yes: false,
+        no_bootstrap: args.no_bootstrap,
         dry_run: args.dry_run,
     };
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;

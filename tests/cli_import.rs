@@ -104,7 +104,7 @@ fn import_rebuilds_the_history_and_matches_the_readme_manifest() {
     let pristine = Pristine::new();
     let env = TestEnv::new();
     let home_before = tree_checksum(&env.home());
-    let err = env.ok(&["import", FIXTURE]);
+    let err = env.ok(&["import", FIXTURE, "--no-bootstrap"]);
 
     assert_eq!(accounting(&err), (6, 6, 0), "{err}");
     assert!(err.contains("run `dot status`, then `dot apply`"), "{err}");
@@ -278,8 +278,8 @@ fn a_source_that_is_in_or_around_the_repo_is_refused() {
 fn the_default_config_is_replaced_silently() {
     let pristine = Pristine::new();
     let env = TestEnv::new();
-    env.ok(&["init"]);
-    let err = env.ok(&["import", FIXTURE]);
+    env.ok(&["init", "--no-bootstrap"]);
+    let err = env.ok(&["import", FIXTURE, "--no-bootstrap"]);
     assert!(
         !err.contains("edited") && !err.contains("backed up"),
         "{err}"

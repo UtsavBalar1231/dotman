@@ -1,0 +1,628 @@
+//! The `install.sh` that `dot init` and `dot import` write, and the script run the way a container
+//! platform runs it: `sh install.sh` in a depth-1 clone, with a PATH that has no dotman.
+
+mod common;
+
+use common::TestEnv;
+use dotman::VERSION;
+use std::error::Error;
+use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::OnceLock;
+use xxhash_rust::xxh3::xxh3_128;
+
+type R<T = ()> = Result<T, Box<dyn Error>>;
+
+const SYSTEM: [&str; 2] = ["/usr/bin", "/bin"];
+const BASHRC: &[u8] = b"export EDITOR=vi\n";
+const SCRIPT: &str = include_str!("../src/bootstrap/install.sh.in");
+
+fn text(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+fn curl_available() -> bool {
+    let found = Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        eprintln!("skipped: curl is not installed, and install.sh needs it to fetch file:// URLs");
+    }
+    found
+}
+
+fn check(cmd: &mut Command) -> R {
+    let out = cmd.output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd:?} failed: {}", text(&out)).into())
+    }
+}
+
+fn archive_name() -> String {
+    format!(
+        "dotman-v{VERSION}-{}-unknown-linux-musl.tar.gz",
+        std::env::consts::ARCH
+    )
+}
+
+fn sha256_line(dir: &Path, name: &str) -> R<String> {
+    let out = Command::new("sha256sum")
+        .arg(name)
+        .current_dir(dir)
+        .output()
+        .or_else(|_| {
+            Command::new("shasum")
+                .args(["-a", "256", name])
+                .current_dir(dir)
+                .output()
+        })?;
+    Ok(String::from_utf8(out.stdout)?)
+}
+
+fn write_exe(path: &Path, body: &str) -> R {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, body)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// The release directory a mirror would serve, built once per test run: a tarball whose top level
+/// holds the built `dot`, and `checksums.txt` with a line for another architecture beside it.
+fn release() -> R<PathBuf> {
+    static RELEASE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    RELEASE
+        .get_or_init(|| build_release().map_err(|e| e.to_string()))
+        .clone()
+        .map_err(Into::into)
+}
+
+fn build_release() -> R<PathBuf> {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("bootstrap-release");
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    let pkg = dir.join("pkg");
+    fs::create_dir_all(&pkg)?;
+    fs::copy(env!("CARGO_BIN_EXE_dot"), pkg.join("dot"))?;
+    let name = archive_name();
+    check(
+        Command::new("tar")
+            .env("GZIP", "-1")
+            .arg("-czf")
+            .arg(dir.join(&name))
+            .arg("-C")
+            .arg(&pkg)
+            .arg("dot"),
+    )?;
+    let other = "0".repeat(64);
+    fs::write(
+        dir.join("checksums.txt"),
+        format!(
+            "{other}  dotman-v{VERSION}-riscv64-unknown-linux-musl.tar.gz\n{}",
+            sha256_line(&dir, &name)?
+        ),
+    )?;
+    Ok(dir)
+}
+
+/// A machine that runs the script, and the depth-1 clone of a dotman repo it runs it from.
+struct Setup {
+    _author: TestEnv,
+    machine: TestEnv,
+    dotfiles: PathBuf,
+}
+
+impl Setup {
+    fn new() -> R<Self> {
+        let author = TestEnv::new();
+        author.write(".bashrc", BASHRC, 0o644);
+        author.ok(&["init", "--no-import"]);
+        author.ok(&["add", ".bashrc"]);
+        author.ok(&["sync"]);
+        let machine = TestEnv::new();
+        let dotfiles = machine.root().join("dotfiles");
+        author.git(&[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &format!("file://{}", author.repo().display()),
+            &dotfiles.to_string_lossy(),
+        ]);
+        assert!(dotfiles.join("install.sh").is_file());
+        assert!(
+            dotfiles.join(".git/shallow").is_file(),
+            "not a depth-1 clone"
+        );
+        Ok(Self {
+            _author: author,
+            machine,
+            dotfiles: fs::canonicalize(dotfiles)?,
+        })
+    }
+
+    fn home(&self) -> PathBuf {
+        self.machine.home()
+    }
+
+    fn installed(&self) -> bool {
+        self.home().join(".local/bin/dot").exists()
+    }
+
+    fn applied(&self) -> bool {
+        fs::read(self.home().join(".bashrc")).is_ok_and(|bytes| bytes == BASHRC)
+    }
+
+    /// `sh` with `stubs` in front of the system directories, and no script yet.
+    fn shell(&self, base: &Path, stubs: &[&Path]) -> Command {
+        let dirs: Vec<PathBuf> = stubs
+            .iter()
+            .map(|dir| dir.to_path_buf())
+            .chain(SYSTEM.iter().map(PathBuf::from))
+            .collect();
+        let mut cmd = self.machine.command_with_path("/bin/sh", &dirs);
+        cmd.env(
+            "DOTMAN_BOOTSTRAP_BASE_URL",
+            format!("file://{}", base.display()),
+        );
+        cmd
+    }
+
+    /// `sh <dotfiles>/install.sh`.
+    fn command(&self, base: &Path, stubs: &[&Path]) -> Command {
+        let mut cmd = self.shell(base, stubs);
+        cmd.arg(self.dotfiles.join("install.sh"));
+        cmd
+    }
+
+    fn run(&self, stubs: &[&Path]) -> R<Output> {
+        Ok(self.command(&release()?, stubs).output()?)
+    }
+
+    fn stubs(&self, name: &str) -> PathBuf {
+        self.machine.root().join(name)
+    }
+
+    fn empty_base(&self) -> R<PathBuf> {
+        let dir = self.machine.root().join("empty");
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+}
+
+/// A `dot` that answers `--version` as `version` and, for anything else, logs its arguments and
+/// environment to `log` and exits `code`.
+fn fake_dot(dir: &Path, version: &str, code: i32, log: &Path) -> R {
+    write_exe(
+        &dir.join("dot"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'dot {version}';;\n  *) echo \"$*\" > '{log}'\n     echo \"${{DOTMAN_NON_INTERACTIVE:-unset}} ${{DOTMAN_ALLOW_ROOT:-unset}}\" >> '{log}'\n     exit {code};;\nesac\n",
+            log = log.display()
+        ),
+    )
+}
+
+#[test]
+fn the_script_installs_the_release_and_applies_the_repo() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let out = setup.run(&[])?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let dot = setup.home().join(".local/bin/dot");
+    assert_eq!(fs::metadata(&dot)?.permissions().mode() & 0o777, 0o755);
+    assert!(setup.applied(), "{}", text(&out));
+    assert!(!setup.home().join("install.sh").exists());
+    let leftovers: Vec<_> = fs::read_dir(setup.home().join(".local/bin"))?.collect();
+    assert_eq!(leftovers.len(), 1, "a temp copy was left behind");
+    Ok(())
+}
+
+#[test]
+fn a_checksum_mismatch_or_a_missing_entry_installs_nothing() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let name = archive_name();
+    let tampered = setup.machine.root().join("tampered");
+    fs::create_dir_all(&tampered)?;
+    symlink(release()?.join(&name), tampered.join(&name))?;
+    for (checksums, why) in [
+        (format!("{}  {name}\n", "0".repeat(64)), "NOT"),
+        (String::new(), "no entry"),
+    ] {
+        fs::write(tampered.join("checksums.txt"), checksums)?;
+        let out = setup.command(&tampered, &[]).output()?;
+        assert_eq!(out.status.code(), Some(1), "{why}: {}", text(&out));
+        assert!(!setup.installed(), "{why}");
+        assert!(!setup.applied(), "{why}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_dotman_of_the_pinned_version_on_path_is_reused_without_a_download() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let bin = setup.stubs("bin");
+    fs::create_dir_all(&bin)?;
+    symlink(release()?.join("pkg/dot"), bin.join("dot"))?;
+    let out = setup.command(&setup.empty_base()?, &[&bin]).output()?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(!setup.installed());
+    assert!(setup.applied(), "{}", text(&out));
+    Ok(())
+}
+
+#[test]
+fn a_dot_that_is_not_dotman_or_is_older_is_not_reused() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let log = |setup: &Setup| setup.machine.root().join("fake.log");
+    let setup = Setup::new()?;
+    let graphviz = setup.stubs("graphviz");
+    write_exe(
+        &graphviz.join("dot"),
+        "#!/bin/sh\necho 'dot - graphviz version 14.0.0 (20250101.0000)'\ncase \"$1\" in -V|--version) exit 0;; esac\nexit 1\n",
+    )?;
+    let out = setup.run(&[&graphviz])?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(setup.installed(), "the download did not happen");
+    assert!(setup.applied());
+
+    let setup = Setup::new()?;
+    let older = setup.stubs("older");
+    fake_dot(&older, "0.0.0", 7, &log(&setup))?;
+    let out = setup.run(&[&older])?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(setup.installed());
+    assert!(!log(&setup).exists(), "the older dot ran init");
+    Ok(())
+}
+
+#[test]
+fn dot_gets_the_directory_and_the_environment_and_exit_3_is_success() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let log = setup.machine.root().join("fake.log");
+    let bin = setup.stubs("bin");
+    fake_dot(&bin, VERSION, 3, &log)?;
+    let root = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim() == "0";
+    let allow_root = if root { "1" } else { "unset" };
+    let dir = setup.dotfiles.display();
+
+    let out = setup
+        .shell(&setup.empty_base()?, &[&bin])
+        .current_dir(&setup.dotfiles)
+        .arg("install.sh")
+        .output()?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(&log)?,
+        format!("init {dir} --take-repo\n1 {allow_root}\n")
+    );
+
+    let out = setup
+        .command(&setup.empty_base()?, &[&bin])
+        .env("DOTMAN_APPROVE_HOOKS", "1")
+        .output()?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(&log)?,
+        format!("init {dir} --take-repo --approve-hooks\n1 {allow_root}\n")
+    );
+
+    fake_dot(&bin, VERSION, 7, &log)?;
+    let out = setup.command(&setup.empty_base()?, &[&bin]).output()?;
+    assert_eq!(out.status.code(), Some(7), "{}", text(&out));
+    Ok(())
+}
+
+#[test]
+fn macos_prints_the_install_command_and_exits_0() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let bin = setup.stubs("darwin");
+    write_exe(&bin.join("uname"), "#!/bin/sh\necho Darwin\n")?;
+    let out = setup.command(&setup.empty_base()?, &[&bin]).output()?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let said = text(&out);
+    assert!(said.contains(&format!("releases/tag/v{VERSION}")), "{said}");
+    assert!(
+        said.contains(&format!(
+            "dot init \"{}\" --take-repo",
+            setup.dotfiles.display()
+        )),
+        "{said}"
+    );
+    assert!(!setup.installed());
+    Ok(())
+}
+
+#[test]
+fn the_template_sets_allow_root_only_inside_the_id_check() {
+    let mut lines = SCRIPT.lines().skip_while(|line| !line.contains("id -u"));
+    let check = lines.next().expect("an id -u check");
+    assert!(check.trim_start().starts_with("if "), "{check}");
+    assert_eq!(lines.next().map(str::trim), Some("DOTMAN_ALLOW_ROOT=1"));
+    assert_eq!(
+        SCRIPT.matches("DOTMAN_ALLOW_ROOT=1").count(),
+        1,
+        "it is set nowhere else"
+    );
+}
+
+fn repo_script(env: &TestEnv) -> PathBuf {
+    env.repo().join("install.sh")
+}
+
+fn header_of(path: &Path) -> R<String> {
+    Ok(fs::read_to_string(path)?
+        .lines()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned())
+}
+
+/// Rewrites the script as an older `dot` wrote it: the pinned version changed everywhere, and
+/// the hash recomputed, so it still counts as unedited.
+fn pin_old(path: &Path) -> R {
+    let old = fs::read_to_string(path)?.replace(VERSION, "0.0.0");
+    let (shebang, rest) = old.split_once('\n').ok_or("no shebang")?;
+    let (_, body) = rest.split_once('\n').ok_or("no header")?;
+    let hash = format!("{:032x}", xxh3_128(format!("{shebang}\n{body}").as_bytes()));
+    fs::write(
+        path,
+        format!("{shebang}\n# generated by dot 0.0.0 sha:{hash}\n{body}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn init_writes_an_executable_script_with_the_hash_header() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init", "--no-import"]);
+    let path = repo_script(&env);
+    let body = fs::read_to_string(&path)?;
+    assert_eq!(body.lines().next(), Some("#!/bin/sh"));
+    let header = header_of(&path)?;
+    assert!(
+        header.starts_with(&format!("# generated by dot {VERSION} sha:")),
+        "{header}"
+    );
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o755);
+    assert!(body.contains(&format!("pinned={VERSION}\n")));
+    Ok(())
+}
+
+#[test]
+fn status_and_list_never_show_install_sh_and_apply_never_writes_it() {
+    let env = TestEnv::new();
+    env.write(".bashrc", BASHRC, 0o644);
+    env.ok(&["init", "--no-import"]);
+    env.ok(&["add", ".bashrc"]);
+    for stage in ["before sync", "after sync"] {
+        for command in ["status", "list"] {
+            let out = env.run(&[command]);
+            assert!(!text(&out).contains("install.sh"), "{stage}: {command}");
+            let keys = env.porcelain(command);
+            assert!(keys.iter().all(|(_, key)| key != "install.sh"), "{stage}");
+        }
+        env.ok(&["sync"]);
+    }
+    assert!(
+        env.git(&["-C", &env.repo().to_string_lossy(), "ls-tree", "HEAD"])
+            .contains("install.sh")
+    );
+    env.ok(&["apply"]);
+    assert!(!env.home().join("install.sh").exists());
+}
+
+#[test]
+fn an_unedited_script_is_refreshed_on_request_and_an_edited_one_never() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init", "--no-import"]);
+    let path = repo_script(&env);
+    let current = fs::read_to_string(&path)?;
+
+    pin_old(&path)?;
+    assert_ne!(fs::read_to_string(&path)?, current);
+    env.ok(&["init"]);
+    assert!(
+        header_of(&path)?.contains("dot 0.0.0"),
+        "a plain init on an existing repo leaves the script alone"
+    );
+    env.ok(&["init", "--refresh-bootstrap"]);
+    assert_eq!(fs::read_to_string(&path)?, current);
+
+    let edited = format!("{current}# mine\n");
+    fs::write(&path, &edited)?;
+    let said = env.ok(&["init", "--refresh-bootstrap"]);
+    assert_eq!(fs::read_to_string(&path)?, edited);
+    assert!(said.contains("install.sh was edited"), "{said}");
+
+    fs::remove_file(&path)?;
+    env.ok(&["init", "--refresh-bootstrap"]);
+    assert_eq!(fs::read_to_string(&path)?, current);
+    Ok(())
+}
+
+#[test]
+fn a_rerun_of_init_that_creates_the_repo_keeps_an_edited_script_and_refreshes_an_old_one() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init", "--no-import"]);
+    let path = repo_script(&env);
+    let current = fs::read_to_string(&path)?;
+    let git_dir = env.repo().join(".git");
+
+    let edited = format!("{current}# mine\n");
+    fs::write(&path, &edited)?;
+    fs::remove_dir_all(&git_dir)?;
+    env.ok(&["init", "--no-import"]);
+    assert_eq!(fs::read_to_string(&path)?, edited);
+
+    pin_old(&path)?;
+    fs::remove_dir_all(&git_dir)?;
+    env.ok(&["init", "--no-import"]);
+    assert_eq!(fs::read_to_string(&path)?, current);
+    Ok(())
+}
+
+#[test]
+fn no_bootstrap_and_dry_run_write_nothing_and_the_flags_conflict() {
+    let env = TestEnv::new();
+    let said = env.ok(&["init", "--no-import", "--dry-run"]);
+    assert!(said.contains("would write install.sh"), "{said}");
+    assert!(!env.repo().exists());
+
+    env.ok(&["init", "--no-import", "--no-bootstrap"]);
+    assert!(!repo_script(&env).exists());
+    env.ok(&["init", "--refresh-bootstrap", "--dry-run"]);
+    assert!(!repo_script(&env).exists());
+
+    let out = env.run(&["init", "--no-bootstrap", "--refresh-bootstrap"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}
+
+fn work_tree(env: &TestEnv, name: &str) -> R<PathBuf> {
+    let dir = env.root().join("work").join(name);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(".vimrc"), "set number\n")?;
+    let dir_arg = dir.to_string_lossy().into_owned();
+    env.git(&["-C", &dir_arg, "init", "-q", "-b", "main"]);
+    env.git(&["-C", &dir_arg, "add", "-A"]);
+    env.git(&["-C", &dir_arg, "commit", "-q", "-m", "first"]);
+    Ok(dir)
+}
+
+#[test]
+fn import_writes_the_script_after_its_commits_and_sync_commits_it() -> R {
+    let env = TestEnv::new();
+    let source = work_tree(&env, "dots")?;
+    let source_arg = source.to_string_lossy().into_owned();
+    let out = env.run(&["import", &source_arg, "--dry-run"]);
+    assert!(
+        text(&out).contains("would write install.sh"),
+        "{}",
+        text(&out)
+    );
+    assert!(!env.repo().exists());
+
+    let out = env.run(&["import", &source_arg]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(repo_script(&env).is_file(), "{}", text(&out));
+    let repo = env.repo().to_string_lossy().into_owned();
+    assert_eq!(
+        env.git(&["-C", &repo, "status", "--porcelain"]),
+        "?? install.sh\n"
+    );
+    env.ok(&["sync"]);
+    assert!(
+        env.git(&["-C", &repo, "ls-tree", "HEAD"])
+            .contains("install.sh")
+    );
+    Ok(())
+}
+
+#[test]
+fn import_with_no_bootstrap_writes_none_and_a_script_from_init_does_not_block_it() -> R {
+    let env = TestEnv::new();
+    let source = work_tree(&env, "dots")?;
+    let source_arg = source.to_string_lossy().into_owned();
+    let out = env.run(&["import", &source_arg, "--no-bootstrap"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!repo_script(&env).exists());
+
+    let env = TestEnv::new();
+    let source = work_tree(&env, "dots")?;
+    let source_arg = source.to_string_lossy().into_owned();
+    env.ok(&["init", "--no-import"]);
+    assert!(repo_script(&env).is_file());
+    let out = env.run(&["import", &source_arg]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(repo_script(&env).is_file());
+    Ok(())
+}
+
+#[test]
+fn an_edited_script_in_the_repo_blocks_an_import_that_would_replace_the_repo() -> R {
+    let env = TestEnv::new();
+    let source = work_tree(&env, "dots")?;
+    env.ok(&["init", "--no-import"]);
+    fs::write(repo_script(&env), "#!/bin/sh\necho mine\n")?;
+    let out = env.run(&["import", &source.to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("install.sh"), "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(repo_script(&env))?,
+        "#!/bin/sh\necho mine\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn doctor_warns_about_an_old_pin_and_only_notes_an_edited_script() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init", "--no-import"]);
+    let path = repo_script(&env);
+    let line = |env: &TestEnv| -> String {
+        String::from_utf8_lossy(&env.run(&["doctor"]).stdout)
+            .lines()
+            .find(|line| line.contains("install.sh"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(line(&env).trim_end(), "pass  install.sh");
+
+    pin_old(&path)?;
+    let warned = line(&env);
+    assert!(warned.starts_with("warn"), "{warned}");
+    assert!(warned.contains("0.0.0"), "{warned}");
+    assert!(warned.contains("dot init --refresh-bootstrap"), "{warned}");
+
+    fs::write(&path, format!("{}# mine\n", fs::read_to_string(&path)?))?;
+    let noted = line(&env);
+    assert!(noted.starts_with("info"), "{noted}");
+    assert!(noted.contains("edited"), "{noted}");
+    Ok(())
+}
+
+#[test]
+fn the_generated_script_passes_shellcheck() -> R {
+    if Command::new("shellcheck")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipped: shellcheck is not installed");
+        return Ok(());
+    }
+    let env = TestEnv::new();
+    env.ok(&["init", "--no-import"]);
+    let out = Command::new("shellcheck")
+        .args(["-s", "sh"])
+        .arg(repo_script(&env))
+        .output()?;
+    assert!(out.status.success(), "{}", text(&out));
+    Ok(())
+}

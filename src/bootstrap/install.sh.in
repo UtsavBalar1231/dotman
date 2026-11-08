@@ -1,0 +1,156 @@
+#!/bin/sh
+set -eu
+
+pinned=@VERSION@
+base=${DOTMAN_BOOTSTRAP_BASE_URL:-https://github.com/UtsavBalar1231/dotman/releases/download/v$pinned}
+dir=$(cd "$(dirname "$0")" && pwd)
+bin_dir=$HOME/.local/bin
+
+die() {
+    printf 'install.sh: %s\n' "$*" >&2
+    exit 1
+}
+
+# Sets major, minor and patch. Strict because Graphviz also ships a `dot`: anything that is
+# not exactly X.Y.Z, with an optional -pre or +build suffix, is not dotman.
+parse_semver() {
+    core=${1%%[-+]*}
+    case $core in
+        '' | *[!0-9.]* | .* | *. | *..*) return 1 ;;
+        *.*.*) ;;
+        *) return 1 ;;
+    esac
+    major=${core%%.*}
+    rest=${core#*.}
+    minor=${rest%%.*}
+    patch=${rest#*.}
+    case $patch in
+        *.*) return 1 ;;
+    esac
+}
+
+at_least_pinned() {
+    if [ "$major" -ne "$want_major" ]; then
+        [ "$major" -gt "$want_major" ]
+        return
+    fi
+    if [ "$minor" -ne "$want_minor" ]; then
+        [ "$minor" -gt "$want_minor" ]
+        return
+    fi
+    [ "$patch" -ge "$want_patch" ]
+}
+
+is_current_dot() {
+    [ -x "$1" ] || return 1
+    out=$("$1" --version 2>/dev/null </dev/null) || return 1
+    case $out in
+        "dot "*) ;;
+        *) return 1 ;;
+    esac
+    parse_semver "${out#dot }" && at_least_pinned
+}
+
+fetch() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$2" "$1"
+    else
+        die "neither curl nor wget is installed"
+    fi
+}
+
+verify() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -c expected
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -c expected
+    else
+        echo "neither sha256sum nor shasum is installed" >&2
+        return 1
+    fi
+}
+
+install_dot() {
+    case $(uname -s) in
+        Linux) ;;
+        Darwin)
+            cat <<EOM
+dot is not installed. Download the macOS build from
+  https://github.com/UtsavBalar1231/dotman/releases/tag/v$pinned
+put it on your PATH, then run:
+  dot init "$dir" --take-repo
+EOM
+            exit 0
+            ;;
+        *) die "unsupported platform $(uname -s); build dot from source and run: dot init \"$dir\" --take-repo" ;;
+    esac
+    case $(uname -m) in
+        x86_64 | amd64) arch=x86_64 ;;
+        aarch64 | arm64) arch=aarch64 ;;
+        *) die "unsupported architecture $(uname -m)" ;;
+    esac
+
+    archive=dotman-v$pinned-$arch-unknown-linux-musl.tar.gz
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    fetch "$base/$archive" "$tmp/$archive" || die "cannot download $base/$archive"
+    fetch "$base/checksums.txt" "$tmp/checksums.txt" || die "cannot download $base/checksums.txt"
+
+    line=$(awk -v name="$archive" '{ n = $2; sub(/^\*/, "", n); if (n == name) print }' "$tmp/checksums.txt")
+    [ -n "$line" ] || die "checksums.txt has no entry for $archive"
+    printf '%s\n' "$line" >"$tmp/expected"
+    (cd "$tmp" && verify) >/dev/null || die "cannot verify $archive; nothing was installed"
+
+    mkdir "$tmp/out"
+    tar -xzf "$tmp/$archive" -C "$tmp/out" dot || die "cannot extract dot from $archive"
+    mkdir -p "$bin_dir"
+    # The rename is atomic, so an interrupted copy never leaves a truncated file named dot.
+    staged=$bin_dir/.dot.$$
+    if ! { cp "$tmp/out/dot" "$staged" && chmod 0755 "$staged" && mv -f "$staged" "$bin_dir/dot"; }; then
+        rm -f "$staged"
+        die "cannot install dot into $bin_dir"
+    fi
+}
+
+parse_semver "$pinned"
+want_major=$major
+want_minor=$minor
+want_patch=$patch
+
+dot=
+for candidate in "$bin_dir/dot" "$(command -v dot || true)"; do
+    case $candidate in
+        /*) ;;
+        *) continue ;;
+    esac
+    if is_current_dot "$candidate"; then
+        dot=$candidate
+        break
+    fi
+done
+if [ -z "$dot" ]; then
+    install_dot
+    dot=$bin_dir/dot
+fi
+
+DOTMAN_NON_INTERACTIVE=1
+export DOTMAN_NON_INTERACTIVE
+if [ "$(id -u)" = 0 ]; then
+    DOTMAN_ALLOW_ROOT=1
+    export DOTMAN_ALLOW_ROOT
+fi
+set -- init "$dir" --take-repo
+if [ "${DOTMAN_APPROVE_HOOKS:-}" = 1 ]; then
+    set -- "$@" --approve-hooks
+fi
+
+code=0
+"$dot" "$@" || code=$?
+# Exit 3 means some paths need attention after a successful init. A nonzero exit would make
+# DevPod run the next candidate script on top of this one.
+case $code in
+    0 | 3) exit 0 ;;
+    *) exit "$code" ;;
+esac
