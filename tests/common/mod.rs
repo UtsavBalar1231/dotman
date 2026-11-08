@@ -4,15 +4,21 @@
 #![allow(clippy::expect_used)]
 
 use assert_cmd::Command;
+use dotman::VERSION;
 use dotman::repo_config::RepoConfig;
+use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
+use std::ops::Deref;
 use std::os::unix::fs::{PermissionsExt, symlink as unix_symlink};
 use std::path::{Path, PathBuf};
-use std::process::Output;
-use std::sync::Arc;
+use std::process::{Command as StdCommand, Output};
+use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -611,4 +617,617 @@ pub fn accounting(stderr: &str) -> (usize, usize, usize) {
         "N = C + R in: {line}"
     );
     (entries, converted, needs)
+}
+
+/// Whether an age CLI is on PATH. Prints why a test skips, and fails it instead when
+/// `DOTMAN_REQUIRE_AGE=1`.
+pub fn age_installed() -> bool {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let found = std::env::split_paths(&path)
+        .any(|dir| ["age", "rage"].iter().any(|name| dir.join(name).is_file()));
+    if !found {
+        assert!(
+            std::env::var_os("DOTMAN_REQUIRE_AGE").is_none_or(|v| v != "1"),
+            "DOTMAN_REQUIRE_AGE=1, but neither age nor rage is on PATH"
+        );
+        eprintln!("skipped: neither age nor rage is on PATH (DOTMAN_REQUIRE_AGE=1 fails instead)");
+    }
+    found
+}
+
+/// Whether chezmoi can run here; says why not, and fails instead when
+/// `DOTMAN_REQUIRE_CHEZMOI=1`.
+pub fn have_chezmoi() -> bool {
+    let found = StdCommand::new("chezmoi")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        assert!(
+            std::env::var("DOTMAN_REQUIRE_CHEZMOI").as_deref() != Ok("1"),
+            "chezmoi is not on PATH, and DOTMAN_REQUIRE_CHEZMOI=1 asks for it"
+        );
+        eprintln!("skipping: chezmoi is not on PATH, so this test cannot run");
+    }
+    found
+}
+
+/// Whether curl can run here, which `install.sh` needs to fetch `file://` URLs.
+pub fn curl_available() -> bool {
+    let found = StdCommand::new("curl")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        eprintln!("skipped: curl is not installed, and install.sh needs it to fetch file:// URLs");
+    }
+    found
+}
+
+/// `git -C dir args`, asserting success; returns stdout.
+pub fn git_in(env: &TestEnv, dir: &Path, args: &[&str]) -> String {
+    let dir = dir.to_string_lossy();
+    let mut full = vec!["-C", &*dir];
+    full.extend_from_slice(args);
+    env.git(&full)
+}
+
+/// A source tree outside the repo. Dropping it fails the test if an import changed it since the
+/// last [`Source::seal`].
+pub struct Source {
+    path: PathBuf,
+    sum: RefCell<BTreeMap<String, Entry>>,
+}
+
+impl Source {
+    pub fn new(path: PathBuf) -> Self {
+        let sum = RefCell::new(tree_checksum(&path));
+        Self { path, sum }
+    }
+
+    /// Accepts the edits the test made to the source itself.
+    pub fn seal(&self) {
+        *self.sum.borrow_mut() = tree_checksum(&self.path);
+    }
+
+    /// Fails if the source differs from its last checksum.
+    pub fn check(&self) {
+        assert_eq!(
+            tree_checksum(&self.path),
+            *self.sum.borrow(),
+            "the source {} was modified",
+            self.path.display()
+        );
+    }
+}
+
+impl Deref for Source {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Source {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.check();
+        }
+    }
+}
+
+/// File name, bytes, executable.
+pub type File<'a> = (&'a str, &'a str, bool);
+
+/// A work tree with two commits holding `files`, and `gitlink` as a submodule if given.
+pub fn work_tree(env: &TestEnv, name: &str, files: &[File], gitlink: Option<&str>) -> PathBuf {
+    let dir = env.root().join("work").join(name);
+    fs::create_dir_all(&dir).expect("create work tree");
+    git_in(env, &dir, &["init", "-q", "-b", "main"]);
+    for (path, text, executable) in files {
+        let full = dir.join(path);
+        fs::create_dir_all(full.parent().expect("parent")).expect("create parents");
+        fs::write(&full, text).expect("write file");
+        let mode = if *executable { 0o755 } else { 0o644 };
+        fs::set_permissions(&full, fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+    git_in(env, &dir, &["add", "-A"]);
+    git_in(env, &dir, &["commit", "-q", "-m", "first"]);
+    if let Some(path) = gitlink {
+        let sha = git_in(env, &dir, &["rev-parse", "HEAD"]);
+        let cacheinfo = format!("160000,{},{path}", sha.trim());
+        git_in(
+            env,
+            &dir,
+            &["update-index", "--add", "--cacheinfo", &cacheinfo],
+        );
+    }
+    git_in(
+        env,
+        &dir,
+        &["commit", "-q", "--allow-empty", "-m", "second"],
+    );
+    dir
+}
+
+/// Copies `work` to `dest` as a bare repo. `worktree` is what yadm and vcsh record.
+pub fn bare(env: &TestEnv, work: &Path, dest: &Path, worktree: Option<&Path>) -> Source {
+    fs::create_dir_all(dest.parent().expect("parent")).expect("create parent");
+    let (work_arg, dest_arg) = (work.to_string_lossy(), dest.to_string_lossy());
+    env.git(&["clone", "-q", "--bare", &*work_arg, &*dest_arg]);
+    git_in(env, dest, &["config", "--unset", "remote.origin.url"]);
+    if let Some(worktree) = worktree {
+        git_in(env, dest, &["config", "core.bare", "false"]);
+        git_in(
+            env,
+            dest,
+            &["config", "core.worktree", &worktree.to_string_lossy()],
+        );
+    }
+    Source::new(dest.to_path_buf())
+}
+
+pub fn yadm_repo(env: &TestEnv) -> PathBuf {
+    env.xdg_data().join("yadm/repo.git")
+}
+
+pub const TOOLRC: &str = "[core]\n{% if yadm.os == \"Linux\" %}\neditor = vim\n{% else %}\neditor = nano\n{% endif %}\n# {{ env.EDITOR }}\n";
+
+/// 13 entries: 8 convert, 5 need action.
+pub const YADM_FILES: [File; 12] = [
+    (".bashrc", "bash\n", false),
+    ("bin/run", "#!/bin/sh\n", true),
+    ("README.md", "readme\n", false),
+    (".zshrc##o.Darwin", "mac\n", false),
+    (".zshrc##o.Linux", "linux\n", false),
+    ("x##h.box,c.work", "x\n", false),
+    (".toolrc##template", TOOLRC, false),
+    ("neg##~o.Darwin", "not mac\n", false),
+    ("esh.conf##template.esh", "<%= $USER %>\n", false),
+    ("inc.conf##template", "{% include \"other\" %}\n", false),
+    ("dir##o.Linux/file", "dir\n", false),
+    ("host.conf##h.my.host", "dotted\n", false),
+];
+
+/// The yadm repo in its default place, with a submodule, and the checksum of the source.
+pub fn yadm_fixture(env: &TestEnv) -> Source {
+    let work = work_tree(env, "yadm", &YADM_FILES, Some("sub"));
+    bare(env, &work, &yadm_repo(env), Some(&env.home()))
+}
+
+/// The read-only legacy dotman repo, and the directory that holds it and its README.
+pub const LEGACY_REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-v2/repo");
+pub const LEGACY_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-v2");
+
+/// The legacy fixture, which no import may change.
+pub fn legacy_fixture() -> Source {
+    Source::new(PathBuf::from(LEGACY_ROOT))
+}
+
+/// A git repo that holds five files of the legacy fixture, `run_mode` on `.local/bin/run`.
+pub fn overlay_source(env: &TestEnv, run_mode: u32, bashrc: &[u8]) -> PathBuf {
+    let src = env.root().join("overlay-src");
+    let files: [(&str, &[u8], u32); 5] = [
+        (".bashrc", bashrc, 0o644),
+        (".local/bin/run", b"#!/bin/sh\necho run\n", run_mode),
+        (".ssh/config", b"Host example\n  User legacyuser\n", 0o644),
+        (".empty", b"", 0o644),
+        (".config/abs.conf", b"abs=true\n", 0o644),
+    ];
+    for (key, bytes, mode) in files {
+        let path = src.join(key);
+        fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+        fs::write(&path, bytes).expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+    git_in(env, &src, &["init", "-q"]);
+    git_in(env, &src, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git_in(env, &src, &["add", "-A"]);
+    git_in(env, &src, &["commit", "-q", "-m", "base"]);
+    src
+}
+
+/// Writes `files` (path, text) under `$ROOT/<name>`, as a chezmoi source.
+pub fn source_tree(env: &TestEnv, name: &str, files: &[(&str, &str)]) -> Source {
+    let path = env.root().join(name);
+    for (file, text) in files {
+        let full = path.join(file);
+        fs::create_dir_all(full.parent().expect("parent")).expect("create parents");
+        fs::write(&full, text).expect("write file");
+    }
+    fs::create_dir_all(&path).expect("create source");
+    Source::new(path)
+}
+
+/// A `chezmoi` that predates entry types: no `--exclude` and no `--no-pager` in its help, no
+/// `dump`. `managed` prints `managed`; `cat` prints the text of the first entry of `files`
+/// whose key ends the path. It logs what it was asked and returns the log's path.
+pub fn stub_chezmoi(env: &mut TestEnv, managed: &[&str], files: &[(&str, &str)]) -> PathBuf {
+    let dir = env.root().join("stub-bin");
+    fs::create_dir_all(&dir).expect("create stub dir");
+    let log = env.root().join("stub.log");
+    let listing = managed.iter().fold(String::new(), |mut out, key| {
+        let _ = write!(out, "{key}\\n");
+        out
+    });
+    let mut arms = String::new();
+    for (key, text) in files {
+        let _ = writeln!(arms, "    */{key}) printf '{text}' ;;");
+    }
+    let script = format!(
+        r#"#!/bin/sh
+log='{log}'
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config|--persistent-state|--cache|--source|--destination) shift 2 ;;
+    --no-tty) shift ;;
+    *) break ;;
+  esac
+done
+echo "$*" >> "$log"
+cmd="$1"; shift
+case "$cmd" in
+  help) echo "Usage: chezmoi dump [target]... [flags]"; echo "  -f, --format <none>|json|yaml   Output format" ;;
+  managed) printf '{listing}' ;;
+  cat) case "$1" in
+{arms}    *) echo "stub: cannot cat $1" >&2; exit 1 ;;
+  esac ;;
+  *) echo "stub: unexpected $cmd" >&2; exit 1 ;;
+esac
+"#,
+        log = log.display()
+    );
+    let path = dir.join("chezmoi");
+    fs::write(&path, script).expect("write stub");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    env.prepend_path(&dir);
+    log
+}
+
+pub const GITCONFIG: &str = "[user]\n\tname = Test User\n\temail = test@example.invalid\n";
+
+/// The Stow layout: packages, a folded directory link and several file links in `$HOME`.
+pub fn stow(env: &TestEnv) {
+    env.write("dotfiles/zsh/.zshrc", b"export A=1\n", 0o644);
+    env.write("dotfiles/git/.gitconfig", GITCONFIG.as_bytes(), 0o644);
+    env.write("dotfiles/tmux/.tmux.conf", b"set -g mouse on\n", 0o644);
+    env.write(
+        "dotfiles/scripts/.local/bin/hello",
+        b"#!/bin/sh\necho hi\n",
+        0o755,
+    );
+    env.write(
+        "dotfiles/nvim/.config/nvim/init.lua",
+        b"vim.o.number = true\n",
+        0o644,
+    );
+    env.write(
+        "dotfiles/nvim/.config/nvim/lua/opts.lua",
+        b"return {}\n",
+        0o600,
+    );
+    fs::remove_file(env.home().join(".gitconfig")).expect("remove the harness .gitconfig");
+    env.symlink(".gitconfig", "dotfiles/git/.gitconfig");
+    env.symlink(".zshrc", "dotfiles/zsh/.zshrc");
+    env.symlink(".tmux.conf", "dotfiles/tmux/.tmux.conf");
+    env.symlink(
+        ".local/bin/hello",
+        "../../dotfiles/scripts/.local/bin/hello",
+    );
+    env.symlink(".config/nvim", "../dotfiles/nvim/.config/nvim");
+}
+
+pub type R<T = ()> = Result<T, Box<dyn Error>>;
+
+/// The `.bashrc` that the bootstrap repo holds.
+pub const BOOTSTRAP_BASHRC: &[u8] = b"export EDITOR=vi\n";
+
+const SYSTEM_DIRS: [&str; 2] = ["/usr/bin", "/bin"];
+
+/// stdout and stderr of `out`, in one text.
+pub fn text(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+fn check(cmd: &mut StdCommand) -> R {
+    let out = cmd.output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd:?} failed: {}", text(&out)).into())
+    }
+}
+
+/// The release asset `install.sh` fetches for this machine.
+pub fn archive_name() -> String {
+    format!(
+        "dotman-v{VERSION}-{}-unknown-linux-musl.tar.gz",
+        std::env::consts::ARCH
+    )
+}
+
+fn sha256_line(dir: &Path, name: &str) -> R<String> {
+    let out = StdCommand::new("sha256sum")
+        .arg(name)
+        .current_dir(dir)
+        .output()
+        .or_else(|_| {
+            StdCommand::new("shasum")
+                .args(["-a", "256", name])
+                .current_dir(dir)
+                .output()
+        })?;
+    Ok(String::from_utf8(out.stdout)?)
+}
+
+/// Writes an executable file, creating parents.
+pub fn write_exe(path: &Path, body: &str) -> R {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, body)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// The release directory a mirror would serve, built once per test run: a tarball whose top level
+/// holds the built `dot`, and `checksums.txt` with a line for another architecture beside it.
+pub fn release() -> R<PathBuf> {
+    static RELEASE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    RELEASE
+        .get_or_init(|| build_release().map_err(|e| e.to_string()))
+        .clone()
+        .map_err(Into::into)
+}
+
+fn build_release() -> R<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let name = exe.file_stem().map_or_else(
+        || "tests".to_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("release-{name}"));
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    let pkg = dir.join("pkg");
+    fs::create_dir_all(&pkg)?;
+    fs::copy(env!("CARGO_BIN_EXE_dot"), pkg.join("dot"))?;
+    let name = archive_name();
+    check(
+        StdCommand::new("tar")
+            .env("GZIP", "-1")
+            .arg("-czf")
+            .arg(dir.join(&name))
+            .arg("-C")
+            .arg(&pkg)
+            .arg("dot"),
+    )?;
+    let other = "0".repeat(64);
+    fs::write(
+        dir.join("checksums.txt"),
+        format!(
+            "{other}  dotman-v{VERSION}-riscv64-unknown-linux-musl.tar.gz\n{}",
+            sha256_line(&dir, &name)?
+        ),
+    )?;
+    Ok(dir)
+}
+
+/// A machine that runs `install.sh`, and the depth-1 clone of a dotman repo it runs it from.
+pub struct Setup {
+    _author: TestEnv,
+    pub machine: TestEnv,
+    pub dotfiles: PathBuf,
+}
+
+impl Setup {
+    pub fn new() -> R<Self> {
+        let author = TestEnv::new();
+        author.write(".bashrc", BOOTSTRAP_BASHRC, 0o644);
+        author.ok(&["init", "--no-import"]);
+        author.ok(&["add", ".bashrc"]);
+        author.ok(&["sync"]);
+        let machine = TestEnv::new();
+        let dotfiles = machine.root().join("dotfiles");
+        author.git(&[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &format!("file://{}", author.repo().display()),
+            &dotfiles.to_string_lossy(),
+        ]);
+        assert!(dotfiles.join("install.sh").is_file());
+        assert!(
+            dotfiles.join(".git/shallow").is_file(),
+            "not a depth-1 clone"
+        );
+        Ok(Self {
+            _author: author,
+            machine,
+            dotfiles: fs::canonicalize(dotfiles)?,
+        })
+    }
+
+    pub fn home(&self) -> PathBuf {
+        self.machine.home()
+    }
+
+    /// Whether the script put a `dot` in `~/.local/bin`.
+    pub fn installed(&self) -> bool {
+        self.home().join(".local/bin/dot").exists()
+    }
+
+    /// Whether `~/.bashrc` holds what the repo holds.
+    pub fn applied(&self) -> bool {
+        fs::read(self.home().join(".bashrc")).is_ok_and(|bytes| bytes == BOOTSTRAP_BASHRC)
+    }
+
+    /// `sh` with `stubs` in front of the system directories, and no script yet.
+    pub fn shell(&self, base: &Path, stubs: &[&Path]) -> StdCommand {
+        let dirs: Vec<PathBuf> = stubs
+            .iter()
+            .map(|dir| dir.to_path_buf())
+            .chain(SYSTEM_DIRS.iter().map(PathBuf::from))
+            .collect();
+        let mut cmd = self.machine.command_with_path("/bin/sh", &dirs);
+        cmd.env(
+            "DOTMAN_BOOTSTRAP_BASE_URL",
+            format!("file://{}", base.display()),
+        );
+        cmd
+    }
+
+    /// `sh <dotfiles>/install.sh`.
+    pub fn command(&self, base: &Path, stubs: &[&Path]) -> StdCommand {
+        let mut cmd = self.shell(base, stubs);
+        cmd.arg(self.dotfiles.join("install.sh"));
+        cmd
+    }
+
+    pub fn run(&self, stubs: &[&Path]) -> R<Output> {
+        Ok(self.command(&release()?, stubs).output()?)
+    }
+
+    pub fn stubs(&self, name: &str) -> PathBuf {
+        self.machine.root().join(name)
+    }
+
+    pub fn empty_base(&self) -> R<PathBuf> {
+        let dir = self.machine.root().join("empty");
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+}
+
+/// The machine config file.
+pub fn machine_config(env: &TestEnv) -> PathBuf {
+    env.xdg_config().join("dotman/config.toml")
+}
+
+/// An initialised repo with the system root in use and `roots` configured.
+pub fn system_setup(roots: &[&str]) -> TestEnv {
+    let mut env = TestEnv::new();
+    env.use_system_root();
+    env.ok(&["init"]);
+    if !roots.is_empty() {
+        let list: Vec<String> = roots.iter().map(|r| format!("\"{r}\"")).collect();
+        env.write_machine_config(&format!("[system]\nroots = [{}]\n", list.join(", ")));
+    }
+    env
+}
+
+/// `system_setup` with `escalate = "none"`, so the helper runs unprivileged below the prefix.
+pub fn system_setup_none(roots: &[&str]) -> TestEnv {
+    let env = system_setup(&[]);
+    configure_machine(&env, &system_config(roots, "none"));
+    env
+}
+
+/// Replaces the machine config at 0644, so a umask of 002 cannot leave it group-writable, which
+/// the helper refuses.
+pub fn configure_machine(env: &TestEnv, text: &str) {
+    env.write_machine_config(text);
+    fs::set_permissions(machine_config(env), fs::Permissions::from_mode(0o644))
+        .expect("chmod the machine config");
+}
+
+/// Machine config text with `roots` and the `escalate` tool.
+pub fn system_config(roots: &[&str], escalate: &str) -> String {
+    let list: Vec<String> = roots.iter().map(|r| format!("\"{r}\"")).collect();
+    format!(
+        "[system]\nroots = [{}]\nescalate = \"{escalate}\"\n",
+        list.join(", ")
+    )
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+pub fn xxh3(bytes: &[u8]) -> String {
+    format!("{:032x}", xxh3_128(bytes))
+}
+
+pub fn root_group() -> String {
+    dotman::sys::group_by_gid(0).expect("gid 0").name
+}
+
+pub fn plan_entry_hashed(target: &str, bytes: &[u8], mode: &str, hash: &str) -> Value {
+    json!({
+        "target": target,
+        "bytes": hex(bytes),
+        "xxh3": hash,
+        "owner": "root",
+        "group": root_group(),
+        "mode": mode,
+    })
+}
+
+pub fn plan_entry(target: &str, bytes: &[u8], mode: &str) -> Value {
+    plan_entry_hashed(target, bytes, mode, &xxh3(bytes))
+}
+
+pub fn plan_json(env: &TestEnv, roots: &[&str], entries: &[Value]) -> Value {
+    let prefix = fs::canonicalize(env.system_root()).expect("canonical system root");
+    json!({
+        "config": machine_config(env),
+        "roots": roots,
+        "prefix": prefix,
+        "entries": entries,
+    })
+}
+
+/// Writes `plan` as `apply --system` would: 0600, in 0700 directories under the state dir.
+pub fn write_plan(env: &TestEnv, plan: &Value) -> PathBuf {
+    let parent = env.state_dir().join("system-plan");
+    let dir = parent.join("by-hand");
+    fs::create_dir_all(&dir).expect("create the plan dir");
+    for private in [&parent, &dir] {
+        fs::set_permissions(private, fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
+    let file = dir.join("plan.json");
+    fs::write(&file, serde_json::to_vec(plan).expect("plan JSON")).expect("write the plan");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("chmod the plan");
+    file
+}
+
+pub fn system_write(env: &TestEnv, plan: &Path) -> Output {
+    env.run(&["system-write", "--plan", &plan.to_string_lossy()])
+}
+
+/// Every hook name git runs around commit, checkout, merge, rebase and push.
+pub const GIT_HOOKS: [&str; 10] = [
+    "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "post-checkout",
+    "post-merge",
+    "pre-rebase",
+    "post-rewrite",
+    "pre-push",
+    "reference-transaction",
+];
+
+/// Writes an executable hook of every name in [`GIT_HOOKS`] into `hooks_dir`; each appends its
+/// name to `marker`.
+pub fn plant_git_hooks(hooks_dir: &Path, marker: &Path) {
+    fs::create_dir_all(hooks_dir).expect("create the hooks dir");
+    for name in GIT_HOOKS {
+        write_exe(
+            &hooks_dir.join(name),
+            &format!("#!/bin/sh\necho {name} >> '{}'\nexit 0\n", marker.display()),
+        )
+        .expect("write a hook");
+    }
 }

@@ -361,7 +361,8 @@ pub fn derive_key(
     Ok(key)
 }
 
-/// Checks a key as stored in the repo: relative, NFC, no `.`/`..`/empty components, not a reserved name.
+/// Checks a key as stored in the repo: relative, NFC, no `.`/`..`/empty components, no `.git`
+/// component at any depth, not a reserved name.
 pub fn validate_key(key: &str) -> Result<()> {
     ensure!(!key.is_empty(), "empty key");
     ensure!(!key.starts_with('/'), "key `{key}` is absolute");
@@ -371,6 +372,13 @@ pub fn validate_key(key: &str) -> Result<()> {
         ensure!(
             !matches!(component, "" | "." | ".."),
             "key `{key}` has an empty, `.` or `..` component"
+        );
+        // A `.git/config` applied into HOME runs its `core.*` commands the next time git is used
+        // in that directory. Git itself refuses these names on checkout, including `.GIT` and
+        // the NTFS short name.
+        ensure!(
+            !component.eq_ignore_ascii_case(".git") && !component.eq_ignore_ascii_case("git~1"),
+            "key `{key}` has a `.git` component"
         );
     }
     let first = key.split('/').next().unwrap_or_default();
@@ -661,6 +669,18 @@ mod tests {
         );
         assert_eq!(key("sub/install.sh").unwrap(), "sub/install.sh");
         assert_eq!(key(".gitconfig").unwrap(), ".gitconfig");
+    }
+
+    #[test]
+    fn a_git_component_is_refused_at_any_depth() {
+        for name in [
+            ".config/x/.git/config",
+            "a/.GIT",
+            "a/git~1/hooks/pre-commit",
+        ] {
+            assert!(validate_key(name).is_err(), "{name}");
+        }
+        assert!(validate_key(".config/x/.github/ci.yml").is_ok());
     }
 
     #[test]

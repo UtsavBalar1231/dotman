@@ -14,7 +14,7 @@
 //! entries are decoded here, not by chezmoi, because chezmoi's own type filters do not agree with
 //! each other (`managed --include=templates` omits a `symlink_*.tmpl`).
 
-use super::gittree::shown;
+use super::gittree::{Staging, check_target, install_keeping_origin, shown};
 use super::{EditedConfig, Item, Report, author_email, count, proceed, require_fresh};
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
@@ -1021,8 +1021,7 @@ fn repo_config(writes: &[Write], dir_perms: &BTreeMap<String, u32>) -> RepoConfi
     config
 }
 
-fn write_files(ctx: &Context, writes: &[Write]) -> Result<()> {
-    let repo = &ctx.paths.repo;
+fn write_files(repo: &Path, writes: &[Write]) -> Result<()> {
     for write in writes {
         ensure_worktree_parents(repo, &write.key)?;
         let path = repo.join(&write.key);
@@ -1392,6 +1391,7 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
     let program = proc::find_program("chezmoi").ok_or_else(|| anyhow!(HINT))?;
     require_fresh(ctx)?;
     author_email(ctx)?;
+    check_target(&ctx.paths.repo)?;
     let edited = EditedConfig::find(ctx)?;
     let root = resolve_root(source)?;
     let mut tree = Tree::default();
@@ -1454,15 +1454,16 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
         output::info("nothing imported");
         return Ok(Outcome::Done);
     }
-    ctx.git.init()?;
-    if let Some(edited) = &edited {
-        edited.back_up()?;
-    }
-    write_files(ctx, &plan.writes)?;
-    plan.config.save(&ctx.repo_config_file(), false)?;
-    ctx.git.stage_all()?;
-    ctx.git
+    let staging = Staging::new(ctx, true)?;
+    staging.git.init()?;
+    write_files(&staging.repo, &plan.writes)?;
+    plan.config
+        .save(&staging.repo.join(".dotman.toml"), false)?;
+    staging.git.stage_all()?;
+    staging
+        .git
         .commit(&format!("import: chezmoi {}", source.display()))?;
+    install_keeping_origin(ctx, &staging, edited.as_ref())?;
     output::success(&format!("imported {files} into {}", repo.display()));
     output::info("next: run `dot status`, then `dot apply`");
     Ok(plan.report.outcome())

@@ -4,14 +4,12 @@
 
 mod common;
 
-use common::{Entry, TestEnv, accounting, mode_of, tree_checksum};
+use common::{Entry, GITCONFIG, TestEnv, accounting, mode_of, stow, tree_checksum};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-
-const GITCONFIG: &str = "[user]\n\tname = Test User\n\temail = test@example.invalid\n";
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
@@ -45,39 +43,6 @@ fn farm_dir(env: &TestEnv, name: &str) -> PathBuf {
 
 fn farm_sum(env: &TestEnv, name: &str) -> BTreeMap<String, Entry> {
     tree_checksum(&farm_dir(env, name))
-}
-
-/// The Stow layout of the task: packages, a folded directory link and several file links.
-// reason: clippy.toml exempts expect only inside #[test] fns
-#[allow(clippy::expect_used)]
-fn stow(env: &TestEnv) {
-    env.write("dotfiles/zsh/.zshrc", b"export A=1\n", 0o644);
-    env.write("dotfiles/git/.gitconfig", GITCONFIG.as_bytes(), 0o644);
-    env.write("dotfiles/tmux/.tmux.conf", b"set -g mouse on\n", 0o644);
-    env.write(
-        "dotfiles/scripts/.local/bin/hello",
-        b"#!/bin/sh\necho hi\n",
-        0o755,
-    );
-    env.write(
-        "dotfiles/nvim/.config/nvim/init.lua",
-        b"vim.o.number = true\n",
-        0o644,
-    );
-    env.write(
-        "dotfiles/nvim/.config/nvim/lua/opts.lua",
-        b"return {}\n",
-        0o600,
-    );
-    fs::remove_file(env.home().join(".gitconfig")).expect("remove the harness .gitconfig");
-    env.symlink(".gitconfig", "dotfiles/git/.gitconfig");
-    env.symlink(".zshrc", "dotfiles/zsh/.zshrc");
-    env.symlink(".tmux.conf", "dotfiles/tmux/.tmux.conf");
-    env.symlink(
-        ".local/bin/hello",
-        "../../dotfiles/scripts/.local/bin/hello",
-    );
-    env.symlink(".config/nvim", "../dotfiles/nvim/.config/nvim");
 }
 
 /// The keys of `stow`, with the folded directory as one entry.

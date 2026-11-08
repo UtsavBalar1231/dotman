@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{TestEnv, files_containing, mode_of};
+use common::{TestEnv, age_installed, files_containing, mode_of};
 use dotman::repo_config::RepoConfig;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -18,22 +18,6 @@ const MARKER: &[u8] = b"AGE-SECRET-KEY-";
 // Only the marker matters to the guard, so this need not be a real identity.
 const FAKE_KEY: &str =
     "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
-
-/// Whether an age CLI is on PATH. Prints why a test skips, and fails it instead when
-/// `DOTMAN_REQUIRE_AGE=1`.
-fn age_installed() -> bool {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let found = std::env::split_paths(&path)
-        .any(|dir| ["age", "rage"].iter().any(|name| dir.join(name).is_file()));
-    if !found {
-        assert!(
-            std::env::var_os("DOTMAN_REQUIRE_AGE").is_none_or(|v| v != "1"),
-            "DOTMAN_REQUIRE_AGE=1, but neither age nor rage is on PATH"
-        );
-        eprintln!("skipped: neither age nor rage is on PATH (DOTMAN_REQUIRE_AGE=1 fails instead)");
-    }
-    found
-}
 
 fn exits(out: &Output, code: i32) -> String {
     let err = String::from_utf8_lossy(&out.stderr).into_owned();

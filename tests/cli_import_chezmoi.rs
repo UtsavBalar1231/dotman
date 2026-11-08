@@ -4,81 +4,16 @@
 
 mod common;
 
-use common::{Entry, TestEnv, accounting, files_containing, mode_of, tree_checksum};
-use std::collections::BTreeMap;
+use common::{
+    Source, TestEnv, accounting, files_containing, have_chezmoi, mode_of, source_tree as source,
+    stub_chezmoi, tree_checksum,
+};
 use std::fs;
-use std::ops::Deref;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-/// Whether chezmoi can run here; says why not, and fails instead when CI requires it.
-fn have_chezmoi() -> bool {
-    let found = std::process::Command::new("chezmoi")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !found {
-        assert!(
-            std::env::var("DOTMAN_REQUIRE_CHEZMOI").as_deref() != Ok("1"),
-            "chezmoi is not on PATH, and DOTMAN_REQUIRE_CHEZMOI=1 asks for it"
-        );
-        eprintln!("skipping: chezmoi is not on PATH, so this test cannot run");
-    }
-    found
-}
-
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// A source tree. Dropping it fails the test if the import changed it.
-struct Source {
-    path: PathBuf,
-    sum: BTreeMap<String, Entry>,
-}
-
-impl Deref for Source {
-    type Target = Path;
-
-    fn deref(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for Source {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            assert_eq!(
-                tree_checksum(&self.path),
-                self.sum,
-                "the source {} was modified",
-                self.path.display()
-            );
-        }
-    }
-}
-
-impl Source {
-    /// Accepts changes the test made to the source itself.
-    fn seal(&mut self) {
-        self.sum = tree_checksum(&self.path);
-    }
-}
-
-/// Writes `files` (path, text) under `$ROOT/<name>`.
-// reason: clippy.toml exempts expect only inside #[test] fns
-#[allow(clippy::expect_used)]
-fn source(env: &TestEnv, name: &str, files: &[(&str, &str)]) -> Source {
-    let path = env.root().join(name);
-    for (file, text) in files {
-        let full = path.join(file);
-        fs::create_dir_all(full.parent().expect("parent")).expect("create parents");
-        fs::write(&full, text).expect("write file");
-    }
-    fs::create_dir_all(&path).expect("create source");
-    let sum = tree_checksum(&path);
-    Source { path, sum }
 }
 
 // reason: clippy.toml exempts expect only inside #[test] fns
@@ -394,7 +329,7 @@ fn symlinks_are_kept_and_everything_chezmoi_does_by_itself_is_reported() {
     let env = TestEnv::new();
     let outside = env.root().join("outside-secret");
     fs::write(&outside, "TOP-SECRET-CONTENT\n").expect("fixture");
-    let mut source = source(
+    let source = source(
         &env,
         "cz",
         &[
@@ -486,7 +421,7 @@ fn a_git_checkout_of_a_source_is_still_a_chezmoi_source_and_its_origin_is_report
         return;
     }
     let env = TestEnv::new();
-    let mut source = source(&env, "cz", &[("dot_bashrc", "export A=1\n")]);
+    let source = source(&env, "cz", &[("dot_bashrc", "export A=1\n")]);
     let dir = source.to_string_lossy().into_owned();
     env.git(&["-C", &dir, "init", "-q", "-b", "main"]);
     env.git(&["-C", &dir, "add", "-A"]);
@@ -594,51 +529,26 @@ fn without_chezmoi_the_import_says_how_to_install_it() {
     assert!(!env.repo().exists());
 }
 
-/// A chezmoi that predates entry types: no `--exclude` and no `--no-pager` in its help, no
-/// `dump`, and a log of what it was asked.
-// reason: clippy.toml exempts expect only inside #[test] fns
-#[allow(clippy::expect_used)]
-fn stub_chezmoi(env: &mut TestEnv) -> PathBuf {
-    let dir = env.root().join("stub-bin");
-    fs::create_dir_all(&dir).expect("create stub dir");
-    let log = env.root().join("stub.log");
-    let script = format!(
-        r#"#!/bin/sh
-log='{log}'
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --config|--persistent-state|--cache|--source|--destination) shift 2 ;;
-    --no-tty) shift ;;
-    *) break ;;
-  esac
-done
-echo "$*" >> "$log"
-cmd="$1"; shift
-case "$cmd" in
-  help) echo "Usage: chezmoi dump [target]... [flags]"; echo "  -f, --format <none>|json|yaml   Output format" ;;
-  managed) printf '.bashrc\n.ssh\n.ssh/config\n.local\n.local/bin\n.local/bin/x\n.gitconfig\n' ;;
-  cat) case "$1" in
-    */.bashrc) printf 'stub bashrc\n' ;;
-    */.ssh/config) printf 'stub ssh\n' ;;
-    */.local/bin/x) printf 'stub x\n' ;;
-    *) echo "stub: cannot cat $1" >&2; exit 1 ;;
-  esac ;;
-  *) echo "stub: unexpected $cmd" >&2; exit 1 ;;
-esac
-"#,
-        log = log.display()
-    );
-    let path = dir.join("chezmoi");
-    fs::write(&path, script).expect("write stub");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
-    env.prepend_path(&dir);
-    log
-}
-
 #[test]
 fn without_entry_types_managed_and_cat_read_the_plain_files_only() {
     let mut env = TestEnv::new();
-    let log = stub_chezmoi(&mut env);
+    let log = stub_chezmoi(
+        &mut env,
+        &[
+            ".bashrc",
+            ".ssh",
+            ".ssh/config",
+            ".local",
+            ".local/bin",
+            ".local/bin/x",
+            ".gitconfig",
+        ],
+        &[
+            (".bashrc", "stub bashrc\n"),
+            (".ssh/config", "stub ssh\n"),
+            (".local/bin/x", "stub x\n"),
+        ],
+    );
     let marks = markers(&env);
     let source = done_when(&env, &marks);
     let out = env.run(&["import", &source.to_string_lossy()]);
@@ -683,8 +593,7 @@ fn a_source_in_the_usual_place_or_named_by_the_config_is_found() {
     let found = env.xdg_data().join("chezmoi");
     fs::create_dir_all(found.join("dot_config")).expect("fixture");
     fs::write(found.join("dot_bashrc"), "export A=1\n").expect("fixture");
-    let sum = tree_checksum(&found);
-    let _usual = Source { path: found, sum };
+    let _usual = Source::new(found);
     let out = env.run(&["import"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(repo_has(&env, ".bashrc"));

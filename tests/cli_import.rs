@@ -2,16 +2,17 @@
 
 mod common;
 
-use common::{Entry, TestEnv, accounting, mode_of, tree_checksum};
+use common::{
+    LEGACY_REPO as FIXTURE, TestEnv, accounting, git_in, legacy_fixture, mode_of, overlay_source,
+    tree_checksum,
+};
 use dotman::repo_config::RepoConfig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use xxhash_rust::xxh3::xxh3_128;
 
-const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-v2/repo");
-const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-v2");
 const OVERLAY_MESSAGE: &str = "import: overlay from legacy dotman";
 const ZERO: &str = "00000000000000000000000000000000";
 
@@ -37,23 +38,6 @@ const MANIFEST: [(&str, &str, &str); 6] = [
     (".ssh/config", "100644", "044442cc692e68f4c0ad058053236021"),
 ];
 
-/// Hashes the fixture when created; `check` fails if the import changed it.
-struct Pristine(BTreeMap<String, Entry>);
-
-impl Pristine {
-    fn new() -> Self {
-        Self(tree_checksum(Path::new(FIXTURE_ROOT)))
-    }
-
-    fn check(&self) {
-        assert_eq!(
-            tree_checksum(Path::new(FIXTURE_ROOT)),
-            self.0,
-            "the legacy fixture was modified"
-        );
-    }
-}
-
 // reason: clippy.toml exempts expect only inside #[test] fns
 #[allow(clippy::expect_used)]
 fn copy_dir(from: &Path, to: &Path) {
@@ -67,13 +51,6 @@ fn copy_dir(from: &Path, to: &Path) {
             fs::copy(item.path(), &target).expect("copy file");
         }
     }
-}
-
-fn git_in(env: &TestEnv, repo: &Path, args: &[&str]) -> String {
-    let repo = repo.to_string_lossy();
-    let mut full = vec!["-C", &*repo];
-    full.extend_from_slice(args);
-    env.git(&full)
 }
 
 fn blob(env: &TestEnv, rev_path: &str) -> Vec<u8> {
@@ -101,7 +78,7 @@ fn mode_table(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 #[test]
 fn import_rebuilds_the_history_and_matches_the_readme_manifest() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     let home_before = tree_checksum(&env.home());
     let err = env.ok(&["import", FIXTURE, "--no-bootstrap"]);
@@ -168,7 +145,7 @@ fn import_rebuilds_the_history_and_matches_the_readme_manifest() {
 
 #[test]
 fn an_imported_repo_applies_with_the_recorded_modes() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     env.ok(&["import", FIXTURE]);
     env.ok(&["apply"]);
@@ -188,7 +165,7 @@ fn an_imported_repo_applies_with_the_recorded_modes() {
 
 #[test]
 fn import_dry_run_reports_and_creates_nothing() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     let before = env.four_trees();
     let err = env.ok(&["import", "--dry-run", FIXTURE]);
@@ -212,7 +189,7 @@ fn import_dry_run_reports_and_creates_nothing() {
 
 #[test]
 fn without_a_source_the_legacy_repo_in_home_is_used() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     let err = env.fails(&["import"]);
     assert!(err.contains("dot import <source>"), "{err}");
@@ -227,7 +204,7 @@ fn without_a_source_the_legacy_repo_in_home_is_used() {
 
 #[test]
 fn a_populated_repo_is_refused_and_the_error_names_overlay() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     env.ok(&["init"]);
     env.write(".bashrc", b"mine\n", 0o644);
@@ -249,7 +226,7 @@ fn a_populated_repo_is_refused_and_the_error_names_overlay() {
 
 #[test]
 fn a_source_that_is_in_or_around_the_repo_is_refused() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     env.ok(&["init"]);
     let inside = env.repo().join("legacy");
@@ -276,7 +253,7 @@ fn a_source_that_is_in_or_around_the_repo_is_refused() {
 
 #[test]
 fn the_default_config_is_replaced_silently() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     env.ok(&["init", "--no-bootstrap"]);
     let err = env.ok(&["import", FIXTURE, "--no-bootstrap"]);
@@ -296,7 +273,7 @@ fn the_default_config_is_replaced_silently() {
 
 #[test]
 fn an_edited_config_is_backed_up_and_reported() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     env.ok(&["init"]);
     let config = env.repo().join(".dotman.toml");
@@ -324,7 +301,7 @@ fn an_edited_config_is_backed_up_and_reported() {
 
 #[test]
 fn a_missing_git_identity_stops_the_import_before_anything_is_created() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     fs::remove_file(env.home().join(".gitconfig")).expect("remove gitconfig");
     let err = env.fails(&["import", FIXTURE]);
@@ -335,7 +312,7 @@ fn a_missing_git_identity_stops_the_import_before_anything_is_created() {
 
 #[test]
 fn overlay_flags_are_checked() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     for source in [None, Some(FIXTURE)] {
         let mut args = vec!["import", "--include-missing"];
@@ -347,32 +324,6 @@ fn overlay_flags_are_checked() {
     assert_eq!(out.status.code(), Some(2));
     assert!(!env.repo().exists());
     pristine.check();
-}
-
-// reason: clippy.toml exempts expect only inside #[test] fns
-#[allow(clippy::expect_used)]
-/// A `$HOME`-shaped git repo holding the fixture's HEAD with every mode 0644, `.ssh/config`
-/// present and `.config/side.toml` absent. `run_mode` is the mode of `.local/bin/run`.
-fn overlay_source(env: &TestEnv, run_mode: u32, bashrc: &[u8]) -> PathBuf {
-    let src = env.root().join("overlay-src");
-    let files: [(&str, &[u8], u32); 5] = [
-        (".bashrc", bashrc, 0o644),
-        (".local/bin/run", b"#!/bin/sh\necho run\n", run_mode),
-        (".ssh/config", b"Host example\n  User legacyuser\n", 0o644),
-        (".empty", b"", 0o644),
-        (".config/abs.conf", b"abs=true\n", 0o644),
-    ];
-    for (key, bytes, mode) in files {
-        let path = src.join(key);
-        fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
-        fs::write(&path, bytes).expect("write");
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
-    }
-    git_in(env, &src, &["init", "-q"]);
-    git_in(env, &src, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    git_in(env, &src, &["add", "-A"]);
-    git_in(env, &src, &["commit", "-q", "-m", "base"]);
-    src
 }
 
 const BASHRC: &[u8] = b"# bashrc v2\nexport EDITOR=vim\n";
@@ -403,7 +354,7 @@ fn changed_files(env: &TestEnv) -> BTreeSet<String> {
 
 #[test]
 fn overlay_records_missing_modes_reports_missing_files_and_makes_one_commit() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = overlay_env(0o644, BASHRC);
     let before = commits(&env);
     let home_before = tree_checksum(&env.home());
@@ -440,7 +391,7 @@ fn overlay_records_missing_modes_reports_missing_files_and_makes_one_commit() {
 
 #[test]
 fn overlay_with_include_missing_adds_the_file() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = overlay_env(0o644, BASHRC);
     let before = commits(&env);
 
@@ -476,7 +427,7 @@ fn overlay_with_include_missing_adds_the_file() {
 
 #[test]
 fn overlay_reports_an_extra_exec_bit_and_leaves_it() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = overlay_env(0o644, BASHRC);
     let repo = env.repo();
     fs::set_permissions(repo.join(".bashrc"), fs::Permissions::from_mode(0o755))
@@ -503,7 +454,7 @@ fn overlay_reports_an_extra_exec_bit_and_leaves_it() {
 
 #[test]
 fn overlay_with_nothing_to_change_makes_no_commit() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = overlay_env(0o755, BASHRC);
     env.ok(&["import", "--overlay", FIXTURE, "--include-missing"]);
     let before = commits(&env);
@@ -519,7 +470,7 @@ fn overlay_with_nothing_to_change_makes_no_commit() {
 
 #[test]
 fn overlay_reports_content_differences_and_leaves_them() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = overlay_env(0o644, b"# my own bashrc\n");
     let out = env.run(&["import", "--overlay", FIXTURE]);
     let err = String::from_utf8_lossy(&out.stderr);
@@ -536,7 +487,7 @@ fn overlay_reports_content_differences_and_leaves_them() {
 
 #[test]
 fn overlay_never_overrides_an_existing_mode_entry() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = overlay_env(0o755, BASHRC);
     let config = env.repo().join(".dotman.toml");
     let mut parsed = RepoConfig::load(&config).expect("load");
@@ -564,7 +515,7 @@ fn overlay_never_overrides_an_existing_mode_entry() {
 
 #[test]
 fn overlay_dry_run_changes_nothing() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = overlay_env(0o644, BASHRC);
     let before = env.four_trees();
     let out = env.run(&[
@@ -586,7 +537,7 @@ fn overlay_dry_run_changes_nothing() {
 
 #[test]
 fn overlay_needs_a_clean_repo_that_exists() {
-    let pristine = Pristine::new();
+    let pristine = legacy_fixture();
     let env = TestEnv::new();
     let err = env.fails(&["import", "--overlay", FIXTURE]);
     assert!(err.contains("dot init"), "{err}");

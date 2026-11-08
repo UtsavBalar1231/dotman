@@ -3,30 +3,20 @@
 
 mod common;
 
-use common::{Entry, TestEnv, accounting, tree_checksum};
+use common::{
+    File, Source, TestEnv, accounting, bare, git_in, tree_checksum, work_tree, yadm_fixture,
+    yadm_repo,
+};
 use dotman::config::Config;
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::fs;
-use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-
-/// File name, bytes, executable.
-type File<'a> = (&'a str, &'a str, bool);
 
 const CONVERT: &str = "import: convert yadm alternates";
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn git_in(env: &TestEnv, dir: &Path, args: &[&str]) -> String {
-    let dir = dir.to_string_lossy();
-    let mut full = vec!["-C", &*dir];
-    full.extend_from_slice(args);
-    env.git(&full)
 }
 
 // reason: clippy.toml exempts expect only inside #[test] fns
@@ -49,101 +39,6 @@ fn blob(env: &TestEnv, repo: &Path, path: &str) -> String {
     git_in(env, repo, &["show", &format!("HEAD:{path}")])
 }
 
-/// A work tree with two commits holding `files`, and `gitlink` as a submodule if given.
-// reason: clippy.toml exempts expect only inside #[test] fns
-#[allow(clippy::expect_used)]
-fn work_tree(env: &TestEnv, name: &str, files: &[File], gitlink: Option<&str>) -> PathBuf {
-    let dir = env.root().join("work").join(name);
-    fs::create_dir_all(&dir).expect("create work tree");
-    git_in(env, &dir, &["init", "-q", "-b", "main"]);
-    for (path, text, executable) in files {
-        let full = dir.join(path);
-        fs::create_dir_all(full.parent().expect("parent")).expect("create parents");
-        fs::write(&full, text).expect("write file");
-        let mode = if *executable { 0o755 } else { 0o644 };
-        fs::set_permissions(&full, fs::Permissions::from_mode(mode)).expect("chmod");
-    }
-    git_in(env, &dir, &["add", "-A"]);
-    git_in(env, &dir, &["commit", "-q", "-m", "first"]);
-    if let Some(path) = gitlink {
-        let sha = git_in(env, &dir, &["rev-parse", "HEAD"]);
-        let cacheinfo = format!("160000,{},{path}", sha.trim());
-        git_in(
-            env,
-            &dir,
-            &["update-index", "--add", "--cacheinfo", &cacheinfo],
-        );
-    }
-    git_in(
-        env,
-        &dir,
-        &["commit", "-q", "--allow-empty", "-m", "second"],
-    );
-    dir
-}
-
-/// A source repo. Dropping it fails the test if the import changed it since the last `seal`.
-struct Source {
-    path: PathBuf,
-    sum: RefCell<BTreeMap<String, Entry>>,
-}
-
-impl Source {
-    fn new(path: PathBuf) -> Self {
-        let sum = RefCell::new(tree_checksum(&path));
-        Self { path, sum }
-    }
-
-    /// Accepts the fixture edits made since `bare`.
-    fn seal(&self) {
-        *self.sum.borrow_mut() = tree_checksum(&self.path);
-    }
-}
-
-impl Deref for Source {
-    type Target = Path;
-
-    fn deref(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for Source {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            assert_eq!(
-                tree_checksum(&self.path),
-                *self.sum.borrow(),
-                "the source {} was modified",
-                self.path.display()
-            );
-        }
-    }
-}
-
-/// Copies `work` to `dest` as a bare repo. `worktree` is what yadm and vcsh record.
-// reason: clippy.toml exempts expect only inside #[test] fns
-#[allow(clippy::expect_used)]
-fn bare(env: &TestEnv, work: &Path, dest: &Path, worktree: Option<&Path>) -> Source {
-    fs::create_dir_all(dest.parent().expect("parent")).expect("create parent");
-    let (work_arg, dest_arg) = (work.to_string_lossy(), dest.to_string_lossy());
-    env.git(&["clone", "-q", "--bare", &*work_arg, &*dest_arg]);
-    git_in(env, dest, &["config", "--unset", "remote.origin.url"]);
-    if let Some(worktree) = worktree {
-        git_in(env, dest, &["config", "core.bare", "false"]);
-        git_in(
-            env,
-            dest,
-            &["config", "core.worktree", &worktree.to_string_lossy()],
-        );
-    }
-    Source::new(dest.to_path_buf())
-}
-
-fn yadm_repo(env: &TestEnv) -> PathBuf {
-    env.xdg_data().join("yadm/repo.git")
-}
-
 // reason: clippy.toml exempts expect only inside #[test] fns
 #[allow(clippy::expect_used)]
 fn yadm_config(env: &TestEnv, key: &str, value: &str) {
@@ -157,30 +52,6 @@ fn yadm_config(env: &TestEnv, key: &str, value: &str) {
         key,
         value,
     ]);
-}
-
-const TOOLRC: &str = "[core]\n{% if yadm.os == \"Linux\" %}\neditor = vim\n{% else %}\neditor = nano\n{% endif %}\n# {{ env.EDITOR }}\n";
-
-/// 13 entries: 8 convert, 5 need action.
-const YADM_FILES: [File; 12] = [
-    (".bashrc", "bash\n", false),
-    ("bin/run", "#!/bin/sh\n", true),
-    ("README.md", "readme\n", false),
-    (".zshrc##o.Darwin", "mac\n", false),
-    (".zshrc##o.Linux", "linux\n", false),
-    ("x##h.box,c.work", "x\n", false),
-    (".toolrc##template", TOOLRC, false),
-    ("neg##~o.Darwin", "not mac\n", false),
-    ("esh.conf##template.esh", "<%= $USER %>\n", false),
-    ("inc.conf##template", "{% include \"other\" %}\n", false),
-    ("dir##o.Linux/file", "dir\n", false),
-    ("host.conf##h.my.host", "dotted\n", false),
-];
-
-/// The yadm repo in its default place, with a submodule, and the checksum of the source.
-fn yadm_fixture(env: &TestEnv) -> Source {
-    let work = work_tree(env, "yadm", &YADM_FILES, Some("sub"));
-    bare(env, &work, &yadm_repo(env), Some(&env.home()))
 }
 
 #[test]

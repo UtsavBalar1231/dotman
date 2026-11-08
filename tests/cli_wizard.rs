@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{TestEnv, mode_of, tree_checksum};
+use common::{TestEnv, age_installed, mode_of, tree_checksum};
 use dotman::config::Config;
 use dotman::state::{RemotePublic, State};
 use std::fs;
@@ -16,20 +16,6 @@ const PLAIN: &[u8] = b"github.com:\n  oauth_token: gho_hunter2\n";
 const HOSTS: &str = ".config/gh/hosts.yml";
 const HOSTS_AGE: &str = ".config/gh/hosts{age}.yml";
 const SSH_URL: &str = "git@github.com:me/dotfiles.git";
-
-fn age_installed() -> bool {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let found = std::env::split_paths(&path)
-        .any(|dir| ["age", "rage"].iter().any(|name| dir.join(name).is_file()));
-    if !found {
-        assert!(
-            std::env::var_os("DOTMAN_REQUIRE_AGE").is_none_or(|v| v != "1"),
-            "DOTMAN_REQUIRE_AGE=1, but neither age nor rage is on PATH"
-        );
-        eprintln!("skipped: neither age nor rage is on PATH (DOTMAN_REQUIRE_AGE=1 fails instead)");
-    }
-    found
-}
 
 fn exits(out: &Output, code: i32) -> String {
     let err = String::from_utf8_lossy(&out.stderr).into_owned();

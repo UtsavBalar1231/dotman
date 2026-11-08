@@ -1,17 +1,18 @@
 mod common;
 
-use common::{Entry, TestEnv, mode_of, tree_checksum};
+use common::{
+    Entry, TestEnv, configure_machine as configure, machine_config, mode_of, plan_entry as entry,
+    plan_entry_hashed as entry_hashed, plan_json, system_config, system_setup as setup,
+    system_setup_none as setup_none, system_write, tree_checksum, write_plan, xxh3,
+};
 use dotman::config::Config;
 use dotman::repo_config::SystemFile;
 use dotman::state::State;
-use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use xxhash_rust::xxh3::xxh3_128;
 
 const KEYD: &str = "/etc/keyd/default.conf";
 
@@ -32,22 +33,6 @@ fn exits(env: &TestEnv, code: i32, args: &[&str]) -> String {
         stderr(&out)
     );
     stderr(&out)
-}
-
-fn machine_config(env: &TestEnv) -> std::path::PathBuf {
-    env.xdg_config().join("dotman/config.toml")
-}
-
-/// An initialised repo with the system root in use and `roots` configured.
-fn setup(roots: &[&str]) -> TestEnv {
-    let mut env = TestEnv::new();
-    env.use_system_root();
-    env.ok(&["init"]);
-    if !roots.is_empty() {
-        let list: Vec<String> = roots.iter().map(|r| format!("\"{r}\"")).collect();
-        env.write_machine_config(&format!("[system]\nroots = [{}]\n", list.join(", ")));
-    }
-    env
 }
 
 type Snapshot = (
@@ -452,95 +437,6 @@ fn paths_outside_home_and_inside_it_are_told_apart() {
     let home_file = env.home().join(".bashrc");
     let err = exits(&env, 1, &["add", "--system", &home_file.to_string_lossy()]);
     assert!(err.contains("$HOME"), "{err}");
-}
-
-/// Replaces the machine config at 0644, so a umask of 002 cannot leave it group-writable, which
-/// the helper refuses.
-// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
-#[allow(clippy::expect_used)]
-fn configure(env: &TestEnv, text: &str) {
-    env.write_machine_config(text);
-    fs::set_permissions(machine_config(env), fs::Permissions::from_mode(0o644))
-        .expect("chmod the machine config");
-}
-
-fn system_config(roots: &[&str], escalate: &str) -> String {
-    let list: Vec<String> = roots.iter().map(|r| format!("\"{r}\"")).collect();
-    format!(
-        "[system]\nroots = [{}]\nescalate = \"{escalate}\"\n",
-        list.join(", ")
-    )
-}
-
-/// `setup` with `escalate = "none"`, so the helper runs unprivileged below the prefix.
-fn setup_none(roots: &[&str]) -> TestEnv {
-    let env = setup(&[]);
-    configure(&env, &system_config(roots, "none"));
-    env
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
-}
-
-fn xxh3(bytes: &[u8]) -> String {
-    format!("{:032x}", xxh3_128(bytes))
-}
-
-// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
-#[allow(clippy::expect_used)]
-fn root_group() -> String {
-    dotman::sys::group_by_gid(0).expect("gid 0").name
-}
-
-fn entry_hashed(target: &str, bytes: &[u8], mode: &str, hash: &str) -> Value {
-    json!({
-        "target": target,
-        "bytes": hex(bytes),
-        "xxh3": hash,
-        "owner": "root",
-        "group": root_group(),
-        "mode": mode,
-    })
-}
-
-fn entry(target: &str, bytes: &[u8], mode: &str) -> Value {
-    entry_hashed(target, bytes, mode, &xxh3(bytes))
-}
-
-// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
-#[allow(clippy::expect_used)]
-fn plan_json(env: &TestEnv, roots: &[&str], entries: &[Value]) -> Value {
-    let prefix = fs::canonicalize(env.system_root()).expect("canonical system root");
-    json!({
-        "config": machine_config(env),
-        "roots": roots,
-        "prefix": prefix,
-        "entries": entries,
-    })
-}
-
-/// Writes `plan` as `apply --system` would: 0600, in 0700 directories under the state dir.
-// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
-#[allow(clippy::expect_used)]
-fn write_plan(env: &TestEnv, plan: &Value) -> PathBuf {
-    let parent = env.state_dir().join("system-plan");
-    let dir = parent.join("by-hand");
-    fs::create_dir_all(&dir).expect("create the plan dir");
-    for private in [&parent, &dir] {
-        fs::set_permissions(private, fs::Permissions::from_mode(0o700)).expect("chmod");
-    }
-    let file = dir.join("plan.json");
-    fs::write(&file, serde_json::to_vec(plan).expect("plan JSON")).expect("write the plan");
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("chmod the plan");
-    file
-}
-
-fn system_write(env: &TestEnv, plan: &Path) -> Output {
-    env.run(&["system-write", "--plan", &plan.to_string_lossy()])
 }
 
 // reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
