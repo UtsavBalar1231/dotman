@@ -83,7 +83,7 @@ A `{tmpl}` file is rendered with minijinja in strict mode: an undefined variable
 
 Variables: `host`, `user`, `distro`, `os`, `arch`, `home`; the lists `profiles` and `like`; `vars` (the `[vars]` table of the machine config); and `env`, which holds only the names listed in `[template] env` of the machine config. The allowlist is empty by default.
 
-dotman never captures a local edit into a template. If both sides changed, the path is reported as template drift and the run exits 3. Fix it with `dotman edit <path>`, which writes the new rendering over the file when the source changed, or discard the local change with `dotman apply --take-repo <path>`.
+dotman never captures a local edit into a template. A local edit to a rendered file is reported as template drift, and the run exits 3. Fix it with `dotman edit <path>`, which writes the new rendering over the file when the source changed, or discard the local change with `dotman apply --take-repo <path>`.
 
 ## Hooks
 
@@ -115,7 +115,7 @@ Without a key, encrypted files are reported as `locked` and skipped.
 
 ```bash
 dotman key init                  # new identity at ~/.config/dotman/age-identity.txt
-dotman key import key.txt        # use an existing identity (--add-recipient lists it)
+dotman key import key.txt        # use an existing identity; --add-recipient adds its recipient
 ```
 
 On a machine where you cannot place a file, set `DOTMAN_AGE_KEY` to the key text, or `DOTMAN_AGE_KEY_FILE` to a path. The key goes only to age's stdin and is stripped from every other child process. It is refused in `[template] env`. Without an env var, the identity file is `$XDG_CONFIG_HOME/dotman/age-identity.txt`.
@@ -128,7 +128,7 @@ dotman refuses to add a file that contains `AGE-SECRET-KEY-`, and holds back new
 
 `init` writes an `install.sh` at the repo root. It downloads a pinned, checksum-verified static `dotman` and runs a non-interactive `dotman init` on the checkout. Point each tool at the dotfiles repo:
 
-- **GitHub Codespaces:** Settings, Codespaces, enable "Automatically import dotfiles" and choose the repo.
+- **GitHub Codespaces:** Settings, Codespaces, enable "Automatically install dotfiles" and choose the repo.
 - **VS Code Dev Containers:** set `dotfiles.repository` (and optionally `dotfiles.installCommand`) in your VS Code user settings.
 - **DevPod:** `devpod context set-options -o DOTFILES_URL=<repo url>`, or Settings, Dotfiles.
 

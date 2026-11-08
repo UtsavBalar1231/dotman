@@ -87,6 +87,7 @@ just lint-strict                              # pre-commit clippy set
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo run -p xtask -- generate                # man pages and completions
+just release-prepare 0.2.0                    # bumps Cargo.toml, Cargo.lock, the PKGBUILD and install/install.sh
 ```
 - `DOTMAN_REQUIRE_AGE=1` and `DOTMAN_REQUIRE_CHEZMOI=1` turn a skipped age or chezmoi test into a failure. CI sets them.
 - The real-sudo test in `tests/system_scope.rs` runs only with `DOTMAN_REAL_SUDO_TEST=1` and a container marker (`/.dockerenv` or `/run/.containerenv`). Only CI's `system-scope` job sets both; elsewhere it returns early.
