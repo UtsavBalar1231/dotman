@@ -26,7 +26,7 @@ use crate::sys;
 use crate::system::escalate::{Escalator, Tool};
 use crate::system::helper::{self, Plan, PlanEntry, Reported};
 use crate::system::{self, Scope, Verdict};
-use crate::variant::{Selection, Sources};
+use crate::variant::{Flag, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -202,6 +202,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     let mut run = Run {
         ctx,
         opts,
+        sources: &sources,
         modes: repo_config.modes.clone(),
         backups: backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?,
         attention: false,
@@ -446,6 +447,7 @@ const fn choice(local: bool, repo: bool) -> Option<Choice> {
 struct Run<'a> {
     ctx: &'a Context,
     opts: &'a Options,
+    sources: &'a Sources,
     modes: BTreeMap<String, String>,
     backups: PathBuf,
     attention: bool,
@@ -462,8 +464,8 @@ struct Run<'a> {
     forget_system: BTreeSet<String>,
     announced: usize,
     left: usize,
-    /// Keys kept local this run, other than templates, and whether each is stored encrypted.
-    kept: Vec<(String, bool)>,
+    /// Keys kept local this run, other than templates.
+    kept: Vec<String>,
 }
 
 impl Run<'_> {
@@ -851,7 +853,7 @@ impl Run<'_> {
                             "capture",
                             &format!("{key} (replaces the repo version for every machine)"),
                         );
-                        self.kept.push((key.clone(), encrypted));
+                        self.kept.push(key.clone());
                     }
                 }
                 // An edit to a file whose stricter mode is kept here travels as content only, so
@@ -883,7 +885,7 @@ impl Run<'_> {
                     (Action::KeepLocal, _) => {
                         self.announce("keep local", key);
                         if !r.template {
-                            self.kept.push((key.clone(), r.encrypted));
+                            self.kept.push(key.clone());
                         }
                         Some(r.tuple.mode)
                     }
@@ -1459,11 +1461,7 @@ impl Run<'_> {
         let mut said = vec![format!(
             "kept; the next `{bin} sync` captures {them} into the repo for every machine"
         )];
-        let keys: Vec<(&str, bool)> = self
-            .kept
-            .iter()
-            .map(|(key, encrypted)| (key.as_str(), *encrypted))
-            .collect();
+        let keys: Vec<&str> = self.kept.iter().map(String::as_str).collect();
         if let Some(add) = self.for_host(&keys) {
             said.push(format!("{add} keeps {them} to this machine"));
         }
@@ -1477,21 +1475,18 @@ impl Run<'_> {
         if self.opts.pass != Pass::Capture || question.local_action != Action::KeepLocal {
             return None;
         }
-        let keys: Vec<(&str, bool)> = items
+        let keys: Vec<&str> = items
             .iter()
             .filter(|item| !item.system && !item.r.as_ref().is_some_and(|r| r.template))
-            .map(|item| {
-                let encrypted = item.r.as_ref().is_some_and(|r| r.encrypted);
-                (item.key.as_str(), encrypted)
-            })
+            .map(|item| item.key.as_str())
             .collect();
         self.for_host(&keys)
     }
 
     /// `` `<bin> add --for host=<host> <paths>` ``, when `keys` is not empty and the host name is
-    /// one a variant condition can hold. The keys flagged as encrypted get a command of their own
-    /// with `--encrypt`: a plain variant of one would put its plain text in the repo.
-    fn for_host(&self, keys: &[(&str, bool)]) -> Option<String> {
+    /// one a variant condition can hold. A key with an `{age}` source, for whichever machine, gets
+    /// a command of its own with `--encrypt`, by the rule `add --for` refuses a plain variant by.
+    fn for_host(&self, keys: &[&str]) -> Option<String> {
         let host = &self.ctx.identity().host;
         // A variant condition takes only these characters.
         let named = !host.is_empty()
@@ -1504,8 +1499,8 @@ impl Run<'_> {
         let command = |encrypt: bool| {
             let paths: Vec<String> = keys
                 .iter()
-                .filter(|(_, encrypted)| *encrypted == encrypt)
-                .map(|(key, _)| add::pasteable(&self.ctx.paths.home, key))
+                .filter(|key| self.stored_encrypted(key) == encrypt)
+                .map(|key| add::pasteable(&self.ctx.paths.home, key))
                 .collect();
             let flag = if encrypt { "--encrypt " } else { "" };
             (!paths.is_empty()).then(|| {
@@ -1518,6 +1513,12 @@ impl Run<'_> {
         };
         let commands: Vec<String> = [false, true].into_iter().filter_map(command).collect();
         Some(commands.join(" and "))
+    }
+
+    fn stored_encrypted(&self, key: &str) -> bool {
+        self.sources
+            .sources_of(key)
+            .any(|source| self.sources.flag(key, source) == Flag::Age)
     }
 
     /// The mode R reached `$HOME` with; `None` when it did not. A skipped or failed write is

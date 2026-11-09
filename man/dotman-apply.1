@@ -32,7 +32,7 @@ Apply only these files or directories, with \-\-system system files too; every m
 .SH DECISIONS
 .TP
 \fB\-\-keep\-local\fR
-Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add \-\-for host=<host> <file>` instead
+Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add \-\-for host=<host> <file>` instead, or `add \-\-encrypt \-\-for host=<host> <file>` when any of its sources is encrypted
 .TP
 \fB\-\-take\-repo\fR
 Take the repo version of conflicting and existing files, after backing them up

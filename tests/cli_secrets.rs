@@ -1224,6 +1224,69 @@ fn the_printed_way_to_keep_an_encrypted_file_here_keeps_it_encrypted() {
     }
 }
 
+const SHARED: &str = ".config/app/app.conf";
+
+/// A plain `SHARED` that every machine applies but `other`, whose variant is `{age}`; machine
+/// `box`, which has no key, then conflicts on the plain file. Returns A and box.
+fn plain_file_with_an_encrypted_variant() -> (TestEnv, TestEnv) {
+    let a = keyed_device();
+    a.write(SHARED, b"base\n", 0o644);
+    a.ok(&["add", SHARED]);
+    a.write(SHARED, b"other's own\n", 0o644);
+    a.ok(&["add", "--encrypt", "--for", "host=other", SHARED]);
+    a.write(SHARED, b"base\n", 0o644);
+    a.ok(&["sync"]);
+    let b = a.second_device();
+    b.write_machine_config("[identity]\nhost = \"box\"\n");
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    a.write(SHARED, b"from a\n", 0o644);
+    a.ok(&["sync"]);
+    b.write(SHARED, BOX_ONLY, 0o644);
+    b.ok(&["git", "pull", "-q", "--rebase", "origin", "main"]);
+    assert_eq!(
+        b.token_of("status", SHARED).as_deref(),
+        Some("both-changed")
+    );
+    (a, b)
+}
+
+/// `add --for` refuses a plain variant when any source of the key is `{age}`, whichever machine it
+/// is for, so the printed way to keep a plain file to this machine follows the same rule: run as
+/// printed, it succeeds and the plain text reaches no object of the remote.
+#[test]
+fn the_printed_way_to_keep_a_plain_file_with_an_encrypted_variant_here_encrypts_it() {
+    if !age_installed() {
+        return;
+    }
+    for command in [&["sync"][..], &["apply", "--keep-local"]] {
+        let (a, b) = plain_file_with_an_encrypted_variant();
+        let out = b.run(command);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            matches!(out.status.code(), Some(0 | 3)),
+            "{command:?}: {err}"
+        );
+        assert!(!err.contains("`dotman add --for"), "{command:?}: {err}");
+        exits(
+            &common::run_hint(&b, &err, "add --encrypt --for host=box"),
+            0,
+        );
+        exits(&b.run(&["sync"]), 0);
+        exits(&a.run(&["sync"]), 0);
+        assert!(
+            remote_tree(&b).contains(".config/app/app{host=box+age}.conf"),
+            "{command:?}"
+        );
+        assert_eq!(
+            remote_objects_holding(&b, b"box-only"),
+            0,
+            "{command:?}: the remote holds the plain text"
+        );
+        assert_eq!(b.read(SHARED), BOX_ONLY);
+        assert_eq!(a.read(SHARED), b"from a\n");
+    }
+}
+
 /// Typed by hand, a plain `--for` variant of an `{age}` file is refused before anything is
 /// written, and the command the refusal names stores it encrypted.
 #[test]

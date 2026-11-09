@@ -138,7 +138,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             break
         }
         'dotman;apply' {
-            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead')
+            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted')
             [CompletionResult]::new('--take-repo', '--take-repo', [CompletionResultType]::ParameterName, 'Take the repo version of conflicting and existing files, after backing them up')
             [CompletionResult]::new('--forget-deleted', '--forget-deleted', [CompletionResultType]::ParameterName, 'Stop managing files deleted locally; they stay deleted')
             [CompletionResult]::new('--restore-deleted', '--restore-deleted', [CompletionResultType]::ParameterName, 'Write files deleted locally back from the repo')
@@ -184,7 +184,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
         'dotman;sync' {
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'Commit message, replacing the generated `sync(<host>): ...` line')
             [CompletionResult]::new('--message', '--message', [CompletionResultType]::ParameterName, 'Commit message, replacing the generated `sync(<host>): ...` line')
-            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead')
+            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted')
             [CompletionResult]::new('--take-repo', '--take-repo', [CompletionResultType]::ParameterName, 'Take the repo version of conflicting and existing files, after backing them up')
             [CompletionResult]::new('--forget-deleted', '--forget-deleted', [CompletionResultType]::ParameterName, 'Stop managing files deleted locally; they stay deleted')
             [CompletionResult]::new('--restore-deleted', '--restore-deleted', [CompletionResultType]::ParameterName, 'Write files deleted locally back from the repo')
