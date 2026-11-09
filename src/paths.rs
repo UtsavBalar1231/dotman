@@ -384,10 +384,11 @@ pub(crate) fn validate_key(key: &str) -> Result<()> {
             "key `{key}` has an empty, `.` or `..` component"
         );
         // A `.git/config` applied into HOME runs its `core.*` commands the next time git is used
-        // in that directory. Git itself refuses these names on checkout, including `.GIT` and
-        // the NTFS short name.
+        // in that directory. Git itself refuses these names on checkout, including `.GIT`, the
+        // NTFS short name, and the trailing spaces and dots that Windows drops.
+        let bare = component.trim_end_matches([' ', '.']);
         ensure!(
-            !component.eq_ignore_ascii_case(".git") && !component.eq_ignore_ascii_case("git~1"),
+            !bare.eq_ignore_ascii_case(".git") && !bare.eq_ignore_ascii_case("git~1"),
             "key `{key}` has a `.git` component"
         );
     }
@@ -687,10 +688,17 @@ mod tests {
             ".config/x/.git/config",
             "a/.GIT",
             "a/git~1/hooks/pre-commit",
+            ".git ",
+            ".GIT.",
+            "a/.git. ./config",
+            "a/.Git  ",
+            "git~1.",
         ] {
             assert!(validate_key(name).is_err(), "{name}");
         }
         assert!(validate_key(".config/x/.github/ci.yml").is_ok());
+        assert!(validate_key(".config/x/.gitx").is_ok());
+        assert!(validate_key(".config/x/ .git").is_ok());
     }
 
     #[test]
