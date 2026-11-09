@@ -58,6 +58,23 @@ fn a_directory_holds_a_secret_named_file_without_a_remote() {
 }
 
 #[test]
+fn another_host_s_encrypted_variant_does_not_let_a_plain_secret_in() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/app/rc", b"rc\n", 0o644);
+    env.write(".config/app/.env", b"API_KEY=hunter2\n", 0o600);
+    // What `add --encrypt --for host=laptop` leaves: the only source is another host's.
+    env.write_repo(".config/app/.env{host=laptop+age}", b"ciphertext\n");
+
+    let err = exits(&env, 3, &["add", "--dry-run", ".config/app"]);
+    assert!(err.contains("held .config/app/.env"), "{err}");
+    let err = exits(&env, 3, &["add", ".config/app"]);
+    assert!(err.contains("held .config/app/.env"), "{err}");
+    assert!(!env.repo().join(".config/app/.env").exists());
+    assert!(env.repo().join(".config/app/rc").exists());
+}
+
+#[test]
 fn an_explicit_secret_named_file_is_added_with_one_warning() {
     let env = TestEnv::new();
     zsh(&env);
