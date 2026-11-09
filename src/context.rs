@@ -58,7 +58,7 @@ impl fmt::Display for InProgress {
                 let name = operation.name();
                 write!(
                     f,
-                    "a {name} is in progress in {repo}; finish it with `{bin} git {name} --continue` or undo it with `{bin} git {name} --abort`"
+                    "a {name} is in progress in {repo}; finish it with `{bin} git -c core.editor=true {name} --continue` or undo it with `{bin} git {name} --abort`"
                 )?;
             }
             Unfinished::Conflicts(paths) => {

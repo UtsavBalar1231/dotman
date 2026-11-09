@@ -98,7 +98,7 @@ fn every_subcommand_but_log_exits_4_while_a_rebase_is_in_progress() {
         assert_eq!(code, Some(4), "`dot {full:?}`: {err}");
         assert!(err.contains("a rebase is in progress"), "{name}: {err}");
         assert!(
-            err.contains("dotman git rebase --continue"),
+            err.contains("dotman git -c core.editor=true rebase --continue"),
             "{name}: {err}"
         );
         assert!(err.contains("dotman git rebase --abort"), "{name}: {err}");
@@ -118,7 +118,10 @@ fn the_other_markers_are_refused_and_named() {
     let (code, err) = stderr_of(&env, &["status"]);
     assert_eq!(code, Some(4), "{err}");
     assert!(err.contains("a merge is in progress"), "{err}");
-    assert!(err.contains("dotman git merge --continue"), "{err}");
+    assert!(
+        err.contains("dotman git -c core.editor=true merge --continue"),
+        "{err}"
+    );
     assert!(err.contains("dotman git merge --abort"), "{err}");
 }
 
@@ -209,14 +212,14 @@ fn cherry_pick_revert_sequencer_and_bisect_markers_are_refused_with_their_hints(
             "CHERRY_PICK_HEAD",
             false,
             "x",
-            "dotman git cherry-pick --continue",
+            "dotman git -c core.editor=true cherry-pick --continue",
         ),
         ("REVERT_HEAD", false, "x", "dotman git revert --abort"),
         (
             "sequencer",
             true,
             "revert 0000000 x\n",
-            "dotman git revert --continue",
+            "dotman git -c core.editor=true revert --continue",
         ),
         (
             "sequencer",

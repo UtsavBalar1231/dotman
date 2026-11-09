@@ -20,7 +20,7 @@ use crate::output;
 use crate::prompt;
 use crate::remote;
 use crate::secrets::{self, Finding};
-use crate::variant::Sources;
+use crate::variant::{Flag, Sources};
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -191,7 +191,7 @@ fn pull(ctx: &Context, branch: &str) -> Result<Option<bool>> {
     match ctx.git.pull_rebase(REMOTE, branch)? {
         PullOutcome::Ok => Ok(Some(true)),
         PullOutcome::Conflict { paths } => {
-            report_conflict(ctx, &paths);
+            report_conflict(ctx, branch, &paths);
             Ok(None)
         }
         // The worktree may hold conflict markers, which the next pass would write into `$HOME`.
@@ -571,13 +571,17 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
         }
     }
     let bin = name::bin();
-    let repo = ctx.paths.repo.display();
+    let repo = ctx.paths.repo.to_string_lossy();
+    let (here, old) = (
+        shell_words::quote(&repo),
+        shell_words::quote(&format!("{repo}.old")).into_owned(),
+    );
     let url = ctx.git.remote_url(REMOTE)?.map_or_else(
         || "<url>".to_owned(),
         |url| shell_words::quote(&url).into_owned(),
     );
     bail!(
-        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has:\n  mv {repo} {repo}.old\n  {bin} import {url}\n  {bin} import --overlay {repo}.old --include-missing    # --include-missing adds the files only this repo has\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {branch}`, then `{bin} sync`"
+        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has, which --include-missing adds:\n  mv {here} {old}\n  {bin} import {url}\n  {bin} import --overlay {old} --include-missing\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {branch}`, then `{bin} sync`"
     )
 }
 
@@ -602,28 +606,94 @@ fn tail(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-fn report_conflict(ctx: &Context, paths: &[PathBuf]) {
-    let names: Vec<String> = paths
+/// Prints numbered recovery steps. A step's first line is a command or a sentence; its further
+/// lines go below, indented past the number, so that every command stands alone on its line.
+fn print_steps(steps: &[Vec<String>]) {
+    for (n, lines) in (1_u8..).zip(steps) {
+        let mut lines = lines.iter();
+        if let Some(first) = lines.next() {
+            output::warning(&format!("  {n}. {first}"));
+        }
+        for line in lines {
+            output::warning(&format!("     {line}"));
+        }
+    }
+}
+
+/// `paths` quoted for any shell. `shell_words` leaves the braces of a variant name bare, and fish
+/// can read those as a brace expansion.
+fn quoted(paths: &[&PathBuf]) -> String {
+    if paths.is_empty() {
+        return "<paths>".to_owned();
+    }
+    paths
         .iter()
-        .map(|p| shell_words::quote(&p.to_string_lossy()).into_owned())
-        .collect();
-    let add = if names.is_empty() {
-        "<paths>".to_owned()
-    } else {
-        names.join(" ")
-    };
+        .map(|path| {
+            let text = path.to_string_lossy();
+            if text.contains(['{', '}']) {
+                format!("'{}'", text.replace('\'', r"'\''"))
+            } else {
+                shell_words::quote(&text).into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The key that `source` holds encrypted; `None` for a source that is not encrypted.
+fn sealed_key(source: &Path) -> Option<String> {
+    let source = source.to_string_lossy();
+    let sources = Sources::group([source.as_ref()]);
+    let key = sources.keys().next()?;
+    (sources.flag(key, &source) == Flag::Age).then(|| key.to_owned())
+}
+
+/// The steps that redo the pull and resolve it. Ciphertext cannot be merged, so an encrypted file
+/// keeps one side whole; in a rebase `--ours` is the upstream side and `--theirs` the local commit.
+fn report_conflict(ctx: &Context, branch: &str, paths: &[PathBuf]) {
+    let bin = name::bin();
+    let (sealed, plain): (Vec<&PathBuf>, Vec<&PathBuf>) =
+        paths.iter().partition(|path| sealed_key(path).is_some());
     output::warning(
         "the pull conflicts with your changes. It was aborted, and your files and commits are as they were. To resolve it:",
     );
-    let bin = name::bin();
-    output::warning(&format!("  1. {bin} git pull --rebase"));
-    output::warning(&format!(
-        "  2. Edit the conflicting files under {}.",
-        ctx.paths.repo.display()
-    ));
-    output::warning(&format!("  3. {bin} git add {add}"));
-    output::warning(&format!("  4. {bin} git rebase --continue"));
-    output::warning(&format!("  5. {bin} sync"));
+    let mut steps = vec![vec![format!("{bin} git pull --rebase {REMOTE} {branch}")]];
+    if !plain.is_empty() || sealed.is_empty() {
+        steps.push(vec![format!(
+            "Edit the conflicting {}files under {}.",
+            if sealed.is_empty() { "" } else { "plain " },
+            ctx.paths.repo.display()
+        )]);
+    }
+    if !sealed.is_empty() {
+        let files = quoted(&sealed);
+        steps.push(vec![
+            format!(
+                "Encrypted files cannot be merged, so keep one version of each whole. In this rebase, --theirs is this machine's version and --ours is the one from {REMOTE}/{branch}. To keep this machine's:"
+            ),
+            format!("  {bin} git checkout --theirs -- {files}"),
+            format!("or to take the one from {REMOTE}/{branch}:"),
+            format!("  {bin} git checkout --ours -- {files}"),
+        ]);
+    }
+    let all: Vec<&PathBuf> = paths.iter().collect();
+    steps.push(vec![format!("{bin} git add {}", quoted(&all))]);
+    steps.push(vec![format!(
+        "{bin} git -c core.editor=true rebase --continue"
+    )]);
+    steps.push(vec![format!("{bin} sync")]);
+    print_steps(&steps);
+    if !sealed.is_empty() {
+        let homes: Vec<String> = sealed
+            .iter()
+            .filter_map(|path| sealed_key(path))
+            .map(|key| add::pasteable(&ctx.paths.home, &key))
+            .collect();
+        output::warning(&format!(
+            "To merge the two versions by hand afterwards, edit {}, where dotman keeps the decrypted file, and run `{bin} sync`; the version you did not keep stays in the history, where `{bin} restore --from <commit>` reaches it.",
+            homes.join(" and ")
+        ));
+    }
     output::warning("conflicting paths:");
     for path in paths {
         output::warning(&format!("  {}", path.display()));
@@ -637,24 +707,22 @@ fn report_unstashed(ctx: &Context, paths: &[PathBuf]) {
     );
     let mut steps = Vec::new();
     if !paths.is_empty() {
-        let names: Vec<String> = paths
-            .iter()
-            .map(|p| shell_words::quote(&p.to_string_lossy()).into_owned())
-            .collect();
-        steps.push(format!(
-            "{bin} git checkout HEAD -- {}   (puts back the pulled version)",
-            names.join(" ")
-        ));
+        let all: Vec<&PathBuf> = paths.iter().collect();
+        steps.push(vec![
+            format!("{bin} git checkout HEAD -- {}", quoted(&all)),
+            "puts back the pulled version".to_owned(),
+        ]);
     }
-    steps.push(format!(
-        "{bin} git stash show -p   (shows the edits; make the ones you want again under {})",
-        ctx.paths.repo.display()
-    ));
-    steps.push(format!("{bin} git stash drop"));
-    steps.push(format!("{bin} sync"));
-    for (n, text) in (1_u8..).zip(steps) {
-        output::warning(&format!("  {n}. {text}"));
-    }
+    steps.push(vec![
+        format!("{bin} git stash show -p"),
+        format!(
+            "shows the edits; make the ones you want again under {}",
+            ctx.paths.repo.display()
+        ),
+    ]);
+    steps.push(vec![format!("{bin} git stash drop")]);
+    steps.push(vec![format!("{bin} sync")]);
+    print_steps(&steps);
     if !paths.is_empty() {
         output::warning("conflicting paths:");
         for path in paths {

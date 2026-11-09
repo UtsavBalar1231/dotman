@@ -4,7 +4,7 @@ use crate::VERSION;
 use crate::bootstrap::{self, Found};
 use crate::cli::DoctorArgs;
 use crate::context::Context;
-use crate::git::Git;
+use crate::git::{Git, Operation};
 use crate::hooks::{self, Standing};
 use crate::import::count;
 use crate::lock::Lock;
@@ -428,10 +428,15 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
         Some(op) => checks.push(fail(
             "git operation",
             &format!("a {} is in progress", op.name()),
-            &format!(
-                "run {bin} git rebase --continue or {bin} git rebase --abort",
-                bin = name::bin()
-            ),
+            &if op == Operation::Bisect {
+                format!("run {} git bisect reset", name::bin())
+            } else {
+                format!(
+                    "run {bin} git -c core.editor=true {op} --continue or {bin} git {op} --abort",
+                    bin = name::bin(),
+                    op = op.name()
+                )
+            },
         )),
         None => checks.push(pass("no git operation in progress")),
     }

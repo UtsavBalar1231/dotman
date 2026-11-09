@@ -69,6 +69,28 @@ fn a_wide_state_dir_warns() {
     assert!(line(&out, "warn", "state dir").is_some(), "{out}");
 }
 
+/// An unfinished merge is named with the merge's own commands, and the continue step needs no
+/// editor.
+#[test]
+fn an_unfinished_operation_gets_its_own_commands() {
+    let env = healthy();
+    fs::write(env.repo().join(".git/MERGE_HEAD"), "x").expect("mark the merge");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(1), "{out}");
+    let fail = line(&out, "fail", "a merge is in progress").unwrap_or_default();
+    assert!(
+        fail.ends_with(
+            "run dotman git -c core.editor=true merge --continue or dotman git merge --abort"
+        ),
+        "{out}"
+    );
+    fs::remove_file(env.repo().join(".git/MERGE_HEAD")).expect("clear the merge");
+    fs::write(env.repo().join(".git/BISECT_LOG"), "x").expect("mark the bisect");
+    let (_, out) = doctor(&env, &[]);
+    let fail = line(&out, "fail", "a bisect is in progress").unwrap_or_default();
+    assert!(fail.ends_with("run dotman git bisect reset"), "{out}");
+}
+
 #[test]
 fn online_reaches_a_file_remote() {
     let env = healthy();

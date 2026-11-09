@@ -75,8 +75,28 @@ fn backticked(err: &str) -> Vec<String> {
         .collect()
 }
 
+/// The numbered steps of a printed recipe with the number taken off. The lines that stand below a
+/// step are joined to it with newlines, their indentation trimmed.
+fn steps(err: &str) -> Vec<String> {
+    let mut steps: Vec<String> = Vec::new();
+    for line in err.lines() {
+        let numbered = line
+            .strip_prefix("  ")
+            .and_then(|rest| rest.split_once(". "))
+            .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if let Some((_, text)) = numbered {
+            steps.push(text.to_owned());
+        } else if let (Some(more), Some(last)) = (line.strip_prefix("     "), steps.last_mut()) {
+            last.push('\n');
+            last.push_str(more.trim_start());
+        }
+    }
+    steps
+}
+
 /// Runs `line` as it runs pasted into a shell, with this build's `dotman` first on PATH. A trailing
-/// comment or a parenthesised note does not survive a paste into every shell.
+/// comment or a parenthesised note does not survive a paste into every shell, and an editor that
+/// fails stands for one that cannot open here.
 // reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
 #[allow(clippy::expect_used)]
 fn paste(env: &TestEnv, line: &str) -> Output {
@@ -88,6 +108,8 @@ fn paste(env: &TestEnv, line: &str) -> Output {
         .parent()
         .expect("the binary's directory");
     env.process_for(Path::new("sh"))
+        .env("EDITOR", "false")
+        .env("VISUAL", "false")
         .arg("-c")
         .arg(format!(
             "PATH={}:\"$PATH\"; {line}",
@@ -154,23 +176,19 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
     exits(&a, 0, &["sync"]);
     let published = a.remote_refs();
 
+    // A repo whose first sync never pushed has no upstream, and the steps must not need one.
+    b.ok(&["git", "branch", "--unset-upstream"]);
     b.write(".a", b"from b\n", 0o644);
     let err = exits(&b, 4, &["sync"]);
-    for step in [
-        "1. dotman git pull --rebase",
-        "dotman git add .a",
-        "4. dotman git rebase --continue",
-        "5. dotman sync",
-    ] {
-        assert!(err.contains(step), "{step}: {err}");
-    }
-    assert!(
-        err.contains(&format!(
-            "2. Edit the conflicting files under {}",
-            repo_path(&b)
-        )),
-        "{err}"
+    let [pull, edit, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
+    assert_eq!(pull, "dotman git pull --rebase origin main");
+    assert_eq!(
+        edit,
+        format!("Edit the conflicting files under {}.", repo_path(&b))
     );
+    assert_eq!(add, "dotman git add .a");
+    assert_eq!(resume, "dotman git -c core.editor=true rebase --continue");
+    assert_eq!(sync, "dotman sync");
     assert!(err.contains("conflicting paths:\n  .a"), "{err}");
 
     assert!(!b.repo().join(".git/rebase-merge").exists());
@@ -183,30 +201,25 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
     );
     assert_eq!(a.remote_refs(), published);
 
-    let repo = repo_path(&b);
-    let pull = b.git_raw(&["-C", &repo, "pull", "--rebase"]);
-    assert!(
-        !pull.status.success(),
-        "the pull should stop on the conflict"
-    );
+    let out = paste(&b, &pull);
+    assert!(!out.status.success(), "the pull stops on the conflict");
     // git before 2.26 rebases with the apply backend.
     assert!(
-        b.repo().join(".git/rebase-merge").exists() || b.repo().join(".git/rebase-apply").exists()
+        b.repo().join(".git/rebase-merge").exists() || b.repo().join(".git/rebase-apply").exists(),
+        "{}",
+        stderr(&out)
     );
     exits(&b, 4, &["status"]);
     b.write_repo(".a", b"resolved\n");
-    b.git(&["-C", &repo, "add", ".a"]);
-    b.git(&[
-        "-C",
-        &repo,
-        "-c",
-        "core.editor=true",
-        "rebase",
-        "--continue",
-    ]);
+    for step in [&add, &resume] {
+        let out = paste(&b, step);
+        assert!(out.status.success(), "{step}: {}", stderr(&out));
+    }
 
     // S still equals B's edit, so only the always-back-up rule keeps those bytes outside history.
-    let err = exits(&b, 0, &["sync"]);
+    let out = paste(&b, &sync);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
     assert!(err.contains("backed up to"), "{err}");
     assert_eq!(b.read(".a"), b"resolved\n");
     assert_eq!(b.backups(".a"), [(b"from b\n".to_vec(), 0o600)]);
@@ -247,8 +260,92 @@ fn a_rebase_conflict_wins_over_a_skipped_path() {
     fs::remove_file(b.home().join(".d")).expect("delete .d");
     let err = exits(&b, 4, &["sync"]);
     assert!(err.contains("local deletions left undecided (1)"), "{err}");
-    assert!(err.contains("dotman git rebase --continue"), "{err}");
+    assert!(
+        err.contains("dotman git -c core.editor=true rebase --continue"),
+        "{err}"
+    );
     assert!(!b.home().join(".d").exists());
+}
+
+const SEALED: &str = ".config/app/s.conf";
+
+/// Two devices that share a key, with [`SEALED`] synced encrypted.
+fn sealed_pair() -> (TestEnv, TestEnv) {
+    let a = first_device(&[(".plain", b"p\n", 0o644)]);
+    a.ok(&["key", "init"]);
+    a.write(SEALED, b"base\n", 0o600);
+    a.ok(&["add", "--encrypt", SEALED]);
+    exits(&a, 0, &["sync"]);
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url()]);
+    let identity = a.xdg_config().join("dotman/age-identity.txt");
+    b.ok(&["key", "import", &identity.to_string_lossy()]);
+    exits(&b, 0, &["apply"]);
+    assert_eq!(b.read(SEALED), b"base\n");
+    (a, b)
+}
+
+/// Both devices edit an encrypted file. The steps say which side `--ours` and `--theirs` stand for
+/// and keep one version whole; run as printed, either pick reaches both devices, and the plaintext
+/// it replaces is backed up.
+#[test]
+fn an_encrypted_conflict_keeps_the_version_the_printed_step_picks() {
+    if !common::age_installed() {
+        return;
+    }
+    for (side, kept) in [("--ours", "from a\n"), ("--theirs", "from b\n")] {
+        let (a, b) = sealed_pair();
+        a.write(SEALED, b"from a\n", 0o600);
+        exits(&a, 0, &["sync"]);
+        b.write(SEALED, b"from b\n", 0o600);
+        let err = exits(&b, 4, &["sync"]);
+        assert!(!err.contains("Edit the conflicting"), "{err}");
+        let [pull, pick, add, resume, sync]: [String; 5] =
+            steps(&err).try_into().expect("five steps");
+        assert!(
+            pick.starts_with("Encrypted files cannot be merged, so keep one version of each whole. In this rebase, --theirs is this machine's version and --ours is the one from origin/main."),
+            "{pick}"
+        );
+        let file = "'.config/app/s{age}.conf'";
+        assert!(
+            pick.contains(&format!(
+                "To keep this machine's:\ndotman git checkout --theirs -- {file}\nor to take the one from origin/main:\ndotman git checkout --ours -- {file}"
+            )),
+            "{pick}"
+        );
+        assert_eq!(add, format!("dotman git add {file}"));
+        assert!(
+            err.contains(&format!(
+                "To merge the two versions by hand afterwards, edit {}, where dotman keeps the decrypted file",
+                b.home().join(SEALED).display()
+            )),
+            "{err}"
+        );
+
+        assert!(!paste(&b, &pull).status.success(), "the pull stops");
+        let chosen = format!("dotman git checkout {side} -- {file}");
+        assert!(pick.lines().any(|line| line == chosen), "{pick}");
+        for step in [&chosen, &add, &resume, &sync] {
+            let out = paste(&b, step);
+            assert!(out.status.success(), "{side} {step}: {}", stderr(&out));
+        }
+        exits(&a, 0, &["sync"]);
+        assert_eq!(b.read(SEALED), kept.as_bytes(), "{side}");
+        assert_eq!(a.read(SEALED), kept.as_bytes(), "{side}");
+        let (replaced, lost) = if side == "--ours" {
+            (&b, "from b\n")
+        } else {
+            (&a, "from a\n")
+        };
+        assert!(
+            replaced
+                .backups(SEALED)
+                .iter()
+                .any(|(bytes, _)| bytes == lost.as_bytes()),
+            "{side}"
+        );
+        assert_converged(&a, &b);
+    }
 }
 
 #[test]
@@ -1178,21 +1275,15 @@ fn an_edit_that_does_not_go_back_after_the_pull_stops_before_home_is_written() {
     let (a, mut b) = pair(&[(".zshrc", b"line1\nline2\n", 0o644)]);
     a.write(".zshrc", b"line1 from a\nline2\n", 0o644);
     exits(&a, 0, &["sync"]);
-    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|dir| dir.join("git"))
-        .find(|path| path.is_file())
-        .expect("git on PATH");
     // An edit that lands in the repo between sync's commit and its pull, as an editor saving then.
-    let stubs = b.root().join("stubs");
-    fs::create_dir_all(&stubs).expect("stub dir");
-    let wrapper = format!(
-        "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = pull ] && printf 'line1 late edit\\nline2\\n' > '{}'; done\nexec '{}' \"$@\"\n",
+    let armed = b.root().join("late-edit");
+    fs::write(&armed, b"").expect("arm the edit");
+    let edit = format!(
+        "for arg in \"$@\"; do [ \"$arg\" = pull ] && [ -e '{armed}' ] && rm '{armed}' && printf 'line1 late edit\\nline2\\n' > '{}'; done",
         b.repo().join(".zshrc").display(),
-        real.display()
+        armed = armed.display()
     );
-    fs::write(stubs.join("git"), wrapper).expect("write the wrapper");
-    fs::set_permissions(stubs.join("git"), fs::Permissions::from_mode(0o755)).expect("chmod");
-    b.prepend_path(&stubs);
+    wrap_git(&mut b, &edit);
 
     let published = b.remote_refs();
     let err = exits(&b, 4, &["sync"]);
@@ -1200,9 +1291,24 @@ fn an_edit_that_does_not_go_back_after_the_pull_stops_before_home_is_written() {
         err.contains("did not go back on top of it cleanly"),
         "{err}"
     );
-    assert!(err.contains("dotman git checkout HEAD -- .zshrc"), "{err}");
-    assert!(err.contains("dotman git stash show -p"), "{err}");
+    let [put_back, show, drop, sync]: [String; 4] = steps(&err).try_into().expect("four steps");
+    assert_eq!(
+        put_back,
+        "dotman git checkout HEAD -- .zshrc\nputs back the pulled version"
+    );
+    assert!(
+        show.starts_with("dotman git stash show -p\nshows the edits"),
+        "{show}"
+    );
     assert_eq!(b.read(".zshrc"), b"line1\nline2\n", "$HOME untouched");
+    assert_eq!(b.remote_refs(), published);
+
+    for step in [&put_back, &show, &drop, &sync] {
+        let command = step.lines().next().unwrap_or_default();
+        let out = paste(&b, command);
+        assert!(out.status.success(), "{command}: {}", stderr(&out));
+    }
+    assert_eq!(b.read(".zshrc"), b"line1 from a\nline2\n");
     assert_eq!(b.remote_refs(), published);
 }
 
@@ -1347,17 +1453,29 @@ fn the_unrelated_history_recipe_keeps_the_files_only_this_repo_has() {
     b.write(".onlyB", b"only b\n", 0o644);
     b.ok(&["add", ".bashrc", ".onlyB"]);
     let err = b.fails(&["sync"]);
-    let step = err
+    let recipe: Vec<&str> = err
         .lines()
-        .find(|line| line.contains("import --overlay"))
-        .expect("the overlay step");
-    assert!(step.contains("--include-missing"), "{err}");
-
+        .skip_while(|line| !line.starts_with("  mv "))
+        .take_while(|line| line.starts_with("  "))
+        .map(str::trim_start)
+        .collect();
     let repo = repo_path(&b);
-    let old = format!("{repo}.old");
-    fs::rename(&repo, &old).expect("move the repo aside");
-    b.ok(&["import", &b.remote_url()]);
-    let out = b.run(&["import", "--overlay", &old, "--include-missing"]);
+    assert_eq!(
+        recipe,
+        [
+            format!("mv {repo} {repo}.old"),
+            format!("dotman import {}", b.remote_url()),
+            format!("dotman import --overlay {repo}.old --include-missing"),
+        ],
+        "{err}"
+    );
+
+    let [mv, import, overlay]: [&str; 3] = recipe.try_into().expect("three steps");
+    for step in [mv, import] {
+        let out = paste(&b, step);
+        assert!(out.status.success(), "{step}: {}", stderr(&out));
+    }
+    let out = paste(&b, overlay);
     assert!(matches!(out.status.code(), Some(0 | 3)), "{}", stderr(&out));
     assert_eq!(
         fs::read(b.repo().join(".onlyB")).expect("in the repo"),
