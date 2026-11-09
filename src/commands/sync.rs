@@ -643,15 +643,21 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
 }
 
 /// What a subject calls dotman's own repo root files when nothing else changed.
-const OWN: [(&str, &str); 2] = [
+const OWN: [(&str, &str); 3] = [
     (".dotman.toml", "settings"),
     ("install.sh", "bootstrap script"),
+    (".dotman/age-recipients", "encryption recipients"),
 ];
 
+/// Under `.dotman/`, only the system files are the user's.
 fn own(path: &str) -> Option<&'static str> {
     OWN.iter()
         .find(|(name, _)| *name == path)
         .map(|(_, what)| *what)
+        .or_else(|| {
+            (is_under(path, ".dotman") && !is_under(path, crate::system::DIR))
+                .then_some("dotman data")
+        })
 }
 
 /// `sync(<host>): a/b, c/d, e/f (+N more)`, naming the first three paths in sorted order. dotman's
@@ -862,5 +868,9 @@ mod tests {
             default_message("box", &set(&["sub/install.sh"])),
             "sync(box): sub/install.sh"
         );
+        let recipients = set(&[".dotman/age-recipients", "x/a"]);
+        assert_eq!(default_message("box", &recipients), "sync(box): x/a");
+        let system = set(&[".dotman/age-recipients", ".dotman/system/etc/hosts"]);
+        assert_eq!(default_message("box", &system), "sync(box): etc/hosts");
     }
 }

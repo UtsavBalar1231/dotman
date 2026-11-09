@@ -561,6 +561,13 @@ fn dotmans_own_files_are_listed_and_named_in_words_when_alone() {
         err.contains("committed: sync(testbox): settings, bootstrap script\n"),
         "{err}"
     );
+
+    env.write_repo(".dotman/age-recipients", b"age1recipient\n");
+    env.write(".a", b"a2\n", 0o644);
+    let err = exits_with(&env, &HOST, 0, &["sync"]);
+    let line = "commit .dotman/age-recipients (encryption recipients)";
+    assert!(has(&err, line.to_owned()), "{err}");
+    assert!(err.contains("committed: sync(testbox): .a\n"), "{err}");
 }
 
 /// Without a git identity, init, sync and doctor give the same steps. Sync commits nothing, and
