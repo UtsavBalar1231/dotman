@@ -4,6 +4,7 @@
 mod common;
 
 use common::TestEnv;
+use dotman::state::State;
 use std::fs;
 use std::path::PathBuf;
 
@@ -352,4 +353,177 @@ fn a_blocked_target_keeps_exit_3_and_the_hook_still_runs_for_the_written_path() 
     fs::write(env.home().join(B).join("x"), "x").expect("file in it");
     exits(&env, 3, &["apply", "--approve-hooks"]);
     assert_eq!(runs(&env), 1);
+}
+
+fn approved_line(env: &TestEnv) -> Option<String> {
+    fs::read_to_string(env.state_dir().join("state.toml"))
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with("approved"))
+        .map(str::to_owned)
+}
+
+#[test]
+fn a_nul_in_a_command_is_refused_and_nothing_is_approved() {
+    let env = hooked();
+    let mark = marker(&env).display().to_string();
+    env.write_repo(
+        ".dotman.toml",
+        format!("[hooks]\n\".config/app/**\" = \"true\\u0000z*\\u0000echo ran >> '{mark}'\"\n")
+            .as_bytes(),
+    );
+    let err = exits(&env, 1, &["apply", "--approve-hooks"]);
+    assert!(err.contains("control character"), "{err}");
+    assert!(
+        err.contains("`.config/app/**` = `true\\0z*\\0echo ran"),
+        "{err}"
+    );
+    assert!(!marker(&env).exists());
+    assert_eq!(approved_line(&env), None, "{err}");
+}
+
+#[test]
+fn a_table_swapped_after_approval_never_runs_unattended() {
+    let env = hooked();
+    let run = append(&env);
+    // One entry whose command embeds NULs: joined with NULs, it is the two entries below.
+    let one = format!("[hooks]\n\".config/app/**\" = \"true\\u0000z*\\u0000{run}\"\n");
+    env.write_repo(".dotman.toml", one.as_bytes());
+    exits(&env, 1, &["apply", "--approve-hooks"]);
+    assert_eq!(approved_line(&env), None);
+
+    // What approving the first table recorded before: the xxh3 of the NUL-joined entries.
+    let file = env.state_dir().join("state.toml");
+    let mut state = State::read(&file).expect("state").expect("a state");
+    state.hooks.approved = Some(common::xxh3(
+        format!(".config/app/**\0true\0z*\0{run}\0").as_bytes(),
+    ));
+    state.save(&file, false).expect("save state");
+
+    let two = format!("[hooks]\n\".config/app/**\" = \"true\"\n\"z*\" = \"{run}\"\n");
+    env.write_repo(".dotman.toml", two.as_bytes());
+    env.write_repo(A, b"a2\n");
+    env.write_repo("zfile", b"z\n");
+    let err = exits(&env, 0, &["apply"]);
+    assert!(err.contains("not approved"), "{err}");
+    assert!(!marker(&env).exists(), "{err}");
+    exits(&env, 0, &["apply", "--approve-hooks"]);
+    assert!(!marker(&env).exists(), "nothing changed, so nothing is due");
+}
+
+#[test]
+fn an_escape_sequence_in_a_hook_is_shown_escaped_even_with_quiet() {
+    let env = hooked();
+    let mark = marker(&env).display().to_string();
+    env.write_repo(
+        ".dotman.toml",
+        format!(
+            "[hooks]\n\"\\u001b]0;t\\u0007\" = \"echo ran >> '{mark}' #\\r\\u001b[2K  .config/app/** -> echo reloaded\"\n"
+        )
+        .as_bytes(),
+    );
+    for args in [
+        &["apply", "--approve-hooks"][..],
+        &["-q", "apply", "--approve-hooks"],
+    ] {
+        let out = env.run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(
+            !out.stderr.contains(&0x1b) && !out.stderr.contains(&b'\r'),
+            "{args:?}"
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("`\\u{1b}]0;t\\u{7}` = `echo ran"),
+            "{args:?}: {err}"
+        );
+        assert!(
+            err.contains("#\\r\\u{1b}[2K  .config/app/**"),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(!marker(&env).exists());
+}
+
+#[test]
+fn saving_an_approval_prints_the_table_even_with_quiet() {
+    let env = hooked();
+    set_hooks(&env, &append(&env));
+    let err = exits(&env, 0, &["-q", "apply", "--approve-hooks"]);
+    assert!(err.contains("approved this [hooks] table"), "{err}");
+    assert!(
+        err.contains(&format!(".config/app/** -> {}", append(&env))),
+        "{err}"
+    );
+    env.write_repo(A, b"a2\n");
+    let err = exits(&env, 0, &["-q", "apply"]);
+    assert!(
+        !err.contains("approved this"),
+        "an approval already saved is not shown: {err}"
+    );
+    assert_eq!(runs(&env), 2);
+}
+
+/// Runs the binary with `args` under `script`, so stdin is a terminal, feeding it `input`, with
+/// colour off so that any escape byte in the output came from the repo. `None` without `script`.
+#[cfg(target_os = "linux")]
+fn in_a_terminal(env: &TestEnv, args: &[&str], input: &[u8]) -> Option<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let script = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("script"))
+        .find(|path| path.is_file())?;
+    let dot = env.dot_process();
+    let mut line = shell_words::quote(&dot.get_program().to_string_lossy()).into_owned();
+    for arg in args {
+        line.push(' ');
+        line.push_str(&shell_words::quote(arg));
+    }
+    let mut cmd = Command::new(script);
+    cmd.env_clear();
+    for (name, value) in dot.get_envs() {
+        if let Some(value) = value {
+            cmd.env(name, value);
+        }
+    }
+    let mut child = cmd
+        .env("DOTMAN_NON_INTERACTIVE", "")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .current_dir(env.home())
+        .args(["-qec", &line, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(input).ok()?;
+    let out = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_approval_prompt_shows_the_table_even_with_quiet() {
+    for quiet in [false, true] {
+        let env = hooked();
+        set_hooks(&env, &append(&env));
+        let args: &[&str] = if quiet { &["-q", "apply"] } else { &["apply"] };
+        let Some(seen) = in_a_terminal(&env, args, b"y\n") else {
+            eprintln!("skipped: no script(1) to give dotman a terminal");
+            return;
+        };
+        assert!(seen.contains("1 hook in .dotman.toml:"), "{seen}");
+        assert!(
+            seen.contains(&format!(".config/app/** -> {}", append(&env))),
+            "{seen}"
+        );
+        assert!(
+            seen.contains("Approval covers these command lines"),
+            "{seen}"
+        );
+        assert!(!seen.contains('\u{1b}'), "{seen:?}");
+        assert_eq!(runs(&env), 1, "{seen}");
+        assert!(approved_line(&env).is_some(), "{seen}");
+    }
 }

@@ -3,12 +3,12 @@
 
 use crate::commands::add::MATCH;
 use crate::context::Context;
-use crate::engine::hash_hex;
 use crate::output;
 use crate::proc;
 use crate::prompt;
 use anyhow::{Context as _, Result, bail};
 use glob::Pattern;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::process::{ExitStatus, Stdio};
@@ -36,8 +36,9 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     if table.is_empty() {
         return Ok(());
     }
+    validate(&table)?;
     let due = due(&table, changed)?;
-    let hash = table_hash(&table);
+    let hash = table_hash(&table)?;
     let mut state = ctx.state(&ctx.repo_id()?)?;
     let recorded = state.hooks.approved.as_deref() == Some(hash.as_str());
     let mut approved = policy.approve || recorded;
@@ -55,12 +56,18 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         return Ok(());
     }
 
-    if !approved && !due.is_empty() && !policy.never_ask && prompt::interactive() {
+    let asked = !approved && !due.is_empty() && !policy.never_ask && prompt::interactive();
+    if asked {
         approved = ask(&table)?;
     }
     if approved && !recorded {
         state.hooks.approved = Some(hash);
         state.save(&ctx.paths.state_file(), false)?;
+        if asked {
+            output::context("approved the [hooks] table above on this machine");
+        } else {
+            show_table("approved this [hooks] table on this machine:", &table);
+        }
     }
     if due.is_empty() {
         return Ok(());
@@ -119,24 +126,41 @@ fn due<'a>(
     Ok(commands)
 }
 
-/// Hashes the parsed table, so TOML spacing and entry order do not change it.
-fn table_hash(table: &BTreeMap<String, String>) -> String {
-    let mut bytes = Vec::new();
-    for (glob, command) in table {
-        bytes.extend_from_slice(glob.as_bytes());
-        bytes.push(0);
-        bytes.extend_from_slice(command.as_bytes());
-        bytes.push(0);
+/// Fails, naming the entry, when a glob or command holds a control character other than tab. A
+/// carriage return or an escape sequence could make the table read as other commands than the
+/// ones that run.
+pub fn validate(table: &BTreeMap<String, String>) -> Result<()> {
+    let control = |text: &str| text.chars().any(|c| c.is_control() && c != '\t');
+    if let Some((glob, command)) = table
+        .iter()
+        .find(|(glob, command)| control(glob) || control(command))
+    {
+        bail!(
+            "the [hooks] entry `{}` = `{}` in .dotman.toml holds a control character, so no hook runs and none is approved; write the command on one line, or move it into a script",
+            output::escape(glob),
+            output::escape(command)
+        );
     }
-    hash_hex(&bytes)
+    Ok(())
+}
+
+/// SHA-256 of the table as JSON. The parsed map is hashed, so TOML spacing and entry order do not
+/// change it; JSON quotes every glob and command, so no two tables share their bytes.
+fn table_hash(table: &BTreeMap<String, String>) -> Result<String> {
+    let bytes = serde_json::to_vec(table).context("cannot encode the [hooks] table")?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+fn show_table(header: &str, table: &BTreeMap<String, String>) {
+    output::context(header);
+    for (glob, command) in table {
+        output::context(&format!("  {glob} -> {command}"));
+    }
 }
 
 fn ask(table: &BTreeMap<String, String>) -> Result<bool> {
-    output::info(&format!("{} in .dotman.toml:", count(table.len())));
-    for (glob, command) in table {
-        output::info(&format!("  {glob} -> {command}"));
-    }
-    output::info(RISK);
+    show_table(&format!("{} in .dotman.toml:", count(table.len())), table);
+    output::context(RISK);
     prompt::confirm("run the matching hooks and approve this table on this machine? [y/N]")
 }
 
@@ -191,14 +215,49 @@ mod tests {
         assert!(err.contains("`a[`"), "{err}");
     }
 
+    fn hash(entries: &[(&str, &str)]) -> String {
+        table_hash(&table(entries)).unwrap_or_default()
+    }
+
     #[test]
     fn the_hash_follows_the_entries_and_nothing_else() {
-        let one = table_hash(&table(&[("a", "x"), ("b", "y")]));
-        assert_eq!(one, table_hash(&table(&[("b", "y"), ("a", "x")])));
-        assert_ne!(one, table_hash(&table(&[("a", "x"), ("b", "z")])));
-        assert_ne!(
-            table_hash(&table(&[("a", "xb\0y")])),
-            table_hash(&table(&[("a", "x"), ("b", "y")]))
-        );
+        let one = hash(&[("a", "x"), ("b", "y")]);
+        assert_eq!(one.len(), 64, "{one}");
+        assert_eq!(one, hash(&[("b", "y"), ("a", "x")]));
+        assert_ne!(one, hash(&[("a", "x"), ("b", "z")]));
+    }
+
+    #[test]
+    fn tables_that_shared_the_old_nul_joined_bytes_hash_apart() {
+        let one = [(".config/app/**", "true\0z*\0touch /tmp/PWNED")];
+        let two = [(".config/app/**", "true"), ("z*", "touch /tmp/PWNED")];
+        let joined = |entries: &[(&str, &str)]| {
+            entries
+                .iter()
+                .flat_map(|(glob, command)| [*glob, *command])
+                .fold(String::new(), |all, part| all + part + "\0")
+        };
+        assert_eq!(joined(&one), joined(&two), "the pair the old hash confused");
+        assert_ne!(hash(&one), hash(&two));
+    }
+
+    #[test]
+    fn control_characters_are_refused_and_tabs_are_not() {
+        assert!(validate(&table(&[("a/*", "make\t-C x")])).is_ok());
+        for (glob, command) in [
+            ("a", "true\0touch x"),
+            ("a", "touch x #\r\u{1b}[2K  a -> echo ok"),
+            ("a", "one\ntwo"),
+            ("a\u{1b}]0;t\u{7}", "true"),
+            ("a", "x\u{9b}2K"),
+        ] {
+            let err = validate(&table(&[("b", "true"), (glob, command)]))
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default();
+            assert!(err.contains("control character"), "{glob:?}: {err}");
+            let named = format!("`{}` = `{}`", output::escape(glob), output::escape(command));
+            assert!(err.contains(&named), "the entry is named: {err}");
+        }
     }
 }
