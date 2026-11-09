@@ -146,8 +146,48 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         for note in &scan.notes {
             output::warning(note);
         }
-        summarize(&rows, unrecorded, in_repo.len());
+        summarize(&rows, unrecorded, [new.len(), held.len(), in_repo.len()]);
+        report_remote(&ctx)?;
     }
+    Ok(())
+}
+
+/// How HEAD stands against `origin/<branch>` as it was last fetched; nothing is fetched.
+fn report_remote(ctx: &Context) -> Result<()> {
+    let git = &ctx.git;
+    if git.remote_url("origin")?.is_none() || git.head()?.is_none() {
+        return Ok(());
+    }
+    let Some(branch) = git.branch()? else {
+        return Ok(());
+    };
+    let upstream = format!("refs/remotes/origin/{branch}");
+    if git.resolve_commit(&upstream)?.is_none() {
+        return Ok(());
+    }
+    let out = git
+        .command()
+        .args(["rev-list", "--left-right", "--count"])
+        .arg(format!("HEAD...{upstream}"))
+        .arg("--")
+        .output()
+        .context("failed to run git")?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let counts: Vec<usize> = text
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let (&[ahead, behind], true) = (counts.as_slice(), out.status.success()) else {
+        return Ok(());
+    };
+    let commits = |n: usize| if n == 1 { "commit" } else { "commits" };
+    let position = match (ahead, behind) {
+        (0, 0) => return Ok(()),
+        (ahead, 0) => format!("{ahead} {} to push", commits(ahead)),
+        (0, behind) => format!("{behind} {} to pull", commits(behind)),
+        (ahead, behind) => format!("{ahead} {} to push, {behind} to pull", commits(ahead)),
+    };
+    output::info(&format!("{position}: run `{} sync`", name::bin()));
     Ok(())
 }
 
@@ -187,17 +227,23 @@ fn home_label(
     })
 }
 
-fn summarize(rows: &[(&str, String)], unrecorded: usize, held_in_repo: usize) {
-    let dirty = rows.iter().filter(|(label, _)| *label != "clean").count();
-    let held = if held_in_repo > 0 {
+/// New and held files are under `[dirs]`, so they count as managed and as to look at.
+fn summarize(rows: &[(&str, String)], unrecorded: usize, [new, held, held_in_repo]: [usize; 3]) {
+    let clean = rows.iter().filter(|(label, _)| *label == "clean").count();
+    let managed = rows.len().saturating_add(new).saturating_add(held);
+    let breakdown = if new > 0 || held > 0 {
+        format!(" ({new} new, {held} held back)")
+    } else {
+        String::new()
+    };
+    let in_repo = if held_in_repo > 0 {
         format!(", {held_in_repo} held in the repo")
     } else {
         String::new()
     };
     output::info(&format!(
-        "{} managed, {} clean, {dirty} to look at{held}",
-        rows.len(),
-        rows.len().saturating_sub(dirty)
+        "{managed} managed, {clean} clean, {} to look at{breakdown}{in_repo}",
+        managed.saturating_sub(clean)
     ));
     if unrecorded > 0 {
         output::info(&format!(

@@ -348,6 +348,29 @@ fn commands_need_an_initialised_repo() {
 }
 
 #[test]
+fn the_status_summary_counts_new_and_held_files_and_adds_up() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.write(".bashrc", b"b\n", 0o644);
+    env.ok(&["add", ".config/app", ".bashrc"]);
+    env.write(".bashrc", b"changed\n", 0o644);
+    env.write(".config/app/new.conf", b"n\n", 0o644);
+    env.write(".config/app/.env", b"X=1\n", 0o600);
+    let err = env.ok(&["status"]);
+    assert!(
+        err.contains("4 managed, 1 clean, 3 to look at (1 new, 1 held back)"),
+        "{err}"
+    );
+    env.write(".bashrc", b"b\n", 0o644);
+    std::fs::remove_file(env.home().join(".config/app/new.conf")).unwrap();
+    std::fs::remove_file(env.home().join(".config/app/.env")).unwrap();
+    let err = env.ok(&["status"]);
+    assert!(err.contains("2 managed, 2 clean, 0 to look at"), "{err}");
+    assert!(!err.contains("held back"), "{err}");
+}
+
+#[test]
 fn an_interrupted_init_is_named_and_a_repo_without_its_id_can_be_adopted() {
     let env = TestEnv::new();
     let git_dir = env.repo().join(".git");

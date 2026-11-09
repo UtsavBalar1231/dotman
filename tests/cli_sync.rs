@@ -702,6 +702,42 @@ fn a_skipped_path_exits_3_and_everything_else_is_still_pushed() {
 }
 
 #[test]
+fn status_counts_the_commits_to_push_and_pull_and_the_printed_sync_settles_them() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    let position = |env: &TestEnv| {
+        exits(env, 0, &["status"])
+            .lines()
+            .filter(|line| line.contains("to push") || line.contains("to pull"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(position(&b), Vec::<String>::new());
+    a.write(".a", b"a2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    assert_eq!(position(&b), Vec::<String>::new(), "status never fetches");
+
+    exits(&b, 0, &["git", "fetch", "-q", "origin"]);
+    assert_eq!(position(&b), ["1 commit to pull: run `dotman sync`"]);
+    for key in [".b", ".c"] {
+        b.write_repo(key, b"local\n");
+        exits(&b, 0, &["git", "add", key]);
+        exits(&b, 0, &["git", "commit", "-q", "-m", key]);
+    }
+    let err = exits(&b, 0, &["status"]);
+    assert_eq!(
+        position(&b),
+        ["2 commits to push, 1 to pull: run `dotman sync`"]
+    );
+
+    let out = common::run_hint(&b, &err, "sync");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(position(&b), Vec::<String>::new());
+    assert_eq!(b.read(".a"), b"a2\n");
+    exits(&a, 0, &["git", "fetch", "-q", "origin"]);
+    assert_eq!(position(&a), ["2 commits to pull: run `dotman sync`"]);
+}
+
+#[test]
 fn the_printed_answer_to_a_conflict_in_sync_does_what_it_says() {
     for (answer, home) in [
         ("sync --keep-local", "mine\n"),
