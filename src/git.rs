@@ -76,6 +76,12 @@ pub enum PullOutcome {
         /// Repo-relative, as git reports them.
         paths: Vec<PathBuf>,
     },
+    /// The pull finished, but the uncommitted edits it set aside did not go back cleanly: they
+    /// are kept in the stash, and the worktree may hold conflict markers.
+    Unstashed {
+        /// Unmerged paths in the index, repo-relative; empty when the stash was kept without them.
+        paths: Vec<PathBuf>,
+    },
 }
 
 /// An unfinished git operation that blocks dotman commands.
@@ -588,9 +594,16 @@ impl Git {
 
     /// `git pull --rebase --autostash`. On conflict the rebase is aborted and the paths returned.
     pub fn pull_rebase(&self, remote: &str, branch: &str) -> Result<PullOutcome> {
+        let stash = ["rev-parse", "-q", "--verify", "refs/stash"];
+        let stashed_before = self.optional(&stash)?;
         let args = ["pull", "--rebase", "--autostash", remote, branch];
         let out = self.probe(&args)?;
         if out.status.success() {
+            // git exits 0 when putting the autostash back conflicts, and keeps it in the stash.
+            let paths = self.unmerged_paths()?;
+            if !paths.is_empty() || self.optional(&stash)? != stashed_before {
+                return Ok(PullOutcome::Unstashed { paths });
+            }
             return Ok(PullOutcome::Ok);
         }
         if !self.operation_in_progress() {
@@ -1536,6 +1549,33 @@ mod tests {
             fs::read(b.repo().join("shared.txt")).expect("read"),
             b"from b\n"
         );
+    }
+
+    #[test]
+    fn pull_rebase_reports_an_uncommitted_edit_that_did_not_go_back() {
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        commit_file(&a, "shared.txt", b"l1\nl2\n", "base");
+        a.set_remote_url("origin", utf8(&remote)).expect("remote");
+        a.push("origin", "main").expect("push");
+        let b = sb.git("b");
+        b.clone_from(utf8(a.repo())).expect("clone");
+        b.set_remote_url("origin", utf8(&remote)).expect("remote");
+
+        commit_file(&a, "shared.txt", b"l1 from a\nl2\n", "a edits");
+        a.push("origin", "main").expect("push");
+        write(&b, "shared.txt", b"l1 uncommitted\nl2\n");
+        let outcome = b.pull_rebase("origin", "main").expect("pull");
+        assert_eq!(
+            outcome,
+            PullOutcome::Unstashed {
+                paths: vec![PathBuf::from("shared.txt")]
+            }
+        );
+        let stash = b.optional(&["rev-parse", "-q", "--verify", "refs/stash"]);
+        assert!(stash.expect("stash").is_some(), "the edit stays stashed");
     }
 
     #[test]

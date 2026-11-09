@@ -541,9 +541,15 @@ fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
     assert_eq!(env.read(".config/app/f00.conf"), b"x\n");
 }
 
+/// Without a remote there is no pull to stop, so the held file is only left out of the commit.
 #[test]
 fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
-    let (a, _b) = pair(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    let a = TestEnv::new();
+    a.ok(&["init"]);
+    a.write(".a", b"a\n", 0o644);
+    a.write(".b", b"b\n", 0o644);
+    a.ok(&["add", ".a", ".b"]);
+    a.ok(&["sync"]);
     let key = "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
     let editor = a.write_script("ed.sh", &format!("#!/bin/sh\necho '{key}' >> \"$1\"\n"));
     let editor = editor.to_string_lossy().into_owned();
@@ -559,17 +565,15 @@ fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
         err.contains("): .b\n"),
         "the message names only what was committed: {err}"
     );
-    assert_eq!(remote_file(&a, ".b"), "harmless\n");
-    assert_eq!(remote_file(&a, ".a"), "a\n");
-    let remote = a.remote_path().to_string_lossy().into_owned();
-    let history = a.git(&["--git-dir", &remote, "log", "--all", "-p", "--format="]);
-    assert!(!history.contains("AGE-SECRET-KEY-"), "{history}");
+    let show = |key: &str| a.git(&["-C", &repo_path(&a), "show", &format!("HEAD:{key}")]);
+    assert_eq!(show(".b"), "harmless\n");
+    assert_eq!(show(".a"), "a\n");
     let local = a.git(&["-C", &repo_path(&a), "log", "--all", "-p", "--format="]);
     assert!(!local.contains("AGE-SECRET-KEY-"), "{local}");
 
     a.write_repo(".a", b"a, key removed\n");
     exits(&a, 0, &["sync"]);
-    assert_eq!(remote_file(&a, ".a"), "a, key removed\n");
+    assert_eq!(show(".a"), "a, key removed\n");
 }
 
 #[test]
@@ -664,4 +668,92 @@ fn a_mode_loosened_on_another_machine_is_applied_and_not_kept_private() {
     exits(&a, 0, &["sync"]);
     exits(&b, 0, &["sync"]);
     assert_eq!(mode_of(&b.home().join(".zshrc")), 0o644);
+}
+
+/// The full shape: `AGE-SECRET-KEY-1` and 58 bech32 characters.
+const AGE_KEY: &str = "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+
+/// B holds `.zshrc` back for an age key, put in by `dotman edit` or by hand in the repo, while A
+/// changed the same line upstream.
+fn held_against_upstream(by_edit: bool) -> (TestEnv, TestEnv) {
+    let (a, b) = pair(&[(".zshrc", b"line1\nline2\n", 0o644)]);
+    a.write(".zshrc", b"line1 from a\nline2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    if by_edit {
+        let editor = b.write_script(
+            "ed.sh",
+            &format!("#!/bin/sh\nprintf 'export K={AGE_KEY}\\nline2\\n' > \"$1\"\n"),
+        );
+        let editor = editor.to_string_lossy().into_owned();
+        b.ok_with(&[("EDITOR", &editor), ("VISUAL", "")], &["edit", ".zshrc"]);
+    } else {
+        b.write_repo(".zshrc", format!("{AGE_KEY}\nline2\n").as_bytes());
+    }
+    (a, b)
+}
+
+#[test]
+fn a_held_edit_stops_sync_before_the_pull_by_either_route() {
+    for by_edit in [false, true] {
+        let (a, b) = held_against_upstream(by_edit);
+        let home_before = b.read(".zshrc");
+        let head = b.git(&["-C", &repo_path(&b), "rev-parse", "HEAD"]);
+        let published = b.remote_refs();
+        for args in [&["sync", "--dry-run"][..], &["sync"]] {
+            let err = exits(&b, 3, args);
+            assert!(err.contains("stopped before the pull"), "{err}");
+            assert!(err.contains("\n  .zshrc\n"), "{err}");
+            for remedy in [
+                "dotman add --encrypt",
+                "remove the key",
+                "dotman git checkout -- <file>",
+            ] {
+                assert!(err.contains(remedy), "{remedy}: {err}");
+            }
+        }
+        assert_eq!(b.read(".zshrc"), home_before, "nothing written to $HOME");
+        assert!(!String::from_utf8_lossy(&b.read(".zshrc")).contains("<<<<<<<"));
+        assert_eq!(b.git(&["-C", &repo_path(&b), "rev-parse", "HEAD"]), head);
+        assert_eq!(b.remote_refs(), published);
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let history = a.git(&["--git-dir", &remote, "log", "--all", "-p"]);
+        assert!(!history.contains("AGE-SECRET-KEY-"), "{history}");
+
+        b.ok(&["git", "checkout", "--", ".zshrc"]);
+        exits(&b, 0, &["sync", "--take-repo"]);
+        assert_eq!(b.read(".zshrc"), b"line1 from a\nline2\n");
+    }
+}
+
+#[test]
+fn an_edit_that_does_not_go_back_after_the_pull_stops_before_home_is_written() {
+    let (a, mut b) = pair(&[(".zshrc", b"line1\nline2\n", 0o644)]);
+    a.write(".zshrc", b"line1 from a\nline2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git on PATH");
+    // An edit that lands in the repo between sync's commit and its pull, as an editor saving then.
+    let stubs = b.root().join("stubs");
+    fs::create_dir_all(&stubs).expect("stub dir");
+    let wrapper = format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = pull ] && printf 'line1 late edit\\nline2\\n' > '{}'; done\nexec '{}' \"$@\"\n",
+        b.repo().join(".zshrc").display(),
+        real.display()
+    );
+    fs::write(stubs.join("git"), wrapper).expect("write the wrapper");
+    fs::set_permissions(stubs.join("git"), fs::Permissions::from_mode(0o755)).expect("chmod");
+    b.prepend_path(&stubs);
+
+    let published = b.remote_refs();
+    let err = exits(&b, 4, &["sync"]);
+    assert!(
+        err.contains("did not go back on top of it cleanly"),
+        "{err}"
+    );
+    assert!(err.contains("dotman git checkout HEAD -- .zshrc"), "{err}");
+    assert!(err.contains("dotman git stash show -p"), "{err}");
+    assert_eq!(b.read(".zshrc"), b"line1\nline2\n", "$HOME untouched");
+    assert_eq!(b.remote_refs(), published);
 }

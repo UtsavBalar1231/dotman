@@ -64,6 +64,9 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     if !dry_run {
         ctx.sweep_temp_files()?;
     }
+    if holds_back_the_pull(&ctx)? {
+        return Ok(Outcome::Attention);
+    }
 
     let first = apply::apply(
         &ctx,
@@ -122,13 +125,9 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     }
 
     // A remote without the branch is a first push: there is nothing to pull.
-    if ctx.git.remote_has_branch(REMOTE, &branch)? {
-        refuse_unrelated(&ctx, &branch)?;
-        if let PullOutcome::Conflict { paths } = ctx.git.pull_rebase(REMOTE, &branch)? {
-            report_conflict(&ctx, &paths);
-            apply::check_failed(first_failed, uncaptured)?;
-            return Ok(Outcome::Conflict);
-        }
+    if ctx.git.remote_has_branch(REMOTE, &branch)? && !pull(&ctx, &branch)? {
+        apply::check_failed(first_failed, uncaptured)?;
+        return Ok(Outcome::Conflict);
     }
     // The pull can bring a pair that only a case-sensitive filesystem holds; the pulled commits
     // stay, and nothing is written for any key.
@@ -158,6 +157,24 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     }
     failed.and(reencrypted).and(hooked)?;
     Ok(finish(attention))
+}
+
+/// Pulls `branch`; false when the pull stopped, with the recovery steps printed, before anything
+/// reached `$HOME`.
+fn pull(ctx: &Context, branch: &str) -> Result<bool> {
+    refuse_unrelated(ctx, branch)?;
+    match ctx.git.pull_rebase(REMOTE, branch)? {
+        PullOutcome::Ok => Ok(true),
+        PullOutcome::Conflict { paths } => {
+            report_conflict(ctx, &paths);
+            Ok(false)
+        }
+        // The worktree may hold conflict markers, which the next pass would write into `$HOME`.
+        PullOutcome::Unstashed { paths } => {
+            report_unstashed(ctx, &paths);
+            Ok(false)
+        }
+    }
 }
 
 fn without_remote(
@@ -225,14 +242,7 @@ fn commit(
     if !allow_mass_delete {
         refuse_mass_delete(ctx, &before, dry_run)?;
     }
-    // `dotman edit` and hand edits in the repo reach no capture, so this is their only check. A
-    // config that cannot be read allows nothing.
-    let allow = ctx.repo_config().map(|c| c.guard.allow).unwrap_or_default();
-    let held: Vec<(&StatusEntry, Finding)> = before
-        .iter()
-        .filter(|entry| entry.kind != StatusKind::Unmerged)
-        .filter_map(|entry| Some((entry, holds_secret_key(ctx, &entry.path, &allow)?)))
-        .collect();
+    let held = held_entries(ctx, &before);
     let held_paths: Vec<PathBuf> = held.iter().map(|(entry, _)| entry.path.clone()).collect();
     let mut changed = BTreeSet::new();
     if dry_run {
@@ -276,6 +286,51 @@ fn commit(
         output::success(&format!("committed: {message}"));
     }
     Ok(held)
+}
+
+/// The changed worktree files the content guard holds, minus what `[guard] allow` covers.
+/// `dotman edit` and hand edits in the repo reach no capture, so this is their only check. A
+/// config that cannot be read allows nothing.
+fn held_entries<'a>(ctx: &Context, status: &'a [StatusEntry]) -> Vec<(&'a StatusEntry, Finding)> {
+    let allow = ctx.repo_config().map(|c| c.guard.allow).unwrap_or_default();
+    status
+        .iter()
+        .filter(|entry| entry.kind != StatusKind::Unmerged)
+        .filter_map(|entry| Some((entry, holds_secret_key(ctx, &entry.path, &allow)?)))
+        .collect()
+}
+
+/// A held edit stays uncommitted in the worktree, so a pull would stash it and put it back over
+/// what arrives, conflict markers and all. Reports the held files and returns true when there are
+/// any and a remote is set.
+fn holds_back_the_pull(ctx: &Context) -> Result<bool> {
+    if ctx.git.remote_url(REMOTE)?.is_none() {
+        return Ok(false);
+    }
+    let status = ctx.git.status()?;
+    let held = held_entries(ctx, &status);
+    if held.is_empty() {
+        return Ok(false);
+    }
+    let one = held.len() == 1;
+    let (it, bin) = (if one { "it" } else { "them" }, name::bin());
+    output::warning(&format!(
+        "{} {} in the repo {} an age secret key or a credential and {} not committed, so sync stopped before the pull, which would set {it} aside and put {it} back over what arrives. Nothing was written. Keep such a file encrypted with `{bin} add --encrypt <file>`, remove the secret from {it}, or drop the edit with `{bin} git checkout -- <file>`:",
+        held.len(),
+        if one { "file" } else { "files" },
+        if one { "holds" } else { "hold" },
+        if one { "is" } else { "are" },
+    ));
+    for (entry, found) in held {
+        let path = entry.path.to_string_lossy();
+        let note = if entry.kind == StatusKind::Untracked {
+            " (not tracked; delete it to drop it)"
+        } else {
+            ""
+        };
+        output::warning(&format!("  {}: {found}{note}", output::escape_line(&path)));
+    }
+    Ok(true)
 }
 
 /// What the content guard holds in the regular file at `path` in the repo, minus what `[guard]
@@ -422,6 +477,42 @@ fn report_conflict(ctx: &Context, paths: &[PathBuf]) {
     output::warning("conflicting paths:");
     for path in paths {
         output::warning(&format!("  {}", path.display()));
+    }
+}
+
+fn report_unstashed(ctx: &Context, paths: &[PathBuf]) {
+    let bin = name::bin();
+    output::warning(
+        "the pull finished, but uncommitted edits in the repo did not go back on top of it cleanly. Nothing was applied to $HOME and nothing was pushed; git keeps the edits in its stash. To recover:",
+    );
+    let mut steps = Vec::new();
+    if !paths.is_empty() {
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| shell_words::quote(&p.to_string_lossy()).into_owned())
+            .collect();
+        steps.push(format!(
+            "{bin} git checkout HEAD -- {}   (puts back the pulled version)",
+            names.join(" ")
+        ));
+    }
+    steps.push(format!(
+        "{bin} git stash show -p   (shows the edits; make the ones you want again under {})",
+        ctx.paths.repo.display()
+    ));
+    steps.push(format!("{bin} git stash drop"));
+    steps.push(format!("{bin} sync"));
+    for (n, text) in (1_u8..).zip(steps) {
+        output::warning(&format!("  {n}. {text}"));
+    }
+    if !paths.is_empty() {
+        output::warning("conflicting paths:");
+        for path in paths {
+            output::warning(&format!(
+                "  {}",
+                output::escape_line(&path.to_string_lossy())
+            ));
+        }
     }
 }
 
