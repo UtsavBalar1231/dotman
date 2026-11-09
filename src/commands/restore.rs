@@ -9,6 +9,7 @@ use crate::cli::RestoreArgs;
 use crate::context::Context;
 use crate::engine::write::{WriteOptions, WriteOutcome, backup_run_dir, safe_symlink, safe_write};
 use crate::engine::{Home, Tuple, hash_hex, observe, observe_portable, recorded_mode};
+use crate::name;
 use crate::output;
 use crate::paths::{create_private_dir, derive_key, private_temp_dir};
 use crate::secrets::{Locked, key_hint};
@@ -24,6 +25,7 @@ use std::ops::RangeInclusive;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Runs `dotman restore`.
@@ -31,8 +33,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// # Errors
 ///
 /// Fails when the path is not managed, `--from` is neither a commit nor a date in an accepted form,
-/// every commit is newer than that date, the file is absent from that commit, the lock is held, or
-/// the file cannot be written.
+/// every commit is newer than that date, the repo cannot read the commit, the file is absent from
+/// that commit, the lock is held, or the file cannot be written.
 pub fn run(args: &RestoreArgs) -> Result<()> {
     let ctx = Context::resolve("restore")?;
     let dry_run = args.dry_run;
@@ -151,6 +153,9 @@ fn resolve(ctx: &Context, from: &str) -> Result<String> {
             if base != from && !base.is_empty() && ctx.git.resolve_commit(base)?.is_some() {
                 bail!("the revision `{from}` does not exist: {base} has no such ancestor");
             }
+            if let Some(damage) = unreadable(ctx, base) {
+                return Err(damage);
+            }
             bail!(
                 "`{from}` is neither a commit nor a date. Give a revision such as HEAD~2 or a commit hash, or a date such as 2024-05-01, \"2024-05-01 13:30\", 2.days.ago or yesterday"
             )
@@ -161,6 +166,46 @@ fn resolve(ctx: &Context, from: &str) -> Result<String> {
         None => None,
     };
     rev.ok_or_else(|| anyhow!("every commit is newer than `{from}`"))
+}
+
+/// When `rev` resolves through the refs but git cannot read the object it names, as after a pack
+/// is truncated or deleted, an error that says the repo is damaged and keeps git's own line. A
+/// full object id is left out: one that was never in this repo resolves the same way.
+fn unreadable(ctx: &Context, rev: &str) -> Option<anyhow::Error> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return None;
+    }
+    let git = |args: &[&str]| {
+        let mut cmd = ctx.git.command();
+        cmd.args(args).stdin(Stdio::null());
+        cmd.output().ok()
+    };
+    let named = git(&["rev-parse", "--verify", "--quiet", rev])?;
+    let oid = String::from_utf8_lossy(&named.stdout).trim().to_owned();
+    if !named.status.success() || oid.is_empty() || oid.eq_ignore_ascii_case(rev) {
+        return None;
+    }
+    let read = git(&["cat-file", "-t", &oid])?;
+    if read.status.success() {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&read.stderr);
+    let mut lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let line = lines
+        .clone()
+        .find(|line| line.starts_with("error:"))
+        .or_else(|| lines.next())
+        .unwrap_or("no message");
+    let short = oid.get(..8).unwrap_or(&oid);
+    Some(
+        anyhow!("git cat-file -t {oid} failed: {line}").context(format!(
+            "the repo is damaged: {rev} names object {short}, which git cannot read; `{} doctor` checks the repo",
+            name::bin()
+        )),
+    )
 }
 
 /// The time a `--from` date names.

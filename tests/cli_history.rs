@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestEnv;
+use std::os::unix::fs::PermissionsExt;
 
 /// A repo with `.a` committed as "one\n" on 2020-01-01 and "two\n" by `sync` today.
 fn two_commits() -> TestEnv {
@@ -131,6 +132,43 @@ fn restore_reads_dates_itself_and_names_a_revision_past_the_history() {
         "{err}"
     );
     assert_eq!(env.read(".a"), b"three\n");
+}
+
+/// A truncated or deleted pack leaves the refs readable but not the commits they name, so
+/// `restore` says the repo is damaged and names `doctor`, not that HEAD is no revision.
+#[test]
+fn restore_on_a_damaged_pack_says_the_repo_is_damaged() {
+    for damage in ["truncate", "delete"] {
+        let env = two_commits();
+        let repo = env.repo().to_string_lossy().into_owned();
+        env.git(&["-C", &repo, "gc", "-q"]);
+        let packs = env.repo().join(".git/objects/pack");
+        let pack = std::fs::read_dir(&packs)
+            .expect("read the pack dir")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+            .expect("a pack after gc");
+        if damage == "delete" {
+            std::fs::remove_file(&pack).expect("delete the pack");
+        } else {
+            let bytes = std::fs::read(&pack).expect("read the pack");
+            let half = bytes.len().checked_div(2).unwrap_or_default();
+            std::fs::set_permissions(&pack, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+            std::fs::write(&pack, bytes.get(..half).expect("half")).expect("truncate");
+        }
+        for from in ["HEAD", "HEAD~1"] {
+            let err = env.fails(&["restore", ".a", "--from", from]);
+            assert!(
+                err.contains("the repo is damaged") && err.contains("doctor` checks the repo"),
+                "{damage} {from}: {err}"
+            );
+            assert!(!err.contains("neither a commit nor a date"), "{err}");
+            if damage == "truncate" {
+                assert!(err.contains("does not match index"), "git's line: {err}");
+            }
+        }
+        assert_eq!(env.read(".a"), b"two\n");
+    }
 }
 
 #[test]
