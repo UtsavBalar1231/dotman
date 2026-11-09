@@ -49,7 +49,7 @@ use walkdir::WalkDir;
 
 /// Roots under these are system files, not somebody's dotfiles. A root below `$HOME` is exempt:
 /// `$HOME` itself may live under one of them.
-const SYSTEM_PREFIXES: [&str; 13] = [
+const SYSTEM_PREFIXES: [&str; 14] = [
     "/usr",
     "/etc",
     "/opt",
@@ -59,6 +59,7 @@ const SYSTEM_PREFIXES: [&str; 13] = [
     "/run",
     "/proc",
     "/sys",
+    "/dev",
     "/tmp",
     "/Applications",
     "/System",
@@ -174,8 +175,9 @@ fn skipped_dirs(ctx: &Context) -> Vec<PathBuf> {
     dirs
 }
 
-/// Every symlink in `$HOME` within `DEPTH`. Symlinked directories are not entered.
-fn home_links(ctx: &Context) -> Vec<Link> {
+/// Every symlink in `$HOME` within `DEPTH`. Symlinked directories are not entered. The flag says
+/// the walk stopped at `MAX_VISITED`.
+fn home_links(ctx: &Context) -> (Vec<Link>, bool) {
     let home_real = real_home(ctx);
     let skip = skipped_dirs(ctx);
     let walk = WalkDir::new(&ctx.paths.home)
@@ -189,18 +191,31 @@ fn home_links(ctx: &Context) -> Vec<Link> {
                     || skip.iter().any(|dir| entry.path() == dir)
                     || is_git_dir(entry.path())))
         });
+    collect_links(
+        walk.filter_map(std::result::Result::ok),
+        &ctx.paths.home,
+        &home_real,
+        MAX_VISITED,
+    )
+}
+
+/// The links among the first `max` entries, and whether there were more.
+fn collect_links(
+    entries: impl Iterator<Item = walkdir::DirEntry>,
+    home: &Path,
+    home_real: &Path,
+    max: usize,
+) -> (Vec<Link>, bool) {
     let mut links = Vec::new();
-    for (seen, entry) in walk.filter_map(std::result::Result::ok).enumerate() {
-        if seen >= MAX_VISITED {
-            break;
+    for (seen, entry) in entries.enumerate() {
+        if seen >= max {
+            return (links, true);
         }
         if !entry.file_type().is_symlink() {
             continue;
         }
-        let (Ok(rel), Ok(raw)) = (
-            entry.path().strip_prefix(&ctx.paths.home),
-            fs::read_link(entry.path()),
-        ) else {
+        let (Ok(rel), Ok(raw)) = (entry.path().strip_prefix(home), fs::read_link(entry.path()))
+        else {
             continue;
         };
         links.push(Link {
@@ -209,7 +224,27 @@ fn home_links(ctx: &Context) -> Vec<Link> {
             raw,
         });
     }
-    links
+    (links, false)
+}
+
+fn capped_note() -> String {
+    format!(
+        "the search for links stopped after {MAX_VISITED} entries of $HOME (depth {DEPTH}); links beyond them were not looked at"
+    )
+}
+
+/// A launcher a tool installs: a link directly in a bin directory, named unlike the file it runs.
+/// A farm links each file under its own name.
+fn is_tool_shim(link: &Link, target: &Path) -> bool {
+    let Some(dir) = link.rel.parent() else {
+        return false;
+    };
+    let in_bin = dir == Path::new(".local/bin")
+        || dir == Path::new("bin")
+        || (dir.starts_with(".local/share")
+            && dir.components().count() == 4
+            && dir.file_name() == Some(OsStr::new("bin")));
+    in_bin && link.rel.file_name() != target.file_name()
 }
 
 /// What a link in `$HOME` is, relative to one farm root.
@@ -284,6 +319,77 @@ fn common_dir(targets: &[&Path]) -> PathBuf {
     }
 }
 
+fn base_dirs(ctx: &Context) -> [PathBuf; 7] {
+    [
+        ctx.paths.config_home.clone(),
+        ctx.paths.data_home.clone(),
+        ctx.paths
+            .state_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
+        ctx.paths.home.join(".cache"),
+        ctx.paths.home.join(".config"),
+        ctx.paths.home.join(".local/share"),
+        ctx.paths.home.join(".local/state"),
+    ]
+}
+
+/// For a root refused because Stow folded a base directory such as `~/.config` into a link to
+/// one of its packages: the restow that unfolds it, and the other packages to import one by one.
+fn fold_hint(ctx: &Context, root: &Path) -> Option<String> {
+    let home = &ctx.paths.home;
+    let folded = base_dirs(ctx).into_iter().find_map(|dir| {
+        let linked = dir
+            .ancestors()
+            .take_while(|at| at.starts_with(home) && *at != home.as_path())
+            .any(|at| fs::symlink_metadata(at).is_ok_and(|meta| meta.file_type().is_symlink()));
+        let package = resolved(&dir)
+            .strip_prefix(root)
+            .ok()?
+            .components()
+            .next()?
+            .as_os_str()
+            .to_owned();
+        linked.then_some((dir, package))
+    })?;
+    let (dir, package) = folded;
+    let shown = dir.strip_prefix(home).map_or_else(
+        |_| dir.display().to_string(),
+        |rel| format!("~/{}", rel.display()),
+    );
+    let bin = name::bin();
+    let others: Vec<String> = fs::read_dir(root)
+        .ok()?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            is_real_dir(path)
+                && path
+                    .file_name()
+                    .is_some_and(|name| name != package && name != ".git")
+        })
+        .map(|path| {
+            format!(
+                "`{bin} import {}`",
+                shell_words::quote(&path.to_string_lossy())
+            )
+        })
+        .collect();
+    let package = package.to_string_lossy();
+    let mut hint = format!(
+        "Stow folded {shown} into a link to the package {package}; restow it with `stow --no-folding -R {package}` so that {shown} is a real directory again"
+    );
+    if !others.is_empty() {
+        let _ = write!(
+            hint,
+            ", or import each other package directory on its own: {}",
+            others.join(", ")
+        );
+    }
+    Some(hint)
+}
+
 /// Why a root cannot be a farm, if it cannot. `explicit` roots are not checked for ownership.
 fn refusal(ctx: &Context, root: &Path, stores: &[PathBuf], explicit: bool) -> Option<String> {
     let home_real = real_home(ctx);
@@ -298,20 +404,7 @@ fn refusal(ctx: &Context, root: &Path, stores: &[PathBuf], explicit: bool) -> Op
     {
         return Some(format!("it lies under {prefix}, a system directory"));
     }
-    let xdg = [
-        ctx.paths.config_home.clone(),
-        ctx.paths.data_home.clone(),
-        ctx.paths
-            .state_dir
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default(),
-        ctx.paths.home.join(".cache"),
-        ctx.paths.home.join(".config"),
-        ctx.paths.home.join(".local/share"),
-        ctx.paths.home.join(".local/state"),
-    ];
-    if xdg
+    if base_dirs(ctx)
         .iter()
         .any(|dir| resolved(dir).starts_with(root) || dir.starts_with(root))
     {
@@ -340,11 +433,18 @@ pub(super) fn candidates(ctx: &Context) -> Vec<PathBuf> {
     let stores = nix_stores();
     let home_real = real_home(ctx);
     let mut groups: BTreeMap<PathBuf, Vec<(PathBuf, PathBuf)>> = BTreeMap::new();
-    for link in home_links(ctx) {
+    let (links, capped) = home_links(ctx);
+    if capped {
+        output::warning(&capped_note());
+    }
+    for link in links {
         let Ok(target) = fs::canonicalize(&link.real) else {
             continue;
         };
-        if in_stores(&target, &stores) || in_stores(&link.first_hop(), &stores) {
+        if in_stores(&target, &stores)
+            || in_stores(&link.first_hop(), &stores)
+            || is_tool_shim(&link, &target)
+        {
             continue;
         }
         groups
@@ -384,7 +484,7 @@ pub(super) fn is_source(ctx: &Context, path: &Path) -> bool {
     }
     let stores = nix_stores();
     let nix_root = in_stores(&root, &stores);
-    home_links(ctx).iter().any(|link| {
+    home_links(ctx).0.iter().any(|link| {
         !link.real.starts_with(&root)
             && match fate(link, &root, &stores) {
                 Some(Fate::Nix) => nix_root && link.first_hop().starts_with(&root),
@@ -825,7 +925,8 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
     ensure!(is_real_dir(&root), "{} is not a directory", root.display());
     let stores = nix_stores();
     if let Some(why) = refusal(ctx, &root, &stores, true) {
-        bail!("{} cannot be a symlink farm: {why}", source.display());
+        let hint = fold_hint(ctx, &root).map_or_else(String::new, |hint| format!(". {hint}"));
+        bail!("{} cannot be a symlink farm: {why}{hint}", source.display());
     }
 
     let defaults = RepoConfig::default();
@@ -841,7 +942,7 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
         bytes: 0,
         too_big: false,
     };
-    let mut links = home_links(ctx);
+    let (mut links, capped) = home_links(ctx);
     links.sort_by(|a, b| a.rel.cmp(&b.rel));
     for link in links.iter().filter(|link| !link.real.starts_with(&root)) {
         if let Some(fate) = fate(link, &root, &stores) {
@@ -867,11 +968,14 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
         preview(plan);
     }
     let config = repo_config(ctx, &planner);
-    let report = Report {
+    let mut report = Report {
         converted: planner.writes.len(),
         needs_action: std::mem::take(&mut planner.items),
         notes: notes(&root, &planner, edited.as_ref(), args.dry_run),
     };
+    if capped {
+        report.notes.push(capped_note());
+    }
     report.print();
 
     let repo = &ctx.paths.repo;
@@ -1363,6 +1467,46 @@ pub(super) fn swap(ctx: &Context, args: &ImportArgs) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_link_walk_says_when_it_stops_at_its_cap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        for name in ["a", "b", "c", "d"] {
+            symlink("target", home.join(name)).unwrap();
+        }
+        let walk = || {
+            WalkDir::new(home)
+                .min_depth(1)
+                .sort_by_file_name()
+                .into_iter()
+                .filter_map(std::result::Result::ok)
+        };
+        let (links, capped) = collect_links(walk(), home, home, 3);
+        assert!(capped);
+        assert_eq!(links.len(), 3);
+        let (links, capped) = collect_links(walk(), home, home, 4);
+        assert!(!capped);
+        assert_eq!(links.len(), 4);
+        assert!(capped_note().contains("stopped after 200000 entries"));
+    }
+
+    #[test]
+    fn a_tool_launcher_in_a_bin_directory_is_not_a_farm_link() {
+        let link = |rel: &str| Link {
+            rel: PathBuf::from(rel),
+            real: PathBuf::from("/h").join(rel),
+            raw: PathBuf::new(),
+        };
+        let cli = Path::new("/h/.tool/pkg/a/dist/cli.js");
+        assert!(is_tool_shim(&link(".local/bin/tool-a"), cli));
+        assert!(is_tool_shim(&link("bin/tool-a"), cli));
+        assert!(is_tool_shim(&link(".local/share/pnpm/bin/tool-a"), cli));
+        assert!(!is_tool_shim(&link(".local/bin/cli.js"), cli));
+        assert!(!is_tool_shim(&link(".config/tool-a"), cli));
+        assert!(!is_tool_shim(&link(".local/bin/sub/tool-a"), cli));
+        assert!(!is_tool_shim(&link(".local/share/bin/tool-a"), cli));
+    }
 
     #[test]
     fn lexical_normalizing_drops_dots_without_touching_the_disk() {

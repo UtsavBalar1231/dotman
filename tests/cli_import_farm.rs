@@ -664,3 +664,67 @@ fn links_that_share_one_target_or_stay_in_one_directory_are_no_farm() {
     assert!(err.contains("none found"), "{err}");
     assert_eq!(tree_checksum(&env.home()), home);
 }
+
+#[test]
+fn tool_launchers_in_a_bin_directory_are_no_farm_and_a_stow_farm_still_is() {
+    let env = TestEnv::new();
+    for tool in ["a", "b"] {
+        env.write(
+            format!(".tool/pkg/{tool}/dist/cli.js"),
+            b"#!/usr/bin/env node\n",
+            0o755,
+        );
+        env.symlink(
+            format!(".local/bin/tool-{tool}"),
+            format!("../../.tool/pkg/{tool}/dist/cli.js"),
+        );
+    }
+    let (out, err) = run_import(&env, &[]);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("none found"), "{err}");
+
+    stow(&env);
+    let (out, err) = run_import(&env, &["--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("imported from the symlink farm"), "{err}");
+    assert!(!err.contains(".tool"), "{err}");
+}
+
+#[test]
+fn a_root_under_dev_is_a_system_directory() {
+    let env = TestEnv::new();
+    env.symlink(".null", "/dev/null");
+    env.symlink(".zero", "/dev/zero");
+    let (out, err) = run_import(&env, &["/dev"]);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("lies under /dev, a system directory"), "{err}");
+}
+
+#[test]
+fn a_folded_base_directory_names_the_restow_and_the_other_packages() {
+    let env = TestEnv::new();
+    env.write("dotfiles/nvim/.config/nvim/init.lua", b"-- init\n", 0o644);
+    env.write("dotfiles/zsh/.zshrc", b"export A=1\n", 0o644);
+    env.symlink(".config", "dotfiles/nvim/.config");
+    env.symlink(".zshrc", "dotfiles/zsh/.zshrc");
+    let farm = env.home().join("dotfiles");
+
+    let (out, err) = run_import(&env, &[&farm.to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("contains a base directory such as ~/.config"),
+        "{err}"
+    );
+    assert!(
+        err.contains("Stow folded ~/.config into a link to the package nvim")
+            && err.contains("stow --no-folding -R nvim"),
+        "{err}"
+    );
+    let zsh = farm.join("zsh");
+    assert!(
+        err.contains(&format!("dotman import {}", zsh.display())),
+        "{err}"
+    );
+    let (out, err) = run_import(&env, &["--dry-run", &zsh.to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+}
