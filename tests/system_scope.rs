@@ -587,6 +587,161 @@ fn a_group_writable_config_is_refused() {
     assert!(!env.system_path("/etc/x.conf").exists());
 }
 
+/// `entry` for `target` with `field` replaced by `value`.
+fn entry_with(target: &str, field: &str, value: &str) -> serde_json::Value {
+    let mut bad = entry(target, b"x", "0644");
+    set(&mut bad, "", field, value.into());
+    bad
+}
+
+/// Sets `field` of the object at `pointer` in `json`.
+fn set(json: &mut serde_json::Value, pointer: &str, field: &str, value: serde_json::Value) {
+    let object = json
+        .pointer_mut(pointer)
+        .and_then(serde_json::Value::as_object_mut);
+    assert!(object.is_some(), "no object at `{pointer}`");
+    if let Some(object) = object {
+        object.insert(field.to_owned(), value);
+    }
+}
+
+/// Runs a plan of a good entry and then `bad`, and checks that it exits 1, names `why` as the
+/// reason `target` failed, reports the good entry as not written, and writes nothing.
+fn rejected(env: &TestEnv, bad: serde_json::Value, target: &str, why: &str) {
+    let good = entry("/etc/new.conf", b"new", "0644");
+    let plan = plan_json(env, &["/etc"], &[good, bad]);
+    let out = system_write(env, &write_plan(env, &plan));
+    assert_eq!(out.status.code(), Some(1), "{target}: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("not-written /etc/new.conf\n"),
+        "{target}: {text}"
+    );
+    let failed = format!("failed {target}: ");
+    let reason = text
+        .lines()
+        .find_map(|line| line.strip_prefix(&failed))
+        .unwrap_or_default();
+    assert!(reason.contains(why), "{target}: {text}");
+    assert!(stderr(&out).contains("nothing was written"), "{target}");
+    assert!(!env.system_path("/etc/new.conf").exists(), "{target}");
+}
+
+#[test]
+fn every_kind_of_bad_entry_is_refused_before_any_write() {
+    let env = setup_none(&["/etc"]);
+    env.write_system("/etc/keep.conf", b"keep", 0o644);
+    env.write_system("/elsewhere/y.conf", b"y", 0o644);
+    symlink(
+        env.system_path("/elsewhere/y.conf"),
+        env.system_path("/etc/link.conf"),
+    )
+    .expect("symlink");
+    let before = tree_checksum(&env.system_root());
+    let cases = [
+        ("/etc", entry("/etc", b"x", "0644"), "is a root"),
+        (
+            "/etc/new.conf",
+            entry("/etc/new.conf", b"other", "0644"),
+            "listed twice",
+        ),
+        (
+            "/etc/hex.conf",
+            entry_with("/etc/hex.conf", "bytes", "zz"),
+            "not hex",
+        ),
+        (
+            "/etc/owner.conf",
+            entry_with("/etc/owner.conf", "owner", "no-such-user-dotman"),
+            "no user is named",
+        ),
+        (
+            "/etc/group.conf",
+            entry_with("/etc/group.conf", "group", "no-such-group-dotman"),
+            "no group is named",
+        ),
+        (
+            "/etc/link.conf",
+            entry("/etc/link.conf", b"x", "0644"),
+            "is a symlink, which is never replaced",
+        ),
+        (
+            "/etc/missing/x.conf",
+            entry("/etc/missing/x.conf", b"x", "0644"),
+            "does not exist; system-write creates no directories",
+        ),
+    ];
+    for (target, bad, why) in cases {
+        rejected(&env, bad, target, why);
+        assert_eq!(tree_checksum(&env.system_root()), before, "{target}");
+    }
+}
+
+#[test]
+fn a_fifo_at_the_target_is_refused() {
+    let env = setup_none(&["/etc"]);
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    let fifo = env.system_path("/etc/fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success());
+    rejected(
+        &env,
+        entry("/etc/fifo", b"x", "0644"),
+        "/etc/fifo",
+        "is not a regular file",
+    );
+    let meta = fs::symlink_metadata(&fifo).expect("stat");
+    assert!(
+        std::os::unix::fs::FileTypeExt::is_fifo(&meta.file_type()),
+        "the FIFO is left alone"
+    );
+}
+
+#[test]
+fn a_bad_plan_dir_config_or_field_is_refused_with_no_write() {
+    let env = setup_none(&["/etc"]);
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    let plan = || plan_json(&env, &["/etc"], &[entry("/etc/x.conf", b"x", "0644")]);
+    let refused = |file: &Path, why: &str| {
+        let out = system_write(&env, file);
+        assert_eq!(out.status.code(), Some(1), "{why}: {}", stderr(&out));
+        assert!(stderr(&out).contains(why), "{why}: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "{why}");
+        assert!(!env.system_path("/etc/x.conf").exists(), "{why}");
+    };
+
+    let file = write_plan(&env, &plan());
+    let dir = file.parent().expect("plan dir").to_path_buf();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o770)).expect("chmod");
+    refused(&file, "is writable by group or others");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod");
+
+    let config = machine_config(&env);
+    let copy = env.root().join("config-copy.toml");
+    fs::rename(&config, &copy).expect("move the config");
+    symlink(&copy, &config).expect("symlink the config");
+    refused(&write_plan(&env, &plan()), "is a symlink");
+    fs::remove_file(&config).expect("remove the link");
+    fs::rename(&copy, &config).expect("restore the config");
+
+    let mut extra = plan();
+    set(&mut extra, "", "extra", true.into());
+    refused(&write_plan(&env, &extra), "unknown field `extra`");
+    let mut extra = plan();
+    set(&mut extra, "/entries/0", "setuid", true.into());
+    refused(&write_plan(&env, &extra), "unknown field `setuid`");
+
+    let out = system_write(&env, &write_plan(&env, &plan()));
+    assert!(
+        out.status.success(),
+        "the same plan, fixed: {}",
+        stderr(&out)
+    );
+}
+
 #[test]
 fn under_sudo_the_helper_refuses_to_run_as_a_user() {
     if !not_root() {
