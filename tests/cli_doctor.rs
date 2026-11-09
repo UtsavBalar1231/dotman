@@ -454,10 +454,13 @@ fn the_old_store_and_an_old_dot_on_path_warn() {
     let (code, out) = doctor(&env, &[]);
     assert_eq!(code, Some(0), "{out}");
     let store = line(&out, "warn", "legacy store").unwrap_or_default();
+    let old = env.home().join(".dotman");
     assert!(
-        store.contains("dotman import ") && store.contains(".dotman`"),
+        store.contains(&format!("`mv {} {}.old`", old.display(), old.display())),
         "{out}"
     );
+    assert!(!store.contains("import "), "{out}");
+    assert!(old.join("index.bin").exists(), "doctor runs nothing");
     let old = line(&out, "warn", "dot:").unwrap_or_default();
     assert!(old.contains("cargo uninstall dotman"), "{out}");
 
@@ -476,6 +479,22 @@ fn the_old_store_and_an_old_dot_on_path_warn() {
         "a forked child does not hold doctor up"
     );
     assert!(line(&out, "warn", "dot:").is_some(), "{out}");
+}
+
+/// With no dotman repo yet, the old store's warning names the import that brings it in.
+#[test]
+fn the_old_store_without_a_repo_names_the_import() {
+    let env = TestEnv::new();
+    let old = env.home().join(".dotman");
+    fs::create_dir_all(&old).expect("mkdir");
+    fs::write(old.join("index.bin"), b"").expect("write index");
+    let (_, out) = doctor(&env, &[]);
+    let store = line(&out, "warn", "legacy store").unwrap_or_default();
+    assert!(
+        store.contains(&format!("`dotman import {}`", old.display())),
+        "{out}"
+    );
+    assert!(!store.contains("mv "), "{out}");
 }
 
 #[test]

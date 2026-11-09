@@ -843,14 +843,25 @@ fn old_dotman(ctx: &Context) -> Vec<Check> {
     let store = ctx.paths.home.join(".dotman");
     let legacy = store.join("index.bin").is_file() || store.join("commits").is_dir();
     if legacy && store != ctx.paths.repo {
+        let shown = store.to_string_lossy();
+        // Only named, never run: whether the import brought everything is the user's to check.
+        let step = if ctx.paths.repo.join(".git").exists() {
+            format!(
+                "once you have checked that the repo at {} holds what you imported from it, retire it, for example with `mv {} {}`",
+                ctx.paths.repo.display(),
+                shell_words::quote(&shown),
+                shell_words::quote(&format!("{shown}.old"))
+            )
+        } else {
+            format!(
+                "run `{} import {}` to bring its files into the repo",
+                name::bin(),
+                shell_words::quote(&shown)
+            )
+        };
         checks.push(warn(
             "legacy store",
-            &format!(
-                "{} is the store of dotman 0.0.1; run `{} import {}` to bring its files into the repo",
-                store.display(),
-                name::bin(),
-                store.display()
-            ),
+            &format!("{shown} is the store of dotman 0.0.1; {step}"),
         ));
     }
     if let Some(dot) = proc::find_program("dot")
