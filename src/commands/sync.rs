@@ -358,13 +358,24 @@ fn commit_staged(
         || default_message(&ctx.identity().host, &changed),
         str::to_owned,
     );
+    // The subject leaves dotman's own files out, and no capture names them.
+    let own_files = || {
+        for path in &changed {
+            if let Some(what) = own(path) {
+                let verb = if dry_run { "would commit" } else { "commit" };
+                output::action(verb, &format!("{path} ({what})"));
+            }
+        }
+    };
     if dry_run {
+        own_files();
         output::info(&format!("would commit: {message}"));
         return Ok(done);
     }
     if !ctx.git.identity_configured()? {
         bail!(identity_fix());
     }
+    own_files();
     let new_commit = ctx.git.commit(&message)?.is_some();
     if new_commit {
         output::success(&format!("committed: {message}"));
@@ -594,11 +605,33 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
     )
 }
 
-/// `sync(<host>): a/b, c/d, e/f (+N more)`, naming the first three paths in sorted order.
+/// What a subject calls dotman's own repo root files when nothing else changed.
+const OWN: [(&str, &str); 2] = [
+    (".dotman.toml", "settings"),
+    ("install.sh", "bootstrap script"),
+];
+
+fn own(path: &str) -> Option<&'static str> {
+    OWN.iter()
+        .find(|(name, _)| *name == path)
+        .map(|(_, what)| *what)
+}
+
+/// `sync(<host>): a/b, c/d, e/f (+N more)`, naming the first three paths in sorted order. dotman's
+/// own files are left out, and named only when nothing else changed.
 fn default_message(host: &str, changed: &BTreeSet<String>) -> String {
     let host = if host.is_empty() { "unknown" } else { host };
-    let named: Vec<&str> = changed.iter().take(LISTED).map(|p| tail(p)).collect();
-    let more = changed.len().saturating_sub(LISTED);
+    let files: Vec<&str> = changed
+        .iter()
+        .map(String::as_str)
+        .filter(|path| own(path).is_none())
+        .collect();
+    let named: Vec<&str> = if files.is_empty() {
+        changed.iter().filter_map(|path| own(path)).collect()
+    } else {
+        files.iter().take(LISTED).map(|p| tail(p)).collect()
+    };
+    let more = files.len().saturating_sub(LISTED);
     let rest = if more > 0 {
         format!(" (+{more} more)")
     } else {
@@ -763,5 +796,25 @@ mod tests {
         let five = default_message("box", &set(&["x/e", "x/a", "x/d", "x/b", "x/c"]));
         assert_eq!(five, "sync(box): x/a, x/b, x/c (+2 more)");
         assert!(default_message("", &set(&["a"])).starts_with("sync(unknown): "));
+    }
+
+    #[test]
+    fn the_message_names_dotmans_own_files_only_when_nothing_else_changed() {
+        let set = |keys: &[&str]| keys.iter().map(|k| (*k).to_owned()).collect();
+        let with_files = set(&[".dotman.toml", "install.sh", "x/a", "x/b", "x/c", "x/d"]);
+        assert_eq!(
+            default_message("box", &with_files),
+            "sync(box): x/a, x/b, x/c (+1 more)"
+        );
+        let own = default_message("box", &set(&["install.sh", ".dotman.toml"]));
+        assert_eq!(own, "sync(box): settings, bootstrap script");
+        assert_eq!(
+            default_message("box", &set(&["install.sh"])),
+            "sync(box): bootstrap script"
+        );
+        assert_eq!(
+            default_message("box", &set(&["sub/install.sh"])),
+            "sync(box): sub/install.sh"
+        );
     }
 }

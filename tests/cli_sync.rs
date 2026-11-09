@@ -449,10 +449,7 @@ fn commit_messages_name_three_paths_and_count_the_rest() {
     exits_with(&env, &HOST, 0, &["sync"]);
     let repo = repo_path(&env);
     let subject = || env.git(&["-C", &repo, "log", "-1", "--format=%s"]);
-    assert_eq!(
-        subject().trim(),
-        "sync(testbox): .dotman.toml, x/a, x/b (+3 more)"
-    );
+    assert_eq!(subject().trim(), "sync(testbox): x/a, x/b, x/c (+2 more)");
 
     for key in &keys {
         env.write(key, b"2\n", 0o644);
@@ -466,6 +463,45 @@ fn commit_messages_name_three_paths_and_count_the_rest() {
     env.write("x/a", b"4\n", 0o644);
     exits_with(&env, &HOST, 0, &["sync"]);
     assert_eq!(subject().trim(), "sync(testbox): x/a");
+}
+
+/// The settings and the bootstrap script stay out of a subject that has files to name, so the dry
+/// run and the real run list them on lines of their own; alone, the subject names them in words.
+#[test]
+fn dotmans_own_files_are_listed_and_named_in_words_when_alone() {
+    let env = TestEnv::new();
+    env.ok_with(&HOST, &["init"]);
+    env.ok_with(&HOST, &["init", "--remote", &env.remote_url()]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok_with(&HOST, &["add", ".a"]);
+    let own = [".dotman.toml (settings)", "install.sh (bootstrap script)"];
+
+    let has = |err: &str, line: String| err.lines().any(|l| l == line);
+    let err = exits_with(&env, &HOST, 0, &["sync", "--dry-run"]);
+    for line in own {
+        assert!(has(&err, format!("would commit {line}")), "{err}");
+    }
+    assert!(err.contains("would commit: sync(testbox): .a\n"), "{err}");
+    let err = exits_with(&env, &HOST, 0, &["sync"]);
+    for line in own {
+        assert!(has(&err, format!("commit {line}")), "{err}");
+    }
+    assert!(err.contains("committed: sync(testbox): .a\n"), "{err}");
+
+    let mut config = env.repo_config();
+    config.ignore.patterns.push("**/*.swp".to_owned());
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    let script = env.repo().join("install.sh");
+    let mut bytes = fs::read(&script).expect("read install.sh");
+    bytes.extend_from_slice(b"# edited\n");
+    fs::write(&script, bytes).expect("edit install.sh");
+    let err = exits_with(&env, &HOST, 0, &["sync"]);
+    assert!(
+        err.contains("committed: sync(testbox): settings, bootstrap script\n"),
+        "{err}"
+    );
 }
 
 /// Without a git identity, init, sync and doctor give the same steps. Sync commits nothing, and
