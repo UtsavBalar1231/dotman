@@ -33,7 +33,7 @@ complete -c dot -w dotman
 
 ## Man pages
 
-`man/dotman.1` is the top page and `man/dotman-<command>.1` covers each command.
+`man/dotman.1` is the top page and `man/dotman-<command>.1` covers each command. The exit codes and environment variables are at the end of `dotman.1`, under EXTRA, which is where clap_mangen puts a command's long help epilogue; `status`, `sync`, `diff` and `git` have one too.
 
 ```bash
 man -l man/dotman.1

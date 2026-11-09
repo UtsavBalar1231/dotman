@@ -43,7 +43,7 @@ lint:
         -W clippy::nursery \
         -W clippy::pedantic
 
-# The clippy set the pre-commit hook runs; CI only runs -D warnings.
+# The clippy set that the pre-commit hook and CI both run.
 lint-strict:
     #!/usr/bin/env bash
     cargo clippy --all-targets --all-features -- \
