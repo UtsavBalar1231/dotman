@@ -331,7 +331,7 @@ fn refuse_mass_delete(ctx: &Context, status: &[StatusEntry], dry_run: bool) -> R
     let what = format!("the changes in the repo delete {deleted} of its {tracked} tracked files");
     if !dry_run && prompt::interactive() {
         output::warning(&format!(
-            "{what}, which looks more like a broken checkout than an edit"
+            "{what}, as a broken checkout or a forget of many files does"
         ));
         if prompt::confirm("commit the deletions? [y/N]")? {
             return Ok(());
@@ -340,7 +340,7 @@ fn refuse_mass_delete(ctx: &Context, status: &[StatusEntry], dry_run: bool) -> R
     }
     let bin = name::bin();
     bail!(
-        "{what}, which looks more like a broken checkout than an edit; nothing was committed or pushed. To bring the files back: `{bin} git checkout -- .`; if the deletions are meant: `{bin} sync --allow-mass-delete`"
+        "{what}, as a broken checkout or a forget of many files does; nothing was committed or pushed. To bring the files back: `{bin} git checkout -- .`; if the deletions are meant: `{bin} sync --allow-mass-delete`"
     )
 }
 
