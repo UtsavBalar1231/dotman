@@ -998,9 +998,18 @@ pub fn archive_name() -> String {
 /// passes anything else to the real one, so `install.sh` takes its Linux download path on macOS
 /// and on other architectures too.
 fn linux_uname(dir: &Path) -> R<PathBuf> {
+    // Alpine has only /bin/uname, macOS only /usr/bin/uname.
+    let real = SYSTEM_DIRS
+        .iter()
+        .map(|dir| Path::new(dir).join("uname"))
+        .find(|path| path.is_file())
+        .ok_or("no uname in /usr/bin or /bin")?;
     write_exe(
         &dir.join("uname"),
-        "#!/bin/sh\ncase \"$*\" in\n  -s) echo Linux ;;\n  -m) echo x86_64 ;;\n  *) exec /usr/bin/uname \"$@\" ;;\nesac\n",
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n  -s) echo Linux ;;\n  -m) echo x86_64 ;;\n  *) exec '{}' \"$@\" ;;\nesac\n",
+            real.display()
+        ),
     )?;
     Ok(dir.to_path_buf())
 }
