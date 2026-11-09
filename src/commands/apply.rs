@@ -1291,9 +1291,13 @@ impl Run<'_> {
         let key = &item.key;
         let mode = self.kept_mode(item, r);
         // Whatever S says: after a rebase that dropped the local commit, H can equal S and still
-        // be the only copy of the user's bytes.
+        // be the only copy of the user's bytes. A change of mode alone replaces the file too, and
+        // its backup records the mode it had.
         let replaces = matches!(&item.raw, Home::Present(h)
-            if self.opts.in_place || h.kind != r.tuple.kind || h.hash != r.tuple.hash);
+            if self.opts.in_place
+                || h.kind != r.tuple.kind
+                || h.hash != r.tuple.hash
+                || (h.kind == Kind::File && h.mode != mode));
         let opts = WriteOptions {
             dry_run: self.opts.dry_run,
             in_place: self.opts.in_place,
