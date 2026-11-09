@@ -554,7 +554,7 @@ fn encryption(ctx: &Context) -> Vec<Check> {
             "DOTMAN_AGE_KEY",
             &why,
             &format!(
-                "install age 1.1.0 or newer, or use DOTMAN_AGE_KEY_FILE or {} key import",
+                "put the key in a file and point DOTMAN_AGE_KEY_FILE at it, or run {} key import",
                 name::bin()
             ),
         )),

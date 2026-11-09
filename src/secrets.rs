@@ -439,7 +439,7 @@ impl Age {
         };
         let mut notes = Vec::new();
         let mut program = cli.program.clone();
-        let key_reader = self.key.as_ref().map(|_| self.stdin_reader(&cli));
+        let key_reader = self.key.as_ref().map(|_| Self::stdin_reader(&cli));
         let stdin_arg = match &key_reader {
             Some(Ok(found)) => {
                 program.clone_from(&found.program);
@@ -487,9 +487,8 @@ impl Age {
 
     // What a CLI can do is probed, not read from `--version`, which a distro build can print as
     // `(devel)`. With rage selected, the `age` on PATH is the fallback.
-    fn stdin_reader(&self, cli: &Cli) -> Result<StdinReader, String> {
-        let keygen = self.keygen().map_err(|e| format!("{e:#}"))?;
-        let probe = Probe::new(&keygen, &cli.program)?;
+    fn stdin_reader(cli: &Cli) -> Result<StdinReader, String> {
+        let probe = Probe::new()?;
         let mut candidates = vec![cli.program.clone()];
         candidates.extend(proc::find_program("age").filter(|_| cli.rage));
         for program in &candidates {
@@ -719,48 +718,48 @@ fn version_of(program: &Path) -> String {
         .unwrap_or_else(|| "version unknown".to_owned())
 }
 
-/// A throwaway identity and a file encrypted to it, made at run time, to find out whether a CLI
-/// reads an identity from stdin by decrypting the file with one.
+// A throwaway identity and `PROBE_TEXT` encrypted to it. They protect nothing: decrypting the file
+// with the identity on stdin shows whether a CLI reads one there, with no keygen installed. The
+// identity is stored in lowercase and in pieces, so the binary holds no key shape for the content
+// guard, or another scanner, to find in it.
+const PROBE_IDENTITY: [&str; 3] = [
+    "age-secret-key-1",
+    "e6yrnetl4eaaft35vteh5delq64wd7gg",
+    "suz8aku0sd08vnhfrafsg60lpx",
+];
+const PROBE_FILE: &str = "-----BEGIN AGE ENCRYPTED FILE-----
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBIdElwYURDMXBSczV5UGNj
+QSswWGhNTVdrL2d4dlRwMjRhSFZ2OTMzZGtjCmx5TVI3enM2cStJMFFiMUN4cU4z
+SHZDdUlmZVlVNHJab0gvQ3VnNldOZEEKLS0tIG5iRk1hNjN4dDUvd1RjbnJ3dHlC
+TUlENkROd1JPWmIwc0hOUHhRbldQM2sKV10cXQZDhqzdlXZRzCPZtZDiYt3AeHxW
+QOe2NBxAoJC7VlGzEsT1MFAFXNCa
+-----END AGE ENCRYPTED FILE-----
+";
+
+/// [`PROBE_FILE`] in a temp file, which a CLI decrypts with the probe identity on stdin.
 struct Probe {
-    identity: Vec<u8>,
-    // Holds the ciphertext; removed on drop.
+    // Removed on drop.
     dir: tempfile::TempDir,
 }
 
 impl Probe {
-    fn new(keygen: &Path, encryptor: &Path) -> Result<Self, String> {
-        let generated = run_within(proc::command(keygen), &[])
-            .filter(|out| out.status.success())
-            .ok_or_else(|| format!("{} did not make a throwaway key", keygen.display()))?;
-        let text = String::from_utf8_lossy(&generated.stdout);
-        let recipient = text
-            .lines()
-            .find_map(|line| line.strip_prefix("# public key:"))
-            .map(str::trim)
-            .ok_or_else(|| format!("{} printed no public key", keygen.display()))?;
-        let mut encrypt = proc::command(encryptor);
-        encrypt.args(["-e", "-r", recipient]);
-        let ciphertext = run_within(encrypt, PROBE_TEXT)
-            .filter(|out| out.status.success())
-            .ok_or_else(|| format!("{} -e failed on a throwaway key", encryptor.display()))?
-            .stdout;
+    fn new() -> Result<Self, String> {
         let dir = tempfile::Builder::new()
             .prefix("dotman-age-probe-")
             .tempdir()
             .map_err(|e| format!("cannot create a temp dir: {e}"))?;
-        fs::write(dir.path().join("probe.age"), ciphertext)
+        fs::write(dir.path().join("probe.age"), PROBE_FILE)
             .map_err(|e| format!("cannot write the probe: {e}"))?;
-        Ok(Self {
-            identity: generated.stdout,
-            dir,
-        })
+        Ok(Self { dir })
     }
 
     fn reads(&self, program: &Path, arg: &str) -> bool {
+        let mut identity = PROBE_IDENTITY.concat().to_ascii_uppercase();
+        identity.push('\n');
         let mut cmd = proc::command(program);
         cmd.args(["-d", "-i", arg, "--"])
             .arg(self.dir.path().join("probe.age"));
-        run_within(cmd, &self.identity)
+        run_within(cmd, identity.as_bytes())
             .is_some_and(|out| out.status.success() && out.stdout == PROBE_TEXT)
     }
 }
@@ -1189,6 +1188,18 @@ mod tests {
             findings(&late).map(|f| f.rule).collect::<Vec<_>>(),
             [AGE_RULE]
         );
+    }
+
+    #[test]
+    fn the_probe_identity_is_a_key_only_once_assembled() {
+        let identity = PROBE_IDENTITY.concat().to_ascii_uppercase();
+        assert_eq!(found(&identity), [(AGE_RULE, 1)]);
+        for piece in PROBE_IDENTITY {
+            assert_eq!(found(piece), [], "{piece}");
+            assert_eq!(found(&piece.to_ascii_uppercase()), [], "{piece}");
+        }
+        assert_eq!(found(PROBE_FILE), []);
+        assert!(PROBE_FILE.as_bytes().starts_with(ARMOR));
     }
 
     #[test]

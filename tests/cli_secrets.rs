@@ -1013,6 +1013,66 @@ fn the_key_in_the_environment_is_probed_not_read_from_the_version() {
     );
 }
 
+/// The probe decrypts a fixed file with a fixed identity, so it needs no keygen: with none beside
+/// the configured age, `DOTMAN_AGE_KEY` still decrypts, doctor passes it, and no key reaches a file.
+#[test]
+fn the_key_in_the_environment_needs_no_keygen() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let key = identity(&a);
+    let vars = [("DOTMAN_AGE_KEY", key.as_str())];
+    let b = wrapped_age(&a, "").unwrap();
+    fs::remove_file(b.root().join("age-wrapper/age-keygen")).unwrap();
+    let err = exits(&b.run_with(&vars, &["apply"]), 0);
+    assert!(!err.contains("cannot be used"), "{err}");
+    assert_eq!(b.read(HOSTS), PLAIN);
+    let report = String::from_utf8_lossy(&b.run_with(&vars, &["doctor"]).stdout).into_owned();
+    assert!(
+        report.contains("pass  DOTMAN_AGE_KEY is read by age"),
+        "{report}"
+    );
+    for dir in [b.home(), b.state_dir(), b.repo(), b.xdg_config()] {
+        assert_eq!(files_containing(&dir, MARKER), Vec::<String>::new());
+    }
+}
+
+/// rage is picked first, and when it cannot read the key from stdin, the age on PATH reads it,
+/// with no rage-keygen installed.
+#[test]
+fn a_rage_that_cannot_read_the_key_falls_back_to_age() {
+    if !age_installed() {
+        return;
+    }
+    let Some(age) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("age"))
+        .find(|candidate| candidate.is_file())
+    else {
+        return;
+    };
+    let a = keyed_device();
+    let key = identity(&a);
+    let mut b = a.second_device();
+    exits(&b.run(&["init", &b.remote_url()]), 0);
+    let dir = b.root().join("rage-only");
+    fs::create_dir(&dir).unwrap();
+    let rage = dir.join("rage");
+    fs::write(
+        &rage,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *' -i - '*|*' -i /dev/stdin '*) echo 'rage: no identity' >&2; exit 1;;\nesac\nexec '{}' \"$@\"\n",
+            age.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&rage, fs::Permissions::from_mode(0o755)).unwrap();
+    b.prepend_path(&dir);
+    let err = exits(&b.run_with(&[("DOTMAN_AGE_KEY", &key)], &["apply"]), 0);
+    assert!(!err.contains("cannot be used"), "{err}");
+    assert_eq!(b.read(HOSTS), PLAIN);
+}
+
 /// A CLI that reads no identity from stdin at all leaves the files locked, and the warning says
 /// that dotman never writes the key to a file and names `DOTMAN_AGE_KEY_FILE`.
 #[test]
