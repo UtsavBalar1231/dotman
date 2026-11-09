@@ -776,7 +776,22 @@ impl Run<'_> {
                 let Home::Present(h) = &item.raw else { return };
                 let source = item.r.as_ref().map_or(key.as_str(), |r| r.source.as_str());
                 let encrypted = item.r.as_ref().is_some_and(|r| r.encrypted);
+                let before = repo_config.modes.get(source).cloned();
                 self.capture(key, source, h.kind, encrypted, state, repo_config);
+                // An edit to a file whose stricter mode is kept here travels as content only, so
+                // other machines keep the repo's mode.
+                let kept = item.kept().filter(|(mode, _)| *mode == h.mode);
+                if let (Some((mode, repo)), Some(entry), false) =
+                    (kept, state.files.get_mut(key), self.opts.dry_run)
+                    && self.captured.contains(key)
+                {
+                    match before {
+                        Some(value) => repo_config.modes.insert(source.to_owned(), value),
+                        None => repo_config.modes.remove(source),
+                    };
+                    entry.mode = format!("{mode:04o}");
+                    entry.repo_mode = Some(format!("{repo:04o}"));
+                }
             }
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };

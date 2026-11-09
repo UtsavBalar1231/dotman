@@ -924,6 +924,19 @@ fn a_stricter_mode_kept_on_one_machine_stays_on_that_machine() {
     assert_eq!(mode(&b, ".bashrc"), 0o600);
     assert_eq!(b.token_of("status", ".bashrc").as_deref(), Some("clean"));
 
+    // An edit on B travels as content only.
+    b.write(".bashrc", b"v3 from b\n", 0o600);
+    exits(&b, 0, &["sync"]);
+    assert!(
+        b.repo_config().modes.is_empty(),
+        "{:?}",
+        b.repo_config().modes
+    );
+    assert_eq!(b.token_of("status", ".bashrc").as_deref(), Some("clean"));
+    exits(&a, 0, &["sync"]);
+    assert_eq!(a.read(".bashrc"), b"v3 from b\n");
+    assert_eq!(mode(&a, ".bashrc"), 0o644);
+
     let mut config = a.repo_config();
     config.modes.insert(".bashrc".to_owned(), "0644".to_owned());
     config
