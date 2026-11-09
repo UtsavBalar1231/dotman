@@ -458,8 +458,8 @@ struct Run<'a> {
     forget_system: BTreeSet<String>,
     announced: usize,
     left: usize,
-    /// Keys kept local this run, other than templates.
-    kept: Vec<String>,
+    /// Keys kept local this run, other than templates, and whether each is stored encrypted.
+    kept: Vec<(String, bool)>,
 }
 
 impl Run<'_> {
@@ -847,7 +847,7 @@ impl Run<'_> {
                             "capture",
                             &format!("{key} (replaces the repo version for every machine)"),
                         );
-                        self.kept.push(key.clone());
+                        self.kept.push((key.clone(), encrypted));
                     }
                 }
                 // An edit to a file whose stricter mode is kept here travels as content only, so
@@ -879,7 +879,7 @@ impl Run<'_> {
                     (Action::KeepLocal, _) => {
                         self.announce("keep local", key);
                         if !r.template {
-                            self.kept.push(key.clone());
+                            self.kept.push((key.clone(), r.encrypted));
                         }
                         Some(r.tuple.mode)
                     }
@@ -1455,7 +1455,11 @@ impl Run<'_> {
         let mut said = vec![format!(
             "kept; the next `{bin} sync` captures {them} into the repo for every machine"
         )];
-        let keys: Vec<&str> = self.kept.iter().map(String::as_str).collect();
+        let keys: Vec<(&str, bool)> = self
+            .kept
+            .iter()
+            .map(|(key, encrypted)| (key.as_str(), *encrypted))
+            .collect();
         if let Some(add) = self.for_host(&keys) {
             said.push(format!("{add} keeps {them} to this machine"));
         }
@@ -1469,17 +1473,21 @@ impl Run<'_> {
         if self.opts.pass != Pass::Capture || question.local_action != Action::KeepLocal {
             return None;
         }
-        let keys: Vec<&str> = items
+        let keys: Vec<(&str, bool)> = items
             .iter()
             .filter(|item| !item.system && !item.r.as_ref().is_some_and(|r| r.template))
-            .map(|item| item.key.as_str())
+            .map(|item| {
+                let encrypted = item.r.as_ref().is_some_and(|r| r.encrypted);
+                (item.key.as_str(), encrypted)
+            })
             .collect();
         self.for_host(&keys)
     }
 
     /// `` `<bin> add --for host=<host> <paths>` ``, when `keys` is not empty and the host name is
-    /// one a variant condition can hold.
-    fn for_host(&self, keys: &[&str]) -> Option<String> {
+    /// one a variant condition can hold. The keys flagged as encrypted get a command of their own
+    /// with `--encrypt`: a plain variant of one would put its plain text in the repo.
+    fn for_host(&self, keys: &[(&str, bool)]) -> Option<String> {
         let host = &self.ctx.identity().host;
         // A variant condition takes only these characters.
         let named = !host.is_empty()
@@ -1489,15 +1497,23 @@ impl Run<'_> {
         if !named || keys.is_empty() {
             return None;
         }
-        let paths: Vec<String> = keys
-            .iter()
-            .map(|key| add::pasteable(&self.ctx.paths.home, key))
-            .collect();
-        Some(format!(
-            "`{} add --for host={host} {}`",
-            name::bin(),
-            paths.join(" ")
-        ))
+        let command = |encrypt: bool| {
+            let paths: Vec<String> = keys
+                .iter()
+                .filter(|(_, encrypted)| *encrypted == encrypt)
+                .map(|(key, _)| add::pasteable(&self.ctx.paths.home, key))
+                .collect();
+            let flag = if encrypt { "--encrypt " } else { "" };
+            (!paths.is_empty()).then(|| {
+                format!(
+                    "`{} add {flag}--for host={host} {}`",
+                    name::bin(),
+                    paths.join(" ")
+                )
+            })
+        };
+        let commands: Vec<String> = [false, true].into_iter().filter_map(command).collect();
+        Some(commands.join(" and "))
     }
 
     /// The mode R reached `$HOME` with; `None` when it did not. A skipped or failed write is

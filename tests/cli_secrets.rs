@@ -1185,6 +1185,45 @@ fn encrypted_conflict() -> (TestEnv, TestEnv) {
     (a, b)
 }
 
+/// The way offered to keep an `{age}` file to this machine, before the decision in `sync` and
+/// after `apply --keep-local`, stores the variant encrypted: run as printed and synced, the
+/// plain text reaches no object of the remote.
+#[test]
+fn the_printed_way_to_keep_an_encrypted_file_here_keeps_it_encrypted() {
+    if !age_installed() {
+        return;
+    }
+    for command in [&["sync"][..], &["apply", "--keep-local"]] {
+        let (a, b) = encrypted_conflict();
+        let out = b.run(command);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            matches!(out.status.code(), Some(0 | 3)),
+            "{command:?}: {err}"
+        );
+        assert!(
+            err.contains("`dotman add --encrypt --for host=box "),
+            "{command:?}: {err}"
+        );
+        assert!(!err.contains("`dotman add --for"), "{command:?}: {err}");
+
+        exits(
+            &common::run_hint(&b, &err, "add --encrypt --for host=box"),
+            0,
+        );
+        exits(&b.run(&["sync"]), 0);
+        exits(&a.run(&["sync"]), 0);
+        assert!(remote_tree(&b).contains(BOX_VARIANT), "{command:?}");
+        assert_eq!(
+            remote_objects_holding(&b, b"box-only"),
+            0,
+            "{command:?}: the remote holds the plain text"
+        );
+        assert_eq!(b.read(HOSTS), BOX_ONLY);
+        assert_eq!(a.read(HOSTS), b"github.com:\n  oauth_token: from-a\n");
+    }
+}
+
 /// Typed by hand, a plain `--for` variant of an `{age}` file is refused before anything is
 /// written, and the command the refusal names stores it encrypted.
 #[test]
