@@ -767,6 +767,37 @@ fn encrypting_a_plain_file_replaces_its_source_and_records_only_other_modes() {
 }
 
 #[test]
+fn rerunning_an_interrupted_add_encrypt_removes_the_plain_source() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    env.write(HOSTS, PLAIN, 0o600);
+    env.ok(&["add", "--encrypt", HOSTS]);
+    let sealed = ciphertext(&env);
+    // An interruption before the plain source is removed leaves both.
+    env.write_repo(HOSTS, PLAIN);
+
+    let err = env.ok(&["add", "--encrypt", HOSTS]);
+    assert!(err.contains("git history still has it"), "{err}");
+    assert!(!env.repo().join(HOSTS).exists());
+    assert_eq!(ciphertext(&env), sealed, "the ciphertext already held H");
+    assert_eq!(env.token_of("status", HOSTS).as_deref(), Some("clean"));
+
+    // When the ciphertext does not hold what $HOME has, the pair stays ambiguous.
+    env.write_repo(HOSTS, PLAIN);
+    env.write(HOSTS, b"github.com:\n  oauth_token: gho_new\n", 0o600);
+    let err = env.fails(&["add", "--encrypt", HOSTS]);
+    assert!(
+        err.contains("equally specific") && err.contains("forget ~/.config/gh/hosts.yml"),
+        "{err}"
+    );
+    assert!(env.repo().join(HOSTS).exists());
+}
+
+#[test]
 fn without_an_age_cli_encrypted_paths_are_locked_and_encrypting_names_the_install() {
     let env = TestEnv::new();
     env.ok(&["init"]);

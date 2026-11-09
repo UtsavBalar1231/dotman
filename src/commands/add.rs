@@ -162,13 +162,17 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     }
     .plan(&args.paths)?;
     let managed: Vec<String> = ctx.managed()?.into_keys().collect();
-    let targets = Targets {
+    let mut targets = Targets {
         sources: Sources::group(managed.iter().map(String::as_str)),
         managed,
         identity: ctx.identity(),
         conditions: args.for_conditions.as_deref(),
         encrypt: args.encrypt,
+        resumed: BTreeMap::new(),
     };
+    if args.encrypt {
+        targets.find_interrupted(&ctx, &plan);
+    }
     refuse_collisions(&targets.sources, &plan)?;
     targets.check(&ctx, &repo_config, &plan)?;
     let public = remote_is_public(&ctx, &mut state, dry_run)?;
@@ -328,9 +332,36 @@ struct Targets<'a> {
     identity: &'a IdentitySnapshot,
     conditions: Option<&'a str>,
     encrypt: bool,
+    /// Keys whose interrupted `add --encrypt` this run completes, and their `{age}` source.
+    resumed: BTreeMap<String, String>,
 }
 
 impl Targets<'_> {
+    /// An interrupted `add --encrypt` leaves the plain source beside its `{age}` one. When the
+    /// ciphertext already holds what `$HOME` has, the rerun only has to remove the plain source.
+    fn find_interrupted(&mut self, ctx: &Context, plan: &Plan) {
+        for key in plan.files.keys() {
+            let Selection::Ambiguous(tied) = self.sources.select(key, self.identity) else {
+                continue;
+            };
+            let [a, b] = tied.as_slice() else {
+                continue;
+            };
+            let pair = [(a, b), (b, a)].into_iter().find(|(plain, age)| {
+                self.sources.flag(key, plain) == Flag::Plain
+                    && variant::with_age(plain).is_ok_and(|source| source == **age)
+            });
+            let Some((_, age)) = pair else {
+                continue;
+            };
+            let done = matches!(read_node(&ctx.paths.home, key), Ok(Node::File { bytes, .. })
+                if ctx.age().decrypt(&ctx.paths.repo.join(age)).is_ok_and(|plain| plain == bytes));
+            if done {
+                self.resumed.insert(key.clone(), age.clone());
+            }
+        }
+    }
+
     fn check(&self, ctx: &Context, repo_config: &RepoConfig, plan: &Plan) -> Result<()> {
         if self.encrypt {
             if !plan.dirs.is_empty() {
@@ -441,6 +472,9 @@ impl Targets<'_> {
         if let Some(conditions) = self.conditions {
             return variant::variant_source(key, conditions);
         }
+        if let Some(source) = self.resumed.get(key) {
+            return Ok(source.clone());
+        }
         match self.sources.select(key, self.identity) {
             Selection::None => Ok(key.to_owned()),
             Selection::Winner(source) if self.sources.flag(key, source) == Flag::Tmpl => bail!(
@@ -449,8 +483,9 @@ impl Targets<'_> {
             ),
             Selection::Winner(source) => Ok(source.to_owned()),
             Selection::Ambiguous(tied) => bail!(
-                "{} are equally specific here; remove one first",
-                tied.join(", ")
+                "{} are equally specific here; remove one of them from the repo first, or stop managing the file with `{} forget ~/{key}`",
+                tied.join(", "),
+                name::bin()
             ),
             Selection::Invalid(problems) => bail!(
                 "{}",
