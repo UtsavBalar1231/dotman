@@ -85,7 +85,7 @@ pub fn run(args: &DoctorArgs) -> Result<bool> {
             Level::Fail => "fail",
             Level::Info => "info",
         };
-        writeln!(out, "{tag:<6}{}", output::escape(&check.line))
+        writeln!(out, "{tag:<6}{}", output::escape_line(&check.line))
             .context("cannot write to stdout")?;
     }
     Ok(checks.iter().all(|c| c.level != Level::Fail))

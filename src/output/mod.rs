@@ -42,8 +42,18 @@ pub fn get_verbosity() -> Verbosity {
 /// `char::escape_debug` writes it, such as `\u{1b}` or `\r`. Everything else is left alone.
 #[must_use]
 pub fn escape(text: &str) -> Cow<'_, str> {
-    let unsafe_char = |c: char| c.is_control() && c != '\n' && c != '\t';
-    if !text.chars().any(unsafe_char) {
+    escape_where(text, |c| c.is_control() && c != '\n' && c != '\t')
+}
+
+/// [`escape`] that also escapes newline and tab, for a field that must stay on one line, such
+/// as a key or a hook command.
+#[must_use]
+pub fn escape_line(text: &str) -> Cow<'_, str> {
+    escape_where(text, char::is_control)
+}
+
+fn escape_where(text: &str, unsafe_char: impl Fn(char) -> bool) -> Cow<'_, str> {
+    if !text.chars().any(&unsafe_char) {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
@@ -97,12 +107,16 @@ pub fn verbose(message: &str) {
     eprintln!("{}", escape(message).dimmed());
 }
 
-/// Prints a git-style action message with dimmed verb and normal message.
+/// Prints a git-style action message with dimmed verb and normal message, each kept on one line.
 pub fn action(verb: &str, message: &str) {
     if get_verbosity() == Verbosity::Quiet {
         return;
     }
-    eprintln!("{} {}", escape(verb).dimmed().bold(), escape(message));
+    eprintln!(
+        "{} {}",
+        escape_line(verb).dimmed().bold(),
+        escape_line(message)
+    );
 }
 
 /// Starts a new progress bar for tracking long operations.
@@ -136,6 +150,14 @@ mod tests {
         assert_eq!(escape("\0\u{7f}\u{9b}\u{85}"), "\\0\\u{7f}\\u{9b}\\u{85}");
         assert_eq!(escape("line\nnext\ttab"), "line\nnext\ttab");
         let once = escape("\u{1b}[2J").into_owned();
+        assert_eq!(escape(&once), once);
+    }
+
+    #[test]
+    fn a_one_line_field_also_escapes_newline_and_tab() {
+        assert_eq!(escape_line("a\nb\tc\rd\u{1b}e"), "a\\nb\\tc\\rd\\u{1b}e");
+        assert!(matches!(escape_line("a/b \"c\" é"), Cow::Borrowed(_)));
+        let once = escape_line("x\ny").into_owned();
         assert_eq!(escape(&once), once);
     }
 }
