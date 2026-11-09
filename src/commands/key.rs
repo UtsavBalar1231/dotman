@@ -25,7 +25,8 @@ use std::time::SystemTime;
 /// # Errors
 ///
 /// Fails when the repo is not initialised, the lock is held, `init` finds an age identity already
-/// there, or `import` cannot read the key file or finds it invalid.
+/// there whose recipient is listed or cannot be derived, or `import` cannot read the key file or
+/// finds it invalid.
 pub fn run(args: &KeyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("key")?;
     match &args.command {
@@ -38,8 +39,47 @@ fn init(ctx: &Context) -> Result<Outcome> {
     let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
     ctx.guard()?;
     ctx.repo_id()?;
+    if fs::symlink_metadata(&ctx.paths.age_identity).is_ok() {
+        return list_existing(ctx);
+    }
     create_identity(ctx)?;
     Ok(Outcome::Done)
+}
+
+fn already_exists(identity: &Path) -> anyhow::Error {
+    anyhow!(
+        "an age identity already exists at {}; dotman never overwrites one. `{} key import --force <file>` replaces it after a backup",
+        identity.display(),
+        name::bin()
+    )
+}
+
+/// Lists the recipient of the identity already in place, as one left by a `key init` that stopped
+/// before it listed it. Fails as before when its recipient is listed or cannot be derived.
+fn list_existing(ctx: &Context) -> Result<Outcome> {
+    let identity = &ctx.paths.age_identity;
+    let text = existing(identity)?.ok_or_else(|| already_exists(identity))?;
+    let Ok(recipients) = ctx.age().recipients_of(&text) else {
+        return Err(already_exists(identity));
+    };
+    let added = add_recipients(ctx, &recipients)?;
+    if added.is_empty() {
+        return Err(already_exists(identity));
+    }
+    output::success(&format!(
+        "an age identity is already at {}; added its recipient {} to [age] recipients in .dotman.toml",
+        identity.display(),
+        added.join(", ")
+    ));
+    advise_backup();
+    Ok(Outcome::Done)
+}
+
+fn advise_backup() {
+    output::info(&format!(
+        "Back the identity up now: keep it in a password manager plus one offline copy, because without it the encrypted files cannot be recovered. On a new machine, supply it with DOTMAN_AGE_KEY or `{} key import`.",
+        name::bin()
+    ));
 }
 
 /// Generates the identity and lists its recipient. The caller holds the lock and has checked
@@ -47,11 +87,7 @@ fn init(ctx: &Context) -> Result<Outcome> {
 pub(crate) fn create_identity(ctx: &Context) -> Result<()> {
     let identity = &ctx.paths.age_identity;
     if fs::symlink_metadata(identity).is_ok() {
-        bail!(
-            "an age identity already exists at {}; dotman never overwrites one. `{} key import --force <file>` replaces it after a backup",
-            identity.display(),
-            name::bin()
-        );
+        return Err(already_exists(identity));
     }
     if let Some(dir) = identity.parent() {
         create_private_dir(dir, false)
@@ -77,10 +113,7 @@ pub(crate) fn create_identity(ctx: &Context) -> Result<()> {
         };
         output::info(&format!("  recipient {recipient}{note}"));
     }
-    output::info(&format!(
-        "Back the identity up now: keep it in a password manager plus one offline copy, because without it the encrypted files cannot be recovered. On a new machine, supply it with DOTMAN_AGE_KEY or `{} key import`.",
-        name::bin()
-    ));
+    advise_backup();
     Ok(())
 }
 
