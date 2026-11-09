@@ -374,6 +374,28 @@ fn row_11_both_changed_is_a_conflict() {
 }
 
 #[test]
+fn the_conflicts_are_listed_before_the_question_even_with_quiet() {
+    let env = added(&[(".bashrc", b"one\n", 0o644)]);
+    env.write_repo(".bashrc", b"repo\n");
+    env.write(".bashrc", b"mine\n", 0o644);
+    let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+    let Some(seen) = common::in_a_terminal(&env, &plain, &["-q", "apply"], b"s\n") else {
+        eprintln!("skipped: no script(1) to give dotman a terminal");
+        return;
+    };
+    assert!(seen.contains("1 conflicts:"), "{seen}");
+    assert!(
+        seen.contains("  both-changed              .bashrc"),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("[k] keep all local (capture them into the repo for every machine)"),
+        "{seen}"
+    );
+    assert_eq!(env.read(".bashrc"), b"mine\n");
+}
+
+#[test]
 fn keep_local_says_the_next_sync_shares_it_and_the_printed_variant_keeps_it_here() {
     let env = TestEnv::new();
     env.write_machine_config("[identity]\nhost = \"box\"\n");

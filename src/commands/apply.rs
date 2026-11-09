@@ -541,12 +541,12 @@ impl Run<'_> {
         } else if pending.is_empty() || self.opts.dry_run || !prompt::interactive() {
             false
         } else {
-            output::info(&format!(
+            output::context(&format!(
                 "the machine identity changed ({change}), which gives {} paths another source:",
                 pending.len()
             ));
             for key in &pending {
-                output::info(&format!("  {key}"));
+                output::context(&format!("  {key}"));
             }
             prompt::confirm("accept the new identity? [y/N]")?
         };
@@ -723,9 +723,9 @@ impl Run<'_> {
         if self.opts.dry_run || !prompt::interactive() {
             return Ok(vec![Choice::Skip; items.len()]);
         }
-        output::info(&format!("{} {}:", items.len(), question.what));
+        output::context(&format!("{} {}:", items.len(), question.what));
         for item in items {
-            output::info(&format!("  {:<26}{}", token(item.row), item.key));
+            output::context(&format!("  {:<26}{}", token(item.row), item.key));
         }
         loop {
             match parse_reply(question, &prompt::ask(&menu(question, true))?, true) {
@@ -1662,13 +1662,13 @@ fn system_files(n: usize) -> String {
 fn show_system(ctx: &Context, ready: &[Ready]) {
     let user = |uid: u32| sys::passwd_by_uid(uid).map_or_else(|| uid.to_string(), |pw| pw.name);
     let group = |gid: u32| sys::group_by_gid(gid).map_or_else(|| gid.to_string(), |gr| gr.name);
-    output::info(&format!("{} to write as root:", system_files(ready.len())));
+    output::context(&format!("{} to write as root:", system_files(ready.len())));
     for item in ready {
         let now = item.current.as_ref().map_or_else(
             || "new".to_owned(),
             |(_, mode, uid, gid)| format!("now {}:{} {mode:04o}", user(*uid), group(*gid)),
         );
-        output::info(&format!(
+        output::context(&format!(
             "  {}  {}:{} {:04o}  ({now})",
             item.key, item.owner, item.group, item.r.tuple.mode
         ));

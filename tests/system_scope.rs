@@ -1049,6 +1049,25 @@ fn apply_system_without_yes_exits_3_when_it_cannot_ask_and_writes_nothing() {
 }
 
 #[test]
+fn the_system_files_to_write_are_listed_before_the_question_even_with_quiet() {
+    let env = setup_none(&["/etc"]);
+    one_pending_write(&env);
+    let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+    let args = ["-q", "apply", "--system"];
+    let Some(seen) = common::in_a_terminal(&env, &plain, &args, b"n\n") else {
+        eprintln!("skipped: no script(1) to give dotman a terminal");
+        return;
+    };
+    assert!(seen.contains("1 system file to write as root:"), "{seen}");
+    assert!(seen.contains(&format!("  {KEYD}  ")), "{seen}");
+    assert!(
+        seen.contains("write 1 system file as root? [y/N]"),
+        "{seen}"
+    );
+    assert_eq!(fs::read(env.system_path(KEYD)).expect("read"), b"old\n");
+}
+
+#[test]
 fn a_dry_run_of_apply_system_changes_nothing() {
     let env = setup_none(&["/etc"]);
     one_pending_write(&env);
