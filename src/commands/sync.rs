@@ -417,7 +417,7 @@ pub(crate) fn held_entries<'a>(
 
 /// How to resolve the hold on `entry` without losing the edit. A tracked file whose edit is not
 /// in `$HOME` must never be pointed at `add`, which would replace the only copy with `$HOME`'s.
-pub(crate) fn held_remedy(ctx: &Context, entry: &StatusEntry, found: Finding) -> String {
+pub(crate) fn held_remedy(ctx: &Context, entry: &StatusEntry) -> String {
     let bin = name::bin();
     let source = entry.path.to_string_lossy();
     let quoted = shell_words::quote(&source);
@@ -439,13 +439,8 @@ pub(crate) fn held_remedy(ctx: &Context, entry: &StatusEntry, found: Finding) ->
         );
     }
     let home = add::pasteable(&ctx.paths.home, &key);
-    let plain = if found.overridable() {
-        format!(", `{bin} add --allow-plain {home}` stores it as is")
-    } else {
-        String::new()
-    };
     format!(
-        "{home} has the same edit: `{bin} add --encrypt {home}` stores it encrypted{plain}; or remove the secret there and drop the repo edit with `{bin} git checkout -- {quoted}`"
+        "{home} has the same edit: `{bin} add --encrypt {home}` stores it encrypted; or remove the secret there and drop the repo edit with `{bin} git checkout -- {quoted}`"
     )
 }
 
@@ -456,7 +451,7 @@ fn list_held(ctx: &Context, held: &[(&StatusEntry, Finding)]) {
         output::warning(&format!("  {}: {found}", output::escape_line(&path)));
         output::warning(&format!(
             "    {}",
-            output::escape_line(&held_remedy(ctx, entry, *found))
+            output::escape_line(&held_remedy(ctx, entry))
         ));
     }
 }

@@ -1953,7 +1953,7 @@ fn add_still_replaces_a_repo_copy_that_came_from_home() {
 
 /// `dotman edit` leaves the key clean while its uncommitted repo copy holds a credential, which
 /// stops sync before the pull: status says so, in both forms, instead of saying clean. The remedy
-/// for a credential names `--allow-plain`, which then lets the edit through.
+/// offers `--encrypt`, never `--allow-plain`; typed by hand, `--allow-plain` still lets it through.
 #[test]
 fn status_reports_a_held_repo_edit_that_stops_sync() {
     let env = first_device(&[(".a", b"a\n", 0o644)]);
@@ -1981,8 +1981,10 @@ fn status_reports_a_held_repo_edit_that_stops_sync() {
 
     let err = exits(&env, 3, &["sync"]);
     assert!(err.contains("stopped before the pull"), "{err}");
-    let allow = format!("`dotman add --allow-plain {home}` stores it as is");
-    assert!(err.contains(&allow), "{err}");
+    let encrypt =
+        format!("`dotman add --encrypt {home}` stores it encrypted; or remove the secret");
+    assert!(err.contains(&encrypt), "{err}");
+    assert!(!err.contains("--allow-plain"), "{err}");
     exits(&env, 0, &["add", "--allow-plain", ".a"]);
     exits(&env, 0, &["sync"]);
     assert!(!env.ok(&["status"]).contains("held in the repo"));

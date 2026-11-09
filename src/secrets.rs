@@ -160,19 +160,19 @@ impl Finding {
     }
 
     /// What follows the finding in a message: how to resolve the hold, with the commands for
-    /// `path`, or with only the `add` flags.
+    /// `path`, or with only the `add` flags. It never offers `--allow-plain`, which would publish
+    /// the credential.
     #[must_use]
     pub fn remedy(self, path: Option<&str>) -> String {
         let bin = name::bin();
         let never = ", which dotman never stores in plain text";
+        let remove = "; or remove the secret from the file";
         match (path, self.overridable()) {
-            (None, true) => {
-                "; --encrypt stores it encrypted, --allow-plain stores it as is".to_owned()
-            }
+            (None, true) => format!("; --encrypt stores it encrypted{remove}"),
             (None, false) => format!("{never}; --encrypt stores it encrypted"),
-            (Some(path), true) => format!(
-                "; `{bin} add --encrypt {path}` stores it encrypted, `{bin} add --allow-plain {path}` stores it as is"
-            ),
+            (Some(path), true) => {
+                format!("; `{bin} add --encrypt {path}` stores it encrypted{remove}")
+            }
             (Some(path), false) => {
                 format!("{never}; `{bin} add --encrypt {path}` stores it encrypted")
             }

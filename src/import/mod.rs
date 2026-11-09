@@ -107,7 +107,7 @@ impl Report {
 }
 
 /// What the content guard holds is left out of every commit the import makes.
-const CREDENTIAL: &str = "files that hold an age secret key or a credential, left out of the repo; `{bin} add --encrypt` stores one encrypted, `{bin} add --allow-plain` stores a credential as it is";
+const CREDENTIAL: &str = "files that hold an age secret key or a credential, left out of the repo; `{bin} add --encrypt` stores one encrypted";
 
 /// The first finding in `bytes` that `allow` does not cover for `key`, as an entry that needs
 /// action.

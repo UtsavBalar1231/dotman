@@ -872,10 +872,11 @@ fn add_refuses_a_named_file_that_holds_a_credential() {
         let err = exits(&env.run(args), 1);
         assert!(
             err.contains(
-                ".config/zsh/local.zsh: line 2 holds a github-token; --encrypt stores it encrypted, --allow-plain stores it as is"
+                ".config/zsh/local.zsh: line 2 holds a github-token; --encrypt stores it encrypted; or remove the secret from the file"
             ),
             "{args:?}: {err}"
         );
+        assert!(!err.contains("--allow-plain"), "{args:?}: {err}");
         assert!(!err.contains(&token), "the value is never printed");
     }
     assert_eq!(env.porcelain("list"), []);
@@ -1242,7 +1243,7 @@ fn a_directory_holds_a_file_that_holds_a_credential() {
     );
     assert!(
         err.contains(&format!(
-            "held .config/app/remote.conf: line 1 holds a gitlab-pat; `dotman add --encrypt {path}` stores it encrypted, `dotman add --allow-plain {path}` stores it as is",
+            "held .config/app/remote.conf: line 1 holds a gitlab-pat; `dotman add --encrypt {path}` stores it encrypted; or remove the secret from the file",
             path = path.display()
         )),
         "{err}"

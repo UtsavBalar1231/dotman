@@ -375,7 +375,7 @@ fn list_held_in_repo(
             out,
             "  {}: {found}\n    {}",
             escape_line(&entry.path.to_string_lossy()),
-            escape_line(&sync::held_remedy(ctx, entry, *found))
+            escape_line(&sync::held_remedy(ctx, entry))
         )?;
     }
     Ok(())
