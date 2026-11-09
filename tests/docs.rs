@@ -242,6 +242,17 @@ const CLAIMS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "When `origin` has no branch yet",
+        &["status_counts_the_commits_never_pushed_and_the_printed_sync_pushes_them"],
+    ),
+    (
+        "Keeping `$HOME`'s version of a conflicting or existing file",
+        &[
+            "keep_local_in_sync_replaces_the_repo_version_for_every_machine_and_says_so",
+            "the_way_to_keep_a_conflict_to_this_machine_is_offered_before_the_capture_and_works",
+        ],
+    ),
+    (
         "A backup copy is never overwritten",
         &["a_file_backed_up_by_both_passes_of_a_sync_keeps_both_copies"],
     ),
