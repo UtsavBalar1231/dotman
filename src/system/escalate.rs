@@ -11,9 +11,11 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use libc::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ChildStderr, Command, ExitStatus, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 // Where sudo, run0 and doas name the user who called them.
@@ -187,18 +189,67 @@ impl Escalator {
             }
         }
         // stdout is a pipe, so run0 passes it through instead of allocating a pseudo TTY.
-        let child = self
-            .command(program, args)
-            .stdout(Stdio::piped())
+        let mut command = self.command(program, args);
+        command.stdout(Stdio::piped());
+        // Only what run0 prints tells a missing systemd from a polkit refusal. Its polkit agent
+        // prompts on the terminal, not on stderr.
+        if self.tool == Tool::Run0 {
+            command.stderr(Stdio::piped());
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("cannot run {name}"))?;
+        let relayed = child.stderr.take().map(relay);
         let output = wait_ignoring_signals(child)?;
+        let said = relayed
+            .and_then(|relay| relay.join().ok())
+            .unwrap_or_default();
+        let hint = if self.tool == Tool::Run0 && !output.status.success() && no_systemd(&said) {
+            RUN0_NEEDS_SYSTEMD.to_owned()
+        } else {
+            self.tool.hint(interactive)
+        };
         Ok(Ran {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             status: output.status,
-            hint: self.tool.hint(interactive),
+            hint,
         })
     }
+}
+
+const RUN0_NEEDS_SYSTEMD: &str =
+    "run0 needs systemd as PID 1; use sudo or doas, or set `[system] escalate`";
+
+/// How much of the end of run0's stderr is kept to look for the reason it failed.
+const KEPT: usize = 4096;
+
+/// Copies `pipe` to stderr as it arrives and returns the last [`KEPT`] bytes.
+fn relay(mut pipe: ChildStderr) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let (mut tail, mut buf) = (Vec::new(), [0_u8; 1024]);
+        let mut err = io::stderr();
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = buf.get(..n).unwrap_or_default();
+                    let _ = err.write_all(chunk);
+                    tail.extend_from_slice(chunk);
+                    tail.drain(..tail.len().saturating_sub(KEPT));
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        tail
+    })
+}
+
+// What systemd prints when PID 1 is not systemd, as in a container: "System has not been booted
+// with systemd as init system (PID 1)", then "Failed to connect to ... bus ...: Host is down".
+fn no_systemd(said: &[u8]) -> bool {
+    let said = String::from_utf8_lossy(said);
+    said.contains("not been booted with systemd") || said.contains("Host is down")
 }
 
 /// What the helper printed and how it, or the escalator in front of it, exited.

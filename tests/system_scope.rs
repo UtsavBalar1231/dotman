@@ -895,16 +895,57 @@ fn each_escalator_gets_its_non_interactive_flags_and_the_exe() {
 }
 
 #[test]
+fn run0_without_systemd_as_pid_1_gets_a_hint_that_names_it() {
+    let env = setup(&[]);
+    configure(&env, &system_config(&["/etc"], "run0"));
+    one_pending_write(&env);
+    let log = env.root().join("run0.log");
+    // What run0 prints in a container, whose PID 1 is not systemd.
+    common::write_exe(
+        &env.root().join("stubs/run0"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\necho \"System has not been booted with systemd as init system (PID 1). Can't operate.\" >&2\necho 'Failed to connect to system scope bus via local transport: Host is down' >&2\nexit 1\n",
+            log.display()
+        ),
+    )
+    .expect("write the run0 stub");
+    let before = tree_checksum(&env.system_root());
+
+    let err = exits(&env, 1, &["apply", "--system", "--yes"]);
+    assert!(err.contains("not been booted with systemd"), "{err}");
+    assert!(
+        err.contains(
+            "run0 did not run system-write, or it refused the plan (exit status: 1); run0 needs systemd as PID 1; use sudo or doas, or set `[system] escalate`"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("polkit"), "{err}");
+    assert!(fs::read_to_string(&log).is_ok_and(|calls| calls.lines().count() == 1));
+    assert_eq!(tree_checksum(&env.system_root()), before);
+    assert_eq!(plans_left(&env), Vec::<String>::new());
+}
+
+#[test]
+fn a_run0_refusal_for_another_reason_keeps_the_polkit_hint() {
+    let env = setup(&[]);
+    configure(&env, &system_config(&["/etc"], "run0"));
+    one_pending_write(&env);
+    common::write_exe(
+        &env.root().join("stubs/run0"),
+        "#!/bin/sh\necho 'Failed to start transient service unit: Access denied' >&2\nexit 1\n",
+    )
+    .expect("write the run0 stub");
+    let err = exits(&env, 1, &["apply", "--system", "--yes"]);
+    assert!(err.contains("Access denied"), "{err}");
+    assert!(err.contains("cannot ask polkit"), "{err}");
+    assert!(!err.contains("needs systemd"), "{err}");
+}
+
+#[test]
 fn with_no_escalator_on_path_the_run_exits_1_with_the_hint() {
     let env = setup(&["/etc"]);
     one_pending_write(&env);
-    let bin = env.root().join("gitbin");
-    fs::create_dir_all(&bin).expect("mkdir");
-    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|dir| dir.join("git"))
-        .find(|path| path.is_file())
-        .expect("git on PATH");
-    symlink(git, bin.join("git")).expect("symlink git");
+    let bin = git_only(&env, "gitbin");
     let path = format!("{}:{}", env.root().join("stubs").display(), bin.display());
     let before = tree_checksum(&env.system_root());
 
