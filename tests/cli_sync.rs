@@ -468,23 +468,48 @@ fn commit_messages_name_three_paths_and_count_the_rest() {
     assert_eq!(subject().trim(), "sync(testbox): x/a");
 }
 
+/// Without a git identity, init, sync and doctor give the same steps. Sync commits nothing, and
+/// the global steps, or the repo-only ones they describe, run as printed let it commit.
 #[test]
-fn a_missing_git_identity_exits_1_with_the_fix_and_commits_nothing() {
-    let env = TestEnv::new();
-    env.ok(&["init"]);
-    env.write(".a", b"a\n", 0o644);
-    env.ok(&["add", ".a"]);
-    fs::remove_file(env.home().join(".gitconfig")).expect("remove the identity");
-    let err = env.fails(&["sync"]);
-    assert!(
-        err.contains("dotman git config --global user.name \"Your Name\""),
-        "{err}"
-    );
-    assert!(
-        err.contains("dotman git config --global user.email \"you@example.com\""),
-        "{err}"
-    );
-    assert!(!env.repo().join(".git/refs/heads/main").exists());
+fn a_missing_git_identity_exits_1_with_steps_that_work() {
+    let steps = "set them with `git config --global user.name \"Your Name\"` and `git config --global user.email \"you@example.com\"`; to set them for the dotman repo only, run `dotman git config` in place of `git config --global`";
+    for global in [true, false] {
+        let env = TestEnv::new();
+        fs::remove_file(env.home().join(".gitconfig")).expect("remove the identity");
+        let err = env.ok(&["init"]);
+        assert!(err.contains(steps), "{err}");
+        env.write(".a", b"a\n", 0o644);
+        env.ok(&["add", ".a"]);
+        let err = env.fails(&["sync"]);
+        let line = format!("git has no user.name and user.email to commit with; {steps}");
+        assert!(err.lines().any(|l| l == line), "{err}");
+        assert!(!env.repo().join(".git/refs/heads/main").exists());
+        let doctor = env.run(&["doctor"]);
+        let report = String::from_utf8_lossy(&doctor.stdout);
+        assert!(
+            report.contains(&format!(
+                "git identity: user.name or user.email is not set; {steps}"
+            )),
+            "{report}"
+        );
+
+        let [name, email, repo_only, in_place]: [String; 4] =
+            backticked(steps).try_into().expect("four commands");
+        for command in [name, email] {
+            let command = if global {
+                command
+            } else {
+                command.replacen(&in_place, &repo_only, 1)
+            };
+            let out = paste(&env, &command);
+            assert!(out.status.success(), "{command}: {}", stderr(&out));
+        }
+        exits(&env, 0, &["sync"]);
+        let repo = repo_path(&env);
+        let log = env.git(&["-C", &repo, "log", "--format=%an <%ae>"]);
+        assert_eq!(log.trim(), "Your Name <you@example.com>");
+        assert_eq!(env.home().join(".gitconfig").exists(), global);
+    }
 }
 
 #[test]

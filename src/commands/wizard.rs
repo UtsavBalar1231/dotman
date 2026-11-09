@@ -5,6 +5,7 @@
 
 use crate::cli::InitArgs;
 use crate::commands::key::{self, Incoming};
+use crate::commands::sync;
 use crate::config::Config;
 use crate::context::Context;
 use crate::name;
@@ -160,8 +161,9 @@ impl Wizard<'_> {
         }
         if identity.name.is_none() && identity.email.is_none() {
             output::info(&format!(
-                "git has no user.name and user.email; pass --git-name and --git-email, or set them with `{bin} git config user.name \"Your Name\"` before `{bin} sync`",
-                bin = name::bin()
+                "git has no user.name and user.email, which `{} sync` needs to commit; pass --git-name and --git-email, or {}",
+                name::bin(),
+                sync::identity_steps()
             ));
             return Ok(None);
         }

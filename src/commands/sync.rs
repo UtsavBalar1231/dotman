@@ -39,9 +39,18 @@ const LISTED: usize = 3;
 const MASS_DELETE: usize = 10;
 
 pub(crate) fn identity_fix() -> String {
-    let bin = name::bin();
     format!(
-        "git has no user.name and user.email to commit with; set them with:\n  {bin} git config --global user.name \"Your Name\"\n  {bin} git config --global user.email \"you@example.com\""
+        "git has no user.name and user.email to commit with; {}",
+        identity_steps()
+    )
+}
+
+/// How to give git an identity, on one line, as every hint about a missing one says it. Plain git
+/// sets the global one, since the dotman repo may not exist yet.
+pub(crate) fn identity_steps() -> String {
+    format!(
+        "set them with `git config --global user.name \"Your Name\"` and `git config --global user.email \"you@example.com\"`; to set them for the dotman repo only, run `{} git config` in place of `git config --global`",
+        name::bin()
     )
 }
 

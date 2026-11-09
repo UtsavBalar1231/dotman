@@ -3,6 +3,7 @@
 use crate::VERSION;
 use crate::bootstrap::{self, Found};
 use crate::cli::DoctorArgs;
+use crate::commands::sync;
 use crate::context::Context;
 use crate::git::{Git, Operation};
 use crate::hooks::{self, Standing};
@@ -312,7 +313,7 @@ fn identity(git: &Git) -> Check {
         Ok(false) => fail(
             "git identity",
             "user.name or user.email is not set",
-            "run git config --global user.name and user.email",
+            &sync::identity_steps(),
         ),
         Err(e) => fail("git identity", &format!("{e:#}"), "check your git config"),
     }
