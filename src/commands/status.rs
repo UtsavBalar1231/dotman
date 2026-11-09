@@ -93,6 +93,16 @@ pub fn run(args: &StatusArgs) -> Result<()> {
 
     let wanted = |key: &str| unfiltered || system_filters.iter().any(|f| is_under(key, f));
     rows.extend(system_rows(&ctx, &repo_config, &state, wanted)?);
+    let mut twins = BTreeSet::new();
+    for (a, b) in ctx.index_collisions()? {
+        output::warning(&format!(
+            "{a} and {b} differ only in case or Unicode normalization; `{} apply` and `{} sync` refuse until one is renamed",
+            name::bin(),
+            name::bin()
+        ));
+        twins.extend([a, b]);
+    }
+    rows.extend(twins.into_iter().map(|key| ("collision", key)));
 
     let new: Vec<&String> = scan.new.keys().filter(|k| in_scope(k)).collect();
     let held: Vec<(&String, Hold)> = scan

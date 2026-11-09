@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::git::{Git, Operation};
 use crate::identity;
-use crate::paths::{Env, Paths, derive_key, validate_key};
+use crate::paths::{Env, Paths, derive_key, find_collisions, is_reserved_root_name, validate_key};
 use crate::repo_config::RepoConfig;
 use crate::secrets::Age;
 use crate::state::{IdentitySnapshot, Kind, State};
@@ -230,6 +230,52 @@ impl Context {
             found.insert(key.to_owned(), kind);
         }
         Ok(found)
+    }
+
+    /// Pairs of keys in the git index, home and system alike, that differ only in case or Unicode
+    /// normalization. A variant counts as the key it targets.
+    pub fn index_collisions(&self) -> Result<Vec<(String, String)>> {
+        // Unlike `managed`, this keeps names that are not NFC: they are what twins look like.
+        let reserved = |p: &str| is_reserved_root_name(p.split('/').next().unwrap_or(p));
+        let paths = self.git.index_paths()?;
+        let system_prefix = format!("{}/", system::DIR);
+        let (system_paths, home_paths): (Vec<&str>, Vec<&str>) = paths
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !p.rsplit('/').next().unwrap_or(p).starts_with(TEMP_PREFIX))
+            .partition(|p| p.starts_with(&system_prefix));
+        let home = Sources::group(home_paths.into_iter().filter(|p| !reserved(p)));
+        let system = Sources::group(
+            system_paths
+                .into_iter()
+                .filter_map(|p| p.strip_prefix(&system_prefix))
+                .filter(|rel| !reserved(rel)),
+        );
+        let keys: Vec<String> = home
+            .keys()
+            .map(str::to_owned)
+            .chain(system.keys().map(system::key_of))
+            .collect();
+        Ok(find_collisions(keys.iter().map(String::as_str)))
+    }
+
+    /// Fails when the index holds two keys that differ only in case or Unicode normalization,
+    /// because a case-insensitive filesystem cannot hold both.
+    pub fn refuse_collisions(&self) -> Result<()> {
+        let pairs = self.index_collisions()?;
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let bin = crate::name::bin();
+        let lines: Vec<String> = pairs
+            .iter()
+            .map(|(a, b)| {
+                format!(
+                    "{a} and {b} differ only in case or Unicode normalization; a case-insensitive filesystem cannot hold both. Rename one with `{bin} git mv` on a case-sensitive machine."
+                )
+            })
+            .collect();
+        bail!("{}", lines.join("\n"))
     }
 
     /// The `keys` under the user-supplied `inputs`, or all of them when there are no inputs. An

@@ -1222,3 +1222,25 @@ fn gh_and_the_network_are_never_reached() {
         "git started an HTTP transport: {err}"
     );
 }
+
+// Silent file loss
+
+/// Two index keys that differ only in case make `apply` and `sync` exit 1 before anything is
+/// written or staged, so a case-insensitive checkout never stages the lost twin's deletion.
+#[test]
+fn colliding_keys_stop_apply_and_sync_before_any_write() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let repo = env.repo().to_string_lossy().into_owned();
+    let blob = env.git(&["-C", &repo, "hash-object", "-w", "/dev/null"]);
+    for key in ["x/A.conf", "x/a.conf"] {
+        let info = format!("100644,{},{key}", blob.trim());
+        env.git(&["-C", &repo, "update-index", "--add", "--cacheinfo", &info]);
+    }
+    let before = env.four_trees();
+    for args in [["apply"], ["sync"]] {
+        let err = exits(&env.run(&args), 1);
+        assert!(err.contains("x/A.conf and x/a.conf"), "{err}");
+    }
+    assert_eq!(env.four_trees(), before);
+}

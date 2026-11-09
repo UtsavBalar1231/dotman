@@ -543,6 +543,17 @@ impl Git {
             .collect())
     }
 
+    /// Every path in the index, in git's order, including files that are gone from the worktree.
+    pub fn index_paths(&self) -> Result<Vec<String>> {
+        let out = self.run(&["ls-files", "-z"])?;
+        Ok(out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|path| !path.is_empty())
+            .filter_map(|path| String::from_utf8(path.to_vec()).ok())
+            .collect())
+    }
+
     /// Every value of `key` in the config file `file`, which need not belong to a repo. A
     /// missing key or file gives no values.
     pub fn config_values(&self, file: &Path, key: &str) -> Result<Vec<String>> {

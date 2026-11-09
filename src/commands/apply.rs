@@ -35,6 +35,7 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("apply")?;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;
     ctx.guard()?;
+    ctx.refuse_collisions()?;
     let opts = Options {
         dry_run: args.dry_run,
         in_place: args.in_place,
