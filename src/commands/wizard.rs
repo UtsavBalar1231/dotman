@@ -624,7 +624,14 @@ fn split_list(answer: &str) -> impl Iterator<Item = &str> {
 
 fn parse_profiles(answer: &str) -> Result<Vec<String>, String> {
     split_list(answer)
-        .map(|part| check_word(part.to_owned()).map_err(|e| format!("{e}")))
+        .map(|part| {
+            if prompt::yes_no(part).is_ok() {
+                return Err(format!(
+                    "`{part}` answers a yes/no question; give profile names such as work,laptop, or leave it empty to keep the profiles"
+                ));
+            }
+            check_word(part.to_owned()).map_err(|e| format!("{e}"))
+        })
         .collect::<Result<Vec<_>, _>>()
         .map(dedup)
 }
@@ -795,6 +802,18 @@ mod tests {
             ["work", "home"]
         );
         assert!(parse_profiles("work, a b").is_err());
+    }
+
+    #[test]
+    fn a_yes_or_no_answer_is_not_a_profile_name() {
+        for answer in ["y", "N", "yes", "No", "work, y"] {
+            let err = parse_profiles(answer).err().unwrap_or_default();
+            assert!(err.contains("answers a yes/no question"), "{answer}: {err}");
+        }
+        assert_eq!(
+            parse_profiles("yesterday, nope").unwrap(),
+            ["yesterday", "nope"]
+        );
     }
 
     #[test]
