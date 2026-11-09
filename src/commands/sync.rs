@@ -7,9 +7,11 @@
 
 use crate::cli::SyncArgs;
 use crate::commands::Outcome;
+use crate::commands::add;
 use crate::commands::apply::{self, Applied, Options, Pass};
 use crate::config::Allow;
 use crate::context::{Context, TEMP_PREFIX};
+use crate::engine::{Node, read_node};
 use crate::git::{PullOutcome, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
 use crate::lock::Lock;
@@ -348,6 +350,52 @@ fn held_entries<'a>(ctx: &Context, status: &'a [StatusEntry]) -> Vec<(&'a Status
         .collect()
 }
 
+/// How to resolve the hold on `entry` without losing the edit. A tracked file whose edit is not
+/// in `$HOME` must never be pointed at `add`, which would replace the only copy with `$HOME`'s.
+pub(crate) fn held_remedy(ctx: &Context, entry: &StatusEntry, found: Finding) -> String {
+    let bin = name::bin();
+    let source = entry.path.to_string_lossy();
+    let quoted = shell_words::quote(&source);
+    let copy = shell_words::quote(&ctx.paths.repo.join(&entry.path).to_string_lossy()).into_owned();
+    if entry.kind == StatusKind::Untracked {
+        return format!("not tracked; move {copy} out of the repo to drop it");
+    }
+    let key = Sources::group([source.as_ref()])
+        .keys()
+        .next()
+        .map_or_else(|| source.clone().into_owned(), str::to_owned);
+    let in_home = matches!(
+        (read_node(&ctx.paths.home, &key), read_node(&ctx.paths.repo, &source)),
+        (Ok(Node::File { bytes: home, .. }), Ok(Node::File { bytes: repo, .. })) if home == repo
+    );
+    if !in_home {
+        return format!(
+            "the edit is only in the repo copy, not in $HOME; `{bin} git diff -- {quoted}` shows it. To keep it, copy {copy} elsewhere and remove the secret from that copy, then drop the edit with `{bin} git checkout -- {quoted}`"
+        );
+    }
+    let home = add::pasteable(&ctx.paths.home, &key);
+    let plain = if found.overridable() {
+        format!(", `{bin} add --allow-plain {home}` stores it as is")
+    } else {
+        String::new()
+    };
+    format!(
+        "{home} has the same edit: `{bin} add --encrypt {home}` stores it encrypted{plain}; or remove the secret there and drop the repo edit with `{bin} git checkout -- {quoted}`"
+    )
+}
+
+/// Each held file with its finding, then how to resolve it.
+fn list_held(ctx: &Context, held: &[(&StatusEntry, Finding)]) {
+    for (entry, found) in held {
+        let path = entry.path.to_string_lossy();
+        output::warning(&format!("  {}: {found}", output::escape_line(&path)));
+        output::warning(&format!(
+            "    {}",
+            output::escape_line(&held_remedy(ctx, entry, *found))
+        ));
+    }
+}
+
 /// A held edit stays uncommitted in the worktree, so a pull would stash it and put it back over
 /// what arrives, conflict markers and all. Reports the held files and returns true when there are
 /// any and a remote is set.
@@ -361,23 +409,15 @@ fn holds_back_the_pull(ctx: &Context) -> Result<bool> {
         return Ok(false);
     }
     let one = held.len() == 1;
-    let (it, bin) = (if one { "it" } else { "them" }, name::bin());
+    let it = if one { "it" } else { "them" };
     output::warning(&format!(
-        "{} {} in the repo {} an age secret key or a credential and {} not committed, so sync stopped before the pull, which would set {it} aside and put {it} back over what arrives. Nothing was written. Keep such a file encrypted with `{bin} add --encrypt <file>`, remove the secret from {it}, or drop the edit with `{bin} git checkout -- <file>`:",
+        "{} {} in the repo {} an age secret key or a credential and {} not committed, so sync stopped before the pull, which would set {it} aside and put {it} back over what arrives. Nothing was written:",
         held.len(),
         if one { "file" } else { "files" },
         if one { "holds" } else { "hold" },
         if one { "is" } else { "are" },
     ));
-    for (entry, found) in held {
-        let path = entry.path.to_string_lossy();
-        let note = if entry.kind == StatusKind::Untracked {
-            " (not tracked; delete it to drop it)"
-        } else {
-            ""
-        };
-        output::warning(&format!("  {}: {found}{note}", output::escape_line(&path)));
-    }
+    list_held(ctx, &held);
     Ok(true)
 }
 
@@ -412,18 +452,14 @@ fn report_held(ctx: &Context, held: &[(&StatusEntry, Finding)], dry_run: bool) {
         return;
     }
     output::warning(&format!(
-        "{} {} in the repo {} an age secret key or a credential, so {} {}committed; remove it from {}, keep such a file encrypted with `{bin} add --encrypt`, or store a credential as it is with `{bin} add --allow-plain`:",
+        "{} {} in the repo {} an age secret key or a credential, so {} {}committed:",
         held.len(),
         if held.len() == 1 { "file" } else { "files" },
         if held.len() == 1 { "holds" } else { "hold" },
         if held.len() == 1 { "it is" } else { "they are" },
         if dry_run { "would not be " } else { "not " },
-        ctx.paths.repo.display(),
-        bin = name::bin()
     ));
-    for (entry, found) in held {
-        output::warning(&format!("  {}: {found}", entry.path.display()));
-    }
+    list_held(ctx, held);
 }
 
 /// Refuses a commit that deletes at least [`MASS_DELETE`] tracked files and at least half of

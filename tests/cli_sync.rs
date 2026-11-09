@@ -915,13 +915,27 @@ fn a_held_edit_stops_sync_before_the_pull_by_either_route() {
                 err.contains("\n  .zshrc: line 1 holds an age secret key"),
                 "{err}"
             );
-            for remedy in [
-                "dotman add --encrypt",
-                "remove the secret",
-                "dotman git checkout -- <file>",
-            ] {
+            assert!(err.contains("dotman git checkout -- .zshrc"), "{err}");
+            assert!(
+                !err.contains("--allow-plain"),
+                "never for an age key: {err}"
+            );
+            // A hand edit is only in the repo, so `add`, which copies $HOME in, is no remedy.
+            let route = if by_edit {
+                [
+                    "has the same edit: `dotman add --encrypt",
+                    "remove the secret there",
+                ]
+            } else {
+                [
+                    "the edit is only in the repo copy, not in $HOME",
+                    "dotman git diff -- .zshrc",
+                ]
+            };
+            for remedy in route {
                 assert!(err.contains(remedy), "{remedy}: {err}");
             }
+            assert_eq!(err.contains("add --encrypt"), by_edit, "{err}");
         }
         assert_eq!(b.read(".zshrc"), home_before, "nothing written to $HOME");
         assert!(!String::from_utf8_lossy(&b.read(".zshrc")).contains("<<<<<<<"));
@@ -935,6 +949,93 @@ fn a_held_edit_stops_sync_before_the_pull_by_either_route() {
         exits(&b, 0, &["sync", "--take-repo"]);
         assert_eq!(b.read(".zshrc"), b"line1 from a\nline2\n");
     }
+}
+
+/// A GitHub token shape, built here so no token-shaped literal sits in the source.
+fn github_token() -> String {
+    format!("ghp_{}", "Zq7".repeat(12))
+}
+
+/// The reviewer's case: a hand edit in the repo holds work found nowhere else plus a token. The
+/// remedy sync prints keeps the work, and `add`, plain or `--encrypt`, refuses to replace the only
+/// copy instead of destroying it.
+#[test]
+fn add_never_destroys_a_held_hand_edit_in_the_repo() {
+    let env = first_device(&[(".bashrc", b"alias ll=ls\n", 0o644)]);
+    let edit = format!(
+        "alias ll=ls\n# PRECIOUS hand-written function\nexport T={}\n",
+        github_token()
+    );
+    env.write_repo(".bashrc", edit.as_bytes());
+    let err = exits(&env, 3, &["sync"]);
+    assert!(
+        err.contains("\n  .bashrc: line 3 holds a github-token\n"),
+        "{err}"
+    );
+    for remedy in [
+        "the edit is only in the repo copy, not in $HOME",
+        "dotman git diff -- .bashrc",
+        "dotman git checkout -- .bashrc",
+    ] {
+        assert!(err.contains(remedy), "{remedy}: {err}");
+    }
+    assert!(!err.contains("dotman add"), "{err}");
+
+    let repo_copy = env.repo().join(".bashrc").to_string_lossy().into_owned();
+    for args in [
+        &["add", "--allow-plain", ".bashrc"][..],
+        &["add", ".bashrc"],
+        &["add", "--dry-run", ".bashrc"],
+    ] {
+        let err = exits(&env, 1, args);
+        assert!(
+            err.contains(".bashrc in the repo has an edit that is neither committed nor in $HOME")
+                && err.contains("dotman git diff -- .bashrc")
+                && err.contains(&repo_copy),
+            "{args:?}: {err}"
+        );
+        assert_eq!(
+            fs::read(env.repo().join(".bashrc")).expect("repo copy"),
+            edit.as_bytes(),
+            "{args:?}"
+        );
+    }
+    if common::age_installed() {
+        env.ok(&["key", "init"]);
+        let err = exits(&env, 1, &["add", "--encrypt", ".bashrc"]);
+        assert!(err.contains("add would remove it"), "{err}");
+        assert_eq!(
+            fs::read(env.repo().join(".bashrc")).expect("repo copy"),
+            edit.as_bytes()
+        );
+        assert!(!env.repo().join(".bashrc{age}").exists());
+    }
+}
+
+/// What `add` replaces is the work of `$HOME`'s file: the copy an earlier `add` or `dotman edit`
+/// left in the repo, uncommitted, is replaced as before.
+#[test]
+fn add_still_replaces_a_repo_copy_that_came_from_home() {
+    let env = first_device(&[(".a", b"one\n", 0o644)]);
+    env.write(".a", b"two\n", 0o644);
+    exits(&env, 0, &["add", ".a"]);
+    env.write(".a", b"three\n", 0o644);
+    exits(&env, 0, &["add", ".a"]);
+    assert_eq!(
+        fs::read(env.repo().join(".a")).expect("repo copy"),
+        b"three\n"
+    );
+
+    let editor = env.write_script("ed.sh", "#!/bin/sh\necho edited >> \"$1\"\n");
+    let editor = editor.to_string_lossy().into_owned();
+    env.ok_with(&[("EDITOR", &editor), ("VISUAL", "")], &["edit", ".a"]);
+    env.write(".a", b"four\n", 0o644);
+    exits(&env, 0, &["add", ".a"]);
+    assert_eq!(
+        fs::read(env.repo().join(".a")).expect("repo copy"),
+        b"four\n"
+    );
+    exits(&env, 0, &["sync"]);
 }
 
 #[test]

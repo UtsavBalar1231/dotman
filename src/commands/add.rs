@@ -234,7 +234,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     if dry_run {
         let (items, announced) = plan.items();
         content.record(&mut ctx.machine, &ctx.paths.config_file, &items, true)?;
-        let failed = targets.try_all(&ctx, &items, &announced);
+        let failed = targets.try_all(&ctx, &state, &items, &announced);
         if in_dirs > 0 {
             output::info(&format!("would add {in_dirs} files from directories"));
         }
@@ -672,6 +672,7 @@ impl Targets<'_> {
     fn try_all(
         &self,
         ctx: &Context,
+        state: &State,
         items: &BTreeMap<String, Leaf>,
         announced: &BTreeSet<String>,
     ) -> usize {
@@ -689,6 +690,7 @@ impl Targets<'_> {
                 if plain_file && let Some(found) = holds_key(&ctx.paths.home, key, allow) {
                     return Err(Held(found).into());
                 }
+                self.refuse_unsaved(ctx, state, key, &source)?;
                 worktree_parents(&ctx.paths.repo, &source, false)?;
                 Ok(source)
             });
@@ -769,6 +771,7 @@ impl Targets<'_> {
     ) -> Result<String> {
         let source = self.source_for(key)?;
         let encrypted = self.encrypt || self.sources.flag(key, &source) == Flag::Age;
+        self.refuse_unsaved(ctx, state, key, &source)?;
         let entry = commit_one(ctx, repo_config, dir_modes, key, &source, kind, encrypted)?;
         let replaced = self.replaced(key, &source);
         if let Some(plain) = &replaced {
@@ -795,6 +798,49 @@ impl Targets<'_> {
             ));
         }
         Ok(source)
+    }
+
+    /// Refuses to overwrite, or with `--encrypt` to remove, a plain repo copy whose bytes are
+    /// nowhere else: not in HEAD, not in `$HOME`, and not what S recorded for the key. A hand
+    /// edit in the repo leaves such a copy, and so does `dotman edit` once `$HOME` changes again.
+    fn refuse_unsaved(&self, ctx: &Context, state: &State, key: &str, source: &str) -> Result<()> {
+        let plain = if self.encrypt {
+            self.replaced(key, source)
+        } else {
+            (self.sources.flag(key, source) != Flag::Age).then(|| source.to_owned())
+        };
+        let Some(plain) = plain else {
+            return Ok(());
+        };
+        let Ok(Node::File { bytes, .. }) = read_node(&ctx.paths.repo, &plain) else {
+            return Ok(());
+        };
+        if matches!(read_node(&ctx.paths.home, key), Ok(Node::File { bytes: home, .. }) if home == bytes)
+        {
+            return Ok(());
+        }
+        let hash = Tuple::of_file(&bytes, 0).hash;
+        if state.files.get(key).is_some_and(|entry| {
+            entry.source == plain && entry.kind == Kind::File && entry.hash == hash
+        }) {
+            return Ok(());
+        }
+        let committed = ctx.git.head()?.is_some() && ctx.git.tree_mode("HEAD", &plain)?.is_some();
+        if committed && ctx.git.show_blob("HEAD", &plain)? == bytes {
+            return Ok(());
+        }
+        let bin = name::bin();
+        let copy = shell_words::quote(&ctx.paths.repo.join(&plain).to_string_lossy()).into_owned();
+        let quoted = shell_words::quote(&plain).into_owned();
+        let verb = if self.encrypt { "remove" } else { "overwrite" };
+        if committed {
+            bail!(
+                "{plain} in the repo has an edit that is neither committed nor in $HOME, and add would {verb} it; `{bin} git diff -- {quoted}` shows the edit. To keep it, copy {copy} elsewhere first; `{bin} git checkout -- {quoted}` then drops it from the repo, and add runs again"
+            )
+        }
+        bail!(
+            "{plain} in the repo is not committed and differs from $HOME, and add would {verb} it. To keep it, move {copy} elsewhere first, then add again"
+        )
     }
 
     /// With `--encrypt`, the plain source that `source` encrypts, so the two never coexist.
