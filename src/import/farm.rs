@@ -339,35 +339,36 @@ fn base_dirs(ctx: &Context) -> [PathBuf; 7] {
 /// one of its packages: the restow that unfolds it, and the other packages to import one by one.
 fn fold_hint(ctx: &Context, root: &Path) -> Option<String> {
     let home = &ctx.paths.home;
-    let folded = base_dirs(ctx).into_iter().find_map(|dir| {
+    let (rel, package) = base_dirs(ctx).into_iter().find_map(|dir| {
+        let rel = dir.strip_prefix(home).ok()?.to_path_buf();
         let linked = dir
             .ancestors()
             .take_while(|at| at.starts_with(home) && *at != home.as_path())
             .any(|at| fs::symlink_metadata(at).is_ok_and(|meta| meta.file_type().is_symlink()));
-        let package = resolved(&dir)
-            .strip_prefix(root)
-            .ok()?
-            .components()
-            .next()?
-            .as_os_str()
-            .to_owned();
-        linked.then_some((dir, package))
+        let target = resolved(&dir);
+        if !linked || !target.starts_with(root) {
+            return None;
+        }
+        // A Stow package mirrors `$HOME`, so the package is the real path less the part of it
+        // that is relative to `$HOME`; the root may be the stow directory or the package.
+        let package = target
+            .ancestors()
+            .nth(rel.components().count())?
+            .to_path_buf();
+        Some((rel, package))
     })?;
-    let (dir, package) = folded;
-    let shown = dir.strip_prefix(home).map_or_else(
-        |_| dir.display().to_string(),
-        |rel| format!("~/{}", rel.display()),
-    );
+    let stow_dir = package.parent()?;
+    let name = package.file_name()?.to_string_lossy();
+    let shown = format!("~/{}", rel.display());
     let bin = name::bin();
-    let others: Vec<String> = fs::read_dir(root)
+    let others: Vec<String> = fs::read_dir(stow_dir)
         .ok()?
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
             is_real_dir(path)
-                && path
-                    .file_name()
-                    .is_some_and(|name| name != package && name != ".git")
+                && *path != package
+                && path.file_name().is_some_and(|name| name != ".git")
         })
         .map(|path| {
             format!(
@@ -376,9 +377,12 @@ fn fold_hint(ctx: &Context, root: &Path) -> Option<String> {
             )
         })
         .collect();
-    let package = package.to_string_lossy();
+    let quote = |path: &Path| shell_words::quote(&path.to_string_lossy()).into_owned();
     let mut hint = format!(
-        "Stow folded {shown} into a link to the package {package}; restow it with `stow --no-folding -R {package}` so that {shown} is a real directory again"
+        "Stow folded {shown} into a link to the package {name}; restow it with `stow -d {} -t {} --no-folding -R {}` so that {shown} is a real directory again",
+        quote(stow_dir),
+        quote(home),
+        shell_words::quote(&name)
     );
     if !others.is_empty() {
         let _ = write!(

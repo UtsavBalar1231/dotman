@@ -746,9 +746,14 @@ fn a_folded_base_directory_names_the_restow_and_the_other_packages() {
         err.contains("contains a base directory such as ~/.config"),
         "{err}"
     );
+    let restow = format!(
+        "stow -d {} -t {} --no-folding -R nvim",
+        farm.display(),
+        env.home().display()
+    );
     assert!(
         err.contains("Stow folded ~/.config into a link to the package nvim")
-            && err.contains("stow --no-folding -R nvim"),
+            && err.contains(&restow),
         "{err}"
     );
     let zsh = farm.join("zsh");
@@ -758,4 +763,16 @@ fn a_folded_base_directory_names_the_restow_and_the_other_packages() {
     );
     let (out, err) = run_import(&env, &["--dry-run", &zsh.to_string_lossy()]);
     assert_eq!(out.status.code(), Some(0), "{err}");
+
+    // Given the package itself, the hint still names the package, not its `.config`.
+    let (out, err) = run_import(&env, &[&farm.join("nvim").to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("into a link to the package nvim;") && err.contains(&restow),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("dotman import {}", zsh.display())),
+        "{err}"
+    );
 }
