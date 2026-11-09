@@ -55,6 +55,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
     ctx.guard()?;
+    // Before git is asked about the index, which needs a repo to exist.
+    ctx.repo_id()?;
     ctx.refuse_git_locks()?;
     ctx.refuse_collisions()?;
     if !dry_run {

@@ -43,6 +43,8 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("apply")?;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;
     ctx.guard()?;
+    // Before git is asked about the index, which needs a repo to exist.
+    ctx.repo_id()?;
     ctx.refuse_collisions()?;
     if !args.dry_run {
         ctx.sweep_temp_files()?;

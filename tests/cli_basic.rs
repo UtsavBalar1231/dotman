@@ -332,6 +332,8 @@ fn commands_need_an_initialised_repo() {
         &["list"],
         &["status"],
         &["forget", ".bashrc"],
+        &["apply"],
+        &["sync"],
     ] {
         assert!(env.fails(args).contains("dotman init"), "{args:?}");
     }
