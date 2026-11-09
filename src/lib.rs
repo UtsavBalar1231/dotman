@@ -1,4 +1,4 @@
-//! Dotfiles manager with git-like semantics.
+//! A dotfiles manager with no learning curve, safe by default.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]

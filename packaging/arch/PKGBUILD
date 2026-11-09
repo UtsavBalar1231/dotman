@@ -3,7 +3,7 @@
 pkgname=dotman-cli
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Dotfiles manager with git-like semantics"
+pkgdesc="A dotfiles manager with no learning curve, safe by default"
 arch=('x86_64' 'aarch64')
 url="https://github.com/UtsavBalar1231/dotman"
 license=('MIT')

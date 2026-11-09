@@ -7,7 +7,11 @@ use std::path::PathBuf;
 
 /// Top-level arguments for `dotman`.
 #[derive(Parser)]
-#[command(name = "dotman", version = crate::VERSION, about = "Git-like dotfiles manager")]
+#[command(
+    name = "dotman",
+    version = crate::VERSION,
+    about = "A dotfiles manager with no learning curve, safe by default"
+)]
 // reason: independent global flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
