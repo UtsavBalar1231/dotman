@@ -14,6 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
 const RECHECK_AFTER_SECS: u64 = 86_400;
+// An unknown result may come from a passing network failure, and it leaves the guard off.
+const RECHECK_UNKNOWN_AFTER_SECS: u64 = 3_600;
 
 /// The https URL to ask about a remote; `None` for `file://`, local paths and anything else that
 /// is not a network remote.
@@ -101,13 +103,26 @@ pub fn needs_check(state: &State, origin: &str) -> bool {
     state.remote_url.as_deref() != Some(stored_form(origin).as_str())
 }
 
-/// Whether the stored result for `origin` is a day old or missing.
+/// Whether `state` holds no usable result for `origin`: none for this URL, or an unknown one for a
+/// network remote that is an hour old.
+#[must_use]
+pub fn is_stale(state: &State, origin: &str, now: u64) -> bool {
+    needs_check(state, origin)
+        || (state.remote_public == Some(RemotePublic::Unknown)
+            && https_form(origin).is_some()
+            && older_than(state, now, RECHECK_UNKNOWN_AFTER_SECS))
+}
+
+/// Whether the stored result for `origin` is stale or a day old.
 #[must_use]
 pub fn is_due(state: &State, origin: &str, now: u64) -> bool {
-    needs_check(state, origin)
-        || state
-            .remote_checked_at
-            .is_none_or(|at| now.saturating_sub(at) >= RECHECK_AFTER_SECS)
+    is_stale(state, origin, now) || older_than(state, now, RECHECK_AFTER_SECS)
+}
+
+fn older_than(state: &State, now: u64, secs: u64) -> bool {
+    state
+        .remote_checked_at
+        .is_none_or(|at| now.saturating_sub(at) >= secs)
 }
 
 /// Whether `state` says `origin` is public.
@@ -136,8 +151,8 @@ pub fn refresh(ctx: &Context, state: &mut State, origin: &str) {
     }
 }
 
-/// Checks the repo's `origin` and saves the result, when `state.toml` holds none for it, or with
-/// `daily` when the result is a day old. Errors only reach `--verbose`.
+/// Checks the repo's `origin` and saves the result, when `state.toml` holds no usable one for it,
+/// or with `daily` when the result is a day old. Errors only reach `--verbose`.
 pub fn note_origin(ctx: &Context, daily: bool) {
     if let Err(e) = note(ctx, daily) {
         output::verbose(&format!("remote visibility not recorded: {e:#}"));
@@ -152,7 +167,7 @@ fn note(ctx: &Context, daily: bool) -> anyhow::Result<()> {
     let due = if daily {
         is_due(&state, &origin, now())
     } else {
-        needs_check(&state, &origin)
+        is_stale(&state, &origin, now())
     };
     if due {
         refresh(ctx, &mut state, &origin);
@@ -304,11 +319,36 @@ mod tests {
     fn a_result_is_due_after_a_day_or_for_a_new_url() {
         let mut state = fresh();
         assert!(needs_check(&state, URL));
-        check(&mut state, URL, 1_000, |_| false);
+        check(&mut state, URL, 1_000, |_| true);
         assert!(!needs_check(&state, URL));
         assert!(!is_due(&state, URL, 1_000 + RECHECK_AFTER_SECS - 1));
         assert!(is_due(&state, URL, 1_000 + RECHECK_AFTER_SECS));
         assert!(is_due(&state, "git@example.org:me/else.git", 1_001));
+    }
+
+    #[test]
+    fn an_unknown_result_is_asked_again_after_an_hour() {
+        let mut state = fresh();
+        check(&mut state, URL, 1_000, |_| false);
+        assert!(!is_stale(
+            &state,
+            URL,
+            1_000 + RECHECK_UNKNOWN_AFTER_SECS - 1
+        ));
+        assert!(!is_due(&state, URL, 1_000 + RECHECK_UNKNOWN_AFTER_SECS - 1));
+        assert!(is_stale(&state, URL, 1_000 + RECHECK_UNKNOWN_AFTER_SECS));
+        assert!(is_due(&state, URL, 1_000 + RECHECK_UNKNOWN_AFTER_SECS));
+
+        check(&mut state, URL, 2_000, |_| true);
+        assert!(!is_stale(&state, URL, 2_000 + RECHECK_AFTER_SECS - 1));
+        assert!(is_due(&state, URL, 2_000 + RECHECK_AFTER_SECS));
+
+        let local = "file:///srv/dots.git";
+        check(&mut state, local, 3_000, |_| false);
+        assert!(
+            !is_stale(&state, local, 3_000 + RECHECK_UNKNOWN_AFTER_SECS),
+            "a local remote stays unknown"
+        );
     }
 
     #[test]
