@@ -453,6 +453,13 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
     if ctx.git.merge_base("HEAD", "FETCH_HEAD")?.is_some() {
         return Ok(());
     }
+    // A shallow clone lacks the history below its cut, where the common commit may be.
+    if ctx.git.is_shallow()? {
+        ctx.git.unshallow(REMOTE, branch)?;
+        if ctx.git.merge_base("HEAD", "FETCH_HEAD")?.is_some() {
+            return Ok(());
+        }
+    }
     let bin = name::bin();
     let repo = ctx.paths.repo.display();
     let url = ctx.git.remote_url(REMOTE)?.map_or_else(

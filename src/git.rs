@@ -711,6 +711,12 @@ impl Git {
         self.run(&["fetch", "-q", remote, branch]).map(drop)
     }
 
+    /// Like [`Git::fetch`], and fetches the history a shallow clone left out.
+    pub fn unshallow(&self, remote: &str, branch: &str) -> Result<()> {
+        self.run(&["fetch", "-q", "--unshallow", remote, branch])
+            .map(drop)
+    }
+
     /// The best common ancestor of `a` and `b`; `None` when their histories are unrelated.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
         let args = ["merge-base", a, b];

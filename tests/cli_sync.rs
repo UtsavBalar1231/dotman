@@ -959,3 +959,29 @@ fn the_unrelated_history_recipe_keeps_the_files_only_this_repo_has() {
         b"only b\n"
     );
 }
+
+/// A shallow clone cut at the commit that a related force-push then replaced lacks the commit it
+/// shares with the remote, so sync deepens it before deciding, and pulls.
+#[test]
+fn a_shallow_repo_is_deepened_before_it_is_called_unrelated() {
+    let a = first_device(&[(".bashrc", b"v1\n", 0o644), (".profile", b"p1\n", 0o644)]);
+    a.write(".bashrc", b"v2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    let d = a.second_device();
+    let repo = repo_path(&d);
+    d.git(&["clone", "-q", "--depth", "1", &d.remote_url(), &repo]);
+    d.ok(&["init"]);
+    d.ok(&["apply", "--take-repo"]);
+
+    a.write_repo(".bashrc", b"v2 amended\n");
+    let a_repo = repo_path(&a);
+    a.git(&[
+        "-C", &a_repo, "commit", "-q", "-a", "--amend", "-m", "amended",
+    ]);
+    a.git(&["-C", &a_repo, "push", "-q", "-f", "origin", "main"]);
+    d.write(".profile", b"p1, edited on d\n", 0o644);
+    let err = exits(&d, 0, &["sync"]);
+    assert!(!err.contains("shares no history"), "{err}");
+    assert_eq!(d.read(".bashrc"), b"v2 amended\n");
+    assert_eq!(remote_file(&a, ".profile"), "p1, edited on d\n");
+}
