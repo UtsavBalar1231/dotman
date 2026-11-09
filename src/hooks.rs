@@ -26,7 +26,8 @@ pub struct Policy {
 
 const RISK: &str = "Approval covers these command lines, not the scripts they call: a managed script that a later sync changes runs in its new version.";
 
-/// Runs the hooks whose glob matches a key in `changed`, if this machine approves them.
+/// Runs the hooks whose glob matches a key in `changed`, if this machine approves them. An
+/// approved table also runs, once, the hooks for the keys an unapproved one held back.
 /// Fails after running every hook when any of them failed.
 pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<()> {
     if policy.no_hooks {
@@ -37,14 +38,19 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         return Ok(());
     }
     validate(&table)?;
-    let due = due(&table, changed)?;
     let json = canonical(&table)?;
     let mut state = ctx.state(&ctx.repo_id()?)?;
     let standing = approval(&json, &state);
     let recorded = standing == Standing::Approved;
     let mut approved = policy.approve || recorded;
+    let due_now = due(&table, changed)?;
+    let with_pending = due(
+        &table,
+        &changed.union(&state.hooks.pending).cloned().collect(),
+    )?;
     if policy.dry_run {
         let would_ask = !approved && !policy.never_ask && prompt::interactive();
+        let due = if approved { with_pending } else { due_now };
         for command in due {
             let command = output::escape_line(command);
             output::info(&if approved {
@@ -58,35 +64,56 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         return Ok(());
     }
 
-    let asked = !approved && !due.is_empty() && !policy.never_ask && prompt::interactive();
+    let asked = !approved && !due_now.is_empty() && !policy.never_ask && prompt::interactive();
     if asked {
         approved = ask(&table)?;
     }
+    let file = ctx.paths.state_file();
     if approved && !recorded {
         state.hooks.approved = Some(json);
-        state.save(&ctx.paths.state_file(), false)?;
+        state.save(&file, false)?;
         if asked {
             output::context("approved the [hooks] table above on this machine");
         } else {
             show_table("approved this [hooks] table on this machine:", &table);
         }
     }
-    if due.is_empty() {
-        return Ok(());
-    }
     if !approved {
+        if due_now.is_empty() {
+            return Ok(());
+        }
+        let held = matched(&table, changed)?;
+        if !held.is_subset(&state.hooks.pending) {
+            state.hooks.pending.extend(held);
+            state.save(&file, false)?;
+        }
         let why = if standing == (Standing::Changed { old_format: true }) {
-            "the approval format changed, so the approval an older dotman saved for the [hooks] table in .dotman.toml no longer counts. Read the table, then run again with --approve-hooks to approve it again:"
+            "the approval format changed, so the approval an older dotman saved for the [hooks] table in .dotman.toml no longer counts. Read the table; then"
         } else {
-            "the [hooks] table in .dotman.toml is not approved on this machine. Read it, then run again with --approve-hooks:"
+            "the [hooks] table in .dotman.toml is not approved on this machine. Read it; then"
         };
-        output::warning(&format!("{} not run: {why}", count(due.len())));
-        for command in due {
+        output::warning(&format!(
+            "{} not run: {why} `{} apply --approve-hooks` approves it and runs {} once:",
+            count(due_now.len()),
+            crate::name::bin(),
+            if due_now.len() == 1 { "it" } else { "them" }
+        ));
+        for command in due_now {
             output::warning(&format!("  {}", output::escape_line(command)));
         }
         return Ok(());
     }
 
+    let ran = run_all(ctx, &with_pending);
+    if !state.hooks.pending.is_empty() {
+        state.hooks.pending.clear();
+        state.save(&file, false)?;
+    }
+    ran
+}
+
+/// Runs each of `due`, and fails after the last when any of them failed.
+fn run_all(ctx: &Context, due: &[&str]) -> Result<()> {
     let mut failed = 0_usize;
     for command in due {
         output::action("hook", command);
@@ -120,8 +147,7 @@ fn due<'a>(
 ) -> Result<Vec<&'a str>> {
     let mut commands: Vec<&str> = Vec::new();
     for (glob, command) in table {
-        let pattern = Pattern::new(glob)
-            .with_context(|| format!("bad [hooks] glob `{glob}` in .dotman.toml"))?;
+        let pattern = pattern(glob)?;
         if !commands.contains(&command.as_str())
             && changed.iter().any(|key| pattern.matches_with(key, MATCH))
         {
@@ -129,6 +155,26 @@ fn due<'a>(
         }
     }
     Ok(commands)
+}
+
+/// The keys of `changed` that a glob in `table` matches.
+fn matched(
+    table: &BTreeMap<String, String>,
+    changed: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let patterns = table
+        .keys()
+        .map(|glob| pattern(glob))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(changed
+        .iter()
+        .filter(|key| patterns.iter().any(|p| p.matches_with(key, MATCH)))
+        .cloned()
+        .collect())
+}
+
+fn pattern(glob: &str) -> Result<Pattern> {
+    Pattern::new(glob).with_context(|| format!("bad [hooks] glob `{glob}` in .dotman.toml"))
 }
 
 /// Fails, naming the entry and the character, when a glob holds a control character other than

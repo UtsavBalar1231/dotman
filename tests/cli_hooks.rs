@@ -329,11 +329,13 @@ fn an_unattended_sync_runs_only_hooks_approved_on_this_machine() {
     assert!(!marker(&a).exists(), "{err}");
     assert!(err.contains("not approved"), "{err}");
 
+    // Approving runs, once, the hook the unattended sync held back.
     exits(&b, 0, &["apply", "--approve-hooks"]);
+    assert_eq!(runs(&a), 1);
     a.write_repo(A, b"a2\n");
     exits(&a, 0, &["sync", "--no-hooks"]);
     exits(&b, 0, &["sync"]);
-    assert_eq!(runs(&a), 1);
+    assert_eq!(runs(&a), 2);
 }
 
 #[test]
@@ -442,10 +444,89 @@ fn a_table_swapped_after_approval_never_runs_unattended() {
     env.write_repo("zfile", b"z\n");
     let err = exits(&env, 0, &["apply"]);
     assert!(err.contains("the approval format changed"), "{err}");
-    assert!(err.contains("--approve-hooks to approve it again"), "{err}");
+    assert!(
+        err.contains("`dotman apply --approve-hooks` approves it and runs them once"),
+        "{err}"
+    );
     assert!(!marker(&env).exists(), "{err}");
+    // Only an explicit approval of the new table runs what the unattended run held back.
     exits(&env, 0, &["apply", "--approve-hooks"]);
-    assert!(!marker(&env).exists(), "nothing changed, so nothing is due");
+    assert_eq!(runs(&env), 1);
+    exits(&env, 0, &["apply", "--approve-hooks"]);
+    assert_eq!(runs(&env), 1, "nothing changed, so nothing is due");
+}
+
+fn pending(env: &TestEnv) -> Vec<String> {
+    let file = env.state_dir().join("state.toml");
+    State::read(&file)
+        .ok()
+        .flatten()
+        .map(|state| state.hooks.pending.into_iter().collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_hook_held_back_by_an_unapproved_table_runs_once_when_the_printed_command_approves_it() {
+    let env = hooked();
+    set_hooks(&env, &append(&env));
+    let err = exits(&env, 0, &["apply"]);
+    assert!(!marker(&env).exists(), "{err}");
+    assert_eq!(pending(&env), [A, B]);
+    assert!(
+        err.contains("`dotman apply --approve-hooks` approves it and runs it once"),
+        "{err}"
+    );
+
+    let before = env.four_trees();
+    let dry = exits(&env, 0, &["apply", "--dry-run", "--approve-hooks"]);
+    assert!(dry.contains("would run hook:"), "{dry}");
+    assert!(!marker(&env).exists(), "{dry}");
+    assert_eq!(
+        env.four_trees(),
+        before,
+        "a dry run keeps the held-back keys"
+    );
+
+    let out = common::run_hint(&env, &err, "apply --approve-hooks");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(runs(&env), 1, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(pending(&env), Vec::<String>::new());
+    exits(&env, 0, &["apply", "--approve-hooks"]);
+    assert_eq!(runs(&env), 1, "once");
+}
+
+#[test]
+fn a_table_changed_before_approval_runs_only_the_hooks_matching_the_held_back_keys() {
+    let env = hooked();
+    set_hooks(&env, &append(&env));
+    exits(&env, 0, &["apply"]);
+    assert_eq!(pending(&env), [A, B]);
+    let mark = marker(&env).display().to_string();
+    env.write_repo(
+        ".dotman.toml",
+        format!(
+            "[hooks]\n\".config/app/a*\" = \"echo a >> '{mark}'\"\n\"zz*\" = \"echo z >> '{mark}'\"\n"
+        )
+        .as_bytes(),
+    );
+    exits(&env, 0, &["apply", "--approve-hooks"]);
+    assert_eq!(fs::read_to_string(marker(&env)).unwrap_or_default(), "a\n");
+    assert_eq!(pending(&env), Vec::<String>::new());
+}
+
+#[test]
+fn a_cloned_table_approved_later_runs_the_hooks_for_what_the_clone_applied() {
+    let source = hooked();
+    set_hooks(&source, &append(&source));
+    source.push_repo();
+    let without = source.second_device();
+    let err = exits(&without, 0, &["init", &source.remote_url()]);
+    assert!(!marker(&source).exists(), "{err}");
+    let out = common::run_hint(&without, &err, "apply --approve-hooks");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(runs(&source), 1, "{}", String::from_utf8_lossy(&out.stderr));
+    exits(&without, 0, &["sync", "--approve-hooks"]);
+    assert_eq!(runs(&source), 1, "once");
 }
 
 #[test]

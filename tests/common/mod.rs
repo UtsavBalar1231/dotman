@@ -1340,6 +1340,28 @@ pub fn in_a_terminal(
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The arguments after `dotman` of the first backticked `dotman <prefix>...` command in `text`,
+/// split as a shell would, so a test can run a printed hint exactly as printed.
+pub fn hint(text: &str, prefix: &str) -> Vec<String> {
+    let found = text
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|quoted| shell_words::split(quoted).ok())
+        .filter(|words| words.first().map(String::as_str) == Some("dotman"))
+        .map(|words| words.into_iter().skip(1).collect::<Vec<_>>())
+        .find(|args| args.join(" ").starts_with(prefix));
+    assert!(found.is_some(), "no `dotman {prefix}...` hint in: {text}");
+    found.unwrap_or_default()
+}
+
+/// Runs the hint that [`hint`] finds, as printed.
+pub fn run_hint(env: &TestEnv, text: &str, prefix: &str) -> Output {
+    let args = hint(text, prefix);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    env.run(&args)
+}
+
 /// Writes an executable hook of every name in [`GIT_HOOKS`] into `hooks_dir`; each appends its
 /// name to `marker`.
 pub fn plant_git_hooks(hooks_dir: &Path, marker: &Path) {

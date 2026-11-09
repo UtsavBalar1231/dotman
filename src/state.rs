@@ -3,7 +3,7 @@
 use crate::paths::{create_private_dir, write_atomic};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -73,6 +73,10 @@ pub struct Hooks {
     /// ordered table. An older dotman kept an xxh3 hex hash here, which approves nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved: Option<String>,
+    /// Changed keys whose hooks were not run because the table was not approved. Once a table is
+    /// approved, its hooks that match one of them run once, and the set is emptied.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub pending: BTreeSet<String>,
 }
 
 /// One applied path.
@@ -246,6 +250,7 @@ mod tests {
             }),
             hooks: Hooks {
                 approved: Some("deadbeef".to_owned()),
+                pending: BTreeSet::from([".config/app/a.conf".to_owned()]),
             },
             files: BTreeMap::from([
                 (".bashrc".to_owned(), entry),
