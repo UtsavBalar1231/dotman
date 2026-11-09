@@ -24,23 +24,73 @@ use walkdir::WalkDir;
 /// Leftover temp files of the write engine; never managed.
 pub const TEMP_PREFIX: &str = ".dotman-tmp-";
 
-/// A rebase or merge is unfinished in the repo. `main` maps it to exit code 4.
+/// A git operation or a conflict is unfinished in the repo. `main` maps it to exit code 4.
 #[derive(Debug)]
 pub struct InProgress {
-    operation: Operation,
+    unfinished: Unfinished,
     repo: PathBuf,
+    /// Lock files a killed git left, which make the recovery commands fail until removed.
+    locks: Vec<PathBuf>,
+    /// The branch a rebase started from, which its recovery checks out again.
+    branch: Option<String>,
+}
+
+#[derive(Debug)]
+enum Unfinished {
+    Operation(Operation),
+    /// Left by `git stash pop` and the like, with no operation to continue or abort.
+    Conflicts(Vec<PathBuf>),
 }
 
 impl fmt::Display for InProgress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = self.operation.name();
+        let bin = crate::name::bin();
+        let repo = self.repo.display();
+        match &self.unfinished {
+            Unfinished::Operation(Operation::Bisect) => write!(
+                f,
+                "a bisect is in progress in {repo}, so the worktree holds an older commit; end it with `{bin} git bisect reset`"
+            )?,
+            Unfinished::Operation(operation) => {
+                let name = operation.name();
+                write!(
+                    f,
+                    "a {name} is in progress in {repo}; finish it with `{bin} git {name} --continue` or undo it with `{bin} git {name} --abort`"
+                )?;
+            }
+            Unfinished::Conflicts(paths) => {
+                let quoted = quote_all(paths);
+                write!(
+                    f,
+                    "the repo at {repo} has unresolved conflicts in {quoted}, as `git stash pop` leaves them; resolve them and run `{bin} git add {quoted}`, or put back the committed version with `{bin} git checkout HEAD -- {quoted}`"
+                )?;
+            }
+        }
+        if self.locks.is_empty() {
+            return Ok(());
+        }
+        let locks = quote_all(&self.locks);
         write!(
             f,
-            "a {name} is in progress in {}; finish it with `{bin} git {name} --continue` or undo it with `{bin} git {name} --abort`",
-            self.repo.display(),
-            bin = crate::name::bin()
-        )
+            "\ngit left lock files behind, so those commands fail until they are removed. If no git is running in the repo, recover with:\n  1. rm {locks}"
+        )?;
+        if matches!(self.unfinished, Unfinished::Operation(Operation::Rebase)) {
+            let branch = self.branch.as_deref().unwrap_or("main");
+            write!(
+                f,
+                "\n  2. {bin} git rebase --abort\n  3. if that fails: {bin} git rebase --quit && {bin} git checkout -f {branch} && {bin} git reset --hard ORIG_HEAD\n  4. {bin} sync"
+            )?;
+        }
+        Ok(())
     }
+}
+
+fn quote_all(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| shell_words::quote(&path.to_string_lossy()).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl std::error::Error for InProgress {}
@@ -53,6 +103,7 @@ pub struct Context {
     pub git: Git,
     /// The machine config, already applied to `paths`.
     pub machine: Config,
+    command: &'static str,
     identity: OnceCell<IdentitySnapshot>,
     template_vars: OnceCell<Vars>,
     age: OnceCell<Age>,
@@ -74,6 +125,7 @@ impl Context {
             git: Git::new(paths.repo.clone(), dot_command),
             paths,
             machine,
+            command: dot_command,
             identity: OnceCell::new(),
             template_vars: OnceCell::new(),
             age: OnceCell::new(),
@@ -150,16 +202,91 @@ impl Context {
         Scope::new(&self.paths, &self.machine)
     }
 
-    /// Fails with [`InProgress`] while a rebase or merge is unfinished in the repo. Every command
-    /// except `doctor` and `git` calls it, after taking its lock.
+    /// Fails when the repo is incomplete, with [`InProgress`] while a git operation or a conflict
+    /// is unfinished in it, and when HEAD tracks a `.dotman.toml` that is gone or empty. Every
+    /// command except `doctor` and `git` calls it, after taking its lock; `log` skips the last
+    /// check, so the history stays readable.
     pub(crate) fn guard(&self) -> Result<()> {
-        self.git.operation().map_or(Ok(()), |operation| {
-            Err(InProgress {
-                operation,
-                repo: self.paths.repo.clone(),
+        self.refuse_incomplete()?;
+        if !is_real_dir(&self.paths.repo.join(".git")) {
+            return Ok(());
+        }
+        let unfinished = match self.git.operation() {
+            Some(operation) => Some(Unfinished::Operation(operation)),
+            // Only a repo with commits can hold an index entry with stages.
+            None if self.git.head()?.is_some() => {
+                let paths = self.git.unmerged_paths()?;
+                (!paths.is_empty()).then_some(Unfinished::Conflicts(paths))
             }
-            .into())
-        })
+            None => None,
+        };
+        if let Some(unfinished) = unfinished {
+            return Err(InProgress {
+                unfinished,
+                repo: self.paths.repo.clone(),
+                locks: self.git.lock_files(),
+                branch: self.git.rebase_branch(),
+            }
+            .into());
+        }
+        if self.command == "log" {
+            return Ok(());
+        }
+        self.refuse_lost_config()
+    }
+
+    /// Fails on a lock file git left in `.git`. While dotman holds its own lock, none of them can
+    /// be dotman's, so they are either another git running in the repo or a killed one's.
+    pub(crate) fn refuse_git_locks(&self) -> Result<()> {
+        let locks = self.git.lock_files();
+        if locks.is_empty() {
+            return Ok(());
+        }
+        let quoted = quote_all(&locks);
+        bail!(
+            "git's lock files are in the repo: {quoted}. Another git is running in {}, or one was killed and left them behind; if no git is running, remove them with `rm {quoted}` and run this again",
+            self.paths.repo.display()
+        )
+    }
+
+    /// A `.git` directory with no `HEAD`, or with a `config.lock` and no `dotman-id`, is what a
+    /// killed `git init` or clone leaves. `dotman-id` is written last, so a repo that has it
+    /// finished its init, whatever else is broken.
+    pub(crate) fn refuse_incomplete(&self) -> Result<()> {
+        let git_dir = self.paths.repo.join(".git");
+        let incomplete = is_real_dir(&git_dir)
+            && !git_dir.join("dotman-id").exists()
+            && (!git_dir.join("HEAD").is_file() || git_dir.join("config.lock").exists());
+        if incomplete {
+            bail!(
+                "the repo at {} is incomplete (an earlier init was interrupted); remove it and rerun `{} init`",
+                self.paths.repo.display(),
+                crate::name::bin()
+            );
+        }
+        Ok(())
+    }
+
+    /// An empty or missing `.dotman.toml` would read as the defaults, losing `[dirs]`, `[modes]`
+    /// and `[age]`, and the next sync would commit that.
+    fn refuse_lost_config(&self) -> Result<()> {
+        let file = self.repo_config_file();
+        let how = match fs::symlink_metadata(&file) {
+            Ok(meta) if meta.len() > 0 => return Ok(()),
+            Ok(_) => "empty",
+            Err(e) if e.kind() == io::ErrorKind::NotFound => "missing",
+            Err(e) => return Err(e).with_context(|| format!("cannot stat {}", file.display())),
+        };
+        let tracked =
+            self.git.head()?.is_some() && self.git.tree_mode("HEAD", ".dotman.toml")?.is_some();
+        if tracked {
+            bail!(
+                "{} is {how}, but the last commit has it, so its [dirs], [modes] and [age] would be lost; restore it with `{} git checkout -- .dotman.toml`",
+                file.display(),
+                crate::name::bin()
+            );
+        }
+        Ok(())
     }
 
     /// Path of `.dotman.toml` in the repo.
@@ -170,13 +297,24 @@ impl Context {
 
     /// The repo's `.git/dotman-id`, trimmed. Fails when `dotman init` has not run.
     pub(crate) fn repo_id(&self) -> Result<String> {
-        match fs::read_to_string(self.paths.repo.join(".git/dotman-id")) {
+        let repo = &self.paths.repo;
+        match fs::read_to_string(repo.join(".git/dotman-id")) {
             Ok(id) => Ok(id.trim().to_owned()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => bail!(
-                "no dotman repo at {}; run `{} init` first",
-                self.paths.repo.display(),
-                crate::name::bin()
-            ),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.refuse_incomplete()?;
+                if repo.join(".git/HEAD").is_file() {
+                    bail!(
+                        "the git repo at {} has no .git/dotman-id, which `{bin} init` writes; run `{bin} init` to adopt it",
+                        repo.display(),
+                        bin = crate::name::bin()
+                    );
+                }
+                bail!(
+                    "no dotman repo at {}; run `{} init` first",
+                    repo.display(),
+                    crate::name::bin()
+                )
+            }
             Err(e) => Err(e).context("cannot read .git/dotman-id"),
         }
     }

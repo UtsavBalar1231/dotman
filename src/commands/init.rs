@@ -32,6 +32,8 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
     if let Some(url) = &args.remote {
         check_url(url)?;
     }
+    // Before the import probe, which would fail on such a repo with a raw git error.
+    ctx.refuse_incomplete()?;
     if !args.no_import && import::is_fresh(&ctx)? {
         let found = import::detect(&ctx)?;
         if !found.is_empty()

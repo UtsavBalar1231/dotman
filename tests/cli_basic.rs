@@ -337,3 +337,47 @@ fn commands_need_an_initialised_repo() {
     }
     assert!(!env.repo().exists());
 }
+
+#[test]
+fn an_interrupted_init_is_named_and_a_repo_without_its_id_can_be_adopted() {
+    let env = TestEnv::new();
+    let git_dir = env.repo().join(".git");
+    fs::create_dir_all(&git_dir).unwrap();
+    for args in [&["status"][..], &["init"], &["apply"], &["sync"]] {
+        let err = env.fails(args);
+        assert!(
+            err.contains("is incomplete (an earlier init was interrupted)"),
+            "{args:?}: {err}"
+        );
+        assert!(err.contains("remove it and rerun `dotman init`"), "{err}");
+    }
+
+    let other = TestEnv::new();
+    other.ok(&["init"]);
+    fs::remove_file(other.repo().join(".git/dotman-id")).unwrap();
+    fs::write(other.repo().join(".git/config.lock"), b"").unwrap();
+    assert!(other.fails(&["status"]).contains("is incomplete"));
+    fs::remove_file(other.repo().join(".git/config.lock")).unwrap();
+
+    let err = other.fails(&["status"]);
+    assert!(err.contains("has no .git/dotman-id"), "{err}");
+    assert!(err.contains("run `dotman init` to adopt it"), "{err}");
+    other.ok(&["init"]);
+    other.ok(&["status"]);
+}
+
+#[test]
+fn an_empty_state_file_is_refused_with_the_way_out() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".bashrc", b"x\n", 0o644);
+    env.ok(&["add", ".bashrc"]);
+    let state = env.state_dir().join("state.toml");
+    fs::write(&state, b"").unwrap();
+    for args in [&["status"][..], &["apply"], &["sync"]] {
+        let err = env.fails(args);
+        assert!(err.contains("is empty"), "{args:?}: {err}");
+        assert!(err.contains(".broken"), "{err}");
+    }
+    assert_eq!(fs::read(&state).unwrap(), b"");
+}

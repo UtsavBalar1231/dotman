@@ -116,3 +116,142 @@ fn the_other_markers_are_refused_and_named() {
     assert!(err.contains("dotman git merge --continue"), "{err}");
     assert!(err.contains("dotman git merge --abort"), "{err}");
 }
+
+/// A repo whose last commit has `.dotman.toml` and `.bashrc`.
+fn committed() -> TestEnv {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".bashrc", b"x\n", 0o644);
+    env.ok(&["add", ".bashrc"]);
+    env.ok(&["sync"]);
+    env
+}
+
+#[test]
+fn every_subcommand_but_log_refuses_a_lost_dotman_toml() {
+    for emptied in [false, true] {
+        for (name, args) in MINIMAL_ARGS {
+            let env = committed();
+            let config = env.repo().join(".dotman.toml");
+            if emptied {
+                fs::write(&config, b"").expect("empty the config");
+            } else {
+                fs::remove_file(&config).expect("delete the config");
+            }
+            let mut full = vec![*name];
+            full.extend_from_slice(args);
+            let (code, err) = stderr_of(&env, &full);
+            if *name == "log" {
+                assert_eq!(code, Some(0), "`dot {full:?}`: {err}");
+                continue;
+            }
+            assert_eq!(code, Some(1), "`dot {full:?}`: {err}");
+            let how = if emptied { "is empty" } else { "is missing" };
+            assert!(err.contains(how), "{name}: {err}");
+            assert!(
+                err.contains("dotman git checkout -- .dotman.toml"),
+                "{name}: {err}"
+            );
+            assert_eq!(fs::read(&config).ok().filter(|b| !b.is_empty()), None);
+        }
+    }
+}
+
+#[test]
+fn cherry_pick_revert_sequencer_and_bisect_markers_are_refused_with_their_hints() {
+    let env = committed();
+    let git_dir = env.repo().join(".git");
+    for (marker, dir, text, hint) in [
+        (
+            "CHERRY_PICK_HEAD",
+            false,
+            "x",
+            "dotman git cherry-pick --continue",
+        ),
+        ("REVERT_HEAD", false, "x", "dotman git revert --abort"),
+        (
+            "sequencer",
+            true,
+            "revert 0000000 x\n",
+            "dotman git revert --continue",
+        ),
+        (
+            "sequencer",
+            true,
+            "pick 0000000 x\n",
+            "dotman git cherry-pick --abort",
+        ),
+        ("BISECT_LOG", false, "x", "dotman git bisect reset"),
+    ] {
+        let path = git_dir.join(marker);
+        if dir {
+            fs::create_dir(&path).expect("mark");
+            fs::write(path.join("todo"), text).expect("todo");
+        } else {
+            fs::write(&path, text).expect("mark");
+        }
+        for args in [&["status"][..], &["apply"], &["sync"]] {
+            let (code, err) = stderr_of(&env, args);
+            assert_eq!(code, Some(4), "{marker} {args:?}: {err}");
+            assert!(err.contains(hint), "{marker}: {err}");
+        }
+        if dir {
+            fs::remove_dir_all(&path).expect("unmark");
+        } else {
+            fs::remove_file(&path).expect("unmark");
+        }
+    }
+    assert_eq!(stderr_of(&env, &["status"]).0, Some(0));
+}
+
+#[test]
+fn a_stash_pop_conflict_is_refused_and_nothing_reaches_home() {
+    let env = committed();
+    let repo = env.repo().to_string_lossy().into_owned();
+    fs::write(env.repo().join(".bashrc"), b"stashed\n").expect("edit");
+    env.git(&["-C", &repo, "stash", "-q"]);
+    fs::write(env.repo().join(".bashrc"), b"committed\n").expect("edit");
+    env.git(&["-C", &repo, "commit", "-q", "-am", "other"]);
+    let pop = env.git_raw(&["-C", &repo, "stash", "pop"]);
+    assert!(!pop.status.success(), "the pop should conflict");
+    assert!(!env.repo().join(".git/MERGE_HEAD").exists());
+
+    for args in [&["status"][..], &["apply"], &["sync"]] {
+        let (code, err) = stderr_of(&env, args);
+        assert_eq!(code, Some(4), "{args:?}: {err}");
+        assert!(err.contains("unresolved conflicts in .bashrc"), "{err}");
+        assert!(err.contains("dotman git add .bashrc"), "{err}");
+        assert!(err.contains("dotman git checkout HEAD -- .bashrc"), "{err}");
+    }
+    assert_eq!(env.read(".bashrc"), b"x\n");
+}
+
+#[test]
+fn stale_git_locks_are_reported_with_the_recovery_steps() {
+    let env = committed();
+    let lock = env.repo().join(".git/index.lock");
+    fs::write(&lock, b"").expect("leave a lock");
+    let err = env.fails(&["sync"]);
+    assert!(err.contains("git's lock files are in the repo"), "{err}");
+    assert!(err.contains(&format!("rm {}", lock.display())), "{err}");
+    assert!(lock.exists(), "never removed silently");
+    assert_eq!(stderr_of(&env, &["status"]).0, Some(0));
+
+    fs::create_dir(env.repo().join(".git/rebase-merge")).expect("mark the rebase");
+    fs::write(
+        env.repo().join(".git/rebase-merge/head-name"),
+        b"refs/heads/main\n",
+    )
+    .expect("head-name");
+    let (code, err) = stderr_of(&env, &["status"]);
+    assert_eq!(code, Some(4), "{err}");
+    for step in [
+        format!("1. rm {}", lock.display()),
+        "2. dotman git rebase --abort".to_owned(),
+        "dotman git rebase --quit && dotman git checkout -f main && dotman git reset --hard ORIG_HEAD"
+            .to_owned(),
+        "4. dotman sync".to_owned(),
+    ] {
+        assert!(err.contains(&step), "{step}: {err}");
+    }
+}

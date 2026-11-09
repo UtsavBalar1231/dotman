@@ -116,8 +116,8 @@ impl Default for State {
 impl State {
     /// Loads the state for the repo whose `.git/dotman-id` is `repo_id` (already trimmed).
     ///
-    /// A missing file gives an empty state. A file that does not parse is an error and is never
-    /// treated as empty. A file written for another repo keeps only its identity snapshot, so
+    /// A missing file gives an empty state. A file that is empty or does not parse is an error and
+    /// is never treated as empty. A file written for another repo keeps only its identity snapshot, so
     /// every entry counts as absent.
     pub(crate) fn load(path: &Path, repo_id: &str) -> Result<Self> {
         Ok(Self::for_repo(
@@ -130,14 +130,24 @@ impl State {
     ///
     /// # Errors
     ///
-    /// Fails when the file exists but cannot be read, is not valid UTF-8 or TOML, or has an
-    /// unsupported version.
+    /// Fails when the file exists but cannot be read, is empty, is not valid UTF-8 or TOML, or has
+    /// an unsupported version.
     pub fn read(path: &Path) -> Result<Option<Self>> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
+        // `save` always writes `version`, so an empty file is a truncated one. Read as empty, it
+        // would make every applied file look new.
+        if bytes.is_empty() {
+            let shown = shell_words::quote(&path.to_string_lossy()).into_owned();
+            bail!(
+                "{} is empty, so what was applied on this machine is unknown; move it aside with `mv {shown} {shown}.broken`, and the next `{} apply` rebuilds it, asking about files that differ from the repo",
+                path.display(),
+                crate::name::bin()
+            );
+        }
         let state = std::str::from_utf8(&bytes)
             .map_err(|e| anyhow!(e))
             .and_then(|text| toml::from_str::<Self>(text).map_err(|e| anyhow!(e)))
@@ -282,7 +292,9 @@ mod tests {
             assert!(err.contains("dotman doctor"), "{err}");
         }
         fs::write(&path, b"").unwrap();
-        assert!(State::load(&path, ID_A).is_ok());
+        let err = State::load(&path, ID_A).unwrap_err().to_string();
+        assert!(err.contains("is empty"), "{err}");
+        assert!(err.contains(".broken"), "{err}");
     }
 
     #[test]

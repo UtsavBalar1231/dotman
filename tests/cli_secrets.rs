@@ -782,8 +782,14 @@ fn without_an_age_cli_encrypted_paths_are_locked_and_encrypting_names_the_instal
 
     env.write_machine_config("");
     env.write_repo(".dotman.toml", b"[age]\nrecipients = [\"age1example\"]\n");
+    // git only: every guarded command asks git about unresolved conflicts.
     let empty = env.root().join("empty-path");
     fs::create_dir(&empty).unwrap();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(git, empty.join("git")).unwrap();
     env.write(".netrc", b"machine x\n", 0o600);
     let vars = [("PATH", empty.to_str().unwrap())];
     let err = exits(&env.run_with(&vars, &["add", "--encrypt", ".netrc"]), 1);

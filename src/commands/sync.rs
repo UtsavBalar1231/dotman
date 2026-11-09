@@ -55,6 +55,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
     ctx.guard()?;
+    ctx.refuse_git_locks()?;
     ctx.refuse_collisions()?;
 
     let first = apply::apply(

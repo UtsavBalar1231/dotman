@@ -75,6 +75,12 @@ pub enum Operation {
     Rebase,
     /// `.git/MERGE_HEAD` exists.
     Merge,
+    /// `.git/CHERRY_PICK_HEAD` exists, or `.git/sequencer` is picking.
+    CherryPick,
+    /// `.git/REVERT_HEAD` exists, or `.git/sequencer` is reverting.
+    Revert,
+    /// `.git/BISECT_LOG` exists: the worktree holds an older commit.
+    Bisect,
 }
 
 impl Operation {
@@ -84,6 +90,9 @@ impl Operation {
         match self {
             Self::Rebase => "rebase",
             Self::Merge => "merge",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+            Self::Bisect => "bisect",
         }
     }
 }
@@ -499,24 +508,88 @@ impl Git {
         Ok(PullOutcome::Conflict { paths })
     }
 
-    /// Looks for `rebase-merge`, `rebase-apply` and `MERGE_HEAD` under `.git`; a rebase wins.
+    /// Looks for the marker files of an unfinished rebase, merge, cherry-pick, revert or bisect
+    /// under `.git`, in that order.
     #[must_use]
     pub fn operation(&self) -> Option<Operation> {
         let git_dir = self.repo.join(".git");
-        if ["rebase-merge", "rebase-apply"]
-            .iter()
-            .any(|name| git_dir.join(name).exists())
-        {
+        let has = |name: &str| git_dir.join(name).exists();
+        if has("rebase-merge") || has("rebase-apply") {
             Some(Operation::Rebase)
+        } else if has("MERGE_HEAD") {
+            Some(Operation::Merge)
+        } else if has("CHERRY_PICK_HEAD") {
+            Some(Operation::CherryPick)
+        } else if has("REVERT_HEAD") {
+            Some(Operation::Revert)
+        } else if has("sequencer") {
+            // Between the picks of a series no HEAD file names it; the todo list does.
+            let todo = fs::read_to_string(git_dir.join("sequencer/todo")).unwrap_or_default();
+            Some(if todo.trim_start().starts_with("revert") {
+                Operation::Revert
+            } else {
+                Operation::CherryPick
+            })
         } else {
-            git_dir
-                .join("MERGE_HEAD")
-                .exists()
-                .then_some(Operation::Merge)
+            has("BISECT_LOG").then_some(Operation::Bisect)
         }
     }
 
-    /// Whether [`Git::operation`] finds a rebase or merge.
+    /// Paths with unresolved conflicts in the index, which `git stash pop` leaves with no
+    /// operation to continue.
+    pub fn unmerged_paths(&self) -> Result<Vec<PathBuf>> {
+        // One `mode oid stage<TAB>path` record per stage.
+        let out = self.run(&["ls-files", "-u", "-z"])?;
+        let mut paths: Vec<PathBuf> = out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                let path = record
+                    .iter()
+                    .position(|b| *b == b'\t')
+                    .and_then(|tab| record.get(tab.saturating_add(1)..))
+                    .unwrap_or(record);
+                path_from(path)
+            })
+            .collect();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    /// Lock files git left in `.git`: the index, `HEAD`, the config and any ref. A killed git
+    /// leaves them behind, and every later git that writes then fails.
+    #[must_use]
+    pub fn lock_files(&self) -> Vec<PathBuf> {
+        let git_dir = self.repo.join(".git");
+        let mut found: Vec<PathBuf> =
+            ["index.lock", "HEAD.lock", "packed-refs.lock", "config.lock"]
+                .iter()
+                .map(|name| git_dir.join(name))
+                .filter(|path| fs::symlink_metadata(path).is_ok())
+                .collect();
+        found.extend(
+            walkdir::WalkDir::new(git_dir.join("refs"))
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().as_bytes().ends_with(b".lock"))
+                .map(walkdir::DirEntry::into_path),
+        );
+        found
+    }
+
+    /// The branch an unfinished rebase started from, such as `main`.
+    #[must_use]
+    pub fn rebase_branch(&self) -> Option<String> {
+        ["rebase-merge", "rebase-apply"].iter().find_map(|dir| {
+            let name =
+                fs::read_to_string(self.repo.join(".git").join(dir).join("head-name")).ok()?;
+            Some(name.trim().strip_prefix("refs/heads/")?.to_owned())
+        })
+    }
+
+    /// Whether [`Git::operation`] finds an unfinished operation.
     #[must_use]
     pub fn operation_in_progress(&self) -> bool {
         self.operation().is_some()
