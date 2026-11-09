@@ -726,6 +726,50 @@ fn a_stricter_mode_in_home_with_the_same_bytes_goes_into_modes() {
 }
 
 #[test]
+fn a_source_s_own_config_is_kept_byte_for_byte_and_the_modes_are_reported() {
+    const OWN: &str = "# my settings\n[modes]\n\".netrc\" = \"0600\"\n";
+    let env = TestEnv::new();
+    let files: [File; 3] = [
+        (".dotman.toml", OWN, false),
+        (".ssh/config", "Host x\n", false),
+        (".netrc", "machine x\n", false),
+    ];
+    let (_, _dir) = dot_dir_bare(&env, &files, Some(&env.home()));
+    env.write(".ssh/config", b"Host x\n", 0o600);
+    env.write(".netrc", b"machine x\n", 0o600);
+
+    let err = env.ok(&["import", "--no-bootstrap"]);
+    assert!(
+        err.contains("the source's own .dotman.toml is kept as it is, so add these lines to its [modes] to keep them:")
+            && err.contains("  \".ssh/config\" = \"0600\""),
+        "{err}"
+    );
+    assert!(
+        !err.contains("\".netrc\" = "),
+        "already in its [modes]: {err}"
+    );
+    assert!(!err.contains("[modes] records it"), "{err}");
+    assert_eq!(
+        fs::read_to_string(env.repo().join(".dotman.toml")).expect("read"),
+        OWN
+    );
+
+    let broken = TestEnv::new();
+    let files: [File; 2] = [
+        (".dotman.toml", "[modes\n", false),
+        (".ssh/config", "Host x\n", false),
+    ];
+    let (_, _dir) = dot_dir_bare(&broken, &files, Some(&broken.home()));
+    broken.write(".ssh/config", b"Host x\n", 0o600);
+    let err = broken.ok(&["import", "--dry-run"]);
+    assert!(
+        err.contains("the source's own .dotman.toml (it does not parse yet) is kept as it is")
+            && !err.contains("[modes] records it"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_converted_template_that_prints_the_os_warns_that_its_case_changes() {
     let env = TestEnv::new();
     let files: [File; 1] = [(".profile##template", "export OS={{ yadm.os }}\n", false)];

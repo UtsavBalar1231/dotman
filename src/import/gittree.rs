@@ -722,23 +722,52 @@ fn home_modes(ctx: &Context, git: &Git, found: &Analysis) -> BTreeMap<String, u3
     modes
 }
 
-fn home_modes_note(modes: &BTreeMap<String, u32>) -> Option<String> {
-    let shown_modes: Vec<String> = modes
-        .iter()
-        .map(|(key, mode)| format!("{key} {mode:04o}"))
-        .collect();
-    (!modes.is_empty()).then(|| {
-        format!(
-            "{} in $HOME {} the same bytes as the source and a stricter mode than git keeps; [modes] records it: {}",
-            count(modes.len(), "file"),
-            if modes.len() == 1 { "has" } else { "have" },
-            shown(&shown_modes)
-        )
-    })
+/// Where the stricter modes go. A source's own `.dotman.toml` is never rewritten, since saving it
+/// would drop its comments, so the `[modes]` lines to add are reported instead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceConfig {
+    None,
+    Parses,
+    Broken,
 }
 
-/// Writes the conversion into the worktree of `repo` and commits it. `modes` go into `[modes]`
-/// where it has no entry yet.
+fn home_modes_notes(modes: &BTreeMap<String, u32>, config: SourceConfig) -> Vec<String> {
+    if modes.is_empty() {
+        return Vec::new();
+    }
+    let found = format!(
+        "{} in $HOME {} the same bytes as the source and a stricter mode than git keeps",
+        count(modes.len(), "file"),
+        if modes.len() == 1 { "has" } else { "have" }
+    );
+    if config == SourceConfig::None {
+        let shown_modes: Vec<String> = modes
+            .iter()
+            .map(|(key, mode)| format!("{key} {mode:04o}"))
+            .collect();
+        return vec![format!(
+            "{found}; [modes] records it: {}",
+            shown(&shown_modes)
+        )];
+    }
+    let broken = if config == SourceConfig::Broken {
+        " (it does not parse yet)"
+    } else {
+        ""
+    };
+    let table: BTreeMap<&str, String> = modes
+        .iter()
+        .map(|(key, mode)| (key.as_str(), format!("{mode:04o}")))
+        .collect();
+    let lines = toml::to_string(&table).unwrap_or_default();
+    let mut notes = vec![format!(
+        "{found}; the source's own .dotman.toml{broken} is kept as it is, so add these lines to its [modes] to keep them:"
+    )];
+    notes.extend(lines.lines().map(|line| format!("  {line}")));
+    notes
+}
+
+/// Writes the conversion into the worktree of `repo` and commits it.
 fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u32>) -> Result<()> {
     for left in found.left.iter().filter(|left| left.remove) {
         fs::remove_file(repo.join(&left.path))
@@ -758,31 +787,19 @@ fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u3
         }
     }
     let has_config = found.kept.iter().any(|kept| kept.to == ".dotman.toml");
-    let file = repo.join(".dotman.toml");
-    let mut config = if has_config {
-        // A source's own config that does not parse is kept as it is, without the modes.
-        RepoConfig::load(&file).ok()
-    } else {
-        Some(RepoConfig::default())
-    };
-    let mut recorded = false;
-    if let Some(config) = &mut config {
-        for (key, mode) in modes {
-            if !config.modes.contains_key(key) {
-                config.modes.insert(key.clone(), format!("{mode:04o}"));
-                recorded = true;
-            }
-        }
-        if recorded || !has_config {
-            config.save(&file, false)?;
-        }
+    if !has_config {
+        let mut config = RepoConfig::default();
+        config.modes.extend(
+            modes
+                .iter()
+                .map(|(key, mode)| (key.clone(), format!("{mode:04o}"))),
+        );
+        config.save(&repo.join(".dotman.toml"), false)?;
     }
     let message = if !found.alternates.is_empty() {
         "import: convert yadm alternates"
     } else if !has_config {
         "import: add .dotman.toml"
-    } else if recorded {
-        "import: record the stricter modes $HOME has"
     } else {
         return Ok(());
     };
@@ -1168,9 +1185,18 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     let setup = yadm_setup(ctx, source, &tree)?;
     let identity = identity::current(setup.machine.as_ref().unwrap_or(&ctx.machine));
     let found = analyze(&staging.git, &tree, &identity);
-    let modes = home_modes(ctx, &staging.git, &found);
+    let mut modes = home_modes(ctx, &staging.git, &found);
+    let has_own = found.kept.iter().any(|kept| kept.to == ".dotman.toml");
+    let config = match has_own.then(|| RepoConfig::load(&staging.repo.join(".dotman.toml"))) {
+        None => SourceConfig::None,
+        Some(Ok(own)) => {
+            modes.retain(|key, _| !own.modes.contains_key(key));
+            SourceConfig::Parses
+        }
+        Some(Err(_)) => SourceConfig::Broken,
+    };
     let mut report = tally(&found, true);
-    report.notes.extend(home_modes_note(&modes));
+    report.notes.extend(home_modes_notes(&modes, config));
     report
         .notes
         .extend(remote_notes(source, source_origin.as_deref(), &found));
