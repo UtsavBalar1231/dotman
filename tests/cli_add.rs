@@ -4,6 +4,7 @@
 mod common;
 
 use common::TestEnv;
+use dotman::state::{RemotePublic, State};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -351,4 +352,38 @@ fn a_dry_run_refuses_a_symlinked_repo_parent_as_the_real_run_does() {
         );
     }
     assert_eq!(fs::read_dir(&outside).expect("read").count(), 0);
+}
+
+/// An unknown visibility an hour old is checked again before the secret-name guard: once the
+/// probe finds the remote public, an explicit secret-named file is refused.
+#[test]
+fn an_unknown_visibility_an_hour_old_is_checked_again_before_the_guard() {
+    let mut env = TestEnv::new();
+    env.ok(&["init", "--remote", "https://example.invalid/me/dots.git"]);
+    let path = env.state_dir().join("state.toml");
+    let mut state = State::read(&path).expect("read").expect("state");
+    assert_eq!(state.remote_public, Some(RemotePublic::Unknown));
+    state.remote_checked_at = state.remote_checked_at.map(|at| at.saturating_sub(7200));
+    state.save(&path, false).expect("save");
+
+    // `ls-remote` answers without credentials, as a public remote does.
+    let real = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git on PATH");
+    let stubs = env.root().join("stubs");
+    fs::create_dir(&stubs).expect("stub dir");
+    let stub = stubs.join("git");
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *\" ls-remote \"*) exit 0;; esac\nexec \"{}\" \"$@\"\n",
+        real.display()
+    );
+    fs::write(&stub, script).expect("write stub");
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
+    env.prepend_path(&stubs);
+
+    env.write(".env", b"X=1\n", 0o600);
+    let err = exits(&env, 1, &["add", ".env"]);
+    assert!(err.contains("the remote is public"), "{err}");
+    assert_eq!(managed(&env), Vec::<String>::new());
 }

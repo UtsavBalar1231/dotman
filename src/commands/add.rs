@@ -334,7 +334,7 @@ fn remote_is_public(ctx: &Context, state: &mut State, dry_run: bool) -> Result<b
     let Some(origin) = ctx.git.remote_url("origin")? else {
         return Ok(false);
     };
-    if !dry_run && remote::needs_check(state, &origin) {
+    if !dry_run && remote::is_stale(state, &origin, remote::now()) {
         remote::refresh(ctx, state, &origin);
         state.save(&ctx.paths.state_file(), false)?;
     }
