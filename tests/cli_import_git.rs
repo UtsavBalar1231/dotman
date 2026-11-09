@@ -951,6 +951,53 @@ fn a_source_with_a_detached_head_is_imported_onto_a_new_main() {
     );
 }
 
+/// The repo an import leaves passes `git fsck` and `dotman doctor`. Dropping `origin` after a
+/// `--single-branch` clone of a local path once left `origin/HEAD` pointing at a deleted branch.
+#[test]
+fn an_import_leaves_no_dangling_remote_ref() {
+    for kind in ["work tree", "bare", "url"] {
+        let env = TestEnv::new();
+        let work = work_tree(&env, "f", &[(".vimrc", "v\n", false)], None);
+        let bare_source = bare(&env, &work, &env.root().join("src.git"), None);
+        let source = match kind {
+            "work tree" => work.to_string_lossy().into_owned(),
+            "bare" => bare_source.to_string_lossy().into_owned(),
+            _ => format!("file://{}", bare_source.display()),
+        };
+        env.ok(&["import", &source]);
+        let repo = env.repo();
+        let fsck = env.git_raw(&["-C", &repo.to_string_lossy(), "fsck"]);
+        assert!(fsck.status.success(), "{kind}: {}", stderr(&fsck));
+        let left = git_in(&env, &repo, &["for-each-ref", "refs/remotes/"]);
+        if kind == "url" {
+            assert!(left.contains("refs/remotes/origin/main"), "{kind}: {left}");
+        } else {
+            assert_eq!(left, "", "{kind}");
+            let head = env.git_raw(&[
+                "-C",
+                &repo.to_string_lossy(),
+                "symbolic-ref",
+                "-q",
+                "refs/remotes/origin/HEAD",
+            ]);
+            assert!(!head.status.success(), "{kind}: origin/HEAD is left");
+        }
+        let doctor = env.run(&["doctor"]);
+        let said = String::from_utf8_lossy(&doctor.stdout);
+        assert!(
+            said.lines().any(|line| line == "pass  repo objects"),
+            "{kind}: {said}"
+        );
+        // A local path leaves the repo with no remote, which doctor fails on its own.
+        let fails: Vec<&str> = said
+            .lines()
+            .filter(|line| line.starts_with("fail"))
+            .collect();
+        let allowed = |line: &&str| kind != "url" && line.starts_with("fail  remote: ");
+        assert!(fails.iter().all(allowed), "{kind}: {said}");
+    }
+}
+
 #[test]
 fn a_populated_repo_is_refused_naming_overlay() {
     let env = TestEnv::new();

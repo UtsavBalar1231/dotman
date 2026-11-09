@@ -1614,7 +1614,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     };
     staging.clone_source(source)?;
     if matches!(source, Source::Path(_)) {
-        staging.git.remove_remote("origin")?;
+        drop_origin(&staging.git)?;
     }
     let branched = branch_detached(&staging.git)?;
     let tree = staging.git.ls_tree("HEAD")?;
@@ -1697,6 +1697,27 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     output::success(&format!("imported {what}{added} into {}", repo.display()));
     super::print_next_steps();
     Ok(report.outcome())
+}
+
+/// Removes `origin` and the refs it leaves. After a `--single-branch` clone, `git remote remove`
+/// deletes only the branch the narrowed refspec names, which leaves `origin/HEAD` pointing at a
+/// deleted ref, and `git fsck` fails on it. `for-each-ref` skips such a ref, so it is named here.
+fn drop_origin(git: &Git) -> Result<()> {
+    git.remove_remote("origin")?;
+    let listed = git_stdout(
+        git,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/",
+        ],
+        None,
+    )?;
+    let listed = String::from_utf8_lossy(&listed);
+    for name in std::iter::once("refs/remotes/origin/HEAD").chain(listed.lines()) {
+        git_stdout(git, &["update-ref", "--no-deref", "-d", name], None)?;
+    }
+    Ok(())
 }
 
 /// Puts a clone whose HEAD is detached on a new branch, `main`, at that commit, since sync pushes
