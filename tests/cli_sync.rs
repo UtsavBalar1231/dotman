@@ -805,6 +805,45 @@ fn status_counts_the_commits_never_pushed_and_the_printed_sync_pushes_them() {
     assert_eq!(pushed, env.git(&["-C", &repo, "rev-parse", "HEAD"]));
 }
 
+/// The count is against `origin` alone: a second remote that holds every commit does not hide
+/// that `origin` has none of them.
+#[test]
+fn status_counts_what_origin_lacks_even_when_another_remote_has_it() {
+    let env = TestEnv::new();
+    let later = env.root().join("later.git");
+    let backup = env.root().join("backup.git");
+    env.ok(&["init"]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    let repo = repo_path(&env);
+    env.git(&["init", "--bare", "-q", &backup.to_string_lossy()]);
+    env.git(&[
+        "-C",
+        &repo,
+        "remote",
+        "add",
+        "backup",
+        &backup.to_string_lossy(),
+    ]);
+    env.git(&["-C", &repo, "push", "-q", "backup", "main"]);
+    env.ok(&["init", "--remote", &format!("file://{}", later.display())]);
+
+    let err = exits(&env, 0, &["status"]);
+    let count = env.git(&["-C", &repo, "rev-list", "--count", "HEAD"]);
+    assert_ne!(count.trim(), "0");
+    let commits = if count.trim() == "1" {
+        "commit"
+    } else {
+        "commits"
+    };
+    let line = format!(
+        "{} {commits} not pushed yet: run `dotman sync`",
+        count.trim()
+    );
+    assert!(err.lines().any(|l| l == line), "{err}");
+}
+
 #[test]
 fn the_printed_answer_to_a_conflict_in_sync_does_what_it_says() {
     for (answer, home) in [

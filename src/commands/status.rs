@@ -167,7 +167,14 @@ fn report_remote(ctx: &Context) -> Result<()> {
     if git.resolve_commit(&upstream)?.is_none() {
         let out = git
             .command()
-            .args(["rev-list", "--count", "HEAD", "--not", "--remotes", "--"])
+            .args([
+                "rev-list",
+                "--count",
+                "HEAD",
+                "--not",
+                "--remotes=origin",
+                "--",
+            ])
             .output()
             .context("failed to run git")?;
         let count = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>();
