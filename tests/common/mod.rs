@@ -139,8 +139,8 @@ impl TestEnv {
         self.root().join("sysroot")
     }
 
-    /// Points `DOTMAN_SYSTEM_ROOT` at an empty directory, and puts stub `pacman`, `dpkg` and `rpm`
-    /// in front of PATH that own nothing, so the host's package database is never asked.
+    /// Points `DOTMAN_SYSTEM_ROOT` at an empty directory, and puts stub `pacman`, `dpkg`, `rpm` and
+    /// `apk` in front of PATH that own nothing, so the host's package database is never asked.
     pub fn use_system_root(&mut self) {
         fs::create_dir_all(self.system_root()).expect("create the system root");
         self.system_root_on = true;
@@ -148,7 +148,7 @@ impl TestEnv {
         fs::create_dir_all(&stubs).expect("create the stub dir");
         self.prepend_path(&stubs);
         self.stub_package_manager(&[]);
-        for name in ["dpkg", "rpm"] {
+        for name in ["dpkg", "rpm", "apk"] {
             write_stub(&stubs.join(name), "#!/bin/sh\nexit 1\n");
         }
     }

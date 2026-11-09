@@ -30,6 +30,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Where system sources live in the repo.
 pub const DIR: &str = ".dotman/system";
@@ -597,35 +598,60 @@ pub enum Ownership {
     Package(String),
     /// A checker ran and found no owner.
     Unowned,
-    /// None of `pacman`, `dpkg` and `rpm` is on `PATH`.
+    /// None of `pacman`, `dpkg`, `rpm` and `apk` is on `PATH`.
     NoChecker,
 }
 
-/// Asks the first available of `pacman -Qo`, `dpkg -S` and `rpm -qf` about `path`.
+/// How long a package manager may take to name the owner of a file.
+const OWNER_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Asks the first available of `pacman -Qo`, `dpkg -S`, `rpm -qf` and `apk info -W` about `path`.
 pub(crate) fn package_owner(path: &Path) -> Result<Ownership> {
-    let checkers: [(&str, &[&str]); 3] =
-        [("pacman", &["-Qo"]), ("dpkg", &["-S"]), ("rpm", &["-qf"])];
+    let checkers: [(&str, &[&str]); 4] = [
+        ("pacman", &["-Qo"]),
+        ("dpkg", &["-S"]),
+        ("rpm", &["-qf"]),
+        ("apk", &["info", "-W"]),
+    ];
     for (name, args) in checkers {
         let Some(program) = proc::find_program(name) else {
             continue;
         };
-        let out = proc::command(&program)
-            .args(args)
-            .arg(path)
-            .output()
-            .with_context(|| format!("cannot run {}", program.display()))?;
+        let mut cmd = proc::command(&program);
+        cmd.args(args).arg(path);
+        let out = proc::output_within(&mut cmd, OWNER_TIMEOUT)
+            .with_context(|| format!("cannot run {}", program.display()))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "{} did not say within {} seconds whether a package owns {}",
+                    program.display(),
+                    OWNER_TIMEOUT.as_secs(),
+                    path.display()
+                )
+            })?;
         if !out.status.success() {
             return Ok(Ownership::Unowned);
         }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let line = stdout.lines().next().unwrap_or_default().trim();
-        return Ok(Ownership::Package(if line.is_empty() {
-            name.to_owned()
-        } else {
-            line.to_owned()
-        }));
+        return Ok(Ownership::Package(owner_of(
+            &String::from_utf8_lossy(&out.stdout),
+            name,
+        )));
     }
     Ok(Ownership::NoChecker)
+}
+
+/// The package in a checker's first line. pacman and apk print `<path> is owned by <package>`,
+/// which is cut to the package; dpkg and rpm lines are kept whole.
+fn owner_of(stdout: &str, checker: &str) -> String {
+    let line = stdout.lines().next().unwrap_or_default().trim();
+    let owner = line
+        .rsplit_once(" is owned by ")
+        .map_or(line, |(_, package)| package.trim());
+    if owner.is_empty() {
+        checker.to_owned()
+    } else {
+        owner.to_owned()
+    }
 }
 
 /// The inputs that are not under `$HOME`, as system filters, and the rest, which stay paths.
@@ -841,5 +867,32 @@ mod tests {
         assert_eq!(picked.len(), 2);
         assert!(select_keys(&["/etc/zzz".to_owned()], &keys).is_err());
         assert_eq!(select_keys(&[], &keys).unwrap(), keys);
+    }
+
+    #[test]
+    fn the_owner_is_cut_from_each_checkers_line() {
+        let cases = [
+            (
+                "/etc/profile is owned by alpine-baselayout-data-3.7.2-r1\n",
+                "alpine-baselayout-data-3.7.2-r1",
+            ),
+            (
+                "/tmp/l symlink target is owned by alpine-baselayout-data-3.7.2-r1\n",
+                "alpine-baselayout-data-3.7.2-r1",
+            ),
+            (
+                "/etc/login.defs is owned by shadow 4.16.0-1\n",
+                "shadow 4.16.0-1",
+            ),
+            ("login: /etc/login.defs\n", "login: /etc/login.defs"),
+            (
+                "shadow-utils-4.9-12.el9.x86_64\nother\n",
+                "shadow-utils-4.9-12.el9.x86_64",
+            ),
+            ("", "apk"),
+        ];
+        for (line, owner) in cases {
+            assert_eq!(owner_of(line, "apk"), owner, "{line:?}");
+        }
     }
 }

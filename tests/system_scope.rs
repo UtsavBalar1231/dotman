@@ -166,6 +166,70 @@ fn a_package_owned_file_needs_the_flag() {
     );
 }
 
+/// A directory holding a link to the host's `git` and nothing else.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn git_only(env: &TestEnv, name: &str) -> PathBuf {
+    let bin = env.root().join(name);
+    fs::create_dir_all(&bin).expect("mkdir");
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git on PATH");
+    symlink(git, bin.join("git")).expect("symlink git");
+    bin
+}
+
+#[test]
+fn with_only_apk_on_path_apk_names_the_owning_package() {
+    let env = setup(&["/etc"]);
+    let bin = git_only(&env, "apkbin");
+    // What apk-tools 2 and 3 print for `apk info -W`.
+    common::write_exe(
+        &bin.join("apk"),
+        "#!/bin/sh\n[ \"$1 $2\" = 'info -W' ] || exit 2\ncase \"$3\" in\n  */etc/profile) echo \"$3 is owned by alpine-baselayout-data-3.7.2-r1\"; exit 0;;\nesac\necho \"ERROR: $3: Could not find owner package\" >&2\nexit 1\n",
+    )
+    .expect("write the apk stub");
+    let path = bin.to_string_lossy().into_owned();
+    let only_apk = [("PATH", path.as_str())];
+    env.write_system("/etc/profile", b"export PATH\n", 0o644);
+    env.write_system("/etc/mine.conf", b"x\n", 0o644);
+    let before = snapshot(&env);
+
+    let out = env.run_with(&only_apk, &["add", "--system", "/etc/profile"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("belongs to a package (alpine-baselayout-data-3.7.2-r1)"),
+        "{err}"
+    );
+    assert!(err.contains("--package-owned"), "{err}");
+    assert_eq!(snapshot(&env), before);
+
+    let out = env.run_with(
+        &only_apk,
+        &["add", "--system", "--package-owned", "/etc/profile"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = env.run_with(&only_apk, &["add", "--system", "/etc/mine.conf"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let config = env.repo_config();
+    assert!(
+        config
+            .system
+            .get("/etc/profile")
+            .expect("table")
+            .package_owned
+    );
+    assert!(
+        !config
+            .system
+            .get("/etc/mine.conf")
+            .expect("table")
+            .package_owned
+    );
+}
+
 #[test]
 fn a_pacnew_sibling_is_reported_by_status_and_doctor() {
     let env = setup(&["/etc"]);
