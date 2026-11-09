@@ -5,6 +5,7 @@
 use crate::cli::AddArgs;
 use crate::commands::Outcome;
 use crate::commands::apply::{Classified, classify_key};
+use crate::config::{Allow, Config};
 use crate::context::{Context, TEMP_PREFIX, is_real_dir};
 use crate::engine::status::{Content, SourceEntry, Variants, Worktree};
 use crate::engine::{
@@ -18,7 +19,7 @@ use crate::paths::{
 };
 use crate::prompt;
 use crate::remote;
-use crate::repo_config::{Allow, RepoConfig};
+use crate::repo_config::RepoConfig;
 use crate::secrets::{self, Finding, Held};
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::system::{self, Ownership, Standing};
@@ -167,7 +168,7 @@ impl Ignore {
 /// holds the lock, an input is outside `$HOME`, ignored, protected or collides with a managed key,
 /// or a file cannot be read or stored.
 pub fn run(args: &AddArgs) -> Result<Outcome> {
-    let ctx = Context::resolve("add")?;
+    let mut ctx = Context::resolve("add")?;
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
     ctx.guard()?;
@@ -180,6 +181,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
+    let identity = ctx.identity().clone();
 
     let mut plan = Planner {
         ctx: &ctx,
@@ -192,7 +194,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     let mut targets = Targets {
         sources: Sources::group(managed.iter().map(String::as_str)),
         managed,
-        identity: ctx.identity(),
+        identity: &identity,
         conditions: args.for_conditions.as_deref(),
         encrypt: args.encrypt,
         resumed: BTreeMap::new(),
@@ -212,7 +214,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         args,
     )?;
     let settled = drop_unchanged(&ctx, &repo_config, &state, &targets.sources, &mut plan);
-    let content = guard_content(&ctx, &mut plan, &repo_config, &targets, args)?;
+    let content = guard_content(&ctx, &mut plan, &targets, args)?;
     guarded.warn(public, &ctx.paths.home, args.for_conditions.as_deref());
     for (key, found) in &content.held {
         let path = pasteable(&ctx.paths.home, key);
@@ -231,8 +233,8 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     let in_dirs: usize = plan.dirs.iter().map(|d| d.items.len()).sum();
     if dry_run {
         let (items, announced) = plan.items();
-        content.record(&mut repo_config, &items, true);
-        let failed = targets.try_all(&ctx, &items, &announced, &repo_config.guard.allow);
+        content.record(&mut ctx.machine, &ctx.paths.config_file, &items, true)?;
+        let failed = targets.try_all(&ctx, &items, &announced);
         if in_dirs > 0 {
             output::info(&format!("would add {in_dirs} files from directories"));
         }
@@ -253,7 +255,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
             repo_config.dirs.paths.push(dir.key.clone());
         }
     }
-    content.record(&mut repo_config, &items, false);
+    content.record(&mut ctx.machine, &ctx.paths.config_file, &items, false)?;
     let (added, failed) =
         targets.commit_all(&ctx, &mut repo_config, &mut state, &items, &announced);
     // The record names the set every `{age}` file is encrypted to; one that exists may mark a
@@ -463,38 +465,52 @@ struct ContentGuard {
 }
 
 impl ContentGuard {
-    /// Adds the entries of the files that are still in `items` to `[guard] allow`.
-    fn record(&self, repo_config: &mut RepoConfig, items: &BTreeMap<String, Leaf>, dry_run: bool) {
-        let kept = self
+    /// Adds the entries of the files that are still in `items` to `machine`'s `[guard] allow` and
+    /// saves it to `file`; a dry run saves nothing.
+    fn record(
+        &self,
+        machine: &mut Config,
+        file: &Path,
+        items: &BTreeMap<String, Leaf>,
+        dry_run: bool,
+    ) -> Result<()> {
+        let kept: Vec<&(Allow, Finding)> = self
             .allowed
             .iter()
-            .filter(|(entry, _)| items.contains_key(&entry.path));
-        for (entry, found) in kept {
+            .filter(|(entry, _)| items.contains_key(&entry.path))
+            .collect();
+        for (entry, found) in &kept {
             output::warning(&format!(
-                "{}: {found}; stored as it is, as --allow-plain asks, and [guard] allow in .dotman.toml {} it",
+                "{}: {found}; stored as it is, as --allow-plain asks, and [guard] allow in {} {} it",
                 entry.path,
+                file.display(),
                 if dry_run { "would record" } else { "records" }
             ));
-            repo_config.guard.allow.push(entry.clone());
+            machine.guard.allow.push(entry.clone());
         }
+        if kept.is_empty() {
+            return Ok(());
+        }
+        machine.save(file, dry_run)
     }
 }
 
 /// The content guard, whatever the remote, over every file this run would store in plain text.
-/// A named file that holds a credential is refused, and a directory holds each such file back;
-/// `--allow-plain` lets it in, to be recorded by rule in `[guard] allow`. An age identity is never
-/// stored in plain text, whatever the flags.
+/// A named file that holds a credential is refused, and a directory holds each such file back.
+/// `--allow-plain` lets in a named file only, to be recorded by rule in this machine's `[guard]
+/// allow`: taking every credential a directory holds at once is too easy to do by mistake. An age
+/// identity is never stored in plain text, whatever the flags.
 fn guard_content(
     ctx: &Context,
     plan: &mut Plan,
-    repo_config: &RepoConfig,
     targets: &Targets,
     args: &AddArgs,
 ) -> Result<ContentGuard> {
     let home = &ctx.paths.home;
+    let allow = &ctx.machine.guard.allow;
     let mut content = ContentGuard::default();
     // An unreadable file, or one whose source cannot be chosen, fails later with its own error.
-    let mut check = |key: &str, leaf: &Leaf| -> Option<Finding> {
+    let mut check = |key: &str, leaf: &Leaf, named: bool| -> Option<Finding> {
         let source = targets.source_for(key).ok()?;
         if !matches!(leaf, Leaf::File { .. })
             || args.encrypt
@@ -505,9 +521,11 @@ fn guard_content(
         let Ok(Node::File { bytes, .. }) = read_node(home, key) else {
             return None;
         };
-        let allow = &repo_config.guard.allow;
         let found = secrets::held(&bytes, key, allow)?;
-        if !args.allow_plain || secrets::findings(&bytes).any(|found| !found.overridable()) {
+        if !named
+            || !args.allow_plain
+            || secrets::findings(&bytes).any(|found| !found.overridable())
+        {
             return Some(found);
         }
         let mut rules = BTreeSet::new();
@@ -524,7 +542,7 @@ fn guard_content(
     };
     let mut refused = Vec::new();
     for (key, leaf) in &plan.files {
-        if let Some(found) = check(key, leaf) {
+        if let Some(found) = check(key, leaf, true) {
             refused.push(format!("{key}: {found}{}", found.remedy(None)));
         }
     }
@@ -543,7 +561,7 @@ fn guard_content(
     let mut held = Vec::new();
     for dir in &mut plan.dirs {
         dir.items.retain(|key, leaf| {
-            let found = check(key, leaf);
+            let found = check(key, leaf, false);
             held.extend(found.map(|found| (key.clone(), found)));
             found.is_none()
         });
@@ -656,8 +674,8 @@ impl Targets<'_> {
         ctx: &Context,
         items: &BTreeMap<String, Leaf>,
         announced: &BTreeSet<String>,
-        allow: &[Allow],
     ) -> usize {
+        let allow = &ctx.machine.guard.allow;
         let mut failed = 0usize;
         for (key, leaf) in items {
             let explicit = announced.contains(key);
@@ -940,7 +958,7 @@ pub(crate) fn scan_dirs(
             Leaf::File { size, binary, .. } => hold_by_name_and_size(&secrets, &key, size)
                 .or_else(|| binary.then_some(Hold::Binary))
                 .or_else(|| {
-                    holds_key(&ctx.paths.home, &key, &repo_config.guard.allow).map(Hold::Content)
+                    holds_key(&ctx.paths.home, &key, &ctx.machine.guard.allow).map(Hold::Content)
                 }),
             Leaf::Link => secrets
                 .iter()
@@ -1310,7 +1328,7 @@ pub(crate) fn commit_one(
     let node = read_node(home, key)?;
     if let Node::File { bytes, .. } = &node
         && !encrypted
-        && let Some(found) = secrets::held(bytes, key, &repo_config.guard.allow)
+        && let Some(found) = secrets::held(bytes, key, &ctx.machine.guard.allow)
     {
         return Err(Held(found).into());
     }

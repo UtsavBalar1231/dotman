@@ -29,6 +29,37 @@ pub struct Config {
     pub system: SystemConfig,
     /// Which age executable and identity file to use.
     pub age: AgeConfig,
+    /// Credentials this machine stores in plain text on purpose.
+    #[serde(skip_serializing_if = "MachineGuard::is_empty")]
+    pub guard: MachineGuard,
+}
+
+/// The `[guard]` table. It lives here, not in `.dotman.toml`: an entry another machine pushed
+/// must never let a credential out of this one.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MachineGuard {
+    /// What `add --allow-plain` stores in plain text, by key and rule.
+    pub allow: Vec<Allow>,
+}
+
+impl MachineGuard {
+    /// No entries, so a saved config needs no `[guard]` table.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.allow.is_empty()
+    }
+}
+
+/// One `[guard] allow` entry. It matches by key and rule, never by line, so an edit elsewhere in
+/// the file keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allow {
+    /// The key, as `$HOME`-relative as every other key.
+    pub path: String,
+    /// A content guard rule name, such as `github-token`.
+    pub rule: String,
 }
 
 /// Each field replaces the detected identity value of the same name; values are lowercased when used.
@@ -86,9 +117,10 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     (
         "",
         &[
-            "repo", "profiles", "identity", "vars", "template", "system", "age",
+            "repo", "profiles", "identity", "vars", "template", "system", "age", "guard",
         ],
     ),
+    ("guard", &["allow"]),
     (
         "identity",
         &["host", "user", "os", "distro", "like", "arch"],
@@ -243,6 +275,28 @@ identity = "/keys/id.txt"
         .unwrap();
         assert_eq!(unknown, ["colour", "age.bogus"]);
         assert_eq!(config.age.command.as_deref(), Some("age"));
+    }
+
+    #[test]
+    fn guard_allow_entries_parse_and_round_trip() {
+        let (config, unknown) = Config::parse(
+            "[guard]\nallow = [{ path = \".config/zsh/local.zsh\", rule = \"github-token\" }]\n",
+        )
+        .unwrap();
+        assert_eq!(unknown, Vec::<String>::new());
+        let entry = Allow {
+            path: ".config/zsh/local.zsh".to_owned(),
+            rule: "github-token".to_owned(),
+        };
+        assert_eq!(config.guard.allow, [entry]);
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert_eq!(Config::parse(&saved).unwrap().0, config);
+        assert!(
+            !toml::to_string_pretty(&Config::default())
+                .unwrap()
+                .contains("guard"),
+            "an empty allow list is not written"
+        );
     }
 
     #[test]

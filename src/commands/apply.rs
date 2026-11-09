@@ -1252,7 +1252,7 @@ impl Run<'_> {
             // Only a dry run reads H here; a real capture checks what it is about to store.
             if !encrypted
                 && let Some(found) =
-                    add::holds_key(&self.ctx.paths.home, key, &repo_config.guard.allow)
+                    add::holds_key(&self.ctx.paths.home, key, &self.ctx.machine.guard.allow)
             {
                 self.held_key(key, found);
                 return;

@@ -3,7 +3,10 @@
 //! Maps are `BTreeMap`s so saving is stable and a load/save round trip of a saved file is
 //! byte-identical.
 
+use crate::config::Allow;
 use crate::engine::recorded_mode;
+use crate::name;
+use crate::output;
 use crate::paths::write_atomic;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -11,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Once;
 
 const DEFAULT_IGNORE: &[&str] = &[
     "**/.git/",
@@ -88,7 +92,9 @@ impl Default for Ignore {
 pub struct Guard {
     /// Globs of new files under managed directories that are held back until added explicitly.
     pub secret_names: Vec<String>,
-    /// Credentials stored in plain text on purpose, which `add --allow-plain` records.
+    /// Entries an older version recorded here. They count for nothing: the allow list is per
+    /// machine, in the machine config, so a pushed entry cannot reach another machine. Parsed
+    /// and saved as found, so the file still loads and round-trips.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<Allow>,
 }
@@ -100,17 +106,6 @@ impl Default for Guard {
             allow: Vec::new(),
         }
     }
-}
-
-/// One `[guard] allow` entry. It matches by key and rule, never by line, so an edit elsewhere in
-/// the file keeps it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Allow {
-    /// The key, as `$HOME`-relative as every other key.
-    pub path: String,
-    /// A content guard rule name, such as `github-token`.
-    pub rule: String,
 }
 
 /// The `[dirs]` table.
@@ -168,7 +163,10 @@ impl RepoConfig {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
             Ok(text) => {
-                Self::parse(&text).with_context(|| format!("cannot parse {}", path.display()))
+                let config = Self::parse(&text)
+                    .with_context(|| format!("cannot parse {}", path.display()))?;
+                warn_ignored_allow(path, &config.guard.allow);
+                Ok(config)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
@@ -186,6 +184,26 @@ impl RepoConfig {
         }
         write_atomic(path, toml::to_string_pretty(self)?.as_bytes(), 0o644)
     }
+}
+
+// Once per run, since a run loads the file several times.
+fn warn_ignored_allow(path: &Path, allow: &[Allow]) {
+    static WARNED: Once = Once::new();
+    if allow.is_empty() {
+        return;
+    }
+    WARNED.call_once(|| {
+        let entries: Vec<String> = allow
+            .iter()
+            .map(|entry| format!("{} {}", entry.path, entry.rule))
+            .collect();
+        output::warning(&output::escape_line(&format!(
+            "{}: [guard] allow is ignored ({}); the allow list is per machine now, in the machine config, where `{} add --allow-plain <file>` records an entry",
+            path.display(),
+            entries.join(", "),
+            name::bin()
+        )));
+    });
 }
 
 #[cfg(test)]

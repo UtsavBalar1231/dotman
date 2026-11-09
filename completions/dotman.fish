@@ -75,7 +75,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand init" -l allow-root -d 'Al
 complete -c dotman -n "__fish_dotman_using_subcommand init" -s h -l help -d 'Print help'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l for -d 'Add the files as variants that apply only where these `+`-joined conditions hold, such as `host=laptop+os!=macos`' -r
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l encrypt -d 'Store the files encrypted to the `[age] recipients` in .dotman.toml'
-complete -c dotman -n "__fish_dotman_using_subcommand add" -l allow-plain -d 'Add files in plain text although their names match `[guard] secret_names` and the remote is public'
+complete -c dotman -n "__fish_dotman_using_subcommand add" -l allow-plain -d 'Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l yes -d 'Do not ask before adding directories'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l dry-run -d 'Show what would be added and change nothing'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l system -d 'Add regular files outside $HOME that you can read, such as /etc/keyd/default.conf'

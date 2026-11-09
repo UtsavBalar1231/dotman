@@ -1,7 +1,7 @@
 //! `{age}` sources, through the `age` or `rage` CLI. Plaintext only travels through pipes: it goes
 //! to the CLI on stdin and comes back on stdout, so the repo only ever holds ciphertext.
 
-use crate::config::Config;
+use crate::config::{Allow, Config};
 use crate::context::Context;
 use crate::engine::write::{WriteOptions, WriteOutcome, safe_write};
 use crate::engine::{Node, observe};
@@ -9,7 +9,6 @@ use crate::name;
 use crate::output;
 use crate::paths::{Paths, write_atomic};
 use crate::proc::{self, AGE_KEY_VAR};
-use crate::repo_config::Allow;
 use crate::state::Kind;
 use crate::sys;
 use crate::variant::Flag;

@@ -20,7 +20,7 @@ use crate::bootstrap;
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::add::ensure_worktree_parents;
-use crate::config::{Config, TemplateConfig};
+use crate::config::{Allow, Config, TemplateConfig};
 use crate::context::{Context, is_real_dir};
 use crate::engine::{Node, read_node};
 use crate::git::{Git, TreeEntry, redact_credentials};
@@ -30,7 +30,7 @@ use crate::output;
 use crate::paths::{
     create_private_dir, is_reserved_root_name, private_temp_dir, validate_key, write_atomic,
 };
-use crate::repo_config::{Allow, RepoConfig};
+use crate::repo_config::RepoConfig;
 use crate::state::IdentitySnapshot;
 use crate::template::{self, Vars};
 use crate::variant::{Selection, Sources};
@@ -1222,10 +1222,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     let mut found = analyze(&staging.git, &tree, &identity);
     let has_own = found.kept.iter().any(|kept| kept.to == ".dotman.toml");
     let own = has_own.then(|| RepoConfig::load(&staging.repo.join(".dotman.toml")));
-    let allow = match &own {
-        Some(Ok(own)) => own.guard.allow.as_slice(),
-        _ => &[],
-    };
+    let allow = &ctx.machine.guard.allow;
     guard_content(&staging.repo, &mut found, allow);
     let mut modes = home_modes(ctx, &staging.git, &found);
     let config = match own {
@@ -1319,7 +1316,7 @@ fn content(git: &Git, kept: &Kept) -> Result<Vec<u8>> {
 
 /// Compares the converted source with the repo worktree. Nothing in the repo is changed.
 fn compare(ctx: &Context, git: &Git, found: &Analysis, include_missing: bool) -> Result<Overlay> {
-    let allow = ctx.repo_config()?.guard.allow;
+    let allow = &ctx.machine.guard.allow;
     let mut overlay = Overlay {
         report: tally(
             &Analysis {
@@ -1358,7 +1355,7 @@ fn compare(ctx: &Context, git: &Git, found: &Analysis, include_missing: bool) ->
         match read_node(&ctx.paths.repo, key)? {
             Node::Missing if include_missing => {
                 let bytes = content(git, kept)?;
-                if !symlink && let Some(item) = held(&bytes, key, &allow) {
+                if !symlink && let Some(item) = held(&bytes, key, allow) {
                     needs(item.reason, item.detail);
                     continue;
                 }

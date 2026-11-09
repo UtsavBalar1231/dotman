@@ -80,7 +80,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
         &'dotman;add'= {
             cand --for 'Add the files as variants that apply only where these `+`-joined conditions hold, such as `host=laptop+os!=macos`'
             cand --encrypt 'Store the files encrypted to the `[age] recipients` in .dotman.toml'
-            cand --allow-plain 'Add files in plain text although their names match `[guard] secret_names` and the remote is public'
+            cand --allow-plain 'Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key'
             cand --yes 'Do not ask before adding directories'
             cand --dry-run 'Show what would be added and change nothing'
             cand --system 'Add regular files outside $HOME that you can read, such as /etc/keyd/default.conf'

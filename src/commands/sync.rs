@@ -8,6 +8,7 @@
 use crate::cli::SyncArgs;
 use crate::commands::Outcome;
 use crate::commands::apply::{self, Applied, Options, Pass};
+use crate::config::Allow;
 use crate::context::{Context, TEMP_PREFIX};
 use crate::git::{PullOutcome, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
@@ -16,7 +17,6 @@ use crate::name;
 use crate::output;
 use crate::prompt;
 use crate::remote;
-use crate::repo_config::Allow;
 use crate::secrets::{self, Finding};
 use crate::variant::Sources;
 use anyhow::{Result, anyhow, bail};
@@ -337,15 +337,14 @@ fn commit_staged(
     Ok(done)
 }
 
-/// The changed worktree files the content guard holds, minus what `[guard] allow` covers.
-/// `dotman edit` and hand edits in the repo reach no capture, so this is their only check. A
-/// config that cannot be read allows nothing.
+/// The changed worktree files the content guard holds, minus what this machine's `[guard] allow`
+/// covers. `dotman edit` and hand edits in the repo reach no capture, so this is their only check.
 fn held_entries<'a>(ctx: &Context, status: &'a [StatusEntry]) -> Vec<(&'a StatusEntry, Finding)> {
-    let allow = ctx.repo_config().map(|c| c.guard.allow).unwrap_or_default();
+    let allow = &ctx.machine.guard.allow;
     status
         .iter()
         .filter(|entry| entry.kind != StatusKind::Unmerged)
-        .filter_map(|entry| Some((entry, holds_secret_key(ctx, &entry.path, &allow)?)))
+        .filter_map(|entry| Some((entry, holds_secret_key(ctx, &entry.path, allow)?)))
         .collect()
 }
 

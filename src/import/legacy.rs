@@ -1015,7 +1015,7 @@ fn compare(ctx: &Context, root: &Path, include_missing: bool) -> Result<Overlay>
             ),
             Node::Missing if include_missing => {
                 let bytes = read_object(root, &entry.object)?;
-                if let Some(item) = held(&bytes, key, &config.guard.allow) {
+                if let Some(item) = held(&bytes, key, &ctx.machine.guard.allow) {
                     needs(item.reason, item.detail);
                     continue;
                 }

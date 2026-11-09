@@ -16,7 +16,7 @@ Add the files as variants that apply only where these `+`\-joined conditions hol
 Store the files encrypted to the `[age] recipients` in .dotman.toml
 .TP
 \fB\-\-allow\-plain\fR
-Add files in plain text although their names match `[guard] secret_names` and the remote is public
+Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key
 .TP
 \fB\-\-yes\fR
 Do not ask before adding directories

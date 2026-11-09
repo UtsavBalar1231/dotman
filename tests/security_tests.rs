@@ -836,8 +836,12 @@ fn remote_tree(env: &TestEnv) -> String {
     env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"])
 }
 
+/// The machine config's `[guard] allow`, where `--allow-plain` records entries.
 fn allow_entries(env: &TestEnv) -> Vec<(String, String)> {
-    env.repo_config()
+    let text = fs::read_to_string(env.xdg_config().join("dotman/config.toml")).unwrap_or_default();
+    dotman::config::Config::parse(&text)
+        .map(|(config, _)| config)
+        .unwrap_or_default()
         .guard
         .allow
         .into_iter()
@@ -947,17 +951,85 @@ fn an_age_secret_key_is_never_overridable() {
         &env.run(&["add", "--allow-plain", "--yes", ".config/app"]),
         3,
     );
-    let mut config = env.repo_config();
-    config.guard.allow.push(dotman::repo_config::Allow {
-        path: keys.to_owned(),
-        rule: "age-secret-key".to_owned(),
-    });
-    config
-        .save(&env.repo().join(".dotman.toml"), false)
-        .unwrap();
+    env.write_machine_config(&format!(
+        "[[guard.allow]]\npath = \"{keys}\"\nrule = \"age-secret-key\"\n"
+    ));
     assert_eq!(env.token_of("status", keys).as_deref(), Some("held"));
     exits(&env.run(&["sync"]), 3);
     assert!(!remote_history(&env).contains("AGE-SECRET-KEY-"));
+}
+
+/// The allow list is per machine. An entry pushed in `.dotman.toml` by another machine lets no
+/// credential out of this one, and says it is ignored; this machine's own `--allow-plain` does,
+/// and a machine that pulls the file still holds its own edits until it passes `--allow-plain`.
+#[test]
+fn a_pushed_allow_entry_never_lets_a_credential_out_of_another_machine() {
+    let a = TestEnv::new();
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".bashrc", b"alias ll=ls\n", 0o644);
+    a.ok(&["add", ".bashrc"]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url()]);
+    let toml = b.repo().join(".dotman.toml");
+    let text = fs::read_to_string(&toml).unwrap();
+    fs::write(
+        &toml,
+        format!("{text}\n[[guard.allow]]\npath = \".bashrc\"\nrule = \"github-token\"\n"),
+    )
+    .unwrap();
+    b.ok(&["sync"]);
+
+    let err = a.ok(&["sync"]);
+    assert!(
+        err.contains("[guard] allow is ignored (.bashrc github-token)"),
+        "{err}"
+    );
+    let token = github_token();
+    a.write(
+        ".bashrc",
+        format!("alias ll=ls\nexport GH={token}\n").as_bytes(),
+        0o644,
+    );
+    let err = exits(&a.run(&["sync"]), 3);
+    assert!(
+        err.contains(".bashrc: held, line 2 holds a github-token"),
+        "{err}"
+    );
+    assert!(!remote_history(&a).contains(&token));
+
+    exits(&a.run(&["add", "--allow-plain", ".bashrc"]), 0);
+    assert_eq!(
+        allow_entries(&a),
+        [(".bashrc".to_owned(), "github-token".to_owned())]
+    );
+    exits(&a.run(&["sync"]), 0);
+    assert!(remote_history(&a).contains(&token));
+
+    exits(&b.run(&["sync"]), 0);
+    b.write(
+        ".bashrc",
+        format!("alias ll=ls\nexport GH={token}\nalias la=ls\n").as_bytes(),
+        0o644,
+    );
+    let err = exits(&b.run(&["sync"]), 3);
+    assert!(
+        err.contains(".bashrc: held, line 2 holds a github-token"),
+        "{err}"
+    );
+    assert!(!remote_history(&a).contains("alias la=ls"));
+    exits(&b.run(&["add", "--allow-plain", ".bashrc"]), 0);
+    exits(&b.run(&["sync"]), 0);
+    assert!(remote_history(&a).contains("alias la=ls"));
 }
 
 /// An age key inside another rule's match, a `glpat-` run or a PEM `Comment:` header, is still
@@ -1047,7 +1119,8 @@ fn only_a_whole_age_key_is_held_and_a_real_one_is() {
 }
 
 /// `add <dir>` holds each file that holds a credential, lists it with the commands that resolve
-/// it, adds the rest and exits 3; sync holds it too, and `add --allow-plain <dir>` takes it.
+/// it, adds the rest and exits 3; sync holds it too. `add --allow-plain <dir>` still holds it, so
+/// one flag never takes every credential under a directory; naming the file takes it.
 #[test]
 fn a_directory_holds_a_file_that_holds_a_credential() {
     let env = TestEnv::new();
@@ -1074,8 +1147,21 @@ fn a_directory_holds_a_file_that_holds_a_credential() {
     exits(&env.run(&["sync"]), 3);
     assert!(!remote_history(&env).contains(&pat));
 
-    exits(
+    let err = exits(
         &env.run(&["add", "--allow-plain", "--yes", ".config/app"]),
+        3,
+    );
+    assert!(
+        err.contains(&format!(
+            "held .config/app/remote.conf: line 1 holds a gitlab-pat; `dotman add --encrypt {path}` stores it encrypted, `dotman add --allow-plain {path}` stores it as is",
+            path = path.display()
+        )),
+        "{err}"
+    );
+    assert_eq!(allow_entries(&env), []);
+    assert!(!env.repo().join(".config/app/remote.conf").exists());
+    exits(
+        &env.run(&["add", "--allow-plain", ".config/app/remote.conf"]),
         0,
     );
     assert_eq!(
