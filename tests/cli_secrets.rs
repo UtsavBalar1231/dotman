@@ -780,6 +780,14 @@ fn rerunning_an_interrupted_add_encrypt_removes_the_plain_source() {
     // An interruption before the plain source is removed leaves both.
     env.write_repo(HOSTS, PLAIN);
 
+    let err = env.ok(&["add", "--encrypt", "--dry-run", HOSTS]);
+    assert!(
+        err.contains(
+            ".config/gh/hosts.yml holds .config/gh/hosts.yml in plain text and would be removed"
+        ),
+        "{err}"
+    );
+    assert!(env.repo().join(HOSTS).exists());
     let err = env.ok(&["add", "--encrypt", HOSTS]);
     assert!(err.contains("git history still has it"), "{err}");
     assert!(!env.repo().join(HOSTS).exists());

@@ -48,7 +48,7 @@ const MATCH_SECRET: MatchOptions = MatchOptions {
     ..MATCH
 };
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Leaf {
     File { mode: u32, size: u64, binary: bool },
     Link,
@@ -201,8 +201,9 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         public,
         args,
     )?;
-    guarded.warn(public);
-    let outcome = if guarded.held.is_empty() {
+    guarded.warn(public, &ctx.paths.home, args.for_conditions.as_deref());
+    let specials = warn_held(&plan);
+    let outcome = if guarded.held.is_empty() && specials == 0 {
         Outcome::Done
     } else {
         Outcome::Attention
@@ -295,6 +296,20 @@ fn drop_unchanged(
     settled
 }
 
+/// Lists the sockets, FIFOs, devices and unreadable entries the directories hold back, which
+/// `[dirs]` would hold at every sync too. Returns how many.
+fn warn_held(plan: &Plan) -> usize {
+    let mut held = 0usize;
+    for (key, hold) in plan.dirs.iter().flat_map(|dir| &dir.held) {
+        output::warning(&format!(
+            "held {key}: {}; an [ignore] pattern in .dotman.toml silences it",
+            hold.reason()
+        ));
+        held = held.saturating_add(1);
+    }
+    held
+}
+
 /// A dry run ends here too, so it exits as the real run would.
 fn finish(failed: usize, total: usize, outcome: Outcome) -> Result<Outcome> {
     if failed > 0 {
@@ -322,28 +337,45 @@ fn remote_is_public(ctx: &Context, state: &mut State, dry_run: bool) -> Result<b
 /// What the `[guard] secret_names` check left of a plan.
 #[derive(Debug, Default)]
 struct Guarded {
-    /// New files that a directory brought in, taken out of its plan.
-    held: Vec<String>,
+    /// New entries that a directory brought in, taken out of its plan.
+    held: Vec<(String, Leaf)>,
     /// Files named explicitly that go in as plain text.
     plain: Vec<String>,
 }
 
+/// `key` as a path to paste into a shell.
+fn pasteable(home: &Path, key: &str) -> String {
+    shell_words::quote(&home.join(key).to_string_lossy()).into_owned()
+}
+
 impl Guarded {
-    fn warn(&self, public: bool) {
+    /// `conditions` is the `--for` of this run, which an `--encrypt` hint has to repeat.
+    fn warn(&self, public: bool, home: &Path, conditions: Option<&str>) {
         let bin = name::bin();
         let keep = if public { "--allow-plain " } else { "" };
-        for key in &self.held {
+        for (key, leaf) in &self.held {
+            let path = pasteable(home, key);
+            let hint = match leaf {
+                // --encrypt takes regular files only.
+                Leaf::Link => format!("`{bin} add {keep}{path}` stores the link as it is"),
+                Leaf::File { .. } => format!(
+                    "`{bin} add --encrypt {path}` stores it encrypted, `{bin} add {keep}{path}` stores it as it is"
+                ),
+            };
             output::warning(&format!(
-                "held {key}: name matches [guard] secret_names; `{bin} add --encrypt ~/{key}` stores it encrypted, `{bin} add {keep}~/{key}` stores it as it is"
+                "held {key}: name matches [guard] secret_names; {hint}"
             ));
         }
         let (verb, which) = match self.plain.as_slice() {
             [] => return,
-            [one] => ("matches [guard] secret_names and is", format!("~/{one}")),
+            [one] => ("matches [guard] secret_names and is", pasteable(home, one)),
             _ => ("match [guard] secret_names and are", "<file>".to_owned()),
         };
+        let variant = conditions.map_or_else(String::new, |conditions| {
+            format!("--for {} ", shell_words::quote(conditions))
+        });
         output::warning(&format!(
-            "{} {verb} stored as plain text; `{bin} add --encrypt {which}` stores it encrypted instead",
+            "{} {verb} stored as plain text; `{bin} add --encrypt {variant}{which}` stores it encrypted instead",
             self.plain.join(", ")
         ));
     }
@@ -369,26 +401,37 @@ fn guard_secrets(
         .filter(|key| named(key))
         .cloned()
         .collect();
+    let is_link = |key: &String| matches!(plan.files.get(key), Some(Leaf::Link));
     if public && !args.encrypt && !args.allow_plain && !explicit.is_empty() {
+        let fix = if explicit.iter().all(is_link) {
+            "pass --allow-plain to store the links as they are"
+        } else {
+            "pass --encrypt to store them encrypted, or --allow-plain to store them as they are"
+        };
         bail!(
-            "{} match [guard] secret_names and the remote is public; pass --encrypt to store them encrypted, or --allow-plain to store them as they are",
+            "{} match [guard] secret_names and the remote is public; {fix}",
             explicit.join(", ")
         );
     }
     let mut guarded = Guarded::default();
+    if !args.encrypt && !args.allow_plain {
+        // A link stores where it points, not the secret, so it gets no warning.
+        guarded.plain = explicit
+            .iter()
+            .filter(|key| !is_link(key))
+            .cloned()
+            .collect();
+    }
     if !args.allow_plain {
         for dir in &mut plan.dirs {
-            dir.items.retain(|key, _| {
+            dir.items.retain(|key, leaf| {
                 let keep = managed.select(key, identity).winner().is_some() || !named(key);
                 if !keep {
-                    guarded.held.push(key.clone());
+                    guarded.held.push((key.clone(), *leaf));
                 }
                 keep
             });
         }
-    }
-    if !args.encrypt && !args.allow_plain {
-        guarded.plain = explicit;
     }
     Ok(guarded)
 }
@@ -511,10 +554,18 @@ impl Targets<'_> {
                 if plain_file && holds_key(&ctx.paths.home, key) {
                     return Err(HoldsKey.into());
                 }
+                worktree_parents(&ctx.paths.repo, &source, false)?;
                 Ok(source)
             });
             match checked {
-                Ok(source) if explicit => output::action("would add", &shown(key, &source)),
+                Ok(source) if explicit => {
+                    output::action("would add", &shown(key, &source));
+                    if let Some(plain) = self.replaced(key, &source) {
+                        output::warning(&format!(
+                            "{plain} holds {key} in plain text and would be removed, but git history would still have it"
+                        ));
+                    }
+                }
                 Ok(_) => {}
                 Err(e) => {
                     failed = failed.saturating_add(1);
@@ -870,9 +921,9 @@ impl Planner<'_> {
             .filter(|rel| !rel.as_os_str().is_empty());
         let hint = inside.map_or_else(String::new, |rel| {
             format!(
-                "; to manage its files, add the directory: `{} add ~/{}`",
+                "; to manage its files, add the directory: `{} add {}`",
                 name::bin(),
-                rel.display()
+                pasteable(&paths.home, &rel.to_string_lossy())
             )
         });
         output::warning(&format!(
@@ -1218,6 +1269,11 @@ pub(crate) fn record_mode(repo_config: &mut RepoConfig, key: &str, mode: u32, de
 
 // A symlink in the worktree (a cloned repo can ship one) must not carry the write out of the repo.
 pub(crate) fn ensure_worktree_parents(repo: &Path, key: &str) -> Result<()> {
+    worktree_parents(repo, key, true)
+}
+
+/// A dry run checks the parents the way [`ensure_worktree_parents`] does, without creating any.
+fn worktree_parents(repo: &Path, key: &str, create: bool) -> Result<()> {
     for parent in parents(key) {
         let path = repo.join(parent);
         match fs::symlink_metadata(&path) {
@@ -1226,6 +1282,7 @@ pub(crate) fn ensure_worktree_parents(repo: &Path, key: &str) -> Result<()> {
                 "{} in the repo is a symlink or a file, not a directory",
                 path.display()
             ),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !create => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&path)
                 .with_context(|| format!("cannot create {}", path.display()))?,
             Err(e) => return Err(e).with_context(|| format!("cannot stat {}", path.display())),
@@ -1562,22 +1619,61 @@ fn settle_roots(
 mod tests {
     use super::*;
 
-    fn link() -> Leaf {
-        Leaf::Link
+    fn file() -> Leaf {
+        Leaf::File {
+            mode: 0o644,
+            size: 1,
+            binary: false,
+        }
     }
 
     fn plan_of(files: &[&str], dir_items: &[&str]) -> Plan {
         Plan {
-            files: files.iter().map(|k| ((*k).to_owned(), link())).collect(),
+            files: files.iter().map(|k| ((*k).to_owned(), file())).collect(),
             dirs: vec![DirPlan {
                 key: ".config/x".to_owned(),
                 items: dir_items
                     .iter()
-                    .map(|k| ((*k).to_owned(), link()))
+                    .map(|k| ((*k).to_owned(), file()))
                     .collect(),
                 ..DirPlan::default()
             }],
         }
+    }
+
+    #[test]
+    fn a_secret_named_link_is_never_pointed_at_encrypt() {
+        let config = RepoConfig::default();
+        let none = Sources::default();
+        let mut plan = plan_of(&[], &[]);
+        plan.files.insert(".env".to_owned(), Leaf::Link);
+        let err = guard_secrets(
+            &mut plan,
+            &config,
+            &none,
+            &here(),
+            true,
+            &args(false, false),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("--allow-plain") && !err.contains("--encrypt"),
+            "{err}"
+        );
+        let guarded = guard_secrets(
+            &mut plan,
+            &config,
+            &none,
+            &here(),
+            false,
+            &args(false, false),
+        )
+        .unwrap();
+        assert!(
+            guarded.plain.is_empty(),
+            "a link gets no plain-text warning"
+        );
     }
 
     fn args(encrypt: bool, allow_plain: bool) -> AddArgs {
@@ -1610,6 +1706,10 @@ mod tests {
         }
     }
 
+    fn held_keys(guarded: &Guarded) -> Vec<&str> {
+        guarded.held.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
     #[test]
     fn a_directory_holds_a_new_secret_name_whatever_the_remote() {
         let config = RepoConfig::default();
@@ -1627,7 +1727,7 @@ mod tests {
                 &args(false, false),
             )
             .unwrap();
-            assert_eq!(guarded.held, [".config/x/.env"], "public: {public}");
+            assert_eq!(held_keys(&guarded), [".config/x/.env"], "public: {public}");
             assert_eq!(kept(&plan), [".config/x/managed.token", ".config/x/rc"]);
         }
         let mut plan = plan_of(&[], &items);
@@ -1652,7 +1752,7 @@ mod tests {
             &args(false, false),
         )
         .unwrap();
-        assert_eq!(guarded.held, [".config/x/.env"]);
+        assert_eq!(held_keys(&guarded), [".config/x/.env"]);
         assert_eq!(kept(&plan), [".config/x/rc"]);
     }
 

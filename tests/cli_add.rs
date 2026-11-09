@@ -38,9 +38,10 @@ fn a_directory_holds_a_secret_named_file_without_a_remote() {
         err.contains("held .config/zsh/secrets.zsh: name matches [guard] secret_names"),
         "{err}"
     );
+    let secrets = env.home().join(".config/zsh/secrets.zsh");
     assert!(
-        err.contains("add --encrypt ~/.config/zsh/secrets.zsh")
-            && err.contains("add ~/.config/zsh/secrets.zsh` stores it as it is"),
+        err.contains(&format!("add --encrypt {}", secrets.display()))
+            && err.contains(&format!("add {}` stores it as it is", secrets.display())),
         "{err}"
     );
     assert_eq!(managed(&env), [".config/zsh/.zshrc"]);
@@ -84,9 +85,10 @@ fn an_explicit_secret_named_file_is_added_with_one_warning() {
         1,
         "one warning:\n{err}"
     );
+    let secrets = env.home().join(".config/zsh/secrets.zsh");
     assert!(
         err.contains("is stored as plain text")
-            && err.contains("add --encrypt ~/.config/zsh/secrets.zsh"),
+            && err.contains(&format!("add --encrypt {}`", secrets.display())),
         "{err}"
     );
     assert_eq!(managed(&env), [".config/zsh/secrets.zsh"]);
@@ -229,16 +231,120 @@ fn adding_a_managed_directory_again_previews_only_what_changed() {
 fn a_symlink_to_a_directory_is_stored_as_a_link_with_a_hint() {
     let env = TestEnv::new();
     env.ok(&["init"]);
-    env.write("dots/nvim/init.lua", b"-- init\n", 0o644);
-    env.symlink(".config/nvim", "../dots/nvim");
+    env.write("my dots/nvim/init.lua", b"-- init\n", 0o644);
+    env.symlink(".config/nvim", "../my dots/nvim");
     let err = env.ok(&["add", ".config/nvim"]);
+    let target = env.home().join("my dots/nvim");
     assert!(
         err.contains("only the link is stored, not the files in it")
-            && err.contains("add ~/dots/nvim"),
+            && err.contains(&format!("add '{}'`", target.display())),
         "{err}"
     );
     assert_eq!(
         env.token_of("list", ".config/nvim").as_deref(),
         Some("symlink")
     );
+}
+
+#[test]
+fn hold_hints_are_commands_that_work_when_pasted() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/my app/.env", b"KEY=1\n", 0o600);
+    env.write(".config/my app/rc", b"rc\n", 0o644);
+    env.write("elsewhere", b"x\n", 0o644);
+    env.symlink(".config/links/.env", "../../elsewhere");
+    let err = exits(&env, 3, &["add", ".config/my app", ".config/links"]);
+    let quoted = format!("'{}'", env.home().join(".config/my app/.env").display());
+    assert!(
+        err.contains(&format!("add --encrypt {quoted}` stores it encrypted")),
+        "{err}"
+    );
+    let link_line = err
+        .lines()
+        .find(|line| line.contains("held .config/links/.env"))
+        .expect("the link is held");
+    assert!(
+        !link_line.contains("--encrypt") && link_line.contains("stores the link as it is"),
+        "{link_line}"
+    );
+
+    env.write(".config/app/.env", b"KEY=2\n", 0o600);
+    let err = env.ok(&["add", "--for", "host=laptop", ".config/app/.env"]);
+    assert!(
+        err.contains(&format!(
+            "add --encrypt --for 'host=laptop' {}`",
+            env.home().join(".config/app/.env").display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_directory_with_entries_it_cannot_store_exits_3_in_both_runs() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/x/rc", b"rc\n", 0o644);
+    let made = Command::new("mkfifo")
+        .arg(env.home().join(".config/x/pipe"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success());
+    for args in [
+        &["add", "--dry-run", ".config/x"][..],
+        &["add", ".config/x"],
+    ] {
+        let err = exits(&env, 3, args);
+        assert!(
+            err.contains("held .config/x/pipe: a socket, FIFO or device"),
+            "{err}"
+        );
+    }
+
+    env.write(".config/locked/a", b"a\n", 0o644);
+    let locked = env.home().join(".config/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let readable = fs::read_dir(&locked).is_ok();
+    let outs: Vec<(Option<i32>, String)> = [
+        &["add", "--dry-run", ".config/locked"][..],
+        &["add", ".config/locked"],
+    ]
+    .iter()
+    .map(|args| {
+        let out = env.run(args);
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    })
+    .collect();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod");
+    // root reads anything, so the case means nothing there.
+    if !readable {
+        for (code, err) in outs {
+            assert_eq!(code, Some(3), "{err}");
+            assert!(err.contains("held .config/locked: cannot be read"), "{err}");
+        }
+    }
+}
+
+#[test]
+fn a_dry_run_refuses_a_symlinked_repo_parent_as_the_real_run_does() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let outside = env.root().join("outside");
+    fs::create_dir(&outside).expect("create dir");
+    std::os::unix::fs::symlink(&outside, env.repo().join(".config")).expect("link");
+    env.write(".config/x", b"secret", 0o644);
+    for args in [
+        &["add", "--dry-run", ".config/x"][..],
+        &["add", ".config/x"],
+    ] {
+        let err = env.fails(args);
+        assert!(
+            err.contains("could not add .config/x") && err.contains("is a symlink or a file"),
+            "{err}"
+        );
+    }
+    assert_eq!(fs::read_dir(&outside).expect("read").count(), 0);
 }
