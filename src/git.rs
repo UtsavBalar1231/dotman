@@ -892,7 +892,14 @@ impl Git {
         self.run(&["push", "-u", remote, branch]).map(drop)
     }
 
-    /// Whether `remote` has `branch`. Asks the remote and writes nothing locally.
+    /// How many commits `tip` has that `base` lacks; every commit of `tip` when `base` is `None`.
+    pub fn count_commits(&self, base: Option<&str>, tip: &str) -> Result<u64> {
+        let range = base.map_or_else(|| tip.to_owned(), |base| format!("{base}..{tip}"));
+        let out = self.run(&["rev-list", "--count", range.as_str()])?;
+        text(&out)
+            .parse()
+            .context("git rev-list printed a bad count")
+    }
     pub fn remote_has_branch(&self, remote: &str, branch: &str) -> Result<bool> {
         let pattern = format!("refs/heads/{branch}");
         let args = ["ls-remote", "--exit-code", remote, pattern.as_str()];

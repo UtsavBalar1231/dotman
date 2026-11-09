@@ -130,7 +130,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     }
 
     // A remote without the branch is a first push: there is nothing to pull.
-    if ctx.git.remote_has_branch(REMOTE, &branch)? && !pull(&ctx, &branch)? {
+    let on_remote = ctx.git.remote_has_branch(REMOTE, &branch)?;
+    if on_remote && !pull(&ctx, &branch)? {
         apply::check_failed(first_failed, uncaptured)?;
         return Ok(Outcome::Conflict);
     }
@@ -155,13 +156,29 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     let hooked = hooks::run(&ctx, &second.written, policy);
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured), uncaptured);
 
-    // A repo with no commit has nothing to push.
-    if ctx.git.head()?.is_some() {
-        ctx.git.push_set_upstream(REMOTE, &branch)?;
-        output::success(&format!("{REMOTE}/{branch} is up to date"));
-    }
+    push(&ctx, &branch, on_remote)?;
     failed.and(reencrypted).and(hooked)?;
     Ok(finish(attention))
+}
+
+/// Pushes `branch` and says how many commits went out. `pulled` means the pull left the remote's
+/// tip in `FETCH_HEAD`, which a remote-tracking ref matches only when the remote has a fetch
+/// refspec.
+fn push(ctx: &Context, branch: &str, pulled: bool) -> Result<()> {
+    // A repo with no commit has nothing to push.
+    if ctx.git.head()?.is_none() {
+        return Ok(());
+    }
+    let pushed = ctx
+        .git
+        .count_commits(pulled.then_some("FETCH_HEAD"), "HEAD")?;
+    ctx.git.push_set_upstream(REMOTE, branch)?;
+    output::success(&match pushed {
+        0 => format!("{REMOTE}/{branch} is up to date"),
+        1 => format!("pushed 1 commit to {REMOTE}/{branch}"),
+        n => format!("pushed {n} commits to {REMOTE}/{branch}"),
+    });
+    Ok(())
 }
 
 /// Pulls `branch`; false when the pull stopped, with the recovery steps printed, before anything

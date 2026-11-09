@@ -251,6 +251,40 @@ fn modes_and_symlinks_round_trip() {
     assert_converged(&a, &b);
 }
 
+/// The push line counts the commits this sync sent, not those the pull brought, and a sync that
+/// sent none says the remote is up to date.
+#[test]
+fn the_push_line_counts_the_commits_sent() {
+    let a = TestEnv::new();
+    a.ok(&["init"]);
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".a", b"a\n", 0o644);
+    a.ok(&["add", ".a"]);
+    let err = exits(&a, 0, &["sync"]);
+    assert!(err.contains("pushed 1 commit to origin/main\n"), "{err}");
+    let err = exits(&a, 0, &["sync"]);
+    assert!(err.contains("origin/main is up to date"), "{err}");
+    assert!(!err.contains("pushed"), "{err}");
+
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let b = clone_to_new_device(&a);
+    a.write(".a", b"a2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.ok(&["git", "commit", "-q", "--allow-empty", "-m", "by hand"]);
+    b.write(".b", b"b\n", 0o644);
+    b.ok(&["add", ".b"]);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("pushed 2 commits to origin/main"), "{err}");
+    assert_eq!(remote_file(&a, ".b"), "b\n");
+}
+
 #[test]
 fn commit_messages_name_three_paths_and_count_the_rest() {
     let files: Vec<(String, &[u8], u32)> = ["a", "b", "c", "d", "e"]
