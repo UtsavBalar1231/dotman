@@ -138,7 +138,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             break
         }
         'dotman;apply' {
-            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files')
+            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead')
             [CompletionResult]::new('--take-repo', '--take-repo', [CompletionResultType]::ParameterName, 'Take the repo version of conflicting and existing files, after backing them up')
             [CompletionResult]::new('--forget-deleted', '--forget-deleted', [CompletionResultType]::ParameterName, 'Stop managing files deleted locally; they stay deleted')
             [CompletionResult]::new('--restore-deleted', '--restore-deleted', [CompletionResultType]::ParameterName, 'Write files deleted locally back from the repo')
@@ -184,7 +184,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
         'dotman;sync' {
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'Commit message, replacing the generated `sync(<host>): ...` line')
             [CompletionResult]::new('--message', '--message', [CompletionResultType]::ParameterName, 'Commit message, replacing the generated `sync(<host>): ...` line')
-            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files')
+            [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead')
             [CompletionResult]::new('--take-repo', '--take-repo', [CompletionResultType]::ParameterName, 'Take the repo version of conflicting and existing files, after backing them up')
             [CompletionResult]::new('--forget-deleted', '--forget-deleted', [CompletionResultType]::ParameterName, 'Stop managing files deleted locally; they stay deleted')
             [CompletionResult]::new('--restore-deleted', '--restore-deleted', [CompletionResultType]::ParameterName, 'Write files deleted locally back from the repo')
@@ -194,7 +194,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             [CompletionResult]::new('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Show what would be captured, committed, pulled, applied and pushed; change nothing')
             [CompletionResult]::new('--system', '--system', [CompletionResultType]::ParameterName, 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'With --system: write the system files without asking')
-            [CompletionResult]::new('--allow-mass-delete', '--allow-mass-delete', [CompletionResultType]::ParameterName, 'Commit even when the repo changes delete at least half of the tracked files (10 or more)')
+            [CompletionResult]::new('--allow-mass-delete', '--allow-mass-delete', [CompletionResultType]::ParameterName, 'Commit even when the repo changes delete at least half of the tracked files (10 or more); a deleted file under a `[dirs]` entry that $HOME still has is captured again by the next sync, so stop managing those with `forget <dir>` first')
             [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress informational messages')

@@ -96,7 +96,9 @@ Exit status:
      reached $HOME, and printed the steps to resolve it.
   1  An error. Among them: the remote shares no commit with the repo, or
      the commit would delete at least 10 tracked files and at least half
-     of them, which needs a yes at the prompt or --allow-mass-delete.";
+     of them, which needs a yes at the prompt or --allow-mass-delete.
+     The next sync captures again the files under [dirs] that $HOME
+     still has, unless `forget <dir>` stops managing them first.";
 
 const DIFF_HELP: &str = "\
 The diff runs from repo/<key> to home/<key>, so an edit made in $HOME shows
@@ -303,7 +305,7 @@ pub struct InitArgs {
 // reason: independent answers to separate prompts, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct Decisions {
-    /// Keep the local version of conflicting and existing files
+    /// Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead
     #[arg(long, help_heading = "Decisions", conflicts_with = "take_repo")]
     pub keep_local: bool,
     /// Take the repo version of conflicting and existing files, after backing them up
@@ -380,7 +382,7 @@ pub struct SyncArgs {
     /// With --system: write the system files without asking
     #[arg(long, requires = "system")]
     pub yes: bool,
-    /// Commit even when the repo changes delete at least half of the tracked files (10 or more)
+    /// Commit even when the repo changes delete at least half of the tracked files (10 or more); a deleted file under a `[dirs]` entry that $HOME still has is captured again by the next sync, so stop managing those with `forget <dir>` first
     #[arg(long)]
     pub allow_mass_delete: bool,
 }

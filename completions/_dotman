@@ -132,7 +132,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (apply)
 _arguments "${_arguments_options[@]}" : \
-'(--take-repo)--keep-local[Keep the local version of conflicting and existing files]' \
+'(--take-repo)--keep-local[Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run \`add --for host=<host> <file>\` instead]' \
 '--take-repo[Take the repo version of conflicting and existing files, after backing them up]' \
 '(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \
 '--restore-deleted[Write files deleted locally back from the repo]' \
@@ -184,7 +184,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-m+[Commit message, replacing the generated \`sync(<host>)\: ...\` line]:MSG:_default' \
 '--message=[Commit message, replacing the generated \`sync(<host>)\: ...\` line]:MSG:_default' \
-'(--take-repo)--keep-local[Keep the local version of conflicting and existing files]' \
+'(--take-repo)--keep-local[Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run \`add --for host=<host> <file>\` instead]' \
 '--take-repo[Take the repo version of conflicting and existing files, after backing them up]' \
 '(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \
 '--restore-deleted[Write files deleted locally back from the repo]' \
@@ -194,7 +194,7 @@ _arguments "${_arguments_options[@]}" : \
 '--dry-run[Show what would be captured, committed, pulled, applied and pushed; change nothing]' \
 '--system[After the pull, also write the system files outside \$HOME, through one sudo, doas or run0 call]' \
 '--yes[With --system\: write the system files without asking]' \
-'--allow-mass-delete[Commit even when the repo changes delete at least half of the tracked files (10 or more)]' \
+'--allow-mass-delete[Commit even when the repo changes delete at least half of the tracked files (10 or more); a deleted file under a \`\[dirs\]\` entry that \$HOME still has is captured again by the next sync, so stop managing those with \`forget <dir>\` first]' \
 '-v[Show verbose output]' \
 '--verbose[Show verbose output]' \
 '-q[Suppress informational messages]' \

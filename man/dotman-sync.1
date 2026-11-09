@@ -25,14 +25,14 @@ After the pull, also write the system files outside $HOME, through one sudo, doa
 With \-\-system: write the system files without asking
 .TP
 \fB\-\-allow\-mass\-delete\fR
-Commit even when the repo changes delete at least half of the tracked files (10 or more)
+Commit even when the repo changes delete at least half of the tracked files (10 or more); a deleted file under a `[dirs]` entry that $HOME still has is captured again by the next sync, so stop managing those with `forget <dir>` first
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
 .SH DECISIONS
 .TP
 \fB\-\-keep\-local\fR
-Keep the local version of conflicting and existing files
+Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add \-\-for host=<host> <file>` instead
 .TP
 \fB\-\-take\-repo\fR
 Take the repo version of conflicting and existing files, after backing them up
@@ -77,3 +77,5 @@ reached $HOME, and printed the steps to resolve it.
 An error. Among them: the remote shares no commit with the repo, or
 the commit would delete at least 10 tracked files and at least half
 of them, which needs a yes at the prompt or \-\-allow\-mass\-delete.
+The next sync captures again the files under [dirs] that $HOME
+still has, unless \fBforget <dir>\fR stops managing them first.

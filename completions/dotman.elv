@@ -129,7 +129,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'dotman;apply'= {
-            cand --keep-local 'Keep the local version of conflicting and existing files'
+            cand --keep-local 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead'
             cand --take-repo 'Take the repo version of conflicting and existing files, after backing them up'
             cand --forget-deleted 'Stop managing files deleted locally; they stay deleted'
             cand --restore-deleted 'Write files deleted locally back from the repo'
@@ -172,7 +172,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
         &'dotman;sync'= {
             cand -m 'Commit message, replacing the generated `sync(<host>): ...` line'
             cand --message 'Commit message, replacing the generated `sync(<host>): ...` line'
-            cand --keep-local 'Keep the local version of conflicting and existing files'
+            cand --keep-local 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead'
             cand --take-repo 'Take the repo version of conflicting and existing files, after backing them up'
             cand --forget-deleted 'Stop managing files deleted locally; they stay deleted'
             cand --restore-deleted 'Write files deleted locally back from the repo'
@@ -182,7 +182,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --dry-run 'Show what would be captured, committed, pulled, applied and pushed; change nothing'
             cand --system 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call'
             cand --yes 'With --system: write the system files without asking'
-            cand --allow-mass-delete 'Commit even when the repo changes delete at least half of the tracked files (10 or more)'
+            cand --allow-mass-delete 'Commit even when the repo changes delete at least half of the tracked files (10 or more); a deleted file under a `[dirs]` entry that $HOME still has is captured again by the next sync, so stop managing those with `forget <dir>` first'
             cand -v 'Show verbose output'
             cand --verbose 'Show verbose output'
             cand -q 'Suppress informational messages'
