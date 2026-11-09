@@ -2,6 +2,7 @@ mod common;
 
 use common::{TestEnv, assert_converged, mode_of, short_host};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Output;
 
 fn stderr(out: &Output) -> String {
@@ -606,4 +607,42 @@ fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
     let remote = env.remote_path().to_string_lossy().into_owned();
     let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
     assert!(!tree.contains(".dotman-tmp-"), "{tree}");
+}
+
+#[test]
+fn an_unreadable_file_is_reported_as_not_captured() {
+    let env = first_device(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    env.write(".b", b"b edited\n", 0o644);
+    fs::set_permissions(env.home().join(".a"), fs::Permissions::from_mode(0o000)).expect("chmod");
+    let err = exits(&env, 1, &["sync"]);
+    fs::set_permissions(env.home().join(".a"), fs::Permissions::from_mode(0o644)).expect("chmod");
+    assert!(err.contains(".a: cannot be captured"), "{err}");
+    assert!(err.contains("1 path could not be captured"), "{err}");
+    assert!(!err.contains("could not be applied"), "{err}");
+    assert_eq!(remote_file(&env, ".b"), "b edited\n");
+}
+
+#[test]
+fn a_managed_directory_replaced_by_a_file_gets_a_clear_message() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/nvim/init.lua", b"init\n", 0o644);
+    env.write(".config/nvim/lua/opts.lua", b"opts\n", 0o644);
+    env.ok(&["add", ".config/nvim"]);
+    env.ok(&["sync"]);
+    fs::remove_dir_all(env.home().join(".config/nvim/lua")).expect("remove the dir");
+    env.write(".config/nvim/lua", b"not a dir\n", 0o644);
+
+    let err = exits(&env, 3, &["sync"]);
+    assert!(
+        err.contains(".config/nvim/lua: a file here, but a directory of managed files in the repo"),
+        "{err}"
+    );
+    assert!(err.contains("dotman forget .config/nvim/lua"), "{err}");
+    assert!(!err.contains("os error"), "{err}");
+    assert_eq!(env.read(".config/nvim/lua"), b"not a dir\n");
+    assert_eq!(
+        fs::read(env.repo().join(".config/nvim/lua/opts.lua")).expect("repo file"),
+        b"opts\n"
+    );
 }

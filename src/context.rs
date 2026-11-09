@@ -13,7 +13,7 @@ use crate::system::{self, Scope};
 use crate::template::Vars;
 use crate::variant::Sources;
 use anyhow::{Context as _, Result, bail};
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
@@ -105,6 +105,8 @@ pub struct Context {
     /// The machine config, already applied to `paths`.
     pub machine: Config,
     command: &'static str,
+    /// Keys already warned about in this run.
+    warned: RefCell<BTreeSet<String>>,
     identity: OnceCell<IdentitySnapshot>,
     template_vars: OnceCell<Vars>,
     age: OnceCell<Age>,
@@ -127,9 +129,18 @@ impl Context {
             paths,
             machine,
             command: dot_command,
+            warned: RefCell::new(BTreeSet::new()),
             identity: OnceCell::new(),
             template_vars: OnceCell::new(),
             age: OnceCell::new(),
+        }
+    }
+
+    /// Prints `message` as a warning, unless one was already printed for `key` in this run, such
+    /// as by `sync`'s pass before the pull.
+    pub(crate) fn warn_once(&self, key: &str, message: &str) {
+        if self.warned.borrow_mut().insert(key.to_owned()) {
+            crate::output::warning(message);
         }
     }
 

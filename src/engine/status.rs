@@ -88,10 +88,8 @@ impl Row {
     pub const fn category(self) -> Option<Category> {
         match self {
             Self::ForgottenEdited => Some(Category::ForgottenEdited),
-            Self::DeletedLocally => Some(Category::LocalDeletions),
-            Self::DeletedChangedUpstream | Self::BothChanged | Self::SymlinkAtTarget => {
-                Some(Category::Conflicts)
-            }
+            Self::DeletedLocally | Self::DeletedChangedUpstream => Some(Category::LocalDeletions),
+            Self::BothChanged | Self::SymlinkAtTarget => Some(Category::Conflicts),
             Self::Existing => Some(Category::ExistingFiles),
             Self::TemplateDrift => Some(Category::TemplateDrift),
             Self::Blocked => Some(Category::Blocked),
@@ -413,7 +411,7 @@ mod tests {
         let row = classify(Some(&file("r")), &Home::Missing, Some(&file("s")));
         assert_eq!(row, Some(Row::DeletedChangedUpstream));
         assert_eq!(row.and_then(Row::number), Some(7));
-        assert_eq!(row.and_then(Row::category), Some(Category::Conflicts));
+        assert_eq!(row.and_then(Row::category), Some(Category::LocalDeletions));
     }
 
     #[test]

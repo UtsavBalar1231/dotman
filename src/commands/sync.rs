@@ -113,7 +113,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         ));
         secrets::reencrypt(&ctx, true)?;
         let hooked = hooks::run(&ctx, &written, policy);
-        apply::check_failed(first_failed).and(hooked)?;
+        apply::check_failed(first_failed, uncaptured).and(hooked)?;
         return Ok(finish(attention));
     }
 
@@ -122,7 +122,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         refuse_unrelated(&ctx, &branch)?;
         if let PullOutcome::Conflict { paths } = ctx.git.pull_rebase(REMOTE, &branch)? {
             report_conflict(&ctx, &paths);
-            apply::check_failed(first_failed)?;
+            apply::check_failed(first_failed, uncaptured)?;
             return Ok(Outcome::Conflict);
         }
     }
@@ -145,7 +145,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     second.written.extend(written);
     let reencrypted = reencrypt(&ctx, args, false);
     let hooked = hooks::run(&ctx, &second.written, policy);
-    let failed = apply::check_failed(second.failed.saturating_add(uncaptured));
+    let failed = apply::check_failed(second.failed.saturating_add(uncaptured), uncaptured);
 
     // A repo with no commit has nothing to push.
     if ctx.git.head()?.is_some() {
@@ -183,6 +183,7 @@ fn without_remote(
     )?;
     second.written.extend(first.written);
     second.failed = second.failed.saturating_add(first.uncaptured);
+    second.uncaptured = second.uncaptured.saturating_add(first.uncaptured);
     let reencrypted = reencrypt(ctx, args, dry_run);
     let outcome = apply::finish(ctx, &second, policy);
     reencrypted?;

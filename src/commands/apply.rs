@@ -5,7 +5,7 @@ use crate::cli::{ApplyArgs, Decisions};
 use crate::commands::add::{self, Scan};
 use crate::commands::status::token;
 use crate::commands::{Outcome, diff, forget};
-use crate::context::Context;
+use crate::context::{Context, is_real_dir};
 use crate::engine::status::{Content, Row, Source, SourceEntry, Variants, Worktree, classify};
 use crate::engine::write::{
     Skip, WriteOptions, WriteOutcome, back_up_bytes, backup_run_dir, safe_symlink, safe_write,
@@ -26,8 +26,10 @@ use crate::system::escalate::{Escalator, Tool};
 use crate::system::helper::{self, Plan, PlanEntry, Reported};
 use crate::system::{self, Scope, Verdict};
 use crate::variant::{Selection, Sources};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -102,7 +104,8 @@ pub(crate) struct Options {
 
 pub(crate) struct Applied {
     pub outcome: Outcome,
-    /// Keys that were asked about and left unanswered, or reported as template drift or held.
+    /// Keys that were asked about and left unanswered, reported as template drift or held, or
+    /// that a capture could not read.
     pub undecided: BTreeSet<String>,
     /// Keys captured into the repo; in a dry run, the keys that would be.
     pub captured: BTreeSet<String>,
@@ -117,18 +120,38 @@ pub(crate) struct Applied {
 
 impl Applied {
     pub(crate) fn check(&self) -> Result<()> {
-        check_failed(self.failed)
+        check_failed(self.failed, self.uncaptured)
     }
 }
 
-pub(crate) fn check_failed(failed: usize) -> Result<()> {
-    if failed > 0 {
-        bail!(
-            "{failed} {} could not be applied",
-            if failed == 1 { "path" } else { "paths" }
-        );
+/// Fails when any of `failed` paths failed; `uncaptured` of them are captures that did not happen.
+pub(crate) fn check_failed(failed: usize, uncaptured: usize) -> Result<()> {
+    let applied = failed.saturating_sub(uncaptured);
+    let paths = |n: usize| if n == 1 { "path" } else { "paths" };
+    let mut parts = Vec::new();
+    if applied > 0 {
+        parts.push(format!("{applied} {} could not be applied", paths(applied)));
     }
-    Ok(())
+    if uncaptured > 0 {
+        parts.push(format!(
+            "{uncaptured} {} could not be captured",
+            paths(uncaptured)
+        ));
+    }
+    if parts.is_empty() {
+        return Ok(());
+    }
+    bail!("{}", parts.join(", and "))
+}
+
+/// H could not be read, so the key can be neither applied nor captured.
+#[derive(Debug)]
+pub(crate) struct HomeUnreadable;
+
+impl std::fmt::Display for HomeUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("it cannot be read in $HOME")
+    }
 }
 
 /// Applies the keys under `inputs` (every key when empty). The caller holds the lock.
@@ -346,7 +369,7 @@ const TAKE: Answer = Answer {
 const QUESTIONS: [Question; 3] = [
     Question {
         what: "conflicts",
-        rows: |row| matches!(row, Row::DeletedChangedUpstream | Row::BothChanged),
+        rows: |row| row == Row::BothChanged,
         flag: |d| choice(d.keep_local, d.take_repo),
         local: KEEP,
         local_action: Action::KeepLocal,
@@ -366,7 +389,9 @@ const QUESTIONS: [Question; 3] = [
     },
     Question {
         what: "local deletions",
-        rows: |row| row == Row::DeletedLocally,
+        // Deleted here and changed upstream too: keeping "local" is forgetting it, and taking the
+        // repo's is restoring it.
+        rows: |row| matches!(row, Row::DeletedLocally | Row::DeletedChangedUpstream),
         flag: |d| choice(d.forget_deleted, d.restore_deleted),
         local: Answer {
             letter: "f",
@@ -444,6 +469,14 @@ impl Run<'_> {
                     for (source, reason) in problems {
                         output::warning(&format!("{key}: skipped, {source}: {reason}"));
                     }
+                }
+                // An unreadable H is what `sync` came to capture; the pass after the pull leaves
+                // it alone instead of reporting it again.
+                Err(e) if self.opts.pass == Pass::Capture && e.is::<HomeUnreadable>() => {
+                    output::warning(&format!("{key}: cannot be captured: {e:#}"));
+                    self.failed = self.failed.saturating_add(1);
+                    self.uncaptured = self.uncaptured.saturating_add(1);
+                    self.undecided.insert(key.clone());
                 }
                 Err(e) => {
                     output::warning(&format!("{key}: skipped: {e:#}"));
@@ -569,15 +602,10 @@ impl Run<'_> {
         Ok(actions)
     }
 
-    /// Keeping H means different things per pass. `sync` captures it, except for a path deleted
-    /// here, which has no H to capture.
+    /// Keeping H means different things per pass: `sync` captures it.
     fn keep(&self, local: Action, item: &Item) -> Action {
         let into_template = item.r.as_ref().is_some_and(|r| r.template);
-        if local == Action::KeepLocal
-            && self.opts.pass == Pass::Capture
-            && item.row != Row::DeletedChangedUpstream
-            && !into_template
-        {
+        if local == Action::KeepLocal && self.opts.pass == Pass::Capture && !into_template {
             Action::Capture
         } else {
             local
@@ -1175,6 +1203,15 @@ impl Run<'_> {
         state: &mut State,
         repo_config: &mut RepoConfig,
     ) {
+        if is_real_dir(&self.ctx.paths.repo.join(source)) {
+            self.attention = true;
+            self.undecided.insert(key.to_owned());
+            output::warning(&format!(
+                "{key}: a file here, but a directory of managed files in the repo; skipped. To manage the file instead: `{bin} forget {key}`, then `{bin} add {key}`",
+                bin = name::bin()
+            ));
+            return;
+        }
         if self.opts.dry_run {
             // Only a dry run reads H here; a real capture checks what it is about to store.
             if !encrypted && add::holds_key(&self.ctx.paths.home, key) {
@@ -1333,7 +1370,12 @@ pub(crate) fn classify_key(
         Selection::Invalid(problems) => return Ok(Classified::Invalid(problems)),
     };
     let home = &ctx.paths.home;
-    let h = observe_portable(home, ctx.paths.home_real.as_deref(), key)?;
+    let h = observe_portable(home, ctx.paths.home_real.as_deref(), key).context(HomeUnreadable)?;
+    if let Home::Present(tuple) = &h
+        && tuple.kind == Kind::File
+    {
+        warn_special_bits(ctx, key);
+    }
     let recorded = state.files.get(key);
     let s = recorded.map(Tuple::from_entry).transpose()?;
     let Some(row) = classify(r.as_ref().map(|e| &e.tuple), &h, s.as_ref()) else {
@@ -1365,6 +1407,28 @@ pub(crate) fn classify_key(
         identity,
         system: false,
     }))
+}
+
+/// H's tuple leaves these bits out, so a file that has them still settles; this says so once per
+/// run.
+fn warn_special_bits(ctx: &Context, key: &str) {
+    let mode = fs::symlink_metadata(ctx.paths.home.join(key)).map_or(0, |meta| meta.mode());
+    let bits: Vec<&str> = [(0o4000, "setuid"), (0o2000, "setgid"), (0o1000, "sticky")]
+        .into_iter()
+        .filter(|(bit, _)| mode & bit != 0)
+        .map(|(_, name)| name)
+        .collect();
+    if !bits.is_empty() {
+        ctx.warn_once(
+            key,
+            &format!(
+                "{key}: has the {} {}, which dotman does not track; a write from the repo drops {}",
+                bits.join(" and "),
+                if bits.len() == 1 { "bit" } else { "bits" },
+                if bits.len() == 1 { "it" } else { "them" }
+            ),
+        );
+    }
 }
 
 fn system_files(n: usize) -> String {
@@ -1540,5 +1604,7 @@ mod tests {
         assert_eq!((conflicts.flag)(forget), None);
         assert!((conflicts.rows)(Row::BothChanged));
         assert!(!(conflicts.rows)(Row::SymlinkAtTarget));
+        assert!(!(conflicts.rows)(Row::DeletedChangedUpstream));
+        assert!((deletions.rows)(Row::DeletedChangedUpstream));
     }
 }

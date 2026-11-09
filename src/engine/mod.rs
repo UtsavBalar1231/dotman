@@ -171,7 +171,11 @@ impl Node {
             Self::BadParent(parent) => Home::Blocked(Obstacle::Parent(parent.clone())),
             Self::Dir => Home::Blocked(Obstacle::Directory),
             Self::Special => Home::Blocked(Obstacle::Special),
-            Self::File { bytes, mode, .. } => Home::Present(Tuple::of_file(bytes, *mode)),
+            // Special bits are never applied, so counting them would leave the file changed
+            // forever.
+            Self::File { bytes, mode, .. } => {
+                Home::Present(Tuple::of_file(bytes, safe_mode(*mode)))
+            }
             Self::Symlink(target) => Home::Present(Tuple::of_link(target)),
         }
     }

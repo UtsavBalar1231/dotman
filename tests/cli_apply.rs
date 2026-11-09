@@ -131,7 +131,7 @@ fn row_6_deleted_locally_waits_for_restore_or_forget() {
 }
 
 #[test]
-fn row_7_deleted_and_changed_upstream_is_a_conflict() {
+fn row_7_deleted_here_and_changed_upstream_is_a_local_deletion() {
     let env = added(&[(".bashrc", b"one\n", 0o644), (".zshrc", b"z\n", 0o644)]);
     for (key, upstream) in [(".bashrc", b"two\n".as_slice()), (".zshrc", b"z 2\n")] {
         fs::remove_file(env.home().join(key)).unwrap();
@@ -141,16 +141,21 @@ fn row_7_deleted_and_changed_upstream_is_a_conflict() {
             Some("deleted-changed-upstream")
         );
     }
-    let err = attention(&env, &["apply", "--restore-deleted"]);
-    assert!(err.contains("conflicts left undecided (2)"), "{err}");
+    let err = attention(&env, &["apply", "--take-repo"]);
+    assert!(err.contains("local deletions left undecided (2)"), "{err}");
+    assert!(
+        err.contains("--forget-deleted or --restore-deleted"),
+        "{err}"
+    );
 
-    env.ok(&["apply", "--take-repo", ".bashrc"]);
+    env.ok(&["apply", "--restore-deleted", ".bashrc"]);
     assert_eq!(env.read(".bashrc"), b"two\n");
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("clean"));
 
-    env.ok(&["apply", "--keep-local", ".zshrc"]);
+    env.ok(&["apply", "--forget-deleted", ".zshrc"]);
     assert!(!env.home().join(".zshrc").exists());
-    assert_eq!(token(&env, ".zshrc").as_deref(), Some("deleted-locally"));
+    assert!(!env.repo().join(".zshrc").exists());
+    assert_eq!(token(&env, ".zshrc"), None);
 }
 
 #[test]
@@ -657,4 +662,25 @@ fn diff_prints_a_unified_diff_from_home_to_repo() {
         0,
         "temp trees are removed"
     );
+}
+
+#[test]
+fn special_bits_in_home_are_not_tracked_so_the_file_settles() {
+    let env = added(&[("bin/tool", b"#!/bin/sh\n", 0o755)]);
+    fs::set_permissions(
+        env.home().join("bin/tool"),
+        fs::Permissions::from_mode(0o2755),
+    )
+    .unwrap();
+    assert_eq!(token(&env, "bin/tool").as_deref(), Some("clean"));
+    let err = env.ok(&["sync"]);
+    assert_eq!(
+        err.matches("bin/tool: has the setgid bit, which dotman does not track")
+            .count(),
+        1,
+        "once per run: {err}"
+    );
+    assert!(!err.contains("capture bin/tool"), "{err}");
+    assert!(!env.ok(&["sync"]).contains("capture bin/tool"));
+    assert_eq!(mode_of(&env.home().join("bin/tool")), 0o2755);
 }
