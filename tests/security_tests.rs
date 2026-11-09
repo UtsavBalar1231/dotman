@@ -1695,6 +1695,49 @@ fn a_tracked_merge_driver_never_joins_a_conflict() {
     assert_eq!(fs::read(b.repo().join(".conf")).unwrap(), b"from-two\n");
 }
 
+/// Every object in the store at `git_dir`, reachable or not, as one text.
+fn every_object(env: &TestEnv, git_dir: &Path) -> String {
+    env.git(&[
+        "--git-dir",
+        &git_dir.to_string_lossy(),
+        "cat-file",
+        "--batch-all-objects",
+        "--batch",
+    ])
+}
+
+/// `init <path>` and `import <path>` clone a local path through git's transport, as they would a
+/// URL, never by copying or hardlinking its object store: an object nothing in the source
+/// reaches stays behind.
+#[test]
+fn a_local_path_is_cloned_through_git_s_transport() {
+    let a = device_with_a_symlink();
+    let marker = "unreachable-object-marker";
+    let loose = a.root().join("loose.txt");
+    fs::write(&loose, marker).unwrap();
+    let repo = a.repo().to_string_lossy().into_owned();
+    a.git(&["-C", &repo, "hash-object", "-w", &loose.to_string_lossy()]);
+    assert!(every_object(&a, &a.repo().join(".git")).contains(marker));
+
+    let b = TestEnv::new();
+    exits(&b.run(&["init", &repo]), 0);
+    assert_eq!(b.read(".zshrc"), b"zsh\n");
+    assert!(!every_object(&b, &b.repo().join(".git")).contains(marker));
+
+    let c = TestEnv::new();
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "hash-object",
+        "-w",
+        &loose.to_string_lossy(),
+    ]);
+    exits(&c.run(&["import", "--yes", &remote]), 0);
+    assert!(c.repo().join(".zshrc").exists());
+    assert!(!every_object(&c, &c.repo().join(".git")).contains(marker));
+}
+
 /// `DOTMAN_AGE_KEY` is in no hook's environment and no editor's: both write their `env` to a
 /// file that lacks the variable and has `HOME`.
 #[test]

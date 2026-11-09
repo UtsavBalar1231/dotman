@@ -507,7 +507,10 @@ impl Git {
         } else {
             None
         };
-        let mut args: Vec<&OsStr> = ["clone", "-q", "--no-checkout", NO_TEMPLATE]
+        // A local path otherwise takes git's shortcut that copies or hardlinks the source's
+        // object store whole, the subject of the 2024 local-clone CVEs, which the 2.25 floor
+        // does not rule out; through the transport, only the wanted history arrives.
+        let mut args: Vec<&OsStr> = ["clone", "-q", "--no-checkout", "--no-local", NO_TEMPLATE]
             .map(OsStr::new)
             .to_vec();
         args.extend(refs.iter().map(OsStr::new));
