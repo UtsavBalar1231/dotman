@@ -496,6 +496,62 @@ impl Git {
         self.run(&args).map(drop)
     }
 
+    /// The index entries of `paths`, taken literally, as `(mode, object id, path)`, for
+    /// [`Git::restore_index`]. Only stage 0: a path with conflicts has no single entry.
+    pub fn index_entries(&self, paths: &[PathBuf]) -> Result<Vec<(String, String, PathBuf)>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args: Vec<OsString> = ["ls-files", "-s", "-z", "--"].map(OsString::from).to_vec();
+        args.extend(paths.iter().map(|path| pathspec(":(literal)", path)));
+        let out = self.run(&args)?;
+        // One `mode oid stage<TAB>path` record per entry.
+        Ok(out
+            .stdout
+            .split(|b| *b == 0)
+            .filter_map(|record| {
+                let (meta, path) =
+                    record.split_at_checked(record.iter().position(|b| *b == b'\t')?)?;
+                let mut fields = meta.split(|b| *b == b' ');
+                let mode = String::from_utf8_lossy(fields.next()?).into_owned();
+                let oid = String::from_utf8_lossy(fields.next()?).into_owned();
+                let path = path_from(path.get(1..)?);
+                (fields.next()? == b"0").then_some((mode, oid, path))
+            })
+            .collect())
+    }
+
+    /// Makes the index hold `entries` from [`Git::index_entries`] again, and none for the rest
+    /// of `paths`. The worktree is left alone.
+    pub fn restore_index(
+        &self,
+        paths: &[PathBuf],
+        entries: &[(String, String, PathBuf)],
+    ) -> Result<()> {
+        let gone: Vec<OsString> = paths
+            .iter()
+            .filter(|path| !entries.iter().any(|(_, _, kept)| kept == *path))
+            .map(|path| pathspec(":(literal)", path))
+            .collect();
+        if !gone.is_empty() {
+            let mut args: Vec<OsString> = ["rm", "-q", "--cached", "--ignore-unmatch", "--"]
+                .map(OsString::from)
+                .to_vec();
+            args.extend(gone);
+            self.run(&args)?;
+        }
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec![OsString::from("update-index"), OsString::from("--add")];
+        for (mode, oid, path) in entries {
+            let mut info = OsString::from(format!("{mode},{oid},"));
+            info.push(path);
+            args.extend([OsString::from("--cacheinfo"), info]);
+        }
+        self.run(&args).map(drop)
+    }
+
     /// Commits the staged changes; `None` when nothing is staged.
     pub fn commit(&self, message: &str) -> Result<Option<String>> {
         let args = ["diff", "--cached", "--quiet", "--no-ext-diff"];

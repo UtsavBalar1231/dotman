@@ -261,33 +261,62 @@ fn commit(
     };
     let held = held_entries(ctx, &before);
     let held_paths: Vec<PathBuf> = held.iter().map(|(entry, _)| entry.path.clone()).collect();
+    // A held rename keeps its old path out of the commit too, which would otherwise delete it as
+    // a forget does. The rename is staged again afterwards, so the next sync holds both again.
+    let renamed: Vec<PathBuf> = held
+        .iter()
+        .filter_map(|(entry, _)| Some([entry.path.clone(), entry.orig_path.clone()?]))
+        .flatten()
+        .collect();
+    let left_out: Vec<PathBuf> = held_paths.iter().chain(&renamed).cloned().collect();
     let mut changed = BTreeSet::new();
+    let mut staged_rename = Vec::new();
     if dry_run {
         changed.extend(captured.iter().cloned());
     } else {
-        ctx.git.stage_all_except(&held_paths)?;
+        staged_rename = ctx.git.index_entries(&renamed)?;
+        ctx.git.stage_all_except(&left_out)?;
         let staged: Vec<PathBuf> = held
             .iter()
             .filter(|(entry, _)| entry.kind != StatusKind::Untracked && !entry.xy.starts_with('.'))
             .map(|(entry, _)| entry.path.clone())
+            .chain(renamed.iter().cloned())
             .collect();
         if !staged.is_empty() {
             ctx.git.unstage(&staged)?;
         }
     }
-    report_held(ctx, &held, dry_run);
-    changed.extend(
-        ctx.git
-            .status()?
-            .iter()
-            .filter(|entry| !held_paths.contains(&entry.path))
-            .filter(|entry| !(entry.kind == StatusKind::Untracked && is_temp(&entry.path)))
-            .map(|entry| entry.path.to_string_lossy().into_owned()),
-    );
     let done = Committed {
         held: !held_paths.is_empty(),
         refusal,
     };
+    let committed = commit_staged(ctx, message, dry_run, &held, &left_out, changed, done);
+    if !dry_run && !renamed.is_empty() {
+        ctx.git.restore_index(&renamed, &staged_rename)?;
+    }
+    committed
+}
+
+/// Reports the held files and commits what [`commit`] staged; `changed` names what a dry run
+/// would capture.
+fn commit_staged(
+    ctx: &Context,
+    message: Option<&str>,
+    dry_run: bool,
+    held: &[(&StatusEntry, Finding)],
+    left_out: &[PathBuf],
+    mut changed: BTreeSet<String>,
+    done: Committed,
+) -> Result<Committed> {
+    report_held(ctx, held, dry_run);
+    changed.extend(
+        ctx.git
+            .status()?
+            .iter()
+            .filter(|entry| !left_out.contains(&entry.path))
+            .filter(|entry| !(entry.kind == StatusKind::Untracked && is_temp(&entry.path)))
+            .map(|entry| entry.path.to_string_lossy().into_owned()),
+    );
     if changed.is_empty() {
         return Ok(done);
     }
