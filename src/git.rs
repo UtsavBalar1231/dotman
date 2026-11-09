@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -17,9 +18,12 @@ const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding\n";
 
 const MIN_VERSION: (u32, u32) = (2, 25);
 
-/// The write engine's temp files, which are never staged.
+/// The write engine's temp files, which are never staged. A wildcard pathspec matches whole paths
+/// only, so a temp directory needs its own `/**`.
 const TEMP_FILES: &str = ":(exclude,glob)**/.dotman-tmp-*";
+const TEMP_DIRS: &str = ":(exclude,glob)**/.dotman-tmp-*/**";
 const TRACKED_TEMP_FILES: &str = ":(glob)**/.dotman-tmp-*";
+const TRACKED_TEMP_DIRS: &str = ":(glob)**/.dotman-tmp-*/**";
 
 /// `core.excludesFile=` must stay empty: otherwise the user's global ignore file hides files from `git status`.
 /// `core.hooksPath=/dev/null` makes every hook lookup fail, so no hook runs.
@@ -75,13 +79,28 @@ const LOCAL_REPO_ENV: [&str; 18] = [
     "GIT_ICASE_PATHSPECS",
 ];
 
+/// Picks, from the untracked paths `git status` lists, those that [`Git::status`] hides and
+/// [`Git::stage_all_except`] leaves out, as git does with what its own ignore rules match. A
+/// directory it returns stands for every path under it.
+pub type LeaveOut = Box<dyn Fn(&Git, &[PathBuf]) -> Result<Vec<PathBuf>> + Send + Sync>;
+
 /// A git repository driven through the `git` binary with config isolation.
-#[derive(Debug)]
 pub struct Git {
     repo: PathBuf,
     dot_command: &'static str,
     env: Vec<(OsString, OsString)>,
     version_checked: OnceLock<()>,
+    leave_out: Option<LeaveOut>,
+}
+
+impl fmt::Debug for Git {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Git")
+            .field("repo", &self.repo)
+            .field("dot_command", &self.dot_command)
+            .field("env", &self.env)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Result of [`Git::pull_rebase`].
@@ -186,7 +205,15 @@ impl Git {
             dot_command,
             env: Vec::new(),
             version_checked: OnceLock::new(),
+            leave_out: None,
         }
+    }
+
+    /// Sets what [`Git::status`] hides and [`Git::stage_all_except`] leaves out.
+    #[must_use]
+    pub fn leaving_out(mut self, pick: LeaveOut) -> Self {
+        self.leave_out = Some(pick);
+        self
     }
 
     /// Adds environment variables to every git process; a later pair overrides an earlier one.
@@ -478,15 +505,26 @@ impl Git {
 
     /// Stages every change, including paths ignored by `.gitignore`.
     pub fn stage_all(&self) -> Result<()> {
-        self.stage_all_except(&[])
+        self.stage(&[])
     }
 
-    /// Like [`Git::stage_all`], leaving out `held`, repo-relative paths taken literally.
+    /// Like [`Git::stage_all`], leaving out `held`, repo-relative paths taken literally, and the
+    /// untracked paths the [`LeaveOut`] picks. A tracked path is staged whatever it picks.
     pub fn stage_all_except(&self, held: &[PathBuf]) -> Result<()> {
-        let mut args: Vec<OsString> = ["add", "-A", "-f", "--", ".", TEMP_FILES]
+        let mut left_out = self.left_out(&self.full_status()?)?;
+        left_out.extend_from_slice(held);
+        self.stage(&left_out)
+    }
+
+    fn stage(&self, left_out: &[PathBuf]) -> Result<()> {
+        let mut args: Vec<OsString> = ["add", "-A", "-f", "--", ".", TEMP_FILES, TEMP_DIRS]
             .map(OsString::from)
             .to_vec();
-        args.extend(held.iter().map(|path| pathspec(":(exclude,literal)", path)));
+        args.extend(
+            left_out
+                .iter()
+                .map(|path| pathspec(":(exclude,literal)", path)),
+        );
         self.run(&args)?;
         // Untracks the leftovers that earlier versions committed.
         let args = [
@@ -497,6 +535,7 @@ impl Git {
             "--ignore-unmatch",
             "--",
             TRACKED_TEMP_FILES,
+            TRACKED_TEMP_DIRS,
         ];
         self.run(&args).map(drop)
     }
@@ -583,9 +622,34 @@ impl Git {
         self.head()
     }
 
-    /// Parsed `git status --porcelain=v2`, including every untracked file. Never rewrites the
-    /// index, so it is safe in a dry run.
+    /// Parsed `git status --porcelain=v2`, including every untracked file except those the
+    /// [`LeaveOut`] picks. Never rewrites the index, so it is safe in a dry run.
     pub fn status(&self) -> Result<Vec<StatusEntry>> {
+        let entries = self.full_status()?;
+        let left_out = self.left_out(&entries)?;
+        Ok(entries
+            .into_iter()
+            .filter(|entry| {
+                entry.kind != StatusKind::Untracked
+                    || !left_out.iter().any(|root| entry.path.starts_with(root))
+            })
+            .collect())
+    }
+
+    /// The untracked paths of `entries` that the [`LeaveOut`] picks; none without one.
+    fn left_out(&self, entries: &[StatusEntry]) -> Result<Vec<PathBuf>> {
+        let untracked: Vec<PathBuf> = entries
+            .iter()
+            .filter(|entry| entry.kind == StatusKind::Untracked)
+            .map(|entry| entry.path.clone())
+            .collect();
+        match &self.leave_out {
+            Some(pick) if !untracked.is_empty() => pick(self, &untracked),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn full_status(&self) -> Result<Vec<StatusEntry>> {
         let mut cmd = self.command();
         cmd.env("GIT_OPTIONAL_LOCKS", "0");
         let args = [
@@ -697,8 +761,9 @@ impl Git {
         if !self.operation_in_progress() {
             return Err(self.failure(&args, &out));
         }
+        // Unfiltered: the filter reads `.dotman.toml`, which may hold conflict markers now.
         let paths = self
-            .status()?
+            .full_status()?
             .into_iter()
             .filter(|e| e.kind == StatusKind::Unmerged)
             .map(|e| e.path)

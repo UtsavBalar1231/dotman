@@ -166,6 +166,28 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
     assert_converged(&a, &b);
 }
 
+/// A conflict in `.dotman.toml` leaves conflict markers in it until the rebase is aborted, and
+/// untracked junk in the worktree must not make sync read it then: the rebase is still aborted.
+#[test]
+fn a_conflict_in_dotman_toml_is_aborted_with_junk_in_the_worktree() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    for (env, pattern) in [(&a, "**/*.from-a"), (&b, "**/*.from-b")] {
+        let mut config = env.repo_config();
+        config.ignore.patterns.push(pattern.to_owned());
+        config
+            .save(&env.repo().join(".dotman.toml"), false)
+            .expect("save .dotman.toml");
+    }
+    exits(&a, 0, &["sync"]);
+    b.write_repo(".bashrc.orig", b"junk\n");
+
+    let err = exits(&b, 4, &["sync"]);
+    assert!(err.contains("conflicting paths:\n  .dotman.toml"), "{err}");
+    assert!(!b.repo().join(".git/rebase-merge").exists());
+    assert!(!b.repo().join(".git/rebase-apply").exists());
+    exits(&b, 0, &["status"]);
+}
+
 #[test]
 fn a_rebase_conflict_wins_over_a_skipped_path() {
     let (a, b) = pair(&[(".a", b"base\n", 0o644), (".d", b"d\n", 0o644)]);
@@ -734,6 +756,74 @@ fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
     let remote = env.remote_path().to_string_lossy().into_owned();
     let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
     assert!(!tree.contains(".dotman-tmp-"), "{tree}");
+}
+
+/// Untracked files in the repo worktree that `[ignore]` matches, and a temp directory a run is
+/// still writing, are never committed, so no machine receives them; sync neither names nor holds
+/// them, even one with a credential in it. A file that `[ignore]` matches but was added by name
+/// still syncs, as git keeps staging a tracked file its ignore rules match.
+#[test]
+fn ignored_junk_in_the_repo_worktree_never_reaches_a_commit() {
+    let (a, b) = pair(&[
+        (".bashrc", b"b\n", 0o644),
+        (".config/app/a.conf", b"a\n", 0o644),
+    ]);
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead = child.id();
+    child.wait().expect("wait");
+    let token = format!("gh{}_{}", "p", "Zq7".repeat(12));
+    let junk = [
+        ".bashrc.orig".to_owned(),
+        ".config/app/.a.conf.swp".to_owned(),
+        ".config/app/node_modules/x/i.js".to_owned(),
+        format!(".config/app/.dotman-tmp-{dead}-DiRrEp/inner.conf"),
+    ];
+    for key in &junk {
+        a.write_repo(key, b"junk\n");
+    }
+    a.write_repo(
+        ".config/app/.b.conf.swp",
+        format!("tok={token}\n").as_bytes(),
+    );
+    a.write(".config/vim/.vimrc.swp", b"swap\n", 0o644);
+    a.ok(&["add", ".config/vim/.vimrc.swp"]);
+
+    let err = exits(&a, 0, &["sync", "--dry-run"]);
+    assert!(
+        !err.contains(".orig") && !err.contains(".a.conf.swp"),
+        "{err}"
+    );
+    let err = exits(&a, 0, &["sync"]);
+    assert!(
+        !err.contains("node_modules") && !err.contains(".b.conf.swp"),
+        "{err}"
+    );
+    let tree = a.git(&["-C", &repo_path(&a), "ls-tree", "-r", "--name-only", "HEAD"]);
+    let committed: Vec<&str> = tree.lines().collect();
+    assert_eq!(
+        committed,
+        [
+            ".bashrc",
+            ".config/app/a.conf",
+            ".config/vim/.vimrc.swp",
+            ".dotman.toml",
+            "install.sh"
+        ]
+    );
+    for key in &junk {
+        assert!(!a.home().join(key).exists(), "{key}");
+    }
+
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".config/vim/.vimrc.swp"), b"swap\n");
+    for key in junk.iter().chain([&".config/app/.b.conf.swp".to_owned()]) {
+        assert!(!b.home().join(key).exists(), "{key}");
+    }
+
+    a.write(".config/vim/.vimrc.swp", b"swap edited\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".config/vim/.vimrc.swp"), b"swap edited\n");
 }
 
 #[test]

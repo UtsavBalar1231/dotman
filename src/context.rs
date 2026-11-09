@@ -126,8 +126,11 @@ impl Context {
     /// A context whose git runs in `paths.repo`; `machine` must be the config `paths` came from.
     #[must_use]
     pub fn new(paths: Paths, machine: Config, dot_command: &'static str) -> Self {
+        let state_file = paths.state_file();
+        let leave_out =
+            move |git: &Git, untracked: &[PathBuf]| left_out(git, &state_file, untracked);
         Self {
-            git: Git::new(paths.repo.clone(), dot_command),
+            git: Git::new(paths.repo.clone(), dot_command).leaving_out(Box::new(leave_out)),
             paths,
             machine,
             command: dot_command,
@@ -181,7 +184,12 @@ impl Context {
         if !real {
             return Ok(found);
         }
-        for entry in WalkDir::new(&root).follow_links(false).min_depth(1) {
+        let temp_dir = |entry: &walkdir::DirEntry| {
+            entry.file_type().is_dir()
+                && entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
+        };
+        let walk = WalkDir::new(&root).follow_links(false).min_depth(1);
+        for entry in walk.into_iter().filter_entry(|entry| !temp_dir(entry)) {
             let entry = entry.with_context(|| format!("cannot read {}", root.display()))?;
             let file_type = entry.file_type();
             let kind = if file_type.is_symlink() {
@@ -389,8 +397,7 @@ impl Context {
     pub(crate) fn managed(&self) -> Result<BTreeMap<String, Kind>> {
         let root = &self.paths.repo;
         // An editor's swap file or a merge's `.orig` in the worktree is not a key.
-        let ignore = Ignore::compile(&self.repo_config()?.ignore.patterns)?;
-        let kept = self.unignored()?;
+        let dropped = Dropped::load(&self.git, &self.paths.state_file())?;
         let mut found = BTreeMap::new();
         let mut walk = WalkDir::new(root)
             .follow_links(false)
@@ -406,8 +413,11 @@ impl Context {
                     .strip_prefix(root)
                     .ok()
                     .and_then(Path::to_str)
-                    .is_some_and(|dir| ignore.matches(dir, true) && !holds_any(&kept, dir));
-                if ignored || (entry.depth() == 1 && entry.file_name() == OsStr::new(".git")) {
+                    .is_some_and(|dir| dropped.drops(dir, true));
+                if ignored
+                    || entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
+                    || (entry.depth() == 1 && entry.file_name() == OsStr::new(".git"))
+                {
                     walk.skip_current_dir();
                 }
                 continue;
@@ -425,29 +435,13 @@ impl Context {
             let Some(key) = rel.to_str() else { continue };
             if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
                 || validate_key(key).is_err()
-                || (ignore.matches(key, false) && !kept.contains(key))
+                || dropped.drops(key, false)
             {
                 continue;
             }
             found.insert(key.to_owned(), kind);
         }
         Ok(found)
-    }
-
-    /// Repo paths that `[ignore]` never drops, as git's own ignore rules never drop a tracked
-    /// file: those in the index, and those this machine applied or added, which `add` puts in the
-    /// worktree before any commit. A state that cannot be read is reported by the command that
-    /// loads it.
-    fn unignored(&self) -> Result<BTreeSet<String>> {
-        let mut kept = BTreeSet::new();
-        if !is_real_dir(&self.paths.repo.join(".git")) {
-            return Ok(kept);
-        }
-        kept.extend(self.git.index_paths()?);
-        if let Some(state) = self.repo_id().ok().and_then(|id| self.state(&id).ok()) {
-            kept.extend(state.files.into_values().map(|entry| entry.source));
-        }
-        Ok(kept)
     }
 
     /// Removes the temp files and directories that killed runs left in the worktree, in dotman's
@@ -590,6 +584,73 @@ impl Context {
         }
         Ok(selected)
     }
+}
+
+/// What `[ignore]` drops from the repo worktree: what its patterns match, minus what git's own
+/// ignore rules would keep, a tracked file. Here that is a path in the index, or one this machine
+/// applied or added, which `add` puts in the worktree before any commit.
+struct Dropped {
+    ignore: Ignore,
+    kept: BTreeSet<String>,
+}
+
+impl Dropped {
+    /// A state that cannot be read keeps nothing; the command that loads it reports it.
+    fn load(git: &Git, state_file: &Path) -> Result<Self> {
+        let repo = git.repo();
+        let ignore = Ignore::compile(
+            &RepoConfig::load(&repo.join(".dotman.toml"))?
+                .ignore
+                .patterns,
+        )?;
+        let mut kept = BTreeSet::new();
+        if is_real_dir(&repo.join(".git")) {
+            kept.extend(git.index_paths()?);
+            let state = fs::read_to_string(repo.join(".git/dotman-id"))
+                .ok()
+                .and_then(|id| State::load(state_file, id.trim()).ok());
+            if let Some(state) = state {
+                kept.extend(state.files.into_values().map(|entry| entry.source));
+            }
+        }
+        Ok(Self { ignore, kept })
+    }
+
+    fn drops(&self, path: &str, is_dir: bool) -> bool {
+        self.ignore.matches(path, is_dir)
+            && if is_dir {
+                !holds_any(&self.kept, path)
+            } else {
+                !self.kept.contains(path)
+            }
+    }
+}
+
+/// The untracked repo paths, as `git status` lists them, that are never staged: what `[ignore]`
+/// drops and dotman's temp names, at any depth. A directory stands for every path under it. The
+/// reserved root names are not keys, so `[ignore]` never applies to them.
+fn left_out(git: &Git, state_file: &Path, untracked: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let dropped = Dropped::load(git, state_file)?;
+    let temp = |path: &str| {
+        path.rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with(TEMP_PREFIX))
+    };
+    let mut roots = BTreeSet::new();
+    for path in untracked.iter().filter_map(|path| path.to_str()) {
+        let key = !is_reserved_root_name(path.split('/').next().unwrap_or(path));
+        let drops = |sub: &str, is_dir| temp(sub) || (key && dropped.drops(sub, is_dir));
+        let dir = path
+            .match_indices('/')
+            .filter_map(|(at, _)| path.get(..at))
+            .find(|dir| drops(dir, true));
+        match dir {
+            Some(dir) => roots.insert(PathBuf::from(dir)),
+            None if drops(path, false) => roots.insert(PathBuf::from(path)),
+            None => false,
+        };
+    }
+    Ok(roots.into_iter().collect())
 }
 
 /// How long a leftover must be untouched before a sweep removes it. A live run in another PID
