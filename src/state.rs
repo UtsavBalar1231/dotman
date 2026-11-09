@@ -158,6 +158,14 @@ impl State {
                 &format!("version {} is not supported", state.version)
             ));
         }
+        // Checked here so that a bad entry names this file, not just the key.
+        for (key, entry) in state.files.iter().chain(&state.system) {
+            if entry.kind == Kind::File
+                && let Err(e) = crate::engine::parse_mode(&entry.mode)
+            {
+                bail!(corrupt(path, &format!("{key}: {e}")));
+            }
+        }
         Ok(Some(state))
     }
 
@@ -280,11 +288,12 @@ mod tests {
     fn corrupt_files_are_errors_naming_doctor() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("state.toml");
-        let bad_inputs: [&[u8]; 4] = [
+        let bad_inputs: [&[u8]; 5] = [
             b"not = [toml",
             b"\xff\xfe",
             b"version = 2\n",
             b"version = \"1\"\n",
+            b"version = 1\n[files.\".a\"]\nsource = \".a\"\nkind = \"file\"\nhash = \"x\"\nmode = \"rw\"\n",
         ];
         for bad in bad_inputs {
             fs::write(&path, bad).unwrap();
