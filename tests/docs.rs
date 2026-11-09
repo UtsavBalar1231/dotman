@@ -436,6 +436,14 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "init_sets_main_attributes_and_stable_id",
             "ignored_crlf_and_text_auto_content_survives_commit_and_clone",
             "a_tracked_merge_driver_never_joins_a_conflict",
+            "a_merge_driver_in_the_user_s_git_config_never_settles_a_conflict",
+        ],
+    ),
+    (
+        "always uses git's built-in text merge, whatever `merge.<name>.driver`",
+        &[
+            "a_merge_driver_in_the_user_s_git_config_never_settles_a_conflict",
+            "a_tracked_merge_driver_never_joins_a_conflict",
         ],
     ),
     (
