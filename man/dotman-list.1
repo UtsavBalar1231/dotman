@@ -9,6 +9,11 @@ dotman\-list \- List the managed files
 List the managed files.
 .PP
 With \-\-porcelain, each record is `<kind>\\t<key>\\0`: a kind word, a tab, the key and a NUL. It carries no source or flags, and the layout is stable for scripts.
+.PP
+The kind is one of:
+  file     a regular file under $HOME; the key is its path relative to $HOME
+  symlink  a symbolic link under $HOME, stored as its target
+  system   a file outside $HOME, written by `apply \-\-system`; the key is its absolute path
 .SH OPTIONS
 .TP
 \fB\-\-porcelain\fR

@@ -364,6 +364,18 @@ fn git_before_init_names_init_and_the_printed_init_lets_it_run() {
 }
 
 #[test]
+fn list_help_explains_the_porcelain_records_and_every_kind() {
+    let env = TestEnv::new();
+    let out = env.run(&["list", "--help"]);
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("`<kind>\\t<key>\\0`"), "{help}");
+    for kind in ["  file ", "  symlink ", "  system "] {
+        assert!(help.contains(kind), "{kind}: {help}");
+    }
+}
+
+#[test]
 fn the_status_summary_counts_new_and_held_files_and_adds_up() {
     let env = TestEnv::new();
     env.ok(&["init"]);

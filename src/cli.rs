@@ -45,7 +45,11 @@ pub enum Commands {
     #[command(long_about = concat!(
         "List the managed files.\n\n",
         "With --porcelain, each record is `<kind>\\t<key>\\0`: a kind word, a tab, the key and a NUL. ",
-        "It carries no source or flags, and the layout is stable for scripts."
+        "It carries no source or flags, and the layout is stable for scripts.\n\n",
+        "The kind is one of:\n",
+        "  file     a regular file under $HOME; the key is its path relative to $HOME\n",
+        "  symlink  a symbolic link under $HOME, stored as its target\n",
+        "  system   a file outside $HOME, written by `apply --system`; the key is its absolute path"
     ))]
     List(ListArgs),
     /// Compare $HOME, the repo and the last applied state
