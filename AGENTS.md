@@ -55,7 +55,7 @@ scripts/                release helper scripts
 | The content guard | `src/secrets.rs` (`RULES`, `held`) | One combined regex; the age rule also runs alone, and binary files are skipped |
 | What sync holds or refuses | `src/commands/sync.rs` | `held_entries` is the staging guard; the mass-delete and unrelated-history refusals live here too |
 | Key rules | `src/paths.rs` (`validate_key`) | Control characters, `.git` in NTFS spellings and reserved root names |
-| Checks every command runs first | `src/context.rs` (`guard`) | All but `doctor`, `git` and `completion`; `log` runs only the first |
+| Checks every command runs first | `src/context.rs` (`guard`, `lock`) | All but `doctor`, `git` and `completion`; `log` runs only the first. A command that writes calls `lock`, which takes the lock, runs `guard` and refreshes `.git/info/attributes` |
 | An importer | `src/import/` | `import::run` routes by detection order |
 | System files, the helper | `src/system.rs`, `src/system/helper.rs`, `src/system/escalate.rs` | The helper runs as root and trusts nothing from the caller |
 | Hook approval | `src/hooks.rs` | The state stores the approved `[hooks]` table as canonical JSON |
@@ -90,8 +90,9 @@ scripts/                release helper scripts
   5. Run `cargo run -p xtask -- generate`.
 
 ## Invariants
-- **Isolation flags.** Every git call carries `-c core.excludesFile= -c core.hooksPath=/dev/null` and the other flags in `src/git.rs`, starts without the `GIT_*` variables in `LOCAL_REPO_ENV`, and parsed output uses `-z`. A user's global excludes or hooks never affect the repo.
-- **Attributes file.** `init` and every clone write `.git/info/attributes` (`* -text -filter -ident -working-tree-encoding`), so a tracked `.gitattributes` cannot transform content. Its other attributes, such as `merge=union`, still apply.
+- **Isolation flags.** Every git call carries `-c core.excludesFile= -c core.hooksPath=/dev/null`, `-c core.symlinks=true` and the other flags in `ISOLATION` in `src/git.rs`, starts without the `GIT_*` variables in `LOCAL_REPO_ENV`, and parsed output uses `-z`. `git init` and `git clone` also get `--template=`, and clones `--no-local`, so a local source goes through git's transport. Staging pathspecs go to `git add --pathspec-from-file=-` on stdin, never as arguments. A user's global excludes, hooks, `core.symlinks` or template directory never affect the repo.
+- **Attributes file.** `init` and every clone write `.git/info/attributes` (`* -text -filter -ident -working-tree-encoding merge=text`), and `Context::lock`, which every writing command takes, writes it again outside a dry run when it differs. A tracked `.gitattributes` cannot transform content or pick the merge driver.
+- **Import scope.** A git-tree import clones with `--single-branch --no-tags`: HEAD's branch only, no tags or other branches. The content guard scans that history's blobs and commit messages, and a finding squashes the import unless `--keep-history`.
 - **State and repo ID.** `$XDG_STATE_HOME/dotman/state.toml` is never synced and is written through temp, fsync and rename. `.git/dotman-id` identifies the repo; a state whose `repo_id` differs is treated as empty. A state file that fails to parse is never treated as empty.
 - **Repo root names.** `.git`, `.dotman.toml`, `.dotman/`, `README*`, `LICENSE*` and `install.sh` are never applied. `.git` is refused as a key component at any depth.
 - **Home writes.** Managed files reach `$HOME` only through `safe_write` and `safe_symlink`: no symlinked parent, no write through a symlink, temp file at 0600, setuid, setgid and sticky stripped, a backup first when the content differs. The `--swap` replacement and rollback, `write_atomic` for dotman's own files and `git config --global` are the other writes, listed in SECURITY.md; a new one goes there too.
