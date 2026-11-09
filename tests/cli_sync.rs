@@ -3,6 +3,7 @@ mod common;
 use common::{TestEnv, assert_converged, mode_of};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Output;
 
 /// Set on every run of a test that reads the host from a `sync(<host>)` subject, so the subject
@@ -63,6 +64,54 @@ fn pair(files: &[(&str, &[u8], u32)]) -> (TestEnv, TestEnv) {
     let a = first_device(files);
     let b = clone_to_new_device(&a);
     (a, b)
+}
+
+/// The commands a message gives in backticks, in order.
+fn backticked(err: &str) -> Vec<String> {
+    err.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Runs `line` as it runs pasted into a shell, with this build's `dotman` first on PATH. A trailing
+/// comment or a parenthesised note does not survive a paste into every shell.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn paste(env: &TestEnv, line: &str) -> Output {
+    assert!(
+        !line.contains(" #") && !line.contains(" ("),
+        "not pasteable: {line}"
+    );
+    let bin = Path::new(env!("CARGO_BIN_EXE_dotman"))
+        .parent()
+        .expect("the binary's directory");
+    env.process_for(Path::new("sh"))
+        .arg("-c")
+        .arg(format!(
+            "PATH={}:\"$PATH\"; {line}",
+            shell_words::quote(&bin.to_string_lossy())
+        ))
+        .output()
+        .expect("run sh")
+}
+
+/// Puts a `git` in front of PATH that runs the shell snippet `before`, with the arguments in `$*`,
+/// and then the real git.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn wrap_git(env: &mut TestEnv, before: &str) {
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git on PATH");
+    let stubs = env.root().join("git-wrapper");
+    fs::create_dir_all(&stubs).expect("stub dir");
+    let wrapper = format!("#!/bin/sh\n{before}\nexec '{}' \"$@\"\n", real.display());
+    fs::write(stubs.join("git"), wrapper).expect("write the wrapper");
+    fs::set_permissions(stubs.join("git"), fs::Permissions::from_mode(0o755)).expect("chmod");
+    env.prepend_path(&stubs);
 }
 
 fn remote_file(env: &TestEnv, key: &str) -> String {
@@ -1399,4 +1448,117 @@ fn an_edit_made_while_a_sync_pulled_the_same_file_reverts_nothing() {
     );
     exits(&b, 0, &["sync"]);
     assert_eq!(remote_file(&a, ".bashrc"), "line1\nline2\nA fix\n");
+}
+
+/// Whether the line after `headline` in `err`, where git's own message goes, starts with `start`.
+fn below(err: &str, headline: &str, start: &str) -> bool {
+    err.lines()
+        .skip_while(|line| *line != headline)
+        .nth(1)
+        .is_some_and(|line| line.starts_with(start))
+}
+
+/// A remote that cannot be reached is named on one line that says what this run committed, with
+/// git's message below it, and the next sync sends the commit.
+#[test]
+fn an_unreachable_remote_says_what_the_run_committed() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    let away = a.root().join("remote-away.git");
+    fs::rename(a.remote_path(), &away).expect("take the remote away");
+
+    let err = exits(&b, 1, &["sync"]);
+    let headline = "could not reach origin, so nothing was pushed; the next sync tries again";
+    assert!(below(&err, headline, "git ls-remote"), "{err}");
+
+    b.write(".a", b"edited offline\n", 0o644);
+    let err = exits(&b, 1, &["sync"]);
+    let headline =
+        "could not reach origin; your changes are committed locally and go out on the next sync";
+    assert!(below(&err, headline, "git ls-remote"), "{err}");
+    assert!(
+        err.contains("does not appear to be a git repository"),
+        "{err}"
+    );
+
+    fs::rename(&away, a.remote_path()).expect("bring the remote back");
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
+    assert_eq!(remote_file(&a, ".a"), "edited offline\n");
+}
+
+/// Another machine pushes between this sync's pull and its push. The refusal says the remote moved
+/// and to sync again, and that sync, run as printed, sends both machines' edits.
+#[test]
+fn a_push_refused_because_the_remote_moved_says_to_sync_again() {
+    let (a, mut b) = pair(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    let armed = b.root().join("race");
+    fs::write(&armed, b"").expect("arm the race");
+    wrap_git(
+        &mut b,
+        &format!(
+            "case \" $* \" in *\" push \"*) if [ -e '{armed}' ]; then rm '{armed}'; cd '{repo}' && printf 'from a\\n' > .a && git commit -qam race && git push -q origin HEAD:main; cd - >/dev/null; fi;; esac",
+            armed = armed.display(),
+            repo = a.repo().display()
+        ),
+    );
+    b.write(".b", b"from b\n", 0o644);
+    let err = exits(&b, 1, &["sync"]);
+    let headline = "origin moved while this sync ran, so the push was refused; your commits are kept here, and `dotman sync` again pulls what arrived and pushes them";
+    assert!(below(&err, headline, "git push"), "{err}");
+    assert!(err.contains("[rejected]"), "{err}");
+
+    let steps = backticked(headline);
+    assert_eq!(steps, ["dotman sync"]);
+    for step in steps {
+        let out = paste(&b, &step);
+        assert!(out.status.success(), "{step}: {}", stderr(&out));
+    }
+    assert_eq!(remote_file(&a, ".a"), "from a\n");
+    assert_eq!(remote_file(&a, ".b"), "from b\n");
+    assert_eq!(b.read(".a"), b"from a\n");
+}
+
+/// A lock file that a killed git left in the repo stops sync with a removal step, whether sync
+/// finds it at the start or git meets it mid-run, and the step run as printed lets sync through.
+#[test]
+fn a_stale_git_lock_gets_a_removal_step_that_works() {
+    let (a, mut b) = pair(&[(".a", b"a\n", 0o644)]);
+    let lock = b.repo().join(".git/index.lock");
+    fs::write(&lock, b"").expect("leave a lock");
+    b.write(".a", b"edited\n", 0o644);
+    let err = exits(&b, 1, &["sync"]);
+    let run = |env: &TestEnv, err: &str| {
+        let rm = backticked(err)
+            .into_iter()
+            .find(|step| step.starts_with("rm "))
+            .expect("an rm step");
+        let out = paste(env, &rm);
+        assert!(out.status.success(), "{rm}: {}", stderr(&out));
+    };
+    run(&b, &err);
+    assert!(!lock.exists());
+
+    let armed = b.root().join("lock-on-add");
+    fs::write(&armed, b"").expect("arm the lock");
+    wrap_git(
+        &mut b,
+        &format!(
+            "case \" $* \" in *\" add \"*) if [ -e '{armed}' ]; then rm '{armed}'; : > '{lock}'; fi;; esac",
+            armed = armed.display(),
+            lock = lock.display()
+        ),
+    );
+    let err = exits(&b, 1, &["sync"]);
+    let repo = repo_path(&b);
+    let headline = format!(
+        "git's lock file {} is in the repo. Another git is running in {repo}, or one was killed and left it behind; if no git is running, remove it with `rm {}` and run this again",
+        lock.display(),
+        lock.display()
+    );
+    assert!(below(&err, &headline, "git add"), "{err}");
+    assert!(err.contains("Unable to create"), "{err}");
+    run(&b, &err);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
+    assert_eq!(remote_file(&a, ".a"), "edited\n");
 }

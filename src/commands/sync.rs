@@ -12,7 +12,7 @@ use crate::commands::apply::{self, Applied, Options, Pass};
 use crate::config::Allow;
 use crate::context::{Context, TEMP_PREFIX};
 use crate::engine::{Node, read_node};
-use crate::git::{PullOutcome, StatusEntry, StatusKind};
+use crate::git::{PullOutcome, RemoteFailure, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
 use crate::lock::Lock;
 use crate::name;
@@ -86,7 +86,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         dry_run,
         never_ask: false,
     };
-    let Committed { held, refusal } = commit(
+    let committed = commit(
         &ctx,
         args.message.as_deref(),
         dry_run,
@@ -107,15 +107,15 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
             "no remote is set; add one with `{} init --remote <url>`",
             name::bin()
         ));
-        let outcome = without_remote(&ctx, args, first, policy, held);
-        return refused(refusal).and(outcome);
+        let outcome = without_remote(&ctx, args, first, policy, committed.held);
+        return refused(committed.refusal).and(outcome);
     };
     if !dry_run {
         remote::note_origin(&ctx, true);
     }
     // A failed path never stops the sync; the failure is reported after the push.
     let (first_failed, uncaptured) = (first.failed, first.uncaptured);
-    let mut attention = first.outcome == Outcome::Attention || held;
+    let mut attention = first.outcome == Outcome::Attention || committed.held;
     let written = first.written;
     if dry_run {
         output::info(&format!(
@@ -125,16 +125,15 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         let hooked = hooks::run(&ctx, &written, policy);
         apply::check_failed(first_failed, uncaptured)
             .and(hooked)
-            .and_then(|()| refused(refusal))?;
+            .and_then(|()| refused(committed.refusal))?;
         return Ok(finish(attention));
     }
 
-    // A remote without the branch is a first push: there is nothing to pull.
-    let on_remote = ctx.git.remote_has_branch(REMOTE, &branch)?;
-    if on_remote && !pull(&ctx, &branch)? {
+    let reached = |err| remote_error(err, committed.new_commit);
+    let Some(pulled) = pull(&ctx, &branch).map_err(reached)? else {
         apply::check_failed(first_failed, uncaptured)?;
         return Ok(Outcome::Conflict);
-    }
+    };
     // The pull can bring a pair that only a case-sensitive filesystem holds; the pulled commits
     // stay, and nothing is written for any key.
     ctx.refuse_collisions()?;
@@ -156,7 +155,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     let hooked = hooks::run(&ctx, &second.written, policy);
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured), uncaptured);
 
-    push(&ctx, &branch, on_remote)?;
+    push(&ctx, &branch, pulled).map_err(reached)?;
     failed.and(reencrypted).and(hooked)?;
     Ok(finish(attention))
 }
@@ -181,20 +180,24 @@ fn push(ctx: &Context, branch: &str, pulled: bool) -> Result<()> {
     Ok(())
 }
 
-/// Pulls `branch`; false when the pull stopped, with the recovery steps printed, before anything
-/// reached `$HOME`.
-fn pull(ctx: &Context, branch: &str) -> Result<bool> {
+/// Pulls `branch` when the remote has it, and says whether it did; `None` when the pull stopped,
+/// with the recovery steps printed, before anything reached `$HOME`.
+fn pull(ctx: &Context, branch: &str) -> Result<Option<bool>> {
+    // A remote without the branch is a first push: there is nothing to pull.
+    if !ctx.git.remote_has_branch(REMOTE, branch)? {
+        return Ok(Some(false));
+    }
     refuse_unrelated(ctx, branch)?;
     match ctx.git.pull_rebase(REMOTE, branch)? {
-        PullOutcome::Ok => Ok(true),
+        PullOutcome::Ok => Ok(Some(true)),
         PullOutcome::Conflict { paths } => {
             report_conflict(ctx, &paths);
-            Ok(false)
+            Ok(None)
         }
         // The worktree may hold conflict markers, which the next pass would write into `$HOME`.
         PullOutcome::Unstashed { paths } => {
             report_unstashed(ctx, &paths);
-            Ok(false)
+            Ok(None)
         }
     }
 }
@@ -256,6 +259,8 @@ struct Committed {
     held: bool,
     /// In a dry run, why the real run would refuse to commit; reported once the preview is done.
     refusal: Option<String>,
+    /// Tells a remote failure after it apart from one that left nothing new to send.
+    new_commit: bool,
 }
 
 /// Fails with `refusal`, if there is one.
@@ -308,6 +313,7 @@ fn commit(
     let done = Committed {
         held: !held_paths.is_empty(),
         refusal,
+        new_commit: false,
     };
     let committed = commit_staged(ctx, message, dry_run, &held, &left_out, changed, done);
     if !dry_run && !renamed.is_empty() {
@@ -350,10 +356,30 @@ fn commit_staged(
     if !ctx.git.identity_configured()? {
         bail!(identity_fix());
     }
-    if ctx.git.commit(&message)?.is_some() {
+    let new_commit = ctx.git.commit(&message)?.is_some();
+    if new_commit {
         output::success(&format!("committed: {message}"));
     }
-    Ok(done)
+    Ok(Committed { new_commit, ..done })
+}
+
+/// A remote that could not be reached, or a push it refused, as one line saying what that means
+/// for this run, with git's message below it. Any other error is returned as it is.
+fn remote_error(err: anyhow::Error, committed: bool) -> anyhow::Error {
+    let line = match err.downcast_ref::<RemoteFailure>() {
+        Some(RemoteFailure::Moved) => format!(
+            "{REMOTE} moved while this sync ran, so the push was refused; your commits are kept here, and `{} sync` again pulls what arrived and pushes them",
+            name::bin()
+        ),
+        Some(RemoteFailure::Unreachable) if committed => format!(
+            "could not reach {REMOTE}; your changes are committed locally and go out on the next sync"
+        ),
+        Some(RemoteFailure::Unreachable) => {
+            format!("could not reach {REMOTE}, so nothing was pushed; the next sync tries again")
+        }
+        None => return err,
+    };
+    anyhow!("{line}\n{}", err.root_cause())
 }
 
 /// The changed worktree files the content guard holds, minus what this machine's `[guard] allow`

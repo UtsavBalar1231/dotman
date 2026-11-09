@@ -150,6 +150,46 @@ impl Operation {
     }
 }
 
+/// Why a command that talks to a remote failed, as far as git's message tells. It is the context of
+/// the error, so a caller can say what the failure means for its own run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteFailure {
+    /// The remote could not be reached or read.
+    Unreachable,
+    /// The push was refused because the remote has commits the branch lacks.
+    Moved,
+}
+
+impl fmt::Display for RemoteFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Unreachable => "could not reach the remote",
+            Self::Moved => "the remote has commits that are not here",
+        })
+    }
+}
+
+impl RemoteFailure {
+    /// What git's `stderr` says about the remote. Git's messages are matched in English, so in
+    /// another locale the failure keeps git's text alone.
+    fn read(stderr: &str) -> Option<Self> {
+        const UNREACHABLE: [&str; 3] = [
+            "Could not read from remote repository",
+            "unable to access '",
+            "remote end hung up unexpectedly",
+        ];
+        if stderr.contains("[rejected]")
+            && (stderr.contains("(fetch first)") || stderr.contains("(non-fast-forward)"))
+        {
+            Some(Self::Moved)
+        } else if UNREACHABLE.iter().any(|text| stderr.contains(text)) {
+            Some(Self::Unreachable)
+        } else {
+            None
+        }
+    }
+}
+
 /// Which `git status --porcelain=v2` record an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
@@ -333,10 +373,20 @@ impl Git {
     }
 
     /// [`failure`], with one line in front naming the repo file when git's error says the index
-    /// or `HEAD` is corrupt.
+    /// or `HEAD` is corrupt, or that a lock file is in the way.
     fn failure<S: AsRef<OsStr>>(&self, args: &[S], out: &Output) -> anyhow::Error {
         let err = failure(args, out);
         let stderr = String::from_utf8_lossy(&out.stderr);
+        if let Some(lock) = stderr
+            .split_once("Unable to create '")
+            .and_then(|(_, rest)| rest.split_once("': File exists"))
+            .map(|(lock, _)| shell_words::quote(lock).into_owned())
+        {
+            return anyhow!(
+                "git's lock file {lock} is in the repo. Another git is running in {}, or one was killed and left it behind; if no git is running, remove it with `rm {lock}` and run this again\n{err}",
+                self.repo.display()
+            );
+        }
         let git_dir = self.repo.join(".git");
         let index = git_dir.join("index");
         let broken = if stderr.contains("index file") || stderr.contains("bad index") {
@@ -355,6 +405,25 @@ impl Git {
             "{broken}; `{} doctor` checks the repo",
             crate::name::bin()
         ))
+    }
+
+    /// [`Git::failure`] of a command that talks to a remote, with [`RemoteFailure`] as its
+    /// context when git's message tells why.
+    fn remote_failure<S: AsRef<OsStr>>(&self, args: &[S], out: &Output) -> anyhow::Error {
+        let err = self.failure(args, out);
+        match RemoteFailure::read(&String::from_utf8_lossy(&out.stderr)) {
+            Some(why) => err.context(why),
+            None => err,
+        }
+    }
+
+    fn run_remote<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output> {
+        let out = self.probe(args)?;
+        if out.status.success() {
+            Ok(out)
+        } else {
+            Err(self.remote_failure(args, &out))
+        }
     }
 
     fn output<S: AsRef<OsStr>>(&self, mut cmd: Command, args: &[S]) -> Result<Output> {
@@ -759,7 +828,7 @@ impl Git {
             return Ok(PullOutcome::Ok);
         }
         if !self.operation_in_progress() {
-            return Err(self.failure(&args, &out));
+            return Err(self.remote_failure(&args, &out));
         }
         // Unfiltered: the filter reads `.dotman.toml`, which may hold conflict markers now.
         let paths = self
@@ -861,12 +930,12 @@ impl Git {
 
     /// Fetches `branch` from `remote` into `FETCH_HEAD`.
     pub fn fetch(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run(&["fetch", "-q", remote, branch]).map(drop)
+        self.run_remote(&["fetch", "-q", remote, branch]).map(drop)
     }
 
     /// Like [`Git::fetch`], and fetches the history a shallow clone left out.
     pub fn unshallow(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run(&["fetch", "-q", "--unshallow", remote, branch])
+        self.run_remote(&["fetch", "-q", "--unshallow", remote, branch])
             .map(drop)
     }
 
@@ -883,13 +952,13 @@ impl Git {
 
     /// Fails if the remote has commits `branch` lacks; pull first.
     pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run(&["push", remote, branch]).map(drop)
+        self.run_remote(&["push", remote, branch]).map(drop)
     }
 
     /// Like [`Git::push`], and records `remote` as the upstream of `branch`, so that a bare
     /// `git pull --rebase` works.
     pub fn push_set_upstream(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run(&["push", "-u", remote, branch]).map(drop)
+        self.run_remote(&["push", "-u", remote, branch]).map(drop)
     }
 
     /// How many commits `tip` has that `base` lacks; every commit of `tip` when `base` is `None`.
@@ -900,6 +969,9 @@ impl Git {
             .parse()
             .context("git rev-list printed a bad count")
     }
+
+    /// Whether `remote` has `branch`. Asks the remote and writes nothing locally. Its failure is
+    /// [`RemoteFailure::Unreachable`] whatever git's message says, since ls-remote only reads.
     pub fn remote_has_branch(&self, remote: &str, branch: &str) -> Result<bool> {
         let pattern = format!("refs/heads/{branch}");
         let args = ["ls-remote", "--exit-code", remote, pattern.as_str()];
@@ -907,7 +979,9 @@ impl Git {
         match out.status.code() {
             Some(0) => Ok(true),
             Some(2) => Ok(false),
-            _ => Err(self.failure(&args, &out)),
+            _ => Err(self
+                .failure(&args, &out)
+                .context(RemoteFailure::Unreachable)),
         }
     }
 
@@ -1362,9 +1436,13 @@ mod tests {
         git.init().expect("init");
         commit_file(&git, "a", b"a", "one");
         let err = git.push("nope", "main").expect_err("no such remote");
-        let msg = err.to_string();
+        let msg = format!("{err:#}");
         assert!(msg.contains("git push nope main failed"), "{msg}");
         assert!(msg.contains("'nope' does not appear"), "{msg}");
+        assert_eq!(
+            err.downcast_ref::<RemoteFailure>(),
+            Some(&RemoteFailure::Unreachable)
+        );
         assert_eq!(
             redact_credentials("https://user:s3cret@host/a@b"),
             "https://***@host/a@b"
