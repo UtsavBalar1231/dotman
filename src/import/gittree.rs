@@ -1476,6 +1476,7 @@ fn remote_notes(
     source_origin: Option<&str>,
     found: &Analysis,
     squash: bool,
+    detached: bool,
 ) -> Vec<String> {
     let mut notes = vec![format!("imported from {}", source.display())];
     match source {
@@ -1500,6 +1501,10 @@ fn remote_notes(
                 "the new repo has no remote, as a local path is no use as one; {advice}"
             ));
         }
+        Source::Url(_) if detached => notes.push(format!(
+            "the new repo has no remote, and the source cannot be one: its HEAD is detached, so sync would pull the source's own main, which this import did not take, and push to it. Set a new, empty repo as the remote with `{} init --remote <url>`",
+            name::bin()
+        )),
         Source::Url(_) => notes.push(format!(
             "origin is {}; the conversion commit is pushed by the next `{} sync`",
             source.display(),
@@ -1613,10 +1618,12 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         Source::Url(_) => None,
     };
     staging.clone_source(source)?;
-    if matches!(source, Source::Path(_)) {
+    let branched = branch_detached(&staging.git)?;
+    // A local path is no use as a remote. A detached HEAD names no branch of the source, and sync
+    // would pull the source's own `main`, which the import did not take, and push to it.
+    if matches!(source, Source::Path(_)) || branched.is_some() {
         drop_origin(&staging.git)?;
     }
-    let branched = branch_detached(&staging.git)?;
     let tree = staging.git.ls_tree("HEAD")?;
 
     let setup = yadm_setup(ctx, source, &tree)?;
@@ -1638,6 +1645,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         Some(Err(_)) => SourceConfig::Broken,
     };
     let mut report = tally(&found, !squash);
+    let detached = branched.is_some();
     report.notes.extend(branched);
     report.notes.extend(home_modes_notes(&modes, config));
     report.notes.extend(remote_notes(
@@ -1645,6 +1653,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         source_origin.as_deref(),
         &found,
         squash,
+        detached,
     ));
     report.notes.extend(setup.notes(ctx, &found, args.dry_run));
     if let Source::Path(path) = source {

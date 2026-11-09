@@ -998,6 +998,58 @@ fn an_import_leaves_no_dangling_remote_ref() {
     }
 }
 
+/// Imported by URL, a source whose HEAD is detached while its `main` has moved on gives a repo
+/// with no remote: sync would otherwise pull that `main`, which the import did not take, apply
+/// its files and push to the source.
+#[test]
+fn a_url_import_of_a_detached_head_sets_no_origin() {
+    let env = TestEnv::new();
+    let work = work_tree(&env, "loose", &[(".bashrc", "alias ll=ls\n", false)], None);
+    fs::write(work.join(".mainfile"), "main only\n").expect("write");
+    git_in(&env, &work, &["add", "-A"]);
+    git_in(&env, &work, &["commit", "-q", "-m", "main tip"]);
+    git_in(&env, &work, &["checkout", "-q", "--detach", "HEAD~1"]);
+    fs::write(work.join(".detfile"), "detached only\n").expect("write");
+    git_in(&env, &work, &["add", "-A"]);
+    git_in(&env, &work, &["commit", "-q", "-m", "detached tip"]);
+    let main = git_in(&env, &work, &["rev-parse", "main"]);
+    let source = Source::new(work);
+    let url = format!("file://{}", source.display());
+
+    let err = env.ok(&["import", "--yes", &url]);
+    assert!(
+        err.contains(
+            "the new repo has no remote, and the source cannot be one: its HEAD is detached"
+        ),
+        "{err}"
+    );
+    let repo = env.repo();
+    assert_eq!(git_in(&env, &repo, &["remote"]), "", "{err}");
+    let fsck = env.git_raw(&["-C", &repo.to_string_lossy(), "fsck"]);
+    assert!(fsck.status.success(), "{}", stderr(&fsck));
+
+    env.ok(&["sync"]);
+    assert_eq!(env.read(".detfile"), b"detached only\n");
+    assert!(!env.home().join(".mainfile").exists());
+    assert_eq!(git_in(&env, &source, &["rev-parse", "main"]), main);
+
+    let remote = env.remote_url();
+    let step = common::hint(&err, "init --remote");
+    let step: Vec<&str> = step
+        .iter()
+        .map(|arg| if arg == "<url>" { remote.as_str() } else { arg })
+        .collect();
+    env.ok(&step);
+    let err = env.ok(&["sync"]);
+    assert!(err.contains("to origin/main"), "{err}");
+    let pushed = env.remote_path().to_string_lossy().into_owned();
+    assert_eq!(
+        env.git(&["--git-dir", &pushed, "rev-parse", "main"]),
+        git_in(&env, &repo, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(git_in(&env, &source, &["rev-parse", "main"]), main);
+}
+
 #[test]
 fn a_populated_repo_is_refused_naming_overlay() {
     let env = TestEnv::new();
