@@ -629,6 +629,20 @@ impl Targets<'_> {
             }
             for key in plan.files.keys() {
                 variant::variant_source(key, conditions)?;
+                // A plain variant would put in the repo, in plain text, what an `{age}` source
+                // keeps encrypted, whichever machine either one is for.
+                let encrypted = self
+                    .sources
+                    .sources_of(key)
+                    .find(|source| self.sources.flag(key, source) == Flag::Age);
+                if let (Some(encrypted), false) = (encrypted, self.encrypt) {
+                    bail!(
+                        "{encrypted} stores {key} encrypted, so a plain variant would put it in the repo in plain text; `{} add --encrypt --for {} {}` stores the variant encrypted",
+                        name::bin(),
+                        shell_words::quote(conditions),
+                        pasteable(&ctx.paths.home, key)
+                    );
+                }
             }
         }
         Ok(())

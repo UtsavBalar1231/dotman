@@ -1147,3 +1147,70 @@ fn encrypt_stores_a_file_the_content_guard_holds() {
         Vec::<String>::new()
     );
 }
+
+/// What machine `box` keeps to itself; nothing the content guard holds.
+const BOX_ONLY: &[u8] = b"github.com:\n  oauth_token: box-only-hunter3\n";
+const BOX_VARIANT: &str = ".config/gh/hosts{host=box+age}.yml";
+
+/// How many objects reachable in the remote hold `needle`, read one by one.
+fn remote_objects_holding(env: &TestEnv, needle: &[u8]) -> usize {
+    let remote = remote_path(env);
+    env.git(&["--git-dir", &remote, "rev-list", "--all", "--objects"])
+        .lines()
+        .filter_map(|line| line.split(' ').next())
+        .filter(|oid| {
+            let out = env.git_raw(&["--git-dir", &remote, "cat-file", "-p", oid]);
+            out.stdout
+                .windows(needle.len())
+                .any(|bytes| bytes == needle)
+        })
+        .count()
+}
+
+/// Machine A, then machine `box` holding A's key, whose encrypted `HOSTS` is both-changed: A's
+/// edit reached box's repo before box's own edit was captured.
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+fn encrypted_conflict() -> (TestEnv, TestEnv) {
+    let a = keyed_device();
+    let b = a.second_device();
+    b.write_machine_config("[identity]\nhost = \"box\"\n");
+    fs::copy(identity_path(&a), identity_path(&b)).expect("copy the key");
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    a.write(HOSTS, b"github.com:\n  oauth_token: from-a\n", 0o600);
+    b.write(HOSTS, BOX_ONLY, 0o600);
+    a.ok(&["sync"]);
+    b.ok(&["git", "pull", "-q", "--rebase", "origin", "main"]);
+    assert_eq!(b.token_of("status", HOSTS).as_deref(), Some("both-changed"));
+    (a, b)
+}
+
+/// Typed by hand, a plain `--for` variant of an `{age}` file is refused before anything is
+/// written, and the command the refusal names stores it encrypted.
+#[test]
+fn a_plain_variant_of_an_encrypted_file_is_refused_naming_encrypt() {
+    if !age_installed() {
+        return;
+    }
+    let (_a, b) = encrypted_conflict();
+    let before = b.four_trees();
+    let mut err = String::new();
+    for args in [
+        &["add", "--dry-run", "--for", "host=box", HOSTS][..],
+        &["add", "--for", "host=box", HOSTS],
+    ] {
+        err = exits(&b.run(args), 1);
+        assert!(
+            err.contains("stores .config/gh/hosts.yml encrypted"),
+            "{err}"
+        );
+        assert_eq!(b.four_trees(), before, "{args:?}: {err}");
+    }
+    exits(
+        &common::run_hint(&b, &err, "add --encrypt --for host=box"),
+        0,
+    );
+    exits(&b.run(&["sync"]), 0);
+    assert!(remote_tree(&b).contains(BOX_VARIANT));
+    assert_eq!(remote_objects_holding(&b, b"box-only"), 0);
+}
