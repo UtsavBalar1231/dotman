@@ -724,12 +724,28 @@ fn guard_content(repo: &Path, found: &mut Analysis, allow: &[Allow]) {
     }
 }
 
-/// A path in the source's history whose content the guard holds, with the commits that add it,
-/// or with no path, the commits whose messages it holds.
+/// A place in the source's history whose content the guard holds, with the commits that add it
+/// or hold it.
 struct Tainted {
-    path: Option<String>,
+    place: Place,
     rule: &'static str,
     commits: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Place {
+    /// A blob, at a path that names it.
+    File(String),
+    /// A part of a commit object: its message, or the header named, such as `commit author`.
+    Commit(&'static str),
+}
+
+/// What the guard holds in one object: the rule, and for a commit the part that holds it, as
+/// [`commit_field`] names it; empty for a blob.
+#[derive(Debug, Clone, Copy)]
+struct Hit {
+    rule: &'static str,
+    field: &'static str,
 }
 
 /// Stdout of `git <args>` in `git`'s repo, with `input` as stdin when given. An error unless git
@@ -823,18 +839,21 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
     let status = child.wait().context("failed to run git")?;
     let mut held = scanned?;
     ensure!(status.success(), "`git cat-file --batch` failed ({status})");
-    let mut messages: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    let mut in_commits: BTreeMap<(&'static str, &'static str), Vec<String>> = BTreeMap::new();
     for commit in commits {
-        if let Some(rule) = held.remove(&commit) {
-            messages.entry(rule).or_default().push(commit);
+        if let Some(hit) = held.remove(&commit) {
+            in_commits
+                .entry((hit.field, hit.rule))
+                .or_default()
+                .push(commit);
         }
     }
     let mut grouped: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
     if !held.is_empty() {
         let adding = adding_commits(git, &held)?;
-        for (oid, rule) in &held {
+        for (oid, hit) in &held {
             let path = paths.get(oid).cloned().unwrap_or_default();
-            let entry = grouped.entry((path, *rule)).or_default();
+            let entry = grouped.entry((path, hit.rule)).or_default();
             for commit in adding.get(oid).into_iter().flatten() {
                 if !entry.contains(commit) {
                     entry.push(commit.clone());
@@ -844,18 +863,44 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
     }
     let files = grouped
         .into_iter()
-        .map(|((path, rule), commits)| (Some(path), rule, commits));
-    let messages = messages
+        .map(|((path, rule), commits)| (Place::File(path), rule, commits));
+    let in_commits = in_commits
         .into_iter()
-        .map(|(rule, commits)| (None, rule, commits));
+        .map(|((field, rule), commits)| (Place::Commit(field), rule, commits));
     Ok(files
-        .chain(messages)
-        .map(|(path, rule, commits)| Tainted {
-            path,
+        .chain(in_commits)
+        .map(|(place, rule, commits)| Tainted {
+            place,
             rule,
             commits,
         })
         .collect())
+}
+
+/// The part of a commit object that holds its 1-based `line`: the message after the first empty
+/// line, or the header before it that the line belongs to, as a header's continuation lines start
+/// with a space.
+fn commit_field(bytes: &[u8], line: usize) -> &'static str {
+    let wanted = line.checked_sub(1);
+    let mut field = "commit header";
+    for (index, text) in bytes.split(|b| *b == b'\n').enumerate() {
+        if text.is_empty() {
+            break;
+        }
+        if !text.starts_with(b" ") {
+            field = match text.split(|b| *b == b' ').next() {
+                Some(b"author") => "commit author",
+                Some(b"committer") => "commit committer",
+                Some(b"mergetag") => "merged tag",
+                Some(b"gpgsig" | b"gpgsig-sha256") => "commit signature",
+                _ => "commit header",
+            };
+        }
+        if Some(index) == wanted {
+            return field;
+        }
+    }
+    "commit message"
 }
 
 fn write_lines(path: &Path, lines: impl Iterator<Item = impl AsRef<str>>) -> Result<()> {
@@ -868,12 +913,12 @@ fn write_lines(path: &Path, lines: impl Iterator<Item = impl AsRef<str>>) -> Res
 }
 
 /// Reads `cat-file --batch` output: per object a `<oid> <type> <size>` line, the content and a
-/// newline. Returns the rule the guard holds each blob or commit for, keyed by oid.
+/// newline. Returns what the guard holds each blob or commit for, keyed by oid.
 fn scan_batch(
     reader: &mut impl BufRead,
     paths: &BTreeMap<String, String>,
     allow: &[Allow],
-) -> Result<BTreeMap<String, &'static str>> {
+) -> Result<BTreeMap<String, Hit>> {
     let sniff = u64::try_from(secrets::SNIFF_BYTES).unwrap_or(u64::MAX);
     let mut held = BTreeMap::new();
     let mut header = String::new();
@@ -898,7 +943,12 @@ fn scan_batch(
             // as binary.
             reader.by_ref().take(size).read_to_end(&mut bytes)?;
             if let Some(found) = secrets::held(&bytes, "", &[]) {
-                held.insert(oid.to_owned(), found.rule);
+                let field = commit_field(&bytes, found.line);
+                let hit = Hit {
+                    rule: found.rule,
+                    field,
+                };
+                held.insert(oid.to_owned(), hit);
             }
             let mut newline = [0u8; 1];
             reader.read_exact(&mut newline)?;
@@ -915,7 +965,11 @@ fn scan_batch(
             reader.by_ref().take(rest).read_to_end(&mut bytes)?;
             let path = paths.get(oid).map_or("", String::as_str);
             if let Some(found) = secrets::held(&bytes, path, allow) {
-                held.insert(oid.to_owned(), found.rule);
+                let hit = Hit {
+                    rule: found.rule,
+                    field: "",
+                };
+                held.insert(oid.to_owned(), hit);
             }
         }
         let mut newline = [0u8; 1];
@@ -927,7 +981,7 @@ fn scan_batch(
 /// history. A blob that only a merge brings has none.
 fn adding_commits(
     git: &Git,
-    held: &BTreeMap<String, &'static str>,
+    held: &BTreeMap<String, Hit>,
 ) -> Result<BTreeMap<String, Vec<String>>> {
     let log = git_stdout(
         git,
@@ -973,10 +1027,10 @@ fn warn_tainted(tainted: &[Tainted], squash: bool, commits: &str) {
             .map(|commit| commit.get(..12).unwrap_or(commit))
             .collect();
         let more = item.commits.len().saturating_sub(SHOWN_COMMITS);
-        let (place, verb) = item
-            .path
-            .as_deref()
-            .map_or(("commit message", "in"), |path| (path, "added in"));
+        let (place, verb) = match &item.place {
+            Place::File(path) => (path.as_str(), "added in"),
+            Place::Commit(field) => (*field, "in"),
+        };
         let named = if short.is_empty() {
             "in a merge".to_owned()
         } else {
@@ -1936,5 +1990,25 @@ mod tests {
         let items: Vec<String> = (0..12).map(|n| n.to_string()).collect();
         assert!(shown(&items).ends_with("9 (+2 more)"));
         assert_eq!(shown(items.get(..2).expect("two")), "0, 1");
+    }
+
+    #[test]
+    fn a_commit_line_is_named_by_the_header_or_message_that_holds_it() {
+        let commit = b"tree 1\nparent 2\nauthor a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\nmergetag object 3\n type commit\n \n tag body\ngpgsig -----BEGIN-----\n sig\n\nsubject\n\nbody\n";
+        let named = [
+            (1, "commit header"),
+            (3, "commit author"),
+            (4, "commit committer"),
+            (5, "merged tag"),
+            (7, "merged tag"),
+            (8, "merged tag"),
+            (10, "commit signature"),
+            (11, "commit message"),
+            (12, "commit message"),
+            (14, "commit message"),
+        ];
+        for (line, field) in named {
+            assert_eq!(commit_field(commit, line), field, "line {line}");
+        }
     }
 }

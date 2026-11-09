@@ -877,6 +877,44 @@ fn a_token_in_a_commit_message_squashes_the_import() {
     assert!(!every_object(&env, &repo.join(".git")).contains(&token));
 }
 
+/// A token in a commit's author header is reported by that field, not as the commit message, and
+/// squashes the import all the same.
+#[test]
+fn a_token_in_a_commit_author_is_named_by_its_field() {
+    let env = TestEnv::new();
+    let token = github_token();
+    let work = work_tree(&env, "who", &[(".bashrc", "alias ll=ls\n", false)], None);
+    let author = format!("bot {token} <bot@example.invalid>");
+    git_in(
+        &env,
+        &work,
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "plain",
+            "--author",
+            &author,
+        ],
+    );
+    let tip = git_in(&env, &work, &["rev-parse", "HEAD"]);
+    let tip = tip.trim().get(..12).unwrap_or_default();
+    let source = bare(&env, &work, &env.root().join("who.git"), None);
+    let out = env.run(&["import", "--yes", &source.to_string_lossy()]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains(&format!("  commit author: github-token, in {tip}")),
+        "{err}"
+    );
+    assert!(!err.contains("commit message"), "{err}");
+    assert!(!err.contains(&token), "{err}");
+    let repo = env.repo();
+    assert_eq!(commits(&env, &repo), 1);
+    assert!(!every_object(&env, &repo.join(".git")).contains(&token));
+}
+
 #[test]
 fn a_populated_repo_is_refused_naming_overlay() {
     let env = TestEnv::new();
