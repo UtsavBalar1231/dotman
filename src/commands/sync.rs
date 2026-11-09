@@ -720,7 +720,7 @@ fn report_conflict(ctx: &Context, branch: &str, paths: &[PathBuf]) {
         ]);
     }
     let all: Vec<&PathBuf> = paths.iter().collect();
-    steps.push(vec![format!("{bin} git add {}", quoted(&all))]);
+    steps.push(vec![format!("{bin} git add -- {}", quoted(&all))]);
     let mut resume = vec![format!("{bin} git -c core.editor=true rebase --continue")];
     // Git before 2.26 rebases with the apply backend, which stops on a commit that taking the
     // upstream version emptied instead of dropping it.

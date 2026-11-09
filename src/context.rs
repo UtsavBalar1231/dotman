@@ -65,7 +65,7 @@ impl fmt::Display for InProgress {
                 let quoted = quote_all(paths);
                 write!(
                     f,
-                    "the repo at {repo} has unresolved conflicts in {quoted}, as `git stash pop` leaves them; resolve them and run `{bin} git add {quoted}`, or put back the committed version with `{bin} git checkout HEAD -- {quoted}`"
+                    "the repo at {repo} has unresolved conflicts in {quoted}, as `git stash pop` leaves them; resolve them and run `{bin} git add -- {quoted}`, or put back the committed version with `{bin} git checkout HEAD -- {quoted}`"
                 )?;
             }
         }

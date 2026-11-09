@@ -266,11 +266,39 @@ fn a_stash_pop_conflict_is_refused_and_nothing_reaches_home() {
         let (code, err) = stderr_of(&env, args);
         assert_eq!(code, Some(4), "{args:?}: {err}");
         assert!(err.contains("unresolved conflicts in .bashrc"), "{err}");
-        assert!(err.contains("dotman git add .bashrc"), "{err}");
+        assert!(err.contains("dotman git add -- .bashrc"), "{err}");
         assert!(err.contains("dotman git checkout HEAD -- .bashrc"), "{err}");
     }
     assert_eq!(stderr_of(&env, &["log"]).0, Some(0));
     assert_eq!(env.read(".bashrc"), b"x\n");
+}
+
+/// git reads a path that starts with a dash as an option unless `--` comes first.
+#[test]
+fn the_printed_add_resolves_a_stash_pop_conflict_on_a_key_that_starts_with_a_dash() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write("-x", b"x\n", 0o644);
+    env.ok(&["add", "./-x"]);
+    env.ok(&["sync"]);
+    let repo = env.repo().to_string_lossy().into_owned();
+    fs::write(env.repo().join("-x"), b"stashed\n").expect("edit");
+    env.git(&["-C", &repo, "stash", "-q"]);
+    fs::write(env.repo().join("-x"), b"committed\n").expect("edit");
+    env.git(&["-C", &repo, "commit", "-q", "-am", "other"]);
+    assert!(!env.git_raw(&["-C", &repo, "stash", "pop"]).status.success());
+
+    let (code, err) = stderr_of(&env, &["status"]);
+    assert_eq!(code, Some(4), "{err}");
+    assert!(err.contains("`dotman git add -- -x`"), "{err}");
+    fs::write(env.repo().join("-x"), b"resolved\n").expect("resolve");
+    let out = common::run_hint(&env, &err, "git add");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stderr_of(&env, &["status"]).0, Some(0));
 }
 
 #[test]

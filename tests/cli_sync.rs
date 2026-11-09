@@ -192,7 +192,7 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
         edit,
         format!("Edit the conflicting files under {}.", repo_path(&b))
     );
-    assert_eq!(add, "dotman git add .a");
+    assert_eq!(add, "dotman git add -- .a");
     assert_eq!(resume, "dotman git -c core.editor=true rebase --continue");
     assert_eq!(sync, "dotman sync");
     assert!(err.contains("conflicting paths:\n  .a"), "{err}");
@@ -232,6 +232,32 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
     exits(&a, 0, &["sync"]);
     assert_eq!(a.read(".a"), b"resolved\n");
     assert_converged(&a, &b);
+}
+
+/// git reads a path that starts with a dash as an option unless `--` comes first.
+#[test]
+fn a_conflict_on_a_key_that_starts_with_a_dash_resolves_with_the_printed_steps() {
+    let a = first_device(&[(".a", b"a\n", 0o644)]);
+    a.write("-x", b"base\n", 0o644);
+    a.ok(&["add", "./-x"]);
+    a.ok(&["sync"]);
+    let b = clone_to_new_device(&a);
+    a.write("-x", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write("-x", b"from b\n", 0o644);
+    let err = exits(&b, 4, &["sync"]);
+    let [pull, _, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
+    assert_eq!(add, "dotman git add -- -x");
+
+    assert!(!paste(&b, &pull).status.success(), "the pull stops");
+    b.write_repo("-x", b"resolved\n");
+    for step in [&add, &resume, &sync] {
+        let out = paste(&b, step);
+        assert!(out.status.success(), "{step}: {}", stderr(&out));
+    }
+    exits(&a, 0, &["sync"]);
+    assert_eq!(a.read("-x"), b"resolved\n");
+    assert_eq!(b.read("-x"), b"resolved\n");
 }
 
 /// A conflict in `.dotman.toml` leaves conflict markers in it until the rebase is aborted, and
@@ -326,7 +352,7 @@ fn an_encrypted_conflict_keeps_the_version_the_printed_step_picks() {
             )),
             "{pick}"
         );
-        assert_eq!(add, format!("dotman git add {file}"));
+        assert_eq!(add, format!("dotman git add -- {file}"));
         assert!(
             err.contains(&format!(
                 "To merge the two versions by hand afterwards, edit {}, where dotman keeps the decrypted file",
