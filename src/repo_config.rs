@@ -19,6 +19,8 @@ const DEFAULT_IGNORE: &[&str] = &[
     "**/.DS_Store",
     "**/__pycache__/",
     "**/node_modules/",
+    "**/*.orig",
+    "**/*.rej",
 ];
 
 const DEFAULT_SECRET_NAMES: &[&str] = &[
@@ -179,7 +181,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let loaded = RepoConfig::load(&tmp.path().join(".dotman.toml")).unwrap();
         assert_eq!(loaded, RepoConfig::parse("").unwrap());
-        assert_eq!(loaded.ignore.patterns.len(), 6);
+        assert_eq!(loaded.ignore.patterns.len(), 8);
+        assert!(loaded.ignore.patterns.contains(&"**/*.orig".to_owned()));
         assert_eq!(loaded.guard.secret_names.len(), 14);
         assert!(
             loaded

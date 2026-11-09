@@ -57,6 +57,9 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     ctx.guard()?;
     ctx.refuse_git_locks()?;
     ctx.refuse_collisions()?;
+    if !dry_run {
+        ctx.sweep_temp_files()?;
+    }
 
     let first = apply::apply(
         &ctx,
@@ -243,7 +246,8 @@ fn commit(
         ctx.git
             .status()?
             .iter()
-            .filter(|entry| !held_paths.contains(&entry.path) && !is_temp(&entry.path))
+            .filter(|entry| !held_paths.contains(&entry.path))
+            .filter(|entry| !(entry.kind == StatusKind::Untracked && is_temp(&entry.path)))
             .map(|entry| entry.path.to_string_lossy().into_owned()),
     );
     let held = !held_paths.is_empty();

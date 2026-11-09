@@ -1,5 +1,6 @@
 //! What every command needs: resolved paths, the machine config and a git handle.
 
+use crate::commands::add::Ignore;
 use crate::config::Config;
 use crate::git::{Git, Operation};
 use crate::identity;
@@ -329,11 +330,13 @@ impl Context {
         State::load(&self.paths.state_file(), repo_id)
     }
 
-    /// Every regular file and symlink in the worktree outside `.git` and the reserved root
-    /// names, with its kind. A symlink to a directory is one entry, never followed. Keyed by repo
-    /// path, which for a variant is not the key it targets.
+    /// Every regular file and symlink in the worktree outside `.git`, the reserved root names and
+    /// the `[ignore]` patterns, with its kind. A symlink to a directory is one entry, never
+    /// followed. Keyed by repo path, which for a variant is not the key it targets.
     pub(crate) fn managed(&self) -> Result<BTreeMap<String, Kind>> {
         let root = &self.paths.repo;
+        // An editor's swap file or a merge's `.orig` in the worktree is not a key.
+        let ignore = Ignore::compile(&self.repo_config()?.ignore.patterns)?;
         let mut found = BTreeMap::new();
         let mut walk = WalkDir::new(root)
             .follow_links(false)
@@ -344,7 +347,13 @@ impl Context {
             let entry = entry.with_context(|| format!("cannot read {}", root.display()))?;
             let file_type = entry.file_type();
             if file_type.is_dir() {
-                if entry.depth() == 1 && entry.file_name() == OsStr::new(".git") {
+                let ignored = entry
+                    .path()
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(Path::to_str)
+                    .is_some_and(|dir| ignore.matches(dir, true));
+                if ignored || (entry.depth() == 1 && entry.file_name() == OsStr::new(".git")) {
                     walk.skip_current_dir();
                 }
                 continue;
@@ -362,12 +371,81 @@ impl Context {
             let Some(key) = rel.to_str() else { continue };
             if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
                 || validate_key(key).is_err()
+                || ignore.matches(key, false)
             {
                 continue;
             }
             found.insert(key.to_owned(), kind);
         }
         Ok(found)
+    }
+
+    /// Removes the temp files and directories that killed runs left in the worktree and in the
+    /// `$HOME` directories of managed keys. Only names whose embedded PID is no live process go,
+    /// so a run that holds no lock, such as a dry run, keeps its own. The caller holds the lock.
+    pub(crate) fn sweep_temp_files(&self) -> Result<()> {
+        let repo = &self.paths.repo;
+        if !is_real_dir(&repo.join(".git")) {
+            return Ok(());
+        }
+        let mut stale = Vec::new();
+        let mut walk = WalkDir::new(repo)
+            .follow_links(false)
+            .min_depth(1)
+            .into_iter();
+        while let Some(entry) = walk.next() {
+            let Ok(entry) = entry else { continue };
+            if entry.depth() == 1 && entry.file_name() == OsStr::new(".git") {
+                walk.skip_current_dir();
+            } else if is_stale_temp(entry.file_name()) {
+                if entry.file_type().is_dir() {
+                    walk.skip_current_dir();
+                }
+                stale.push(entry.into_path());
+            }
+        }
+        let home = &self.paths.home;
+        let mut dirs = BTreeSet::new();
+        for key in self.sources()?.keys() {
+            // Only real directories, so the sweep never reaches through a symlinked parent.
+            let parents: Vec<&str> = crate::engine::parents(key).collect();
+            if parents.iter().all(|parent| is_real_dir(&home.join(parent))) {
+                dirs.insert(
+                    parents
+                        .last()
+                        .map_or_else(|| home.clone(), |p| home.join(p)),
+                );
+            }
+        }
+        for dir in dirs {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            stale.extend(
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| is_stale_temp(&entry.file_name()))
+                    .map(|entry| entry.path()),
+            );
+        }
+        for path in &stale {
+            let removed = if is_real_dir(path) {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+            if let Err(e) = removed {
+                crate::output::warning(&format!("cannot remove {}: {e}", path.display()));
+            }
+        }
+        if !stale.is_empty() {
+            crate::output::info(&format!(
+                "removed {} temp {} that an interrupted run left behind",
+                stale.len(),
+                if stale.len() == 1 { "file" } else { "files" }
+            ));
+        }
+        Ok(())
     }
 
     /// Pairs of keys in the git index, home and system alike, that differ only in case or Unicode
@@ -441,6 +519,23 @@ impl Context {
     }
 }
 
+/// A `.dotman-tmp-<pid>-…` or `.dotman-tmp-link-<pid>-…` name whose process is gone. Names
+/// without a PID, from older versions, are left alone.
+fn is_stale_temp(name: &OsStr) -> bool {
+    let Some(rest) = name
+        .to_str()
+        .and_then(|name| name.strip_prefix(TEMP_PREFIX))
+    else {
+        return false;
+    };
+    let rest = rest.strip_prefix("link-").unwrap_or(rest);
+    let Some((pid, _)) = rest.split_once('-') else {
+        return false;
+    };
+    pid.parse::<u32>()
+        .is_ok_and(|pid| pid != std::process::id() && !sys::pid_alive(pid))
+}
+
 /// Whether `key` is `dir` or lies under it.
 #[must_use]
 pub fn is_under(key: &str, dir: &str) -> bool {
@@ -454,4 +549,35 @@ pub fn is_under(key: &str, dir: &str) -> bool {
 #[must_use]
 pub fn is_real_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dead_pid() -> u32 {
+        let mut child = crate::proc::command("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn only_temp_names_of_dead_processes_are_stale() {
+        let dead = dead_pid();
+        let me = std::process::id();
+        let stale = |name: String| is_stale_temp(OsStr::new(&name));
+        assert!(stale(format!("{TEMP_PREFIX}{dead}-a1B2c3")));
+        assert!(stale(format!("{TEMP_PREFIX}link-{dead}-0")));
+        assert!(!stale(format!("{TEMP_PREFIX}{me}-a1B2c3")));
+        assert!(!stale(format!("{TEMP_PREFIX}1-a1B2c3")), "pid 1 is alive");
+        assert!(
+            !stale(format!("{TEMP_PREFIX}a1B2c3")),
+            "no PID: an older version's"
+        );
+        assert!(!stale(format!("{TEMP_PREFIX}{dead}")));
+        assert!(!stale(format!("x{TEMP_PREFIX}{dead}-a")));
+        assert!(sys::pid_alive(me));
+        assert!(!sys::pid_alive(dead));
+    }
 }

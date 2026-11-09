@@ -482,6 +482,28 @@ fn a_private_file_is_never_widened_to_git_default_mode() {
 }
 
 #[test]
+fn ignored_names_in_the_worktree_are_not_keys() {
+    let env = added(&[(".config/app/a.conf", b"a\n", 0o644)]);
+    for leftover in [
+        ".config/app/a.conf.orig",
+        ".config/app/a.conf.rej",
+        ".config/app/.a.conf.swp",
+    ] {
+        env.write_repo(leftover, b"merge leftover\n");
+    }
+    env.write_repo(".config/app/node_modules/x.js", b"x\n");
+    let rows = env.porcelain("status");
+    assert_eq!(
+        rows,
+        [("clean".to_owned(), ".config/app/a.conf".to_owned())]
+    );
+    env.ok(&["apply"]);
+    for leftover in [".config/app/a.conf.orig", ".config/app/node_modules/x.js"] {
+        assert!(!env.home().join(leftover).exists(), "{leftover}");
+    }
+}
+
+#[test]
 fn a_malformed_mode_fails_a_dry_run() {
     let env = added(&[(".bashrc", b"one\n", 0o644)]);
     let config = env.repo().join(".dotman.toml");

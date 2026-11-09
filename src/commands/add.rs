@@ -132,6 +132,9 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     let dry_run = args.dry_run;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
     ctx.guard()?;
+    if !dry_run {
+        ctx.sweep_temp_files()?;
+    }
     if args.system {
         return add_system(&ctx, args);
     }

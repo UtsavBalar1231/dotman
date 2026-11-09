@@ -301,7 +301,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
     let mut tmp = tempfile::Builder::new()
-        .prefix(".dotman-tmp-")
+        .prefix(&format!(".dotman-tmp-{}-", std::process::id()))
         .tempfile_in(dir)
         .with_context(|| format!("cannot create a temp file in {}", dir.display()))?;
     tmp.write_all(bytes)?;

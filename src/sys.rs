@@ -72,6 +72,24 @@ pub fn geteuid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Whether a process with id `pid` exists, as `kill(pid, 0)` tells: one owned by another user
+/// counts. A `pid` that cannot name a single process counts as alive, so nothing is ever taken
+/// from a live one.
+#[must_use]
+pub fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    if pid <= 0 {
+        return true;
+    }
+    // SAFETY: signal 0 sends nothing; the call only checks that `pid` exists and may be signalled.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
 /// Opens the directory `name` inside `dir`. A symlink is never followed: it fails with ELOOP, or
 /// ENOTDIR on some systems.
 pub(crate) fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {

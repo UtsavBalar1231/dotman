@@ -17,6 +17,10 @@ const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding\n";
 
 const MIN_VERSION: (u32, u32) = (2, 25);
 
+/// The write engine's temp files, which are never staged.
+const TEMP_FILES: &str = ":(exclude,glob)**/.dotman-tmp-*";
+const TRACKED_TEMP_FILES: &str = ":(glob)**/.dotman-tmp-*";
+
 /// `core.excludesFile=` must stay empty: otherwise the user's global ignore file hides files from `git status`.
 /// `core.hooksPath=/dev/null` makes every hook lookup fail, so no hook runs.
 const ISOLATION: [&str; 14] = [
@@ -366,8 +370,21 @@ impl Git {
 
     /// Like [`Git::stage_all`], leaving out `held`, repo-relative paths taken literally.
     pub fn stage_all_except(&self, held: &[PathBuf]) -> Result<()> {
-        let mut args: Vec<OsString> = ["add", "-A", "-f", "--", "."].map(OsString::from).to_vec();
+        let mut args: Vec<OsString> = ["add", "-A", "-f", "--", ".", TEMP_FILES]
+            .map(OsString::from)
+            .to_vec();
         args.extend(held.iter().map(|path| pathspec(":(exclude,literal)", path)));
+        self.run(&args)?;
+        // Untracks the leftovers that earlier versions committed.
+        let args = [
+            "rm",
+            "-r",
+            "-q",
+            "--cached",
+            "--ignore-unmatch",
+            "--",
+            TRACKED_TEMP_FILES,
+        ];
         self.run(&args).map(drop)
     }
 

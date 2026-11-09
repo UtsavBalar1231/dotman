@@ -16,6 +16,11 @@ use tempfile::TempPath;
 use walkdir::WalkDir;
 
 const TEMP_PREFIX: &str = ".dotman-tmp-";
+
+// The PID lets a later run tell a killed run's leftovers from a live run's files.
+fn temp_prefix() -> String {
+    format!("{TEMP_PREFIX}{}-", std::process::id())
+}
 // Under `.dotman/`, a reserved root name, so no key's backup can land on the record.
 const LINKS_FILE: &str = ".dotman/links.txt";
 const MODES_FILE: &str = ".dotman/modes.txt";
@@ -234,7 +239,7 @@ pub fn replace_link_with_dir(
     let path = home.join(key);
     let dir = parent_of(&path)?;
     let temp = tempfile::Builder::new()
-        .prefix(TEMP_PREFIX)
+        .prefix(&temp_prefix())
         .permissions(Permissions::from_mode(0o700))
         .tempdir_in(dir)
         .with_context(|| format!("cannot create a temp dir in {}", dir.display()))?;
@@ -365,7 +370,7 @@ pub fn restore_dir_link(
     }
     let dir = parent_of(&path)?;
     let link = tempfile::Builder::new()
-        .prefix(TEMP_PREFIX)
+        .prefix(&temp_prefix())
         .make_in(dir, |temp| symlink(target, temp))
         .with_context(|| format!("cannot create a temp link in {}", dir.display()))?
         .into_temp_path();
@@ -599,8 +604,9 @@ fn write_backup(dest: &Path, bytes: &[u8], append: bool) -> Result<()> {
 }
 
 fn make_temp(dir: &Path, new: New<'_>) -> Result<TempPath> {
+    let prefix = temp_prefix();
     let mut builder = tempfile::Builder::new();
-    builder.prefix(TEMP_PREFIX);
+    builder.prefix(&prefix);
     let temp = match new {
         New::File { bytes, mode } => {
             // 0600 at open, so private or decrypted content is never readable by others, even

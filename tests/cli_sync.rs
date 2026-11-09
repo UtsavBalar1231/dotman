@@ -567,3 +567,43 @@ fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
     exits(&a, 0, &["sync"]);
     assert_eq!(remote_file(&a, ".a"), "a, key removed\n");
 }
+
+#[test]
+fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
+    let env = first_device(&[(".config/app/a.conf", b"a\n", 0o644)]);
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead = child.id();
+    child.wait().expect("wait");
+    let live = std::process::id();
+    let repo_temp = env
+        .repo()
+        .join(format!(".config/app/.dotman-tmp-{dead}-AbCdEf"));
+    let home_temp = env
+        .home()
+        .join(format!(".config/app/.dotman-tmp-{dead}-GhIjKl"));
+    let live_temp = env
+        .repo()
+        .join(format!(".config/app/.dotman-tmp-{live}-MnOpQr"));
+    let old_style = env.repo().join(".config/app/.dotman-tmp-StUvWx");
+    for path in [&repo_temp, &home_temp, &live_temp, &old_style] {
+        fs::write(path, b"partial\n").expect("leave a temp file");
+    }
+    // An earlier version committed one; the next sync untracks it.
+    let tracked = format!(".config/.dotman-tmp-{dead}-YzAbCd");
+    env.write_repo(&tracked, b"committed by mistake\n");
+    let repo = repo_path(&env);
+    env.git(&["-C", &repo, "add", "-f", &tracked]);
+    env.git(&["-C", &repo, "commit", "-q", "-m", "old"]);
+
+    let err = exits(&env, 0, &["sync"]);
+    assert!(err.contains("removed 3 temp files"), "{err}");
+    assert!(!repo_temp.exists() && !home_temp.exists());
+    assert!(!env.repo().join(&tracked).exists());
+    assert!(
+        live_temp.exists() && old_style.exists(),
+        "kept: no dead PID"
+    );
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
+    assert!(!tree.contains(".dotman-tmp-"), "{tree}");
+}
