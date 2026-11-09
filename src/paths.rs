@@ -376,7 +376,12 @@ pub(crate) fn derive_key(
 pub(crate) fn validate_key(key: &str) -> Result<()> {
     ensure!(!key.is_empty(), "empty key");
     ensure!(!key.starts_with('/'), "key `{key}` is absolute");
-    ensure!(!key.contains('\0'), "key `{key}` contains a NUL byte");
+    // A newline in a name would forge lines of output, and an ESC would reach the terminal.
+    ensure!(
+        !key.chars().any(|c| c.is_ascii_control()),
+        "key `{}` contains a control character",
+        key.escape_debug()
+    );
     ensure!(is_nfc(key), "key `{key}` is not NFC-normalized");
     for component in key.split('/') {
         ensure!(
@@ -384,13 +389,17 @@ pub(crate) fn validate_key(key: &str) -> Result<()> {
             "key `{key}` has an empty, `.` or `..` component"
         );
         // A `.git/config` applied into HOME runs its `core.*` commands the next time git is used
-        // in that directory. Git itself refuses these names on checkout, including `.GIT`, the
-        // NTFS short name, and the trailing spaces and dots that Windows drops.
-        let bare = component.trim_end_matches([' ', '.']);
-        ensure!(
-            !bare.eq_ignore_ascii_case(".git") && !bare.eq_ignore_ascii_case("git~1"),
-            "key `{key}` has a `.git` component"
-        );
+        // in that directory. Git refuses the names that NTFS resolves to `.git` as well: `.GIT`,
+        // the short name `git~1`, trailing spaces and dots, an `:stream` suffix and `\` separators.
+        let git_dir = component.split('\\').any(|part| {
+            let bare = part
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches([' ', '.']);
+            bare.eq_ignore_ascii_case(".git") || bare.eq_ignore_ascii_case("git~1")
+        });
+        ensure!(!git_dir, "key `{key}` has a `.git` component");
     }
     let first = key.split('/').next().unwrap_or_default();
     ensure!(
@@ -693,12 +702,36 @@ mod tests {
             "a/.git. ./config",
             "a/.Git  ",
             "git~1.",
+            ".config/x/.git:stream",
+            "a/.git\\y",
+            "a/x\\.GIT. ",
+            "GIT~1:z",
         ] {
             assert!(validate_key(name).is_err(), "{name}");
         }
-        assert!(validate_key(".config/x/.github/ci.yml").is_ok());
-        assert!(validate_key(".config/x/.gitx").is_ok());
-        assert!(validate_key(".config/x/ .git").is_ok());
+        for fine in [
+            ".config/x/.github/ci.yml",
+            ".config/x/.gitx",
+            ".config/x/ .git",
+            ".git.d",
+            ".gitconfig",
+            ".git~",
+            "a/x:.git",
+        ] {
+            assert!(validate_key(fine).is_ok(), "{fine}");
+        }
+    }
+
+    #[test]
+    fn a_control_character_is_refused_in_any_component() {
+        for name in ["a/b\nc", "a\tb", "x/\u{1b}[2Jy", "del\u{7f}", "nul\0"] {
+            let err = validate_key(name).unwrap_err().to_string();
+            assert!(
+                !err.chars().any(|c| c.is_ascii_control()),
+                "{name:?}: the error echoes it raw: {err:?}"
+            );
+        }
+        assert!(validate_key("caf\u{e9}/\u{a0}x").is_ok());
     }
 
     #[test]

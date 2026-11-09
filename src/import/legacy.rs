@@ -1365,15 +1365,18 @@ mod tests {
 
     #[test]
     fn the_stream_names_the_importing_email_and_only_the_old_name() {
-        let history = [snapshot("c1", &[], &[("a\"b\nc", 0o644)])];
-        let text = stream_of(&planned(&history, &[]));
+        let history = [snapshot("c1", &[], &[("a\"b\\c", 0o644), ("x\ny", 0o644)])];
+        let plan = planned(&history, &[]);
+        assert_eq!(plan.report.needs_action.len(), 1, "a newline is refused");
+        let text = stream_of(&plan);
         let who = "Old Name <me@mail.invalid> 1700000000 +0000";
         assert!(
             text.contains(&format!("author {who}\ncommitter {who}\n")),
             "{text}"
         );
         assert!(!text.contains("old@mail.invalid"));
-        assert!(text.contains("M 100644 :1 \"a\\\"b\\nc\"\n"), "{text}");
+        assert!(text.contains("M 100644 :1 \"a\\\"b\\\\c\"\n"), "{text}");
+        assert!(!text.contains("x\ny") && !text.contains("x\\ny"), "{text}");
         assert!(text.contains("data 14\nmessage of c1\n"), "{text}");
         assert_eq!(author_name("<a@b>"), "unknown");
         assert_eq!(author_name("  Ann  <a@b>"), "Ann");
