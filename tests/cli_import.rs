@@ -538,6 +538,112 @@ fn overlay_dry_run_changes_nothing() {
     pristine.check();
 }
 
+/// `tracking.bin` as the old library wrote it: bincode's legacy encoding of
+/// `{ version: u32, tracked_directories: HashSet<PathBuf>, tracked_files: HashSet<PathBuf> }`.
+fn tracking_bin(dirs: &[&str]) -> Vec<u8> {
+    let mut out = 1_u32.to_le_bytes().to_vec();
+    out.extend_from_slice(&(dirs.len() as u64).to_le_bytes());
+    for dir in dirs {
+        out.extend_from_slice(&(dir.len() as u64).to_le_bytes());
+        out.extend_from_slice(dir.as_bytes());
+    }
+    out.extend_from_slice(&0_u64.to_le_bytes());
+    out
+}
+
+/// A copy of the fixture with the rest of what an old store holds: `tracking.bin`, staged work in
+/// `index.bin`, a branch that HEAD does not reach, a stash entry, and the old config's remote.
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+fn rich_legacy(env: &TestEnv) -> std::path::PathBuf {
+    let copy = env.root().join("legacy");
+    copy_dir(Path::new(FIXTURE), &copy);
+    fs::write(
+        copy.join("tracking.bin"),
+        tracking_bin(&[".local/bin", "/home/legacyuser/.config", "/srv/elsewhere"]),
+    )
+    .expect("write tracking.bin");
+    fs::write(copy.join("index.bin"), [0_u8; 64]).expect("write index.bin");
+    fs::write(
+        copy.join("refs/heads/wip"),
+        "abababababababababababababababab",
+    )
+    .expect("branch");
+    fs::create_dir_all(copy.join("stash/entries")).expect("stash dir");
+    fs::write(copy.join("stash/entries/0"), b"x").expect("stash entry");
+    let config = env.xdg_config().join("dotman/config");
+    fs::create_dir_all(config.parent().expect("parent")).expect("config dir");
+    fs::write(
+        &config,
+        "[remotes.origin]\nremote_type = \"git\"\nurl = \"https://example.invalid/dots\"\n",
+    )
+    .expect("write the old config");
+    copy
+}
+
+#[test]
+fn import_carries_the_tracked_directories_and_reports_what_it_leaves_behind() {
+    let env = TestEnv::new();
+    let legacy = rich_legacy(&env);
+    let err = env.ok(&["import", &legacy.to_string_lossy(), "--no-bootstrap"]);
+    assert_eq!(accounting(&err), (6, 6, 0), "{err}");
+    for note in [
+        "[dirs] tracks 2 directories, as the old store did: .config, .local/bin",
+        "add [ignore] patterns before `dotman sync`",
+        "tracked directories left out of [dirs]: /srv/elsewhere",
+        "names the remote `origin` at https://example.invalid/dots; `dotman init --remote https://example.invalid/dots` sets it here",
+        "index.bin holds staged changes",
+        "these branches are not: wip",
+        "stash/ holds 1 stashed change",
+    ] {
+        assert!(err.contains(note), "missing `{note}` in:\n{err}");
+    }
+
+    assert_eq!(env.repo_config().dirs.paths, [".config", ".local/bin"]);
+    let first = git_in(&env, &env.repo(), &["rev-list", "--max-parents=0", "HEAD"]);
+    let root_config = blob(&env, &format!("{}:.dotman.toml", first.trim()));
+    let root_config =
+        RepoConfig::parse(&String::from_utf8(root_config).expect("utf8")).expect("parse");
+    assert_eq!(root_config.dirs.paths, Vec::<String>::new());
+
+    // The tracked directories make new files show up, as they did with the old store.
+    env.write(".config/new.conf", b"new\n", 0o644);
+    assert_eq!(
+        env.token_of("status", ".config/new.conf").as_deref(),
+        Some("new")
+    );
+}
+
+#[test]
+fn overlay_names_the_tracked_directories_and_leaves_dirs_alone() {
+    let env = overlay_env(0o644, BASHRC);
+    let legacy = rich_legacy(&env);
+    let out = env.run(&["import", "--overlay", &legacy.to_string_lossy()]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the old store tracked 2 directories, which an overlay leaves out of [dirs]"),
+        "{err}"
+    );
+    assert!(err.contains("index.bin holds staged changes"), "{err}");
+    assert_eq!(env.repo_config().dirs.paths, Vec::<String>::new());
+}
+
+#[test]
+fn a_directory_with_only_commits_is_not_a_legacy_store() {
+    let env = TestEnv::new();
+    let dir = env.root().join("project");
+    fs::create_dir_all(dir.join("commits")).expect("create commits/");
+    let err = env.fails(&["import", &dir.to_string_lossy()]);
+    assert!(
+        err.contains("is not a source `dotman import` understands"),
+        "{err}"
+    );
+
+    fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+    let err = env.fails(&["import", &dir.to_string_lossy()]);
+    assert!(err.contains("legacy repo has no commits"), "{err}");
+}
+
 #[test]
 fn overlay_needs_a_clean_repo_that_exists() {
     let pristine = legacy_fixture();

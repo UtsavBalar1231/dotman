@@ -8,6 +8,7 @@
 //! key counts as converted when every commit that holds it kept it, and as needing action when any
 //! commit dropped it.
 
+use super::gittree::shown;
 use super::{
     EditedConfig, Item, Report, author_email, count, homes, proceed, require_clean, require_fresh,
 };
@@ -17,21 +18,28 @@ use crate::commands::add::ensure_worktree_parents;
 use crate::commands::sync::identity_fix;
 use crate::context::Context;
 use crate::engine::{Node, read_node, recorded_mode};
+use crate::git::redact_credentials;
+use crate::name;
 use crate::output;
 use crate::paths::{validate_key, write_atomic};
 use crate::prompt;
 use crate::repo_config::RepoConfig;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, BufWriter, Read, Seek, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 const MAX_BYTES: u64 = 100 * 1024 * 1024;
 const BINCODE_LIMIT: usize = 100 * 1024 * 1024;
 const OVERLAY_MESSAGE: &str = "import: overlay from legacy dotman";
+const TRACKING_FILE: &str = "tracking.bin";
+/// The size of an index with nothing staged: a `u32` version and two empty `u64` lengths.
+const EMPTY_INDEX: u64 = 20;
 
 const UNSAFE_KEY: &str = "keys the path rules refuse";
 const OUTSIDE_HOME: &str = "absolute keys outside any home directory";
@@ -74,6 +82,29 @@ struct Snapshot {
     files: BTreeMap<PathBuf, SnapshotFile>,
 }
 
+/// `tracking.bin`: what the old `dotman add <dir>` recorded so that its status found new files.
+// reason: the legacy layout needs every field to decode, but not every field is read.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+struct TrackingManifest {
+    version: u32,
+    tracked_directories: BTreeSet<PathBuf>,
+    tracked_files: BTreeSet<PathBuf>,
+}
+
+/// The old machine config, `$XDG_CONFIG_HOME/dotman/config`; only its remotes are read.
+#[derive(Debug, Deserialize)]
+struct LegacyConfig {
+    #[serde(default)]
+    remotes: BTreeMap<String, LegacyRemote>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyRemote {
+    url: Option<String>,
+}
+
 impl Snapshot {
     /// In their stored order, without the null id and without repeats.
     fn parents(&self) -> Vec<&str> {
@@ -102,8 +133,9 @@ fn check_id(id: &str, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// A `commits/` directory alone is too common a name to mean a legacy store.
 pub(super) fn is_legacy(dir: &Path) -> bool {
-    dir.join("index.bin").is_file() || dir.join("commits").is_dir()
+    (dir.join("HEAD").is_file() && dir.join("commits").is_dir()) || dir.join("index.bin").is_file()
 }
 
 fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>> {
@@ -131,10 +163,10 @@ fn inflate(compressed: &[u8], limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn decode<const LIMIT: usize>(bytes: &[u8]) -> Result<Snapshot> {
+fn decode<T: DeserializeOwned, const LIMIT: usize>(bytes: &[u8]) -> Result<T> {
     let config = bincode::config::legacy().with_limit::<LIMIT>();
-    let (snapshot, _) = bincode::serde::decode_from_slice(bytes, config)?;
-    Ok(snapshot)
+    let (decoded, _) = bincode::serde::decode_from_slice(bytes, config)?;
+    Ok(decoded)
 }
 
 fn load_snapshot(root: &Path, id: &str) -> Result<Snapshot> {
@@ -144,7 +176,153 @@ fn load_snapshot(root: &Path, id: &str) -> Result<Snapshot> {
         read_capped(&path, MAX_BYTES).with_context(|| format!("cannot read legacy commit {id}"))?;
     let bytes = inflate(&compressed, MAX_BYTES)
         .with_context(|| format!("cannot decompress legacy commit {id}"))?;
-    decode::<BINCODE_LIMIT>(&bytes).with_context(|| format!("cannot decode legacy commit {id}"))
+    decode::<Snapshot, BINCODE_LIMIT>(&bytes)
+        .with_context(|| format!("cannot decode legacy commit {id}"))
+}
+
+/// The directories the old store watched for new files, as keys.
+#[derive(Debug, Default)]
+struct Tracked {
+    dirs: Vec<String>,
+    /// Directories the key rules refuse, with the reason.
+    dropped: Vec<String>,
+    /// Why `tracking.bin` could not be read.
+    unreadable: Option<String>,
+}
+
+/// `tracking.bin`, uncompressed. Its directories go through the same key rules as the files.
+fn tracked(root: &Path, homes: &[&Path]) -> Tracked {
+    let path = root.join(TRACKING_FILE);
+    if !path.is_file() {
+        return Tracked::default();
+    }
+    let manifest = read_capped(&path, MAX_BYTES)
+        .and_then(|bytes| decode::<TrackingManifest, BINCODE_LIMIT>(&bytes));
+    let manifest = match manifest {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            return Tracked {
+                unreadable: Some(format!("{e:#}")),
+                ..Tracked::default()
+            };
+        }
+    };
+    let mut tracked = Tracked::default();
+    for dir in &manifest.tracked_directories {
+        let key = dir
+            .to_str()
+            .ok_or_else(|| format!("{}: not valid UTF-8", dir.to_string_lossy()))
+            .and_then(|source| target_key(source, homes).map_err(|(_, why)| why));
+        match key {
+            Ok(key) if !tracked.dirs.contains(&key) => tracked.dirs.push(key),
+            Ok(_) => {}
+            Err(why) => tracked.dropped.push(why),
+        }
+    }
+    tracked.dirs.sort();
+    tracked
+}
+
+impl Tracked {
+    fn notes(&self, overlay: bool) -> Vec<String> {
+        let bin = name::bin();
+        let mut notes = Vec::new();
+        let n = self.dirs.len();
+        let dirs = if n == 1 {
+            "1 directory".to_owned()
+        } else {
+            format!("{n} directories")
+        };
+        if overlay && n > 0 {
+            notes.push(format!(
+                "the old store tracked {dirs}, which an overlay leaves out of [dirs]: {}; add [ignore] patterns for what they should not capture, then `{bin} add` each one",
+                shown(&self.dirs)
+            ));
+        } else if n > 0 {
+            notes.push(format!(
+                "[dirs] tracks {dirs}, as the old store did: {}; `{bin} status` lists their new files, so add [ignore] patterns before `{bin} sync`",
+                shown(&self.dirs)
+            ));
+        }
+        if !self.dropped.is_empty() {
+            notes.push(format!(
+                "tracked directories left out of [dirs]: {}",
+                shown(&self.dropped)
+            ));
+        }
+        if let Some(why) = &self.unreadable {
+            notes.push(format!(
+                "{TRACKING_FILE} cannot be read ({why}), so [dirs] is left empty"
+            ));
+        }
+        notes
+    }
+}
+
+/// The remote the old config names: `origin` first, else the first one with a URL.
+fn legacy_origin(config: &Path) -> Option<(String, String)> {
+    let bytes = read_capped(config, 1_048_576).ok()?;
+    let parsed: LegacyConfig = toml::from_str(std::str::from_utf8(&bytes).ok()?).ok()?;
+    let remotes: Vec<(String, String)> = parsed
+        .remotes
+        .into_iter()
+        .filter_map(|(name, remote)| remote.url.map(|url| (name, url)))
+        .filter(|(_, url)| !url.is_empty())
+        .collect();
+    let at = remotes
+        .iter()
+        .position(|(name, _)| name == "origin")
+        .unwrap_or(0);
+    remotes.into_iter().nth(at)
+}
+
+/// What the store holds besides the history of `HEAD`, which no import carries over.
+/// `imported` tells whether a commit id is in what the import takes.
+fn left_behind(ctx: &Context, root: &Path, imported: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let bin = name::bin();
+    let mut notes = Vec::new();
+    if let Some((remote, url)) = legacy_origin(&ctx.paths.config_home.join("dotman/config")) {
+        let url = redact_credentials(&url);
+        notes.push(format!(
+            "the old dotman config names the remote `{remote}` at {url}; `{bin} init --remote {url}` sets it here"
+        ));
+    }
+    if fs::metadata(root.join("index.bin")).is_ok_and(|meta| meta.len() > EMPTY_INDEX) {
+        notes.push(format!(
+            "index.bin holds staged changes that were never committed; they are not imported, so add those files again with `{bin} add`"
+        ));
+    }
+    let heads = root.join("refs/heads");
+    let mut branches: Vec<String> = WalkDir::new(&heads)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| {
+            read_capped(entry.path(), 4096)
+                .is_ok_and(|bytes| !imported(String::from_utf8_lossy(&bytes).trim()))
+        })
+        .filter_map(|entry| {
+            let name = entry.path().strip_prefix(&heads).ok()?;
+            Some(name.to_string_lossy().into_owned())
+        })
+        .collect();
+    branches.sort();
+    if !branches.is_empty() {
+        notes.push(format!(
+            "only the history of HEAD is imported; these branches are not: {}",
+            shown(&branches)
+        ));
+    }
+    let stashed = fs::read_dir(root.join("stash/entries")).map_or(0, Iterator::count);
+    if stashed > 0 {
+        notes.push(format!(
+            "stash/ holds {}, which {} not imported",
+            count(stashed, "stashed change"),
+            if stashed == 1 { "is" } else { "are" }
+        ));
+    }
+    notes
 }
 
 fn object_path(root: &Path, hash: &str) -> PathBuf {
@@ -426,15 +604,19 @@ fn author_name(author: &str) -> String {
     }
 }
 
+/// `dirs` goes into the `[dirs]` of the last commit, which is `HEAD`: every other commit is an
+/// ancestor of it.
 fn plan(
     history: &[(String, Snapshot)],
     homes: &[&Path],
     has_object: &dyn Fn(&str) -> bool,
+    dirs: &[String],
 ) -> Result<Plan> {
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
     let mut position: BTreeMap<&str, usize> = BTreeMap::new();
     let mut commits = Vec::with_capacity(history.len());
-    for (id, snapshot) in history {
+    let last = history.len().saturating_sub(1);
+    for (at, (id, snapshot)) in history.iter().enumerate() {
         let Selection { chosen, dropped } = select(snapshot, homes, has_object);
         let mut modes = BTreeMap::new();
         for file in &chosen {
@@ -462,10 +644,13 @@ fn plan(
             })
             .collect::<Result<Vec<_>>>()?;
         position.insert(id, commits.len());
-        let config = RepoConfig {
+        let mut config = RepoConfig {
             modes,
             ..RepoConfig::default()
         };
+        if at == last {
+            config.dirs.paths = dirs.to_vec();
+        }
         commits.push(Planned {
             parents,
             author: author_name(&snapshot.commit.author),
@@ -617,15 +802,25 @@ pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Ou
     require_fresh(ctx)?;
     let email = author_email(ctx)?;
     let history = load_history(root, &head(root)?)?;
-    let mut plan = plan(&history, &homes(ctx), &|hash| {
-        object_path(root, hash).is_file()
-    })?;
+    let homes = homes(ctx);
+    let tracked = tracked(root, &homes);
+    let mut plan = plan(
+        &history,
+        &homes,
+        &|hash| object_path(root, hash).is_file(),
+        &tracked.dirs,
+    )?;
+    plan.report.notes.extend(tracked.notes(false));
     if root.join("remote-mappings.toml").is_file() {
         plan.report.notes.push(
             "remote-mappings.toml is ignored: the commits are rebuilt without a mapping to any remote"
                 .to_owned(),
         );
     }
+    let ids: BTreeSet<&str> = history.iter().map(|(id, _)| id.as_str()).collect();
+    plan.report
+        .notes
+        .extend(left_behind(ctx, root, &|id| ids.contains(id)));
     let edited = EditedConfig::find(ctx)?;
     if let Some(edited) = &edited {
         plan.report.notes.push(edited.note(args.dry_run));
@@ -730,10 +925,11 @@ struct Overlay {
 
 /// Compares the legacy `HEAD` snapshot with the worktree. Content is never changed.
 fn compare(ctx: &Context, root: &Path, include_missing: bool) -> Result<Overlay> {
-    let snapshot = load_snapshot(root, &head(root)?)?;
-    let Selection { chosen, dropped } = select(&snapshot, &homes(ctx), &|hash| {
-        object_path(root, hash).is_file()
-    });
+    let head = head(root)?;
+    let snapshot = load_snapshot(root, &head)?;
+    let homes = homes(ctx);
+    let Selection { chosen, dropped } =
+        select(&snapshot, &homes, &|hash| object_path(root, hash).is_file());
     let repo = &ctx.paths.repo;
     let config = ctx.repo_config()?;
     let sources = ctx.sources()?;
@@ -806,12 +1002,19 @@ fn compare(ctx: &Context, root: &Path, include_missing: bool) -> Result<Overlay>
         }
     }
     overlay.report.converted = converted;
+    let mut tracked = tracked(root, &homes);
+    tracked.dirs.retain(|dir| !config.dirs.paths.contains(dir));
+    overlay.report.notes.extend(tracked.notes(true));
     if root.join("remote-mappings.toml").is_file() {
         overlay
             .report
             .notes
             .push("remote-mappings.toml is ignored".to_owned());
     }
+    overlay
+        .report
+        .notes
+        .extend(left_behind(ctx, root, &|id| id == head));
     Ok(overlay)
 }
 
@@ -948,7 +1151,7 @@ mod tests {
 
     fn planned(history: &[(String, Snapshot)], missing: &'static [&str]) -> Plan {
         let home = Path::new("/h/me");
-        plan(history, &[home], &|hash| !missing.contains(&hash)).unwrap()
+        plan(history, &[home], &|hash| !missing.contains(&hash), &[]).unwrap()
     }
 
     fn kept_keys(plan: &Plan) -> Vec<&str> {
@@ -1186,13 +1389,63 @@ mod tests {
 
         let (_, snap) = snapshot("c1", &[], &[("f", 0o644)]);
         let bytes = bincode::serde::encode_to_vec(&snap, bincode::config::legacy()).unwrap();
-        assert_eq!(decode::<BINCODE_LIMIT>(&bytes).unwrap().commit.id, "c1");
-        assert!(decode::<16>(&bytes).is_err());
+        assert_eq!(
+            decode::<Snapshot, BINCODE_LIMIT>(&bytes).unwrap().commit.id,
+            "c1"
+        );
+        assert!(decode::<Snapshot, 16>(&bytes).is_err());
 
         // A string that claims 200 MB must fail before anything is allocated.
         let mut claim = 200_000_000_u64.to_le_bytes().to_vec();
         claim.extend_from_slice(b"short");
-        assert!(decode::<BINCODE_LIMIT>(&claim).is_err());
+        assert!(decode::<Snapshot, BINCODE_LIMIT>(&claim).is_err());
+        assert!(decode::<TrackingManifest, BINCODE_LIMIT>(&claim).is_err());
+    }
+
+    fn manifest(dirs: &[&str]) -> Vec<u8> {
+        let manifest = TrackingManifest {
+            version: 1,
+            tracked_directories: dirs.iter().map(PathBuf::from).collect(),
+            tracked_files: BTreeSet::new(),
+        };
+        bincode::serde::encode_to_vec(&manifest, bincode::config::legacy()).unwrap()
+    }
+
+    #[test]
+    fn tracked_directories_become_head_dirs_through_the_key_rules() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(
+            root.join(TRACKING_FILE),
+            manifest(&[".config/nvim", "/h/me/.config/zsh", "/srv/x", ".git/hooks"]),
+        )
+        .unwrap();
+        let found = tracked(root, &[Path::new("/h/me")]);
+        assert_eq!(found.dirs, [".config/nvim", ".config/zsh"]);
+        assert_eq!(found.dropped.len(), 2, "{:?}", found.dropped);
+        let notes = found.notes(false);
+        assert!(
+            notes
+                .first()
+                .is_some_and(|note| note.starts_with("[dirs] tracks 2 directories")),
+            "{notes:?}"
+        );
+
+        let history = [
+            snapshot("c1", &[], &[("a", 0o644)]),
+            snapshot("c2", &["c1"], &[("a", 0o644)]),
+        ];
+        let plan = plan(&history, &[Path::new("/h/me")], &|_| true, &found.dirs).unwrap();
+        let dirs: Vec<Vec<String>> = plan
+            .commits
+            .iter()
+            .map(|commit| RepoConfig::parse(&commit.config).unwrap().dirs.paths)
+            .collect();
+        assert_eq!(dirs, [vec![], found.dirs]);
+
+        fs::write(root.join(TRACKING_FILE), b"\x01\0\0\0\xff\xff").unwrap();
+        let broken = tracked(root, &[]);
+        assert!(broken.dirs.is_empty() && broken.unreadable.is_some());
     }
 
     #[test]
@@ -1222,9 +1475,12 @@ mod tests {
                 "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d"
             ]
         );
-        let plan = plan(&history, &[Path::new("/h/me")], &|h| {
-            object_path(&root, h).is_file()
-        })
+        let plan = plan(
+            &history,
+            &[Path::new("/h/me")],
+            &|h| object_path(&root, h).is_file(),
+            &[],
+        )
         .unwrap();
         assert_eq!((plan.report.total(), plan.report.converted), (6, 6));
         assert_eq!(
