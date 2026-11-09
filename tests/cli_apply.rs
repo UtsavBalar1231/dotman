@@ -158,7 +158,8 @@ fn row_8_existing_file_is_backed_up_before_the_repo_version() {
     let env = TestEnv::new();
     env.ok(&["init"]);
     env.write_repo(".bashrc", b"repo\n");
-    env.write(".bashrc", b"mine\n", 0o600);
+    // Group access, so the repo's mode applies; a private file keeps its own (see below).
+    env.write(".bashrc", b"mine\n", 0o640);
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("existing"));
 
     let err = attention(&env, &["apply"]);
@@ -390,6 +391,52 @@ fn recorded_modes_are_applied_without_special_bits() {
     assert_eq!(b.read(".ssh/config"), b"Host *\n");
     for key in [".local/bin/tool", ".ssh/config"] {
         assert_eq!(token(&b, key).as_deref(), Some("clean"), "{key}");
+    }
+}
+
+#[test]
+fn a_private_file_is_never_widened_to_git_default_mode() {
+    // A git-tree repo carries only git's 100644; `[modes]` says nothing about these keys.
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_repo(".ssh/config", b"Host repo\n");
+    env.write_repo(".ssh/known", b"same\n");
+    env.write_repo(".netrc", b"repo\n");
+    env.write(".ssh/config", b"Host mine\n", 0o600);
+    env.write(".ssh/known", b"same\n", 0o600);
+    env.write(".netrc", b"mine\n", 0o600);
+    let mut config = env.repo_config();
+    config.modes.insert(".netrc".to_owned(), "0644".to_owned());
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .unwrap();
+
+    let err = env.ok(&["apply", "--take-repo"]);
+    assert!(
+        err.contains(".ssh/config: kept at 0600, not the repo's 0644"),
+        "{err}"
+    );
+    assert_eq!(env.read(".ssh/config"), b"Host repo\n");
+    assert_eq!(mode_of(&env.home().join(".ssh/config")), 0o600);
+    assert_eq!(mode_of(&env.home().join(".ssh/known")), 0o600);
+    assert_eq!(
+        env.backups(".ssh/config"),
+        [(b"Host mine\n".to_vec(), 0o600)]
+    );
+    // An explicit `[modes]` entry wins.
+    assert_eq!(mode_of(&env.home().join(".netrc")), 0o644);
+
+    // The kept mode is a local change, which the next sync records for every machine.
+    assert_eq!(
+        token(&env, ".ssh/config").as_deref(),
+        Some("changed-locally")
+    );
+    env.ok(&["sync"]);
+    let modes = env.repo_config().modes;
+    assert_eq!(modes.get(".ssh/config").map(String::as_str), Some("0600"));
+    assert_eq!(modes.get(".ssh/known").map(String::as_str), Some("0600"));
+    for key in [".ssh/config", ".ssh/known", ".netrc"] {
+        assert_eq!(token(&env, key).as_deref(), Some("clean"), "{key}");
     }
 }
 
