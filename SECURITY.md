@@ -29,7 +29,7 @@ How this is enforced:
 - Git runs with the user's excludes, hooks and filters disabled, so a global config or a tracked `.gitattributes` cannot change what is read or written. A `.git` path component is refused at any depth.
 - Hooks run only when the hash of the `[hooks]` table matches the one approved on this machine. Approval covers the command text, not the scripts it calls.
 - Templates use minijinja with no loader and no command functions. Environment variables are visible only if listed in `[template] env`.
-- Importers do not execute the source. The chezmoi importer copies only plain files to a scratch directory and runs chezmoi there with an empty config. `--render-templates` is the explicit opt-in to run chezmoi's templates.
+- Importers do not execute the source. The chezmoi importer copies only plain files to a scratch directory and runs chezmoi there with a config that sets only the umask, so the user's chezmoi config and its hooks are never read. `--render-templates` is the explicit opt-in to run chezmoi's templates.
 - System files are opt-in per machine, read as the user, and written by a helper that rechecks everything (below).
 
 ## The system-write helper

@@ -170,6 +170,7 @@ Every prompt has a flag, so unattended runs never guess. A run is non-interactiv
 - Rust 1.88 or newer, to build from source.
 - Linux or macOS. Native Windows is not supported; WSL counts as Linux.
 - dotman refuses to run as root unless you pass `--allow-root` or set `DOTMAN_ALLOW_ROOT=1`.
+- Two managed files whose names differ only in case or Unicode form are refused: `status` reports them, and `apply` and `sync` stop before writing, because a macOS filesystem cannot hold both.
 - Paths follow XDG: the repo is `$XDG_DATA_HOME/dotman`, state is `$XDG_STATE_HOME/dotman`, and the machine config is `$XDG_CONFIG_HOME/dotman/config.toml`. `DOTMAN_REPO_PATH` and `DOTMAN_CONFIG_PATH` override the first and last.
 
 ## Limitations
