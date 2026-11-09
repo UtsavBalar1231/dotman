@@ -264,7 +264,11 @@ const CLAIMS: &[(&str, &[&str])] = &[
     ),
     (
         "When `origin` has no branch yet",
-        &["status_counts_the_commits_never_pushed_and_the_printed_sync_pushes_them"],
+        &[
+            "status_counts_what_origin_lacks_even_when_another_remote_has_it",
+            "status_never_counts_what_origin_has_before_the_first_fetch",
+            "status_says_origin_was_never_fetched_and_the_printed_sync_pushes",
+        ],
     ),
     (
         "Keeping `$HOME`'s version of a conflicting or existing file",

@@ -201,6 +201,25 @@ fn report_remote(ctx: &Context) -> Result<()> {
     let commits = |n: usize| if n == 1 { "commit" } else { "commits" };
     // No branch was ever pushed, as when every push after `init --remote` failed.
     if git.resolve_commit(&upstream)?.is_none() {
+        // With no `origin` ref at all, nothing was fetched, and the count would take in the
+        // commits origin already has.
+        let fetched = git
+            .command()
+            .args([
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                "refs/remotes/origin/",
+            ])
+            .output()
+            .context("failed to run git")?;
+        if fetched.status.success() && fetched.stdout.is_empty() {
+            output::info(&format!(
+                "origin has not been fetched yet; `{} sync` fetches and pushes",
+                name::bin()
+            ));
+            return Ok(());
+        }
         let out = git
             .command()
             .args([

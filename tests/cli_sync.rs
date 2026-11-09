@@ -772,9 +772,10 @@ fn status_counts_the_commits_to_push_and_pull_and_the_printed_sync_settles_them(
     assert_eq!(position(&a), ["2 commits to pull: run `dotman sync`"]);
 }
 
-/// With no `origin/<branch>` yet, as after every push failed, status counts what no remote ref has.
+/// With no `origin` ref at all, as after every push failed, nothing was fetched, so status cannot
+/// count what origin lacks and says so; the printed sync pushes the commits.
 #[test]
-fn status_counts_the_commits_never_pushed_and_the_printed_sync_pushes_them() {
+fn status_says_origin_was_never_fetched_and_the_printed_sync_pushes() {
     let env = TestEnv::new();
     let later = env.root().join("later.git");
     env.ok(&["init"]);
@@ -786,17 +787,9 @@ fn status_counts_the_commits_never_pushed_and_the_printed_sync_pushes_them() {
 
     let err = exits(&env, 0, &["status"]);
     let repo = repo_path(&env);
-    let count = env.git(&["-C", &repo, "rev-list", "--count", "HEAD"]);
-    let commits = if count.trim() == "1" {
-        "commit"
-    } else {
-        "commits"
-    };
-    let line = format!(
-        "{} {commits} not pushed yet: run `dotman sync`",
-        count.trim()
-    );
+    let line = "origin has not been fetched yet; `dotman sync` fetches and pushes";
     assert!(err.lines().any(|l| l == line), "{err}");
+    assert!(!err.contains("not pushed"), "{err}");
 
     env.git(&["init", "--bare", "-q", &later.to_string_lossy()]);
     let out = common::run_hint(&env, &err, "sync");
@@ -807,8 +800,35 @@ fn status_counts_the_commits_never_pushed_and_the_printed_sync_pushes_them() {
     assert_eq!(pushed, env.git(&["-C", &repo, "rev-parse", "HEAD"]));
 }
 
-/// The count is against `origin` alone: a second remote that holds every commit does not hide
-/// that `origin` has none of them.
+/// Before the first fetch, as after an import whose history origin already holds, status does not
+/// count the commits origin has as not pushed: it says origin was never fetched, and the next
+/// sync pushes only the new one.
+#[test]
+fn status_never_counts_what_origin_has_before_the_first_fetch() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    env.write(".a", b"a2\n", 0o644);
+    env.ok(&["sync"]);
+    let repo = repo_path(&env);
+    env.git(&["-C", &repo, "update-ref", "-d", "refs/remotes/origin/main"]);
+    env.git(&["-C", &repo, "commit", "-q", "--allow-empty", "-m", "local"]);
+
+    let err = exits(&env, 0, &["status"]);
+    let line = "origin has not been fetched yet; `dotman sync` fetches and pushes";
+    assert!(err.lines().any(|l| l == line), "{err}");
+    assert!(!err.contains("not pushed"), "{err}");
+    let err = exits(&env, 0, &["sync"]);
+    assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
+    let err = exits(&env, 0, &["status"]);
+    assert!(!err.contains("fetched") && !err.contains("push"), "{err}");
+}
+
+/// Once origin was fetched and it lacks the branch, status counts what origin lacks, against
+/// `origin` alone: a second remote that holds every commit does not hide that `origin` has none
+/// of them.
 #[test]
 fn status_counts_what_origin_lacks_even_when_another_remote_has_it() {
     let env = TestEnv::new();
@@ -829,7 +849,22 @@ fn status_counts_what_origin_lacks_even_when_another_remote_has_it() {
         &backup.to_string_lossy(),
     ]);
     env.git(&["-C", &repo, "push", "-q", "backup", "main"]);
+    env.git(&["init", "--bare", "-q", &later.to_string_lossy()]);
+    let other = env.root().join("other");
+    let other = other.to_string_lossy().into_owned();
+    env.git(&["init", "-q", &other]);
+    env.git(&["-C", &other, "commit", "-q", "--allow-empty", "-m", "other"]);
+    let later_path = later.to_string_lossy().into_owned();
+    env.git(&[
+        "-C",
+        &other,
+        "push",
+        "-q",
+        &later_path,
+        "HEAD:refs/heads/other",
+    ]);
     env.ok(&["init", "--remote", &format!("file://{}", later.display())]);
+    exits(&env, 0, &["git", "fetch", "-q", "origin"]);
 
     let err = exits(&env, 0, &["status"]);
     let count = env.git(&["-C", &repo, "rev-list", "--count", "HEAD"]);
