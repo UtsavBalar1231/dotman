@@ -234,7 +234,8 @@ fn has_objects(objects: &Path) -> bool {
     false
 }
 
-/// `git fsck --connectivity-only`: every object a ref reaches is present and readable.
+/// `git fsck --connectivity-only`: every object a ref reaches is present and readable. The repo
+/// may hold commits that are nowhere else, so no step moves or removes it before a backup.
 fn objects(ctx: &Context) -> Check {
     let mut cmd = ctx.git.command();
     cmd.args([
@@ -243,6 +244,8 @@ fn objects(ctx: &Context) -> Check {
         "--no-dangling",
         "--no-progress",
     ])
+    // English, so the broken refs can be read out of the message.
+    .env("LC_ALL", "C")
     .stdin(Stdio::null());
     match cmd.output() {
         Ok(out) if out.status.success() => pass("repo objects"),
@@ -252,25 +255,71 @@ fn objects(ctx: &Context) -> Check {
                 String::from_utf8_lossy(&out.stderr),
                 String::from_utf8_lossy(&out.stdout)
             );
-            let shown: Vec<&str> = text
+            let lines: Vec<&str> = text
                 .lines()
                 .filter(|line| !line.trim().is_empty())
-                .take(3)
                 .collect();
+            let shown: Vec<&str> = lines.iter().take(3).copied().collect();
+            let refs: Option<Vec<&str>> = lines.iter().map(|line| broken_ref(line)).collect();
+            let fix = match refs {
+                Some(refs) if !refs.is_empty() => {
+                    let steps: Vec<String> = refs
+                        .iter()
+                        .map(|name| format!("{} git update-ref --no-deref -d {name}", name::bin()))
+                        .collect();
+                    format!(
+                        "only refs that point at nothing are broken, and removing them loses no commit; a fetch brings a remote's back: `{}`",
+                        steps.join(" && ")
+                    )
+                }
+                _ => corrupt_repo_steps(ctx),
+            };
             fail(
                 "repo objects",
                 &format!("git fsck failed: {}", shown.join("; ")),
-                &format!(
-                    "move {} aside and rerun {} init <url> to clone it again",
-                    ctx.paths.repo.display(),
-                    name::bin()
-                ),
+                &fix,
             )
         }
         Err(e) => fail(
             "repo objects",
             &format!("cannot run git fsck: {e}"),
             "install git",
+        ),
+    }
+}
+
+/// The ref in fsck's `error: <ref>: invalid sha1 pointer <oid>`, as a dangling symref or a ref to
+/// a missing object gives, unless it is a branch or `HEAD`: those name the user's history, which a
+/// repair must not drop.
+fn broken_ref(line: &str) -> Option<&str> {
+    let (name, rest) = line.strip_prefix("error: ")?.split_once(": ")?;
+    let usable = rest.starts_with("invalid sha1 pointer ")
+        && name.starts_with("refs/")
+        && !name.starts_with("refs/heads/")
+        && !name.contains(char::is_whitespace);
+    usable.then_some(name)
+}
+
+/// Objects are missing or damaged: back the repo up first, since it may hold commits that are
+/// nowhere else, then clone again from origin when there is one.
+fn corrupt_repo_steps(ctx: &Context) -> String {
+    let repo = ctx.paths.repo.to_string_lossy();
+    let (here, backup) = (
+        shell_words::quote(&repo),
+        shell_words::quote(&format!("{repo}.bak")).into_owned(),
+    );
+    let backup_step = format!(
+        "back the repo up first with `cp -a {here} {backup}`, which keeps any commit that is only here"
+    );
+    match ctx.git.remote_url("origin") {
+        Ok(Some(url)) => format!(
+            "{backup_step}; then clone it again from origin: `rm -rf {here}` and `{} init {}`",
+            name::bin(),
+            shell_words::quote(&url)
+        ),
+        _ => format!(
+            "{backup_step}; `{} git fsck` lists what is missing, and with no origin there is no other copy to clone",
+            name::bin()
         ),
     }
 }

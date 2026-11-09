@@ -233,8 +233,68 @@ fn damaged_objects_fail_the_object_check() {
     let (code, out) = doctor(&env, &[]);
     assert_eq!(code, Some(1), "{out}");
     let failed = line(&out, "fail", "repo objects").unwrap_or_default();
+    let repo = env.repo().display().to_string();
+    let backup = format!("`cp -a {repo} {repo}.bak`");
+    let clone = format!("`dotman init {}`", env.remote_url());
+    for step in [backup.as_str(), clone.as_str()] {
+        assert!(failed.contains(step), "{step}: {out}");
+    }
+    assert!(!failed.contains("aside"), "{out}");
     assert!(
-        failed.contains("git fsck failed") && failed.contains("init <url>"),
+        failed.find(&backup) < failed.find("rm -rf"),
+        "the backup comes first: {out}"
+    );
+}
+
+/// A ref that points at nothing, as a remote's `HEAD` left dangling by an import, fails the object
+/// check with a step that removes that ref alone, never the repo, and the step run as printed
+/// clears it. A branch that points at nothing gets the backup steps instead.
+#[test]
+fn a_dangling_ref_fails_with_a_step_that_removes_only_the_ref() {
+    let env = committed();
+    let repo = env.repo().to_string_lossy().into_owned();
+    env.git(&[
+        "-C",
+        &repo,
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/gone",
+    ]);
+    let commits = env.git(&["-C", &repo, "rev-list", "--all"]);
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(1), "{out}");
+    let failed = line(&out, "fail", "repo objects").unwrap_or_default();
+    assert!(
+        failed.contains("`dotman git update-ref --no-deref -d refs/remotes/origin/HEAD`"),
+        "{out}"
+    );
+    assert!(
+        !failed.contains("aside") && !failed.contains("rm -rf"),
+        "{out}"
+    );
+    let ran = common::run_hint(&env, failed, "git update-ref");
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(line(&out, "pass", "repo objects").is_some(), "{out}");
+    assert_eq!(env.git(&["-C", &repo, "rev-list", "--all"]), commits);
+
+    let missing = "1".repeat(40);
+    fs::write(
+        env.repo().join(".git/refs/heads/side"),
+        format!("{missing}\n"),
+    )
+    .expect("a branch");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(1), "{out}");
+    let failed = line(&out, "fail", "repo objects").unwrap_or_default();
+    assert!(!failed.contains("update-ref"), "{out}");
+    assert!(
+        failed.contains(&format!("`cp -a {repo} {repo}.bak`")),
         "{out}"
     );
 }
