@@ -25,15 +25,22 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 const ARMOR: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
-// age reads identities from `-i -` since 1.1.0.
-const STDIN_IDENTITIES: (u32, u32, u32) = (1, 1, 0);
+// Every age checked reads `-i -` with the ciphertext named as a file: 1.0.0~rc1 (Debian 11), 1.0.0
+// (Ubuntu 22.04) and 1.3.2. A CLI that does not may still read `-i /dev/stdin`, which opens the
+// same pipe, so the key never reaches a file either way.
+const STDIN_ARGS: [&str; 2] = ["-", "/dev/stdin"];
+// Bounds the probes and `--version` only, as long as the bound on `git --version`: a real
+// decryption can wait on a plugin that asks the user to touch a token, so it has no time limit.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_POLL: Duration = Duration::from_millis(10);
+const PROBE_TEXT: &[u8] = b"dotman probe\n";
 // The recipient set the `{age}` sources were last all encrypted to. `.dotman/` is reserved, so
 // this is never a managed key.
 const RECORD: &str = ".dotman/age-recipients";
-const INSTALL: &str =
-    "pacman -S age, apt install age, dnf install age, apk add age or brew install age";
+const RELEASES: &str = "https://github.com/FiloSottile/age/releases";
 /// Where a key can come from, for messages about a missing one.
 #[must_use]
 pub fn key_hint() -> String {
@@ -279,16 +286,25 @@ struct Cli {
     rage: bool,
 }
 
+/// An age CLI that reads `DOTMAN_AGE_KEY` from its stdin.
+#[derive(Debug)]
+struct StdinReader {
+    program: PathBuf,
+    /// One of [`STDIN_ARGS`].
+    arg: &'static str,
+}
+
 #[derive(Debug)]
 struct Reader {
     program: PathBuf,
-    stdin_key: bool,
+    /// The `-i` argument that reads `DOTMAN_AGE_KEY`, when a CLI here can.
+    stdin_arg: Option<&'static str>,
     files: Vec<PathBuf>,
     locked: Option<String>,
     /// Printed once, by the first decryption.
     notes: Vec<String>,
-    /// With `DOTMAN_AGE_KEY` set: the version of the age that reads it, or why none can.
-    stdin_version: Option<Result<String, String>>,
+    /// With `DOTMAN_AGE_KEY` set: the age that reads it, or why none can.
+    key_cli: Option<Result<PathBuf, String>>,
 }
 
 /// The age CLI and the identities this machine has, resolved once per run.
@@ -384,30 +400,30 @@ impl Age {
             Err(e) => {
                 return Reader {
                     program: PathBuf::new(),
-                    stdin_key: false,
+                    stdin_arg: None,
                     files: Vec::new(),
                     locked: Some(format!("{e:#}")),
                     notes: Vec::new(),
-                    stdin_version: self.key.as_ref().map(|_| Err(format!("{e:#}"))),
+                    key_cli: self.key.as_ref().map(|_| Err(format!("{e:#}"))),
                 };
             }
         };
         let mut notes = Vec::new();
         let mut program = cli.program.clone();
-        let key_reader = self.key.as_ref().map(|_| stdin_reader(&cli));
-        let stdin_key = match &key_reader {
-            Some(Ok((age, _))) => {
-                program.clone_from(age);
-                true
+        let key_reader = self.key.as_ref().map(|_| self.stdin_reader(&cli));
+        let stdin_arg = match &key_reader {
+            Some(Ok(found)) => {
+                program.clone_from(&found.program);
+                Some(found.arg)
             }
             Some(Err(why)) => {
                 notes.push(format!(
-                    "{AGE_KEY_VAR} is set but cannot be used: {why}; install age 1.1.0 or newer, or use DOTMAN_AGE_KEY_FILE or `{} key import`",
+                    "{AGE_KEY_VAR} is set but cannot be used: {why}. dotman never writes the key to a file, so put it in one yourself and point DOTMAN_AGE_KEY_FILE at it, or run `{} key import`",
                     name::bin()
                 ));
-                false
+                None
             }
-            None => false,
+            None => None,
         };
         let mut files = Vec::new();
         if let Some(file) = &self.key_file {
@@ -423,7 +439,7 @@ impl Age {
         if fs::symlink_metadata(&self.identity).is_ok() {
             files.push(self.identity.clone());
         }
-        let locked = (!stdin_key && files.is_empty()).then(|| {
+        let locked = (stdin_arg.is_none() && files.is_empty()).then(|| {
             if self.key.is_some() {
                 format!("{AGE_KEY_VAR} cannot be used here and there is no identity file")
             } else {
@@ -432,19 +448,50 @@ impl Age {
         });
         Reader {
             program,
-            stdin_key,
+            stdin_arg,
             files,
             locked,
             notes,
-            stdin_version: key_reader.map(|found| found.map(|(_, version)| version)),
+            key_cli: key_reader.map(|found| found.map(|found| found.program)),
         }
+    }
+
+    // What a CLI can do is probed, not read from `--version`, which a distro build can print as
+    // `(devel)`. With rage selected, the `age` on PATH is the fallback.
+    fn stdin_reader(&self, cli: &Cli) -> Result<StdinReader, String> {
+        let keygen = self.keygen().map_err(|e| format!("{e:#}"))?;
+        let probe = Probe::new(&keygen, &cli.program)?;
+        let mut candidates = vec![cli.program.clone()];
+        candidates.extend(proc::find_program("age").filter(|_| cli.rage));
+        for program in &candidates {
+            if let Some(arg) = STDIN_ARGS.into_iter().find(|arg| probe.reads(program, arg)) {
+                return Ok(StdinReader {
+                    program: program.clone(),
+                    arg,
+                });
+            }
+        }
+        let tried: Vec<String> = candidates
+            .iter()
+            .map(|program| format!("{} ({})", program.display(), version_of(program)))
+            .collect();
+        Err(format!(
+            "{} cannot read an identity from stdin",
+            tried.join(" or ")
+        ))
     }
 
     /// `None` when `DOTMAN_AGE_KEY` is unset; else the version of the age that reads it from
     /// stdin, or why no installed CLI can.
     #[must_use]
     pub fn key_reader(&self) -> Option<Result<String, String>> {
-        self.reader().stdin_version.clone()
+        let found = self.reader().key_cli.as_ref()?;
+        Some(
+            found
+                .as_ref()
+                .map(|program| version_of(program))
+                .map_err(Clone::clone),
+        )
     }
 
     /// The plaintext of the age file at `ciphertext`. A [`Locked`] error means no key here
@@ -461,8 +508,8 @@ impl Age {
         }
         let mut cmd = proc::command(&reader.program);
         cmd.arg("-d");
-        if reader.stdin_key {
-            cmd.args(["-i", "-"]);
+        if let Some(arg) = reader.stdin_arg {
+            cmd.args(["-i", arg]);
         }
         for file in &reader.files {
             cmd.arg("-i").arg(file);
@@ -471,7 +518,7 @@ impl Age {
         let key = self
             .key
             .as_ref()
-            .filter(|_| reader.stdin_key)
+            .filter(|_| reader.stdin_arg.is_some())
             .map(|key| format!("{key}\n"));
         let out = run(cmd, key.as_deref().map(str::as_bytes))?;
         if out.status.success() {
@@ -550,7 +597,10 @@ fn select(command: Option<&str>) -> Result<Cli, String> {
             .iter()
             .find_map(|name| proc::find_program(name))
             .ok_or_else(|| {
-                format!("encrypted files need rage or age, and neither is installed; install one: {INSTALL}")
+                format!(
+                    "encrypted files need rage or age, and neither is installed; {}",
+                    install_hint(cfg!(target_os = "macos"), read_os_release().as_deref())
+                )
             })?,
     };
     let rage = program
@@ -560,39 +610,176 @@ fn select(command: Option<&str>) -> Result<Cli, String> {
     Ok(Cli { program, rage })
 }
 
-// `-i -` was checked with age 1.3.2 and rage 0.12.1 and works in both. With rage selected it still
-// goes through the `age` on PATH, never through rage.
-fn stdin_reader(cli: &Cli) -> Result<(PathBuf, String), String> {
-    let age = if cli.rage {
-        proc::find_program("age").ok_or_else(|| {
-            "rage is selected, and reading the key from stdin goes through age, which is not on PATH"
-                .to_owned()
-        })?
-    } else {
-        cli.program.clone()
-    };
-    let (major, minor, patch) =
-        version_of(&age).ok_or_else(|| format!("cannot read the version of {}", age.display()))?;
-    let version = format!("{major}.{minor}.{patch}");
-    if (major, minor, patch) < STDIN_IDENTITIES {
-        return Err(format!(
-            "{} is {version}, and reading the key from stdin needs 1.1.0 or newer",
-            age.display()
-        ));
-    }
-    Ok((age, version))
+fn read_os_release() -> Option<String> {
+    ["/etc/os-release", "/usr/lib/os-release"]
+        .iter()
+        .find_map(|path| fs::read_to_string(path).ok())
 }
 
-fn version_of(program: &Path) -> Option<(u32, u32, u32)> {
-    let out = proc::command(program)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+/// The way to install age here, from `ID`, `ID_LIKE` and `VERSION_ID`, parsed as the git hint
+/// parses them and never sourced. Where the distro has no package, the release binaries or rage.
+fn install_hint(macos: bool, os_release: Option<&str>) -> String {
+    let fallback = format!("download a release binary from {RELEASES}, or `cargo install rage`");
+    if macos {
+        return "install one with `brew install age`".to_owned();
+    }
+    let (mut ids, mut version) = (Vec::new(), String::new());
+    for line in os_release.unwrap_or_default().lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+        match key.trim() {
+            "ID" => ids.insert(0, value.to_owned()),
+            "ID_LIKE" => ids.extend(value.split_whitespace().map(str::to_owned)),
+            "VERSION_ID" => value.clone_into(&mut version),
+            _ => {}
+        }
+    }
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok());
+    // Ubuntu has age from 22.04 and Debian from 11; a derivative's own version says nothing.
+    let too_old = match ids.first().map(String::as_str) {
+        Some("ubuntu") => major.is_some_and(|major| major < 22),
+        Some("debian") => major.is_some_and(|major| major < 11),
+        _ => false,
+    };
+    // `Some(None)`: this distro is known to have no package. RHEL and its rebuilds carry age only
+    // in EPEL, and Amazon Linux has neither, though both list fedora in `ID_LIKE`.
+    let package = ids.iter().find_map(|id| match id.as_str() {
+        "arch" => Some(Some("pacman -S age")),
+        "alpine" => Some(Some("apk add age")),
+        "opensuse" | "suse" => Some(Some("zypper install age")),
+        "rhel" | "centos" | "rocky" | "almalinux" | "ol" => {
+            Some(Some("dnf install epel-release && dnf install age"))
+        }
+        "amzn" => Some(None),
+        "fedora" => Some(Some("dnf install age")),
+        "debian" | "ubuntu" if too_old => Some(None),
+        "debian" | "ubuntu" => Some(Some("apt install age")),
+        _ => None,
+    });
+    match package.flatten() {
+        Some(package) if package.contains("epel") => {
+            format!("install one with `{package}`, or {fallback}")
+        }
+        Some(package) => format!("install one with `{package}`"),
+        None => fallback,
+    }
+}
+
+/// The version an age CLI prints, for messages only: what it can do is probed. `--version` is
+/// bounded, so a hung CLI cannot hold the lock.
+fn version_of(program: &Path) -> String {
+    let mut cmd = proc::command(program);
+    cmd.arg("--version");
+    let Ok(Some(out)) = proc::output_within(&mut cmd, PROBE_TIMEOUT) else {
+        return "version unknown".to_owned();
+    };
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push(' ');
     text.push_str(&String::from_utf8_lossy(&out.stderr));
-    text.split_whitespace().find_map(parse_version)
+    let parsed = text
+        .split_whitespace()
+        .find_map(parse_version)
+        .map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"));
+    parsed
+        .or_else(|| text.split_whitespace().next().map(str::to_owned))
+        .unwrap_or_else(|| "version unknown".to_owned())
+}
+
+/// A throwaway identity and a file encrypted to it, made at run time, to find out whether a CLI
+/// reads an identity from stdin by decrypting the file with one.
+struct Probe {
+    identity: Vec<u8>,
+    // Holds the ciphertext; removed on drop.
+    dir: tempfile::TempDir,
+}
+
+impl Probe {
+    fn new(keygen: &Path, encryptor: &Path) -> Result<Self, String> {
+        let generated = run_within(proc::command(keygen), &[])
+            .filter(|out| out.status.success())
+            .ok_or_else(|| format!("{} did not make a throwaway key", keygen.display()))?;
+        let text = String::from_utf8_lossy(&generated.stdout);
+        let recipient = text
+            .lines()
+            .find_map(|line| line.strip_prefix("# public key:"))
+            .map(str::trim)
+            .ok_or_else(|| format!("{} printed no public key", keygen.display()))?;
+        let mut encrypt = proc::command(encryptor);
+        encrypt.args(["-e", "-r", recipient]);
+        let ciphertext = run_within(encrypt, PROBE_TEXT)
+            .filter(|out| out.status.success())
+            .ok_or_else(|| format!("{} -e failed on a throwaway key", encryptor.display()))?
+            .stdout;
+        let dir = tempfile::Builder::new()
+            .prefix("dotman-age-probe-")
+            .tempdir()
+            .map_err(|e| format!("cannot create a temp dir: {e}"))?;
+        fs::write(dir.path().join("probe.age"), ciphertext)
+            .map_err(|e| format!("cannot write the probe: {e}"))?;
+        Ok(Self {
+            identity: generated.stdout,
+            dir,
+        })
+    }
+
+    fn reads(&self, program: &Path, arg: &str) -> bool {
+        let mut cmd = proc::command(program);
+        cmd.args(["-d", "-i", arg, "--"])
+            .arg(self.dir.path().join("probe.age"));
+        run_within(cmd, &self.identity)
+            .is_some_and(|out| out.status.success() && out.stdout == PROBE_TEXT)
+    }
+}
+
+/// [`run`] for the probes: `None` when the child cannot start or is still running after
+/// [`PROBE_TIMEOUT`], when it is killed. Every pipe is read or written by a thread of its own, so
+/// the poll sees the deadline whatever the child does with them.
+fn run_within(mut cmd: Command, input: &[u8]) -> Option<Output> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let _sigpipe = sys::ignore_sigpipe();
+    let mut child = cmd.spawn().ok()?;
+    let stdin = child.stdin.take();
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.map(|mut pipe| pipe.write_all(input)));
+        let out = scope.spawn(move || read_all(stdout));
+        let err = scope.spawn(move || read_all(stderr));
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() < PROBE_TIMEOUT => std::thread::sleep(PROBE_POLL),
+                _ => {
+                    // The kill closes the child's ends of the pipes, so the threads finish.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let _ = writer.join();
+        let (stdout, stderr) = (out.join().ok()?, err.join().ok()?);
+        Some(Output {
+            status: status?,
+            stdout,
+            stderr,
+        })
+    })
+}
+
+fn read_all(pipe: Option<impl Read>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut bytes);
+    }
+    bytes
 }
 
 /// `1.3.2`, `v1.2.1` or `0.10` as numbers; anything else is `None`.
@@ -979,7 +1166,47 @@ mod tests {
         for bad in ["rage", "(devel)", "1", ""] {
             assert_eq!(parse_version(bad), None, "{bad}");
         }
-        assert!((1, 0, 9) < STDIN_IDENTITIES && (1, 1, 0) >= STDIN_IDENTITIES);
+    }
+
+    #[test]
+    fn the_install_hint_follows_os_release_and_falls_back_to_the_releases() {
+        let hint = |text: &str| install_hint(false, Some(text));
+        assert!(hint("ID=arch\n").contains("`pacman -S age`"));
+        assert!(hint("ID=manjaro\nID_LIKE=arch\n").contains("`pacman -S age`"));
+        assert!(hint("ID=ubuntu\nVERSION_ID=\"22.04\"\n").contains("`apt install age`"));
+        assert!(hint("ID=debian\nVERSION_ID=\"13\"\n").contains("`apt install age`"));
+        assert!(
+            hint("ID=debian\n").contains("`apt install age`"),
+            "testing has no VERSION_ID"
+        );
+        assert!(
+            hint("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\nVERSION_ID=\"21.3\"\n")
+                .contains("`apt install age`")
+        );
+        assert!(hint("ID=fedora\nVERSION_ID=45\n").contains("`dnf install age`"));
+        assert!(hint("ID=alpine\nVERSION_ID=3.24.0\n").contains("`apk add age`"));
+        assert!(
+            hint("ID=\"opensuse-tumbleweed\"\nID_LIKE=\"opensuse suse\"\n")
+                .contains("`zypper install age`")
+        );
+        for old in [
+            "ID=ubuntu\nVERSION_ID=\"20.04\"\n",
+            "ID=debian\nVERSION_ID=\"10\"\n",
+        ] {
+            let text = hint(old);
+            assert!(!text.contains("apt install"), "{text}");
+            assert!(text.contains(RELEASES) && text.contains("rage"), "{text}");
+        }
+        let rocky = hint("ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.6\"\n");
+        assert!(
+            rocky.contains("epel-release") && rocky.contains(RELEASES),
+            "{rocky}"
+        );
+        assert!(!rocky.contains("`dnf install age`"), "{rocky}");
+        let amazon = hint("ID=\"amzn\"\nID_LIKE=\"fedora\"\nVERSION_ID=\"2023\"\n");
+        assert!(amazon.contains(RELEASES), "{amazon}");
+        assert_eq!(hint("ID=plan9\n"), amazon);
+        assert!(install_hint(true, None).contains("`brew install age`"));
     }
 
     #[test]

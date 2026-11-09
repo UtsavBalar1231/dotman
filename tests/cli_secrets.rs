@@ -833,8 +833,11 @@ fn without_an_age_cli_encrypted_paths_are_locked_and_encrypting_names_the_instal
     env.write(".netrc", b"machine x\n", 0o600);
     let vars = [("PATH", empty.to_str().unwrap())];
     let err = exits(&env.run_with(&vars, &["add", "--encrypt", ".netrc"]), 1);
+    // The hint follows this machine's os-release; its cases are unit-tested.
     assert!(
-        err.contains("pacman -S age") && err.contains("brew install age"),
+        err.contains("rage or age")
+            && (err.contains("install one with `")
+                || err.contains("github.com/FiloSottile/age/releases")),
         "{err}"
     );
     assert!(!env.repo().join(".netrc{age}").exists());
@@ -940,4 +943,120 @@ fn doctor_warns_on_one_recipient_counts_locked_files_and_checks_the_key_reader()
         out.contains("pass  encrypted files: 1, none locked"),
         "{out}"
     );
+}
+
+/// A second device of `a` without a key, whose `[age] command` is the real age behind a shell
+/// `case` over its arguments, with the real age-keygen beside it. `None` without an age CLI.
+fn wrapped_age(a: &TestEnv, arms: &str) -> Option<TestEnv> {
+    let path = std::env::var_os("PATH")?;
+    let find = |name: &str| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    };
+    let (age, keygen) = (find("age")?, find("age-keygen")?);
+    let b = a.second_device();
+    exits(&b.run(&["init", &b.remote_url()]), 0);
+    let dir = b.root().join("age-wrapper");
+    fs::create_dir(&dir).ok()?;
+    let wrapper = dir.join("age");
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in\n{arms}\nesac\nexec '{}' \"$@\"\n",
+        age.display()
+    );
+    fs::write(&wrapper, script).ok()?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).ok()?;
+    std::os::unix::fs::symlink(keygen, dir.join("age-keygen")).ok()?;
+    let config = b.xdg_config().join("dotman/config.toml");
+    let text = fs::read_to_string(&config).unwrap_or_default();
+    b.write_machine_config(&format!(
+        "{text}\n[age]\ncommand = \"{}\"\n",
+        wrapper.display()
+    ));
+    Some(b)
+}
+
+/// `DOTMAN_AGE_KEY` works by what the CLI does, not by what `--version` says: a build that
+/// prints `(devel)` reads the key, and so does one without `-i -`, through `/dev/stdin`. The key
+/// is written to no file either way.
+#[test]
+fn the_key_in_the_environment_is_probed_not_read_from_the_version() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let key = identity(&a);
+    let vars = [("DOTMAN_AGE_KEY", key.as_str())];
+    let devel = "  *' --version '*) echo '(devel)'; exit 0;;";
+    let no_dash =
+        "  *' -i - '*) echo 'age: error: open -: no such file or directory' >&2; exit 1;;";
+    for arms in [devel, no_dash] {
+        let b = wrapped_age(&a, arms).unwrap();
+        assert!(!b.home().join(HOSTS).exists(), "locked without the key");
+        let err = exits(&b.run_with(&vars, &["apply"]), 0);
+        assert!(!err.contains("cannot be used"), "{arms}: {err}");
+        assert_eq!(b.read(HOSTS), PLAIN, "{arms}");
+        for dir in [b.home(), b.state_dir(), b.repo(), b.xdg_config()] {
+            assert_eq!(
+                files_containing(&dir, MARKER),
+                Vec::<String>::new(),
+                "{arms}"
+            );
+        }
+    }
+    let b = wrapped_age(&a, devel).unwrap();
+    let out = b.run_with(&vars, &["doctor"]);
+    let report = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        report.contains("pass  DOTMAN_AGE_KEY is read by age (devel)"),
+        "{report}"
+    );
+}
+
+/// A CLI that reads no identity from stdin at all leaves the files locked, and the warning says
+/// that dotman never writes the key to a file and names `DOTMAN_AGE_KEY_FILE`.
+#[test]
+fn a_cli_that_cannot_read_the_key_from_stdin_says_why_and_names_the_key_file() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let key = identity(&a);
+    let arms = "  *' -i - '*|*' -i /dev/stdin '*) echo 'age: error: no identity' >&2; exit 1;;";
+    let b = wrapped_age(&a, arms).unwrap();
+    let err = exits(&b.run_with(&[("DOTMAN_AGE_KEY", &key)], &["apply"]), 0);
+    assert!(
+        err.contains("DOTMAN_AGE_KEY is set but cannot be used")
+            && err.contains("dotman never writes the key to a file")
+            && err.contains("DOTMAN_AGE_KEY_FILE"),
+        "{err}"
+    );
+    assert!(err.contains("locked"), "{err}");
+    assert!(!b.home().join(HOSTS).exists());
+    assert!(!err.contains("AGE-SECRET-KEY-1"), "{err}");
+}
+
+/// `age --version` is bounded: a CLI that never answers it cannot hold the lock, and doctor
+/// still finishes and reports the key reader.
+#[test]
+fn a_hung_version_probe_is_bounded() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let key = identity(&a);
+    let b = wrapped_age(&a, "  *' --version '*) exec sleep 60;;").unwrap();
+    let started = std::time::Instant::now();
+    let out = b.run_with(&[("DOTMAN_AGE_KEY", &key)], &["doctor"]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "doctor waited on age --version"
+    );
+    let report = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        report.contains("pass  DOTMAN_AGE_KEY is read by age version unknown"),
+        "{report}"
+    );
+    exits(&b.run_with(&[("DOTMAN_AGE_KEY", &key)], &["apply"]), 0);
+    assert_eq!(b.read(HOSTS), PLAIN);
 }
