@@ -137,6 +137,30 @@ fn a_hostile_home_symlink_never_carries_a_clone_outside_home() {
     assert_eq!(tree_checksum(&outside), before);
 }
 
+/// An upstream file whose name holds a C1 control character, such as the 8-bit CSI U+009B that
+/// some terminals read as ESC `[`, is no key: a clone applies the rest and never writes it into
+/// HOME, and nothing prints the character raw.
+#[test]
+fn an_upstream_name_with_a_c1_control_is_never_applied() {
+    let a = TestEnv::new();
+    a.ok(&["init"]);
+    a.write_repo(".config/app/ok.conf", b"ok\n");
+    a.write_repo(".config/app/csi\u{9b}2J.conf", b"planted\n");
+    a.push_repo();
+
+    let b = a.second_device();
+    let out = b.run(&["init", &a.remote_url(), "--take-repo"]);
+    let err = exits(&out, 0);
+    assert_eq!(b.read(".config/app/ok.conf"), b"ok\n");
+    assert_eq!(names(&b.home().join(".config/app")), ["ok.conf"]);
+    for args in [&["status"][..], &["list"], &["sync"]] {
+        let out = b.run(args);
+        let all = format!("{err}{}", text(&out));
+        assert!(!all.contains('\u{9b}'), "{args:?}: {all:?}");
+    }
+    assert_eq!(names(&b.home().join(".config/app")), ["ok.conf"]);
+}
+
 /// A symlink at a HOME target (`~/.bashrc` pointing outside HOME) is never written through by
 /// `init --take-repo`, `apply`, `sync` or `restore`: the file it points at keeps its bytes and the
 /// link stays.

@@ -376,9 +376,10 @@ pub(crate) fn derive_key(
 pub(crate) fn validate_key(key: &str) -> Result<()> {
     ensure!(!key.is_empty(), "empty key");
     ensure!(!key.starts_with('/'), "key `{key}` is absolute");
-    // A newline in a name would forge lines of output, and an ESC would reach the terminal.
+    // A newline in a name would forge lines of output, and an ESC or a C1 CSI (U+009B) would
+    // reach the terminal.
     ensure!(
-        !key.chars().any(|c| c.is_ascii_control()),
+        !key.chars().any(char::is_control),
         "key `{}` contains a control character",
         key.escape_debug()
     );
@@ -727,11 +728,27 @@ mod tests {
         for name in ["a/b\nc", "a\tb", "x/\u{1b}[2Jy", "del\u{7f}", "nul\0"] {
             let err = validate_key(name).unwrap_err().to_string();
             assert!(
-                !err.chars().any(|c| c.is_ascii_control()),
+                !err.chars().any(char::is_control),
                 "{name:?}: the error echoes it raw: {err:?}"
             );
         }
         assert!(validate_key("caf\u{e9}/\u{a0}x").is_ok());
+    }
+
+    #[test]
+    fn a_c1_control_character_is_refused_and_escaped() {
+        for (name, shown) in [
+            ("x/csi\u{9b}2Jy", "csi\\u{9b}2Jy"),
+            ("\u{80}first", "\\u{80}first"),
+            ("a/nel\u{85}", "nel\\u{85}"),
+            ("a/\u{9f}last", "\\u{9f}last"),
+        ] {
+            let err = validate_key(name).unwrap_err().to_string();
+            assert!(err.contains("control character"), "{name:?}: {err}");
+            assert!(err.contains(shown), "{name:?}: {err}");
+            assert!(!err.chars().any(char::is_control), "{name:?}: {err:?}");
+        }
+        assert!(validate_key("\u{a0}nbsp/\u{7e}tilde").is_ok());
     }
 
     #[test]
