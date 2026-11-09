@@ -32,8 +32,6 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-// Binary detection looks at this many leading bytes, as git does.
-const SNIFF_BYTES: u64 = 8192;
 // A new file over this size is probably a download, a cache or a database, not a config.
 const HOLD_BYTES: u64 = 1_048_576;
 const LARGEST_SHOWN: usize = 5;
@@ -836,7 +834,7 @@ impl Hold {
     pub(crate) fn reason(self) -> String {
         match self {
             Self::Large => "over 1 MiB".to_owned(),
-            Self::Binary => "binary: NUL in the first 8 KiB".to_owned(),
+            Self::Binary => "binary: NUL in the first 8000 bytes".to_owned(),
             Self::SecretName => "name matches [guard] secret_names".to_owned(),
             Self::Content(found) => format!("{found}{}", found.remedy(None)),
             Self::Special => "a socket, FIFO or device, which dotman never stores".to_owned(),
@@ -882,8 +880,7 @@ pub(crate) fn hold_by_name_and_size(secrets: &[Pattern], key: &str, size: u64) -
 
 /// The holds that need the bytes of `key`, a file that passed [`hold_by_name_and_size`].
 pub(crate) fn hold_by_content(bytes: &[u8], key: &str, allow: &[Allow]) -> Option<Hold> {
-    let sniffed = usize::try_from(SNIFF_BYTES).unwrap_or(8192);
-    if bytes.iter().take(sniffed).any(|b| *b == 0) {
+    if secrets::looks_binary(bytes) {
         Some(Hold::Binary)
     } else {
         secrets::held(bytes, key, allow).map(Hold::Content)
@@ -1234,8 +1231,9 @@ fn has_nul_in_head(path: &Path) -> io::Result<bool> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let mut head = Vec::new();
-    file.take(SNIFF_BYTES).read_to_end(&mut head)?;
-    Ok(head.contains(&0))
+    file.take(u64::try_from(secrets::SNIFF_BYTES).unwrap_or(u64::MAX))
+        .read_to_end(&mut head)?;
+    Ok(secrets::looks_binary(&head))
 }
 
 fn refuse_collisions(existing: &Sources, plan: &Plan) -> Result<()> {

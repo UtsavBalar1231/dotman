@@ -960,6 +960,48 @@ fn an_age_secret_key_is_never_overridable() {
     assert!(!remote_history(&env).contains("AGE-SECRET-KEY-"));
 }
 
+/// An age key inside another rule's match, a `glpat-` run or a PEM `Comment:` header, is still
+/// an age key: `--allow-plain` refuses the file, and nothing reaches the repo.
+#[test]
+fn an_age_key_nested_in_another_credential_is_never_stored() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let pem_body = "b3BlbnNzaC1rZXktdjEAAAAA".repeat(3);
+    for (key, text) in [
+        (".glrc", format!("export GL=glpat-{FAKE_KEY}\n")),
+        (
+            ".pemrc",
+            format!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nComment: {FAKE_KEY}\n{pem_body}\n-----END OPENSSH PRIVATE KEY-----\n"
+            ),
+        ),
+    ] {
+        env.write(key, text.as_bytes(), 0o600);
+        let err = exits(&env.run(&["add", "--allow-plain", key]), 1);
+        assert!(err.contains("holds an age secret key"), "{key}: {err}");
+        assert!(!env.repo().join(key).exists(), "{key}");
+    }
+    assert_eq!(allow_entries(&env), []);
+    assert_eq!(
+        files_containing(&env.repo(), b"AGE-SECRET-KEY-"),
+        Vec::<String>::new()
+    );
+}
+
+/// A file with a NUL in its first 8000 bytes is binary, as git counts it, and the content guard
+/// skips it: a tool that embeds a key shape, as age-keygen does, can be stored and synced.
+#[test]
+fn a_binary_file_that_embeds_a_key_shape_is_stored() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let mut tool = b"\x7fELF\x02\x01\x01\0\0\0".to_vec();
+    tool.extend_from_slice(format!("usage: {FAKE_KEY}\n").as_bytes());
+    env.write(".local/bin/tool", &tool, 0o755);
+    exits(&env.run(&["add", ".local/bin/tool"]), 0);
+    exits(&env.run(&["sync"]), 0);
+    assert!(remote_tree(&env).contains(".local/bin/tool"));
+}
+
 /// The age key rule needs the whole key shape: an alias that names the `AGE-SECRET-KEY-` prefix
 /// is managed and pushed like any file, and a real key from `age-keygen` is held.
 #[test]

@@ -60,15 +60,19 @@ pub fn no_recipients() -> String {
 /// The rule that finds an age identity. No `[guard] allow` entry covers it.
 pub const AGE_RULE: &str = "age-secret-key";
 
-// Every rule starts with a fixed prefix: without one, the combined scan is 100 times slower. The
-// age identity is `AGE-SECRET-KEY-1` and 58 characters of uppercase bech32 (32 bytes of key and
-// a 6-character checksum), so a bare `AGE-SECRET-KEY-` in a script is not one. Provider rules come
-// from the research for the content guard; none of them is a keyword or entropy rule.
+/// Git's rule for a binary file: a NUL in the first 8000 bytes. The content guard skips such a
+/// file, or a tool that embeds a key shape, such as age-keygen, could never be stored.
+pub const SNIFF_BYTES: usize = 8000;
+
+// The age identity is `AGE-SECRET-KEY-1` and 58 characters of uppercase bech32 (32 bytes of key
+// and a 6-character checksum), so a bare `AGE-SECRET-KEY-` in a script is not one.
+const AGE_PATTERN: &str = r"AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}";
+
+// Every rule starts with a fixed prefix: without one, the combined scan is 100 times slower.
+// Provider rules come from the research for the content guard; none of them is a keyword or
+// entropy rule.
 const RULES: [(&str, &str); 21] = [
-    (
-        AGE_RULE,
-        r"AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}",
-    ),
+    (AGE_RULE, AGE_PATTERN),
     ("github-token", r"\bgh[pousr]_[0-9A-Za-z]{36,251}\b"),
     (
         "github-fine-grained-pat",
@@ -124,6 +128,12 @@ static SCANNER: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| {
         .join("|");
     RegexBuilder::new(&combined).unicode(false).build()
 });
+
+// The combined scan matches leftmost-first, so a longer match of another rule, such as a `glpat-`
+// run or a PEM header line, swallows an age key that starts inside it. The age rule, which no
+// allow entry covers, also runs alone.
+static AGE_SCANNER: LazyLock<Result<Regex, regex::Error>> =
+    LazyLock::new(|| RegexBuilder::new(AGE_PATTERN).unicode(false).build());
 
 /// What the content guard found: the rule, and the 1-based line where its match starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,26 +195,42 @@ impl fmt::Display for Finding {
     }
 }
 
-/// Every finding in `bytes`, in order. The whole file is scanned at once, so a match may span
-/// lines, as a PEM block does. Should the rules ever fail to compile, every file is held.
+/// Every finding in `bytes`, in order; none in a file that [`looks_binary`]. The whole file is
+/// scanned at once, so a match may span lines, as a PEM block does. Should the rules ever fail to
+/// compile, every file is held.
 pub fn findings(bytes: &[u8]) -> Box<dyn Iterator<Item = Finding> + '_> {
-    let Ok(scanner) = SCANNER.as_ref() else {
+    if looks_binary(bytes) {
+        return Box::new(std::iter::empty());
+    }
+    let (Ok(scanner), Ok(age)) = (SCANNER.as_ref(), AGE_SCANNER.as_ref()) else {
         return Box::new(std::iter::once(Finding {
             rule: "unscanned",
             line: 1,
         }));
     };
-    Box::new(scanner.captures_iter(bytes).filter_map(move |caps| {
-        let (at, (rule, _)) = RULES
-            .iter()
-            .enumerate()
-            .find(|(at, _)| caps.get(at.saturating_add(1)).is_some())?;
-        let start = caps.get(at.saturating_add(1))?.start();
-        Some(Finding {
-            rule,
-            line: line_at(bytes, start),
+    let mut found: Vec<(usize, &'static str)> = scanner
+        .captures_iter(bytes)
+        .filter_map(|caps| {
+            let (at, (rule, _)) = RULES
+                .iter()
+                .enumerate()
+                .find(|(at, _)| caps.get(at.saturating_add(1)).is_some())?;
+            Some((caps.get(at.saturating_add(1))?.start(), *rule))
         })
+        .collect();
+    found.extend(age.find_iter(bytes).map(|key| (key.start(), AGE_RULE)));
+    found.sort_unstable();
+    found.dedup();
+    Box::new(found.into_iter().map(move |(start, rule)| Finding {
+        rule,
+        line: line_at(bytes, start),
     }))
+}
+
+/// A NUL in the first [`SNIFF_BYTES`].
+#[must_use]
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(SNIFF_BYTES).any(|b| *b == 0)
 }
 
 // The text before the match splits at each newline into one piece more than it has newlines,
@@ -217,10 +243,13 @@ fn line_at(bytes: &[u8], offset: usize) -> usize {
         .count()
 }
 
-/// The first finding in `bytes` that no `[guard] allow` entry for `key` covers.
+/// The first finding in `bytes` that no `[guard] allow` entry for `key` covers, an age key before
+/// any credential, since no flag stores one in plain text.
 #[must_use]
 pub fn held(bytes: &[u8], key: &str, allow: &[Allow]) -> Option<Finding> {
-    findings(bytes).find(|found| !found.allowed(key, allow))
+    findings(bytes)
+        .filter(|found| !found.allowed(key, allow))
+        .min_by_key(|found| found.overridable())
 }
 
 /// Whether `bytes` hold an age identity or a credential a rule finds, whatever `[guard] allow`
@@ -1119,6 +1148,47 @@ mod tests {
             "A".repeat(64)
         );
         assert_eq!(found(&pem), [("private-key", 2)]);
+    }
+
+    #[test]
+    fn an_age_key_inside_another_rules_match_is_still_found() {
+        let key = age_key(&bech32(58));
+        let in_glpat = format!("export GL=glpat-{key}\n");
+        let in_pem = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nComment: {key}\n{}\n",
+            "A".repeat(64)
+        );
+        assert_eq!(found(&in_glpat), [("gitlab-pat", 1), (AGE_RULE, 1)]);
+        assert_eq!(found(&in_pem), [("private-key", 1), (AGE_RULE, 2)]);
+        for (text, rule) in [(&in_glpat, "gitlab-pat"), (&in_pem, "private-key")] {
+            let allow = [Allow {
+                path: "k".to_owned(),
+                rule: rule.to_owned(),
+            }];
+            assert_eq!(
+                held(text.as_bytes(), "k", &allow).map(|f| f.rule),
+                Some(AGE_RULE),
+                "{rule}"
+            );
+        }
+        assert_eq!(found(&format!("{key}\n")), [(AGE_RULE, 1)], "found once");
+    }
+
+    #[test]
+    fn a_file_with_a_nul_in_its_first_8000_bytes_is_not_scanned() {
+        let key = age_key(&bech32(58));
+        let mut binary = b"\x7fELF\0".to_vec();
+        binary.extend_from_slice(key.as_bytes());
+        assert!(looks_binary(&binary));
+        assert_eq!(findings(&binary).count(), 0);
+        let mut late = vec![b'#'; SNIFF_BYTES];
+        late.push(0);
+        late.extend_from_slice(key.as_bytes());
+        assert!(!looks_binary(&late));
+        assert_eq!(
+            findings(&late).map(|f| f.rule).collect::<Vec<_>>(),
+            [AGE_RULE]
+        );
     }
 
     #[test]
