@@ -1516,7 +1516,6 @@ pub(crate) fn commit_one(
         .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))
 }
 
-/// The mode git can store for a file at `mode`.
 const fn stored_mode(mode: u32) -> u32 {
     if mode & 0o111 == 0 { 0o644 } else { 0o755 }
 }

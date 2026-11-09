@@ -254,7 +254,6 @@ pub(crate) fn install(
     check_recipients(ctx, recipients.clone(), add_recipient)
 }
 
-/// Copies the identity file's `old` bytes into a new backup run and returns where.
 fn back_up_identity(ctx: &Context, old: &[u8]) -> Result<PathBuf> {
     let run = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
     let name = ctx.paths.age_identity.file_name().map_or_else(
