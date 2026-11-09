@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, Item, TableLike, Value};
 
 /// Machine config, read from `config.toml`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,11 +167,13 @@ impl Config {
         Ok(config)
     }
 
-    /// Writes the config atomically with mode 0600, creating its directory at 0700. A dry run writes nothing.
+    /// Writes the config atomically with mode 0600, creating its directory at 0700. An existing
+    /// file keeps its comments, layout and the keys dotman does not know; only what changed is
+    /// rewritten. A dry run writes nothing.
     ///
     /// # Errors
     ///
-    /// Fails when the directory cannot be created or the file cannot be written.
+    /// Fails when the directory cannot be created or the file cannot be read or written.
     pub fn save(&self, path: &Path, dry_run: bool) -> Result<()> {
         if dry_run {
             return Ok(());
@@ -179,7 +182,121 @@ impl Config {
             create_private_dir(dir, false)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
         }
-        write_atomic(path, toml::to_string_pretty(self)?.as_bytes(), 0o600)
+        let fresh = toml::to_string_pretty(self)?;
+        let text = match fs::read_to_string(path) {
+            Ok(old) => self.edit(&old, &fresh).unwrap_or(fresh),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => fresh,
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
+        write_atomic(path, text.as_bytes(), 0o600)
+    }
+
+    /// `old` with this config written into it; `None` when the result would not read back as
+    /// this config, and `fresh`, the plain serialization, is written instead.
+    fn edit(&self, old: &str, fresh: &str) -> Option<String> {
+        let mut doc: DocumentMut = old.parse().ok()?;
+        let new: DocumentMut = fresh.parse().ok()?;
+        let before: toml::Table = toml::from_str(old).ok()?;
+        let after: toml::Table = toml::from_str(fresh).ok()?;
+        let defaults: toml::Table =
+            toml::from_str(&toml::to_string_pretty(&Self::default()).ok()?).ok()?;
+        merge(
+            doc.as_table_mut(),
+            new.as_table(),
+            [&before, &after, &defaults],
+            "",
+        );
+        let text = doc.to_string();
+        (Self::parse(&text).ok()?.0 == *self).then_some(text)
+    }
+}
+
+/// Writes into `doc`, the document `before` was read from, each value of `after` that differs,
+/// taken from `new`, the document of `after`; a key `doc` lacks is added only when its value is
+/// not the default, which its absence already means. A key of `section` that dotman knows and
+/// `after` lacks is removed; any other key stays.
+fn merge(
+    doc: &mut dyn TableLike,
+    new: &dyn TableLike,
+    [before, after, defaults]: [&toml::Table; 3],
+    section: &str,
+) {
+    let none = toml::Table::new();
+    for (key, value) in after {
+        let old = before.get(key);
+        if old == Some(value) {
+            continue;
+        }
+        let Some(item) = new.get(key) else { continue };
+        match (doc.get_mut(key), old, value) {
+            (Some(slot), Some(toml::Value::Table(old)), toml::Value::Table(value)) => {
+                let defaults = defaults
+                    .get(key)
+                    .and_then(toml::Value::as_table)
+                    .unwrap_or(&none);
+                match (slot.as_table_like_mut(), item.as_table_like()) {
+                    (Some(slot), Some(item)) => merge(slot, item, [old, value, defaults], key),
+                    (None, _) | (_, None) => replace(slot, item.clone()),
+                }
+            }
+            // Entries added to the end, as `add --allow-plain` does, leave the others as written.
+            (Some(slot), Some(toml::Value::Array(old)), toml::Value::Array(value))
+                if value.starts_with(old) =>
+            {
+                append(slot, item, old.len());
+            }
+            (Some(slot), ..) => replace(slot, item.clone()),
+            (None, ..) if defaults.get(key) == Some(value) => {}
+            (None, ..) => {
+                doc.insert(key, item.clone());
+            }
+        }
+    }
+    // `[vars]` is the user's own table, so every key in it is known.
+    let known = (section != "vars").then(|| {
+        KNOWN_KEYS
+            .iter()
+            .find(|(name, _)| *name == section)
+            .map_or(&[][..], |(_, keys)| *keys)
+    });
+    for key in before.keys().filter(|key| !after.contains_key(*key)) {
+        if known.is_none_or(|known| known.contains(&key.as_str())) {
+            doc.remove(key);
+        }
+    }
+}
+
+/// Adds the elements of `item` after the first `skip` to the array in `slot`, in its style.
+fn append(slot: &mut Item, item: &Item, skip: usize) {
+    match (slot, item) {
+        (Item::ArrayOfTables(old), Item::ArrayOfTables(new)) => {
+            for table in new.iter().skip(skip) {
+                old.push(table.clone());
+            }
+        }
+        (Item::Value(Value::Array(old)), Item::ArrayOfTables(new)) => {
+            for table in new.iter().skip(skip) {
+                old.push(table.clone().into_inline_table());
+            }
+        }
+        (Item::Value(Value::Array(old)), Item::Value(Value::Array(new))) => {
+            for value in new.iter().skip(skip) {
+                old.push(value.clone());
+            }
+        }
+        (slot, item) => replace(slot, item.clone()),
+    }
+}
+
+/// Puts `item` in `slot`; a value keeps the slot's spacing and trailing comment.
+fn replace(slot: &mut Item, item: Item) {
+    if let Item::Value(old) = slot {
+        if let Ok(mut value) = item.into_value() {
+            *value.decor_mut() = old.decor().clone();
+            *old = value;
+        }
+    } else {
+        *slot = item;
     }
 }
 
@@ -312,6 +429,46 @@ identity = "/keys/id.txt"
     fn wrong_types_and_bad_toml_are_errors() {
         assert!(Config::parse("profiles = 3").is_err());
         assert!(Config::parse("repo = [").is_err());
+    }
+
+    #[test]
+    fn save_rewrites_only_what_changed() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dotman/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = "# top\nrepo = \"/r\" # where\ncolour = 1\n\n[vars]\nemail = \"a@b\" # mine\nold = \"x\"\n\n[age]\nbogus = true\ncommand = \"age\"\n\n# entries\n[[guard.allow]]\npath = \".a\" # first\nrule = \"npm-token\"\n";
+        fs::write(&path, text).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.repo = Some(PathBuf::from("/s"));
+        config.vars.remove("old");
+        config.age.command = None;
+        config.guard.allow.push(Allow {
+            path: ".b".to_owned(),
+            rule: "gitlab-pat".to_owned(),
+        });
+        config.save(&path, false).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        for kept in [
+            "# top\nrepo = \"/s\" # where\ncolour = 1\n",
+            "email = \"a@b\" # mine\n",
+            "[age]\nbogus = true\n",
+            "# entries\n[[guard.allow]]\npath = \".a\" # first\n",
+            "[[guard.allow]]\npath = \".b\"\nrule = \"gitlab-pat\"\n",
+        ] {
+            assert!(saved.contains(kept), "{kept}: {saved}");
+        }
+        assert!(
+            !saved.contains("old =") && !saved.contains("command ="),
+            "{saved}"
+        );
+        for default in ["profiles", "[identity]", "[template]", "[system]"] {
+            assert!(!saved.contains(default), "{default} was never set: {saved}");
+        }
+        assert_eq!(Config::load(&path).unwrap(), config);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

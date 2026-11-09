@@ -933,6 +933,41 @@ fn allow_plain_is_recorded_by_path_and_rule_never_by_line() {
     );
 }
 
+/// `add --allow-plain` adds its `[guard] allow` entry to the machine config in place: comments,
+/// a key dotman does not know and the entry already there stay as written.
+#[test]
+fn allow_plain_keeps_the_machine_config_as_written() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let text = "# this machine\nprofiles = [\"laptop\"] # mine\nfuture_key = 1\n\n[guard]\n# checked by hand\nallow = [{ path = \".config/old.zsh\", rule = \"npm-token\" }]\n";
+    env.write_machine_config(text);
+    let local = ".config/zsh/local.zsh";
+    env.write(
+        local,
+        format!("export GH={}\n", github_token()).as_bytes(),
+        0o600,
+    );
+    exits(&env.run(&["add", "--allow-plain", local]), 0);
+    let saved = fs::read_to_string(env.xdg_config().join("dotman/config.toml")).unwrap();
+    for kept in [
+        "# this machine\nprofiles = [\"laptop\"] # mine\nfuture_key = 1\n",
+        "# checked by hand\nallow = [{ path = \".config/old.zsh\", rule = \"npm-token\" }, ",
+    ] {
+        assert!(saved.contains(kept), "{kept}: {saved}");
+    }
+    assert!(
+        !saved.contains("[identity]"),
+        "no default is written: {saved}"
+    );
+    assert_eq!(
+        allow_entries(&env),
+        [
+            (".config/old.zsh".to_owned(), "npm-token".to_owned()),
+            (local.to_owned(), "github-token".to_owned())
+        ]
+    );
+}
+
 /// No flag and no `[guard] allow` entry lets an age identity in as plain text.
 #[test]
 fn an_age_secret_key_is_never_overridable() {
