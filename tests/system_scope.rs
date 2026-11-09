@@ -1067,6 +1067,39 @@ fn the_system_files_to_write_are_listed_before_the_question_even_with_quiet() {
     assert_eq!(fs::read(env.system_path(KEYD)).expect("read"), b"old\n");
 }
 
+/// What the root write is approved on shows the write itself: from the file there now to what is
+/// written, so a file to be created shows as added and a changed line's repo content as `+`.
+#[test]
+fn the_system_write_preview_runs_from_the_file_now_to_what_is_written() {
+    let env = setup_none(&["/etc"]);
+    one_pending_write(&env);
+    let created = "/etc/keyd/created.conf";
+    env.write_system(created, b"created\n", 0o644);
+    env.ok(&["add", "--system", created]);
+    fs::remove_file(env.system_path(created)).expect("remove");
+    let args = [
+        "apply",
+        "--system",
+        "--dry-run",
+        "--yes",
+        "--restore-deleted",
+    ];
+    let out = env.run(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let diff = stdout(&out);
+    for line in [
+        "--- now/system/etc/keyd/default.conf",
+        "+++ written/system/etc/keyd/default.conf",
+        "-old",
+        "+new",
+        "--- /dev/null",
+        "+++ written/system/etc/keyd/created.conf",
+        "+created",
+    ] {
+        assert!(diff.lines().any(|l| l == line), "{line}: {diff}");
+    }
+}
+
 #[test]
 fn a_dry_run_of_apply_system_changes_nothing() {
     let env = setup_none(&["/etc"]);

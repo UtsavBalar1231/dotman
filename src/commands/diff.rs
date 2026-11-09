@@ -95,8 +95,30 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
         .map(|(k, r)| (k.as_str(), r))
         .collect();
     let no_pager = no_pager || std::env::var_os("NO_PAGER").is_some_and(|v| !v.is_empty());
-    show_all(&ctx, &refs, &system_refs, no_pager)
+    show_all(&ctx, &refs, &system_refs, no_pager, &DIFF)
 }
+
+/// The names of the two trees `git diff` compares, which label its paths.
+struct Sides {
+    home: &'static str,
+    repo: &'static str,
+    /// The repo's tree is the old side, as in `dotman diff`, so an edit made in `$HOME` shows as
+    /// added lines; otherwise `$HOME`'s is, as before a write.
+    repo_first: bool,
+}
+
+const DIFF: Sides = Sides {
+    home: "home",
+    repo: "repo",
+    repo_first: true,
+};
+
+/// What a write of R does to the file there now.
+const WRITE: Sides = Sides {
+    home: "now",
+    repo: "written",
+    repo_first: false,
+};
 
 /// One `git diff`, without a pager, from `repo/<key>` (R) to `home/<key>` (H) over the keys whose
 /// H differs from R; system keys are read through the system scope.
@@ -105,7 +127,13 @@ pub(crate) fn show(
     entries: &[(&str, &SourceEntry)],
     system_entries: &[(&str, &SourceEntry)],
 ) -> Result<()> {
-    show_all(ctx, entries, system_entries, true)
+    show_all(ctx, entries, system_entries, true, &DIFF)
+}
+
+/// What writing R over each system key changes: one `git diff`, without a pager, from the file
+/// there now, `now/system/<key>`, to what is written, `written/system/<key>`.
+pub(crate) fn show_writes(ctx: &Context, system_entries: &[(&str, &SourceEntry)]) -> Result<()> {
+    show_all(ctx, &[], system_entries, true, &WRITE)
 }
 
 // System keys go under `system/` in both trees, so one can never land on a home key.
@@ -114,11 +142,12 @@ fn show_all(
     entries: &[(&str, &SourceEntry)],
     system_entries: &[(&str, &SourceEntry)],
     no_pager: bool,
+    sides: &Sides,
 ) -> Result<()> {
     ctx.git.check_version()?;
     // Decrypted content goes here, so it is removed on every return, a failed git diff included.
     let tmp = private_temp_dir("dotman-diff-", &private_base(ctx)?)?;
-    let (home_side, repo_side) = (tmp.path().join("home"), tmp.path().join("repo"));
+    let (home_side, repo_side) = (tmp.path().join(sides.home), tmp.path().join(sides.repo));
     let (home, home_real) = (&ctx.paths.home, ctx.paths.home_real.as_deref());
     let mut differs = false;
     for (key, r) in entries {
@@ -166,15 +195,12 @@ fn show_all(
     }
     // `--no-index` keeps each side's directory in the path, so `--no-prefix` with sides named
     // `repo` and `home` gives `repo/<key>` and `home/<key>`; `--src-prefix=repo/` would double it.
-    cmd.args([
-        "diff",
-        "--no-index",
-        color(),
-        "--no-prefix",
-        "--",
-        "repo",
-        "home",
-    ]);
+    let (old, new) = if sides.repo_first {
+        (sides.repo, sides.home)
+    } else {
+        (sides.home, sides.repo)
+    };
+    cmd.args(["diff", "--no-index", color(), "--no-prefix", "--", old, new]);
     let mut child = cmd.spawn().context("failed to run git diff")?;
     // Ctrl-C reaches the whole foreground group. Ignored here only after the spawn, so git and the
     // pager keep their default actions, and dotman outlives them to remove the temp dir; only SIGKILL

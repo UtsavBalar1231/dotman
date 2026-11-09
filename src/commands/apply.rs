@@ -1902,7 +1902,7 @@ fn show_system(ctx: &Context, ready: &[Ready]) {
         .iter()
         .map(|item| (item.key.as_str(), &item.r))
         .collect();
-    if let Err(e) = diff::show(ctx, &[], &entries) {
+    if let Err(e) = diff::show_writes(ctx, &entries) {
         output::warning(&format!("cannot show the diffs: {e:#}"));
     }
 }
