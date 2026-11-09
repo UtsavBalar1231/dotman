@@ -14,6 +14,7 @@ use crate::output;
 use crate::paths::{create_private_dir, derive_key, private_temp_dir};
 use crate::secrets::{Locked, key_hint};
 use crate::state::Kind;
+use crate::sys;
 use crate::template;
 use crate::variant::Flag;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -141,39 +142,46 @@ fn resolve(ctx: &Context, from: &str) -> Result<String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    match parse_date(from, now) {
-        Some(When::At(secs)) => ctx
-            .git
-            .rev_before(&format!("@{secs} +0000"))?
-            .ok_or_else(|| anyhow!("every commit is newer than `{from}`")),
-        Some(When::BeforeEpoch) => bail!("every commit is newer than `{from}`"),
+    let secs = match parse_date(from, now) {
+        Some(When::Local([year, month, day, hour, minute, second])) => {
+            sys::local_epoch(year, month, day, hour, minute, second)
+        }
+        Some(When::At(secs)) => Some(secs),
+        Some(When::BeforeEpoch) => None,
         None => {
             let base = from.split(['~', '^']).next().unwrap_or(from);
             if base != from && !base.is_empty() && ctx.git.resolve_commit(base)?.is_some() {
                 bail!("the revision `{from}` does not exist: {base} has no such ancestor");
             }
             bail!(
-                "`{from}` is neither a commit nor a date. Give a revision such as HEAD~2 or a commit hash, or a date such as 2024-05-01, \"2024-05-01 13:30\" (UTC), 2.days.ago or yesterday"
+                "`{from}` is neither a commit nor a date. Give a revision such as HEAD~2 or a commit hash, or a date such as 2024-05-01, \"2024-05-01 13:30\", 2.days.ago or yesterday"
             )
         }
-    }
+    };
+    let rev = match secs {
+        Some(secs) => ctx.git.rev_before(&format!("@{secs} +0000"))?,
+        None => None,
+    };
+    rev.ok_or_else(|| anyhow!("every commit is newer than `{from}`"))
 }
 
 /// The time a `--from` date names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum When {
+    /// A wall-clock time in the local time zone: year, month, day, hour, minute and second.
+    Local([u32; 6]),
     /// Unix seconds.
     At(u64),
     /// A span that reaches back past 1970, before any commit.
     BeforeEpoch,
 }
 
-/// `text` as a date: `YYYY-MM-DD` in UTC, optionally followed by a space or `T` and `HH:MM` or
-/// `HH:MM:SS`; `N.units.ago` or `N units ago`, where a month is 30 days and a year 365; or
-/// `yesterday`. `None` for anything else. git gets the result as seconds, never the text: its
+/// `text` as a date: `YYYY-MM-DD` in local time, optionally followed by a space or `T` and
+/// `HH:MM` or `HH:MM:SS`; `N.units.ago` or `N units ago`, where a month is 30 days and a year 365;
+/// or `yesterday`. `None` for anything else. git gets the result as seconds, never the text: its
 /// approxidate reads nearly any text as some date, and misreads some of these forms.
 fn parse_date(text: &str, now: u64) -> Option<When> {
-    calendar(text).map(When::At).or_else(|| ago(text, now))
+    calendar(text).map(When::Local).or_else(|| ago(text, now))
 }
 
 fn number(part: &str, len: usize, range: RangeInclusive<u32>) -> Option<u32> {
@@ -196,7 +204,7 @@ const fn days_in_month(year: u32, month: u32) -> u32 {
     }
 }
 
-fn calendar(text: &str) -> Option<u64> {
+fn calendar(text: &str) -> Option<[u32; 6]> {
     let (date, time) = text
         .split_once([' ', 'T'])
         .map_or((text, None), |(date, time)| (date, Some(time)));
@@ -223,19 +231,7 @@ fn calendar(text: &str) -> Option<u64> {
             )
         }
     };
-    let mut days: u64 = 0;
-    for earlier in 1970..year {
-        days = days.checked_add(if leap(earlier) { 366 } else { 365 })?;
-    }
-    for earlier in 1..month {
-        days = days.checked_add(u64::from(days_in_month(year, earlier)))?;
-    }
-    days = days.checked_add(u64::from(day.checked_sub(1)?))?;
-    let seconds = u64::from(hour)
-        .checked_mul(3_600)?
-        .checked_add(u64::from(minute).checked_mul(60)?)?
-        .checked_add(u64::from(second))?;
-    days.checked_mul(86_400)?.checked_add(seconds)
+    Some([year, month, day, hour, minute, second])
 }
 
 fn ago(text: &str, now: u64) -> Option<When> {
@@ -330,19 +326,17 @@ mod tests {
     const NOW: u64 = 1_800_000_000;
 
     #[test]
-    fn calendar_dates_are_utc_seconds_with_real_month_lengths() {
-        for (date, secs) in [
-            ("1970-01-01", 0),
-            ("2024-05-01", 1_714_521_600),
-            ("2024-05-01 13:30", 1_714_570_200),
-            ("2024-05-01T13:30:59", 1_714_570_259),
-            ("2024-02-29", 1_709_164_800),
-            ("2000-02-29", 951_782_400),
-            ("2100-01-01", 4_102_444_800),
-            ("3000-01-01", 32_503_680_000),
-            ("9999-12-31T23:59:59", 253_402_300_799),
+    fn calendar_dates_are_local_wall_clock_times_with_real_month_lengths() {
+        for (date, fields) in [
+            ("1970-01-01", [1970, 1, 1, 0, 0, 0]),
+            ("2024-05-01 13:30", [2024, 5, 1, 13, 30, 0]),
+            ("2024-05-01T13:30:59", [2024, 5, 1, 13, 30, 59]),
+            ("2024-02-29", [2024, 2, 29, 0, 0, 0]),
+            ("2000-02-29", [2000, 2, 29, 0, 0, 0]),
+            ("3000-01-01", [3000, 1, 1, 0, 0, 0]),
+            ("9999-12-31T23:59:59", [9999, 12, 31, 23, 59, 59]),
         ] {
-            assert_eq!(parse_date(date, NOW), Some(When::At(secs)), "{date}");
+            assert_eq!(parse_date(date, NOW), Some(When::Local(fields)), "{date}");
         }
         for bad in [
             "2025-09-31",

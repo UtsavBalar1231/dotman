@@ -88,6 +88,31 @@ fn restore_refuses_a_mistyped_revision_instead_of_reading_it_as_a_date() {
 }
 
 #[test]
+fn a_calendar_date_is_read_in_the_local_time_zone() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"one\n", 0o644);
+    env.ok(&["add", ".a"]);
+    commit_at(&env, "2020-06-15T12:00:00Z", "one");
+    env.write_repo(".a", b"two\n");
+    commit_at(&env, "2020-06-15T13:00:00Z", "two");
+    // POSIX offsets need no zone database: XXX-5:30 is five and a half hours east of UTC.
+    for (zone, expected) in [("XXX-5:30", b"one\n"), ("UTC0", b"two\n")] {
+        env.write(".a", b"local\n", 0o644);
+        let out = env.run_with(
+            &[("TZ", zone)],
+            &["restore", ".a", "--from", "2020-06-15 18:00"],
+        );
+        assert!(
+            out.status.success(),
+            "{zone}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(env.read(".a"), expected, "{zone}");
+    }
+}
+
+#[test]
 fn restore_reads_dates_itself_and_names_a_revision_past_the_history() {
     let env = two_commits();
     env.write(".a", b"three\n", 0o644);

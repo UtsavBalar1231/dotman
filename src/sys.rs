@@ -219,6 +219,38 @@ pub fn machine() -> Option<String> {
     Some(String::from_utf8_lossy(bytes.get(..end)?).into_owned())
 }
 
+/// Unix seconds of a wall-clock time in the local time zone, daylight saving time included, as
+/// `mktime` reads it. `None` when the time is before 1970 or the C library cannot represent it.
+#[must_use]
+pub fn local_epoch(
+    year: u32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<u64> {
+    let field = |value: u32, base: u32| {
+        value
+            .checked_sub(base)
+            .and_then(|v| libc::c_int::try_from(v).ok())
+    };
+    // SAFETY: zeroed memory is a valid `tm`: integers, plus on some platforms a zone-name pointer,
+    // for which null is allowed.
+    let mut tm: libc::tm = unsafe { MaybeUninit::<libc::tm>::zeroed().assume_init() };
+    tm.tm_year = field(year, 1900)?;
+    tm.tm_mon = field(month, 1)?;
+    tm.tm_mday = field(day, 0)?;
+    tm.tm_hour = field(hour, 0)?;
+    tm.tm_min = field(minute, 0)?;
+    tm.tm_sec = field(second, 0)?;
+    tm.tm_isdst = -1;
+    // SAFETY: `tm` is initialized and outlives the call; mktime normalizes its fields in place and
+    // keeps no pointer to it.
+    let secs = unsafe { libc::mktime(&raw mut tm) };
+    u64::try_from(secs).ok()
+}
+
 /// A passwd database entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Passwd {
