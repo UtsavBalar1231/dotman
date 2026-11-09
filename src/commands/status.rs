@@ -4,7 +4,7 @@ use crate::cli::StatusArgs;
 use crate::commands::add::{self, Hold};
 use crate::commands::apply::{Classified, classify_key};
 use crate::commands::sync;
-use crate::context::{Context, is_under};
+use crate::context::{self, Context, is_under};
 use crate::engine::status::{Row, TemplateError, Variants, Worktree};
 use crate::git::StatusEntry;
 use crate::name;
@@ -117,6 +117,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     let worktree_status = ctx.git.status()?;
     let mut in_repo = sync::held_entries(&ctx, &worktree_status);
     in_repo.retain(|(entry, _)| in_scope(&entry.path.to_string_lossy()));
+    report_unnamed(&ctx, in_scope)?;
 
     let mut out = std::io::stdout().lock();
     for (label, key) in &rows {
@@ -148,6 +149,22 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         }
         summarize(&rows, unrecorded, [new.len(), held.len(), in_repo.len()]);
         report_remote(&ctx)?;
+    }
+    Ok(())
+}
+
+/// The untracked repo files that sync never commits because their names are not UTF-8, and that
+/// no `[ignore]` pattern silences.
+fn report_unnamed(ctx: &Context, in_scope: impl Fn(&str) -> bool) -> Result<()> {
+    for path in context::unnamed_untracked(ctx)? {
+        let shown = path.to_string_lossy();
+        if in_scope(&shown) {
+            output::warning(&format!(
+                "{}: in the repo, never committed: its name is not valid UTF-8, which no key can have; rename or remove it in {}, or keep it out with an [ignore] pattern",
+                escape_line(&shown),
+                ctx.paths.repo.display()
+            ));
+        }
     }
     Ok(())
 }

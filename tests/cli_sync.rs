@@ -1,7 +1,9 @@
 mod common;
 
 use common::{TestEnv, assert_converged, mode_of, tree_checksum};
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
@@ -1483,6 +1485,66 @@ fn ignored_junk_in_the_repo_worktree_never_reaches_a_commit() {
     exits(&a, 0, &["sync"]);
     exits(&b, 0, &["sync"]);
     assert_eq!(b.read(".config/vim/.vimrc.swp"), b"swap edited\n");
+}
+
+/// A repo worktree name that is not UTF-8 is never a key. `[ignore]` matches it, or a directory
+/// above it, in its lossy form; one that no pattern matches is never committed either, and status
+/// names it until one does. A reserved root name, such as a README, is repo content and is
+/// committed.
+#[test]
+fn a_repo_name_that_is_not_utf8_is_never_committed_and_status_names_it() {
+    let env = first_device(&[(".a", b"a\n", 0o644)]);
+    let repo = env.repo();
+    let ignored = repo.join(OsStr::from_bytes(b"\xff\xfe.log"));
+    let in_ignored_dir = repo.join(OsStr::from_bytes(b"\xffcache/blob"));
+    let loose = repo.join(OsStr::from_bytes(b"notes\xff.txt"));
+    let readme = repo.join(OsStr::from_bytes(b"README\xff.md"));
+    for path in [&ignored, &in_ignored_dir, &loose, &readme] {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).expect("create the dir");
+        }
+        fs::write(path, b"junk\n").expect("write the file");
+    }
+    let mut config = env.repo_config();
+    config
+        .ignore
+        .patterns
+        .extend(["*.log", "*cache"].map(str::to_owned));
+    config
+        .save(&repo.join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    env.write(".a", b"a2\n", 0o644);
+
+    let err = exits(&env, 0, &["status"]);
+    let named: Vec<&str> = err
+        .lines()
+        .filter(|line| line.contains("never committed"))
+        .collect();
+    assert_eq!(named.len(), 1, "{err}");
+    assert!(
+        named
+            .iter()
+            .all(|line| line.starts_with("notes\u{fffd}.txt: in the repo")),
+        "{err}"
+    );
+    let err = exits(&env, 0, &["sync"]);
+    assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
+    assert_eq!(remote_file(&env, ".a"), "a2\n");
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
+    assert!(
+        !tree.contains(".log") && !tree.contains("cache") && !tree.contains("notes"),
+        "{tree}"
+    );
+    assert!(tree.contains("README"), "{tree}");
+    assert!(loose.exists() && ignored.exists() && in_ignored_dir.exists());
+
+    config.ignore.patterns.push("notes*".to_owned());
+    config
+        .save(&repo.join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    let err = exits(&env, 0, &["status"]);
+    assert!(!err.contains("never committed"), "{err}");
 }
 
 #[test]

@@ -2,7 +2,7 @@
 
 use crate::commands::add::Ignore;
 use crate::config::Config;
-use crate::git::{Git, Operation};
+use crate::git::{Git, Operation, StatusKind};
 use crate::identity;
 use crate::lock::Lock;
 use crate::paths::{Env, Paths, derive_key, find_collisions, is_reserved_root_name, validate_key};
@@ -656,9 +656,37 @@ impl Dropped {
 }
 
 /// The untracked repo paths, as `git status` lists them, that are never staged: what `[ignore]`
-/// drops and dotman's temp names, at any depth. A directory stands for every path under it. The
-/// reserved root names are not keys, so `[ignore]` never applies to them.
+/// drops and dotman's temp names, at any depth, and the names that are not UTF-8. A directory
+/// stands for every path under it. The reserved root names are not keys, so `[ignore]` never
+/// applies to them.
 fn left_out(git: &Git, state_file: &Path, untracked: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let (mut roots, unnamed) = sort_untracked(git, state_file, untracked)?;
+    roots.extend(unnamed);
+    Ok(roots)
+}
+
+/// The untracked repo paths that [`left_out`] leaves out only because their names are not UTF-8:
+/// no key has such a name, so committing one would spread bytes that no machine applies and no
+/// status shows. Status lists them instead.
+pub(crate) fn unnamed_untracked(ctx: &Context) -> Result<Vec<PathBuf>> {
+    // A handle with no leave-out filter, which would hide them.
+    let untracked: Vec<PathBuf> = Git::new(ctx.paths.repo.clone(), ctx.command)
+        .status()?
+        .into_iter()
+        .filter(|entry| entry.kind == StatusKind::Untracked)
+        .map(|entry| entry.path)
+        .collect();
+    Ok(sort_untracked(&ctx.git, &ctx.paths.state_file(), &untracked)?.1)
+}
+
+/// What [`left_out`] leaves out of `untracked`: the roots that `[ignore]` and the temp names drop,
+/// and apart, the paths whose names are not UTF-8 and that nothing drops. `[ignore]` matches such
+/// a name in its lossy form. Under a reserved root name, which is never a key, such a name stays.
+fn sort_untracked(
+    git: &Git,
+    state_file: &Path,
+    untracked: &[PathBuf],
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let dropped = Dropped::load(git, state_file)?;
     let temp = |path: &str| {
         path.rsplit('/')
@@ -666,20 +694,33 @@ fn left_out(git: &Git, state_file: &Path, untracked: &[PathBuf]) -> Result<Vec<P
             .is_some_and(|name| name.starts_with(TEMP_PREFIX))
     };
     let mut roots = BTreeSet::new();
-    for path in untracked.iter().filter_map(|path| path.to_str()) {
-        let key = !is_reserved_root_name(path.split('/').next().unwrap_or(path));
+    let mut unnamed = Vec::new();
+    for path in untracked {
+        let lossy = path.to_string_lossy();
+        let key = !is_reserved_root_name(lossy.split('/').next().unwrap_or(&lossy));
         let drops = |sub: &str, is_dir| temp(sub) || (key && dropped.drops(sub, is_dir));
-        let dir = path
-            .match_indices('/')
-            .filter_map(|(at, _)| path.get(..at))
-            .find(|dir| drops(dir, true));
+        // The real parents, shortest first: a lossy name's byte offsets are not the path's.
+        let mut parents: Vec<&Path> = path
+            .ancestors()
+            .skip(1)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .collect();
+        parents.reverse();
+        let dir = parents
+            .into_iter()
+            .find(|dir| drops(&dir.to_string_lossy(), true));
         match dir {
-            Some(dir) => roots.insert(PathBuf::from(dir)),
-            None if drops(path, false) => roots.insert(PathBuf::from(path)),
-            None => false,
-        };
+            Some(dir) => {
+                roots.insert(dir.to_path_buf());
+            }
+            None if drops(&lossy, false) => {
+                roots.insert(path.clone());
+            }
+            None if key && path.to_str().is_none() => unnamed.push(path.clone()),
+            None => {}
+        }
     }
-    Ok(roots.into_iter().collect())
+    Ok((roots.into_iter().collect(), unnamed))
 }
 
 /// How long a leftover must be untouched before a sweep removes it. A live run in another PID
