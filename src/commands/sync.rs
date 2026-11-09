@@ -10,7 +10,7 @@ use crate::commands::Outcome;
 use crate::commands::add;
 use crate::commands::apply::{self, Applied, Options, Pass};
 use crate::config::Allow;
-use crate::context::{Context, TEMP_PREFIX};
+use crate::context::{Context, TEMP_PREFIX, is_under};
 use crate::engine::{Node, read_node};
 use crate::git::{PullOutcome, RemoteFailure, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
@@ -538,32 +538,68 @@ fn refuse_mass_delete(
     dry_run: bool,
 ) -> Result<Option<String>> {
     // Only files gone from the worktree: a lost index also lists every file as deleted.
-    let deleted = status
+    let deleted: Vec<&Path> = status
         .iter()
         .filter(|entry| entry.kind == StatusKind::Ordinary && entry.xy.contains('D'))
         .filter(|entry| fs::symlink_metadata(ctx.paths.repo.join(&entry.path)).is_err())
-        .count();
-    if deleted < MASS_DELETE || ctx.git.head()?.is_none() {
+        .map(|entry| entry.path.as_path())
+        .collect();
+    if deleted.len() < MASS_DELETE || ctx.git.head()?.is_none() {
         return Ok(None);
     }
     let tracked = ctx.git.ls_tree("HEAD")?.len();
-    if deleted.saturating_mul(2) < tracked {
+    if deleted.len().saturating_mul(2) < tracked {
         return Ok(None);
     }
-    let what = format!("the changes in the repo delete {deleted} of its {tracked} tracked files");
+    let what = format!(
+        "the changes in the repo delete {} of its {tracked} tracked files",
+        deleted.len()
+    );
+    let bin = name::bin();
+    // A file still in $HOME under a [dirs] entry is captured again by the next sync, so only
+    // forgetting the entry keeps such a deletion.
+    let dirs: Vec<String> = ctx.repo_config().map_or_else(
+        |_| Vec::new(),
+        |config| {
+            config
+                .dirs
+                .paths
+                .iter()
+                .filter(|dir| {
+                    deleted
+                        .iter()
+                        .any(|path| is_under(&path.to_string_lossy(), dir))
+                })
+                .map(|dir| add::pasteable(&ctx.paths.home, dir))
+                .collect()
+        },
+    );
+    let in_dirs = if dirs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " The next sync captures again each file that [dirs] lists and $HOME still has; to stop managing them: `{bin} forget {}`, then `{bin} sync --allow-mass-delete`.",
+            dirs.join(" ")
+        )
+    };
     if !dry_run && prompt::interactive() {
         output::warning(&format!(
-            "{what}, as a broken checkout or a forget of many files does"
+            "{what}, as a broken checkout or a forget of many files does.{in_dirs}"
         ));
         if prompt::confirm("commit the deletions? [y/N]")? {
             return Ok(None);
         }
         bail!("nothing was committed or pushed");
     }
-    let bin = name::bin();
-    let fix = format!(
-        "To bring the files back: `{bin} git checkout -- .`; if the deletions are meant: `{bin} sync --allow-mass-delete`"
-    );
+    let fix = if dirs.is_empty() {
+        format!(
+            "To bring the files back: `{bin} git checkout -- .`; if the deletions are meant: `{bin} sync --allow-mass-delete`"
+        )
+    } else {
+        format!(
+            "To bring the files back: `{bin} git checkout -- .`.{in_dirs} If $HOME no longer has the files and the deletions are meant: `{bin} sync --allow-mass-delete`"
+        )
+    };
     if dry_run {
         return Ok(Some(format!(
             "sync would refuse: {what}, as a broken checkout or a forget of many files does, and would commit or push nothing. {fix}"

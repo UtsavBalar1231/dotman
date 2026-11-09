@@ -1161,6 +1161,46 @@ fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
     assert_eq!(env.read(".config/app/f00.conf"), b"x\n");
 }
 
+/// `$HOME` still has the files under a `[dirs]` entry, which the next sync would capture again,
+/// so the way out that keeps the deletion forgets the entry.
+#[test]
+fn a_mass_delete_under_dirs_points_to_forget_and_the_printed_route_sticks() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    for n in 0..12 {
+        env.write(format!(".config/app/f{n:02}.conf"), b"x\n", 0o644);
+    }
+    env.ok(&["add", ".config/app"]);
+    env.ok(&["sync"]);
+    assert_eq!(env.repo_config().dirs.paths, [".config/app"]);
+    fs::remove_dir_all(env.repo().join(".config/app")).expect("delete from the worktree");
+
+    let err = env.fails(&["sync"]);
+    let fix = err
+        .lines()
+        .find(|line| line.contains("To bring the files back"))
+        .expect("the fix");
+    let [_, forget, allow, _]: [String; 4] = backticked(fix).try_into().expect("four steps");
+    assert!(forget.starts_with("dotman forget "), "{fix}");
+    assert!(forget.ends_with("/home/.config/app"), "{fix}");
+    assert_eq!(allow, "dotman sync --allow-mass-delete");
+    for step in [&forget, &allow] {
+        let out = paste(&env, step);
+        assert!(out.status.success(), "{step}: {}", stderr(&out));
+    }
+
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    for _ in 0..2 {
+        exits(&env, 0, &["sync"]);
+        let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
+        assert!(!tree.contains(".config/app/"), "{tree}");
+    }
+    assert_eq!(env.repo_config().dirs.paths, Vec::<String>::new());
+    assert_eq!(env.read(".config/app/f00.conf"), b"x\n");
+    assert_eq!(env.porcelain("status"), Vec::new());
+}
+
 /// Without a remote there is no pull to stop, so the held file is only left out of the commit.
 #[test]
 fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
