@@ -81,8 +81,9 @@ fn stderr_of(env: &TestEnv, args: &[&str]) -> (Option<i32>, String) {
     )
 }
 
+/// `log` only reads the history, so it runs through an unfinished operation.
 #[test]
-fn every_subcommand_exits_4_while_a_rebase_is_in_progress() {
+fn every_subcommand_but_log_exits_4_while_a_rebase_is_in_progress() {
     for (name, args) in MINIMAL_ARGS {
         let env = TestEnv::new();
         env.ok(&["init"]);
@@ -90,6 +91,10 @@ fn every_subcommand_exits_4_while_a_rebase_is_in_progress() {
         let mut full = vec![*name];
         full.extend_from_slice(args);
         let (code, err) = stderr_of(&env, &full);
+        if *name == "log" {
+            assert_eq!(code, Some(0), "`dot {full:?}`: {err}");
+            continue;
+        }
         assert_eq!(code, Some(4), "`dot {full:?}`: {err}");
         assert!(err.contains("a rebase is in progress"), "{name}: {err}");
         assert!(
@@ -253,6 +258,7 @@ fn a_stash_pop_conflict_is_refused_and_nothing_reaches_home() {
         assert!(err.contains("dotman git add .bashrc"), "{err}");
         assert!(err.contains("dotman git checkout HEAD -- .bashrc"), "{err}");
     }
+    assert_eq!(stderr_of(&env, &["log"]).0, Some(0));
     assert_eq!(env.read(".bashrc"), b"x\n");
 }
 

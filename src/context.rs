@@ -216,11 +216,11 @@ impl Context {
 
     /// Fails when the repo is incomplete, with [`InProgress`] while a git operation or a conflict
     /// is unfinished in it, and when HEAD has a non-empty `.dotman.toml` that is gone or empty. Every
-    /// command except `doctor` and `git` calls it, after taking its lock; `log` skips the last
-    /// check, so the history stays readable.
+    /// command except `doctor` and `git` calls it, after taking its lock; `log`, which only reads
+    /// the history, skips all but the first check.
     pub(crate) fn guard(&self) -> Result<()> {
         self.refuse_incomplete()?;
-        if !is_real_dir(&self.paths.repo.join(".git")) {
+        if self.command == "log" || !is_real_dir(&self.paths.repo.join(".git")) {
             return Ok(());
         }
         let unfinished = match self.git.operation() {
@@ -240,9 +240,6 @@ impl Context {
                 branch: self.git.rebase_branch(),
             }
             .into());
-        }
-        if self.command == "log" {
-            return Ok(());
         }
         self.refuse_lost_config()
     }
