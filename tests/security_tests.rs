@@ -796,6 +796,288 @@ fn sync_holds_a_plain_file_that_holds_an_age_secret_key() {
     assert_eq!(env.git(&["-C", &repo, "status", "--porcelain"]), "");
 }
 
+// Credential content guard
+
+/// A GitHub classic token shape, built here so no token-shaped literal sits in the source.
+fn github_token() -> String {
+    format!("ghp_{}", "a1B2".repeat(9))
+}
+
+fn npm_token() -> String {
+    format!("npm_{}", "Zy9x".repeat(9))
+}
+
+fn remote_tree(env: &TestEnv) -> String {
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"])
+}
+
+fn allow_entries(env: &TestEnv) -> Vec<(String, String)> {
+    env.repo_config()
+        .guard
+        .allow
+        .into_iter()
+        .map(|entry| (entry.path, entry.rule))
+        .collect()
+}
+
+/// `add <file>` of a file that holds a credential exits 1 with the rule and the line, never the
+/// value, alone or among other paths, dry run or not, and adds nothing.
+#[test]
+fn add_refuses_a_named_file_that_holds_a_credential() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let token = github_token();
+    let local = ".config/zsh/local.zsh";
+    env.write(
+        local,
+        format!("# local\nexport GH={token}\n").as_bytes(),
+        0o600,
+    );
+    env.write(".bashrc", b"# rc\n", 0o644);
+    for args in [
+        &["add", local][..],
+        &["add", "--dry-run", local],
+        &["add", ".bashrc", local],
+    ] {
+        let err = exits(&env.run(args), 1);
+        assert!(
+            err.contains(
+                ".config/zsh/local.zsh: line 2 holds a github-token; --encrypt stores it encrypted, --allow-plain stores it as is"
+            ),
+            "{args:?}: {err}"
+        );
+        assert!(!err.contains(&token), "the value is never printed");
+    }
+    assert_eq!(env.porcelain("list"), []);
+    assert_eq!(
+        files_containing(&env.repo(), token.as_bytes()),
+        Vec::<String>::new()
+    );
+}
+
+/// `add --allow-plain` stores the file and records `[guard] allow` by key and rule; later edits,
+/// which move the line, sync without a hold, while a credential of another rule is held.
+#[test]
+fn allow_plain_is_recorded_by_path_and_rule_never_by_line() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let (token, npm) = (github_token(), npm_token());
+    let local = ".config/zsh/local.zsh";
+    env.write(local, format!("export GH={token}\n").as_bytes(), 0o600);
+    let err = exits(&env.run(&["add", "--allow-plain", local]), 0);
+    assert!(
+        err.contains("line 1 holds a github-token; stored as it is"),
+        "{err}"
+    );
+    assert!(!err.contains(&token), "{err}");
+    assert_eq!(
+        allow_entries(&env),
+        [(local.to_owned(), "github-token".to_owned())]
+    );
+    exits(&env.run(&["sync"]), 0);
+    assert!(remote_tree(&env).contains(local));
+
+    env.write(
+        local,
+        format!("# moved down\n\nexport GH={token}\n").as_bytes(),
+        0o600,
+    );
+    exits(&env.run(&["sync"]), 0);
+    assert!(remote_history(&env).contains("# moved down"));
+
+    env.write(
+        local,
+        format!("# moved down\n\nexport GH={token}\nexport NPM={npm}\n").as_bytes(),
+        0o600,
+    );
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(
+        err.contains(".config/zsh/local.zsh: held, line 4 holds a npm-token"),
+        "{err}"
+    );
+    assert!(!err.contains(&npm) && !err.contains(&token), "{err}");
+    assert!(!remote_history(&env).contains(&npm));
+    assert!(
+        !fs::read_to_string(env.repo().join(local))
+            .unwrap()
+            .contains(&npm)
+    );
+}
+
+/// No flag and no `[guard] allow` entry lets an age identity in as plain text.
+#[test]
+fn an_age_secret_key_is_never_overridable() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let keys = ".config/app/keys.txt";
+    env.write(keys, format!("{FAKE_KEY}\n").as_bytes(), 0o600);
+    let err = exits(&env.run(&["add", "--allow-plain", keys]), 1);
+    assert!(
+        err.contains("line 1 holds an age secret key (AGE-SECRET-KEY-), which dotman never stores in plain text"),
+        "{err}"
+    );
+
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    exits(
+        &env.run(&["add", "--allow-plain", "--yes", ".config/app"]),
+        3,
+    );
+    let mut config = env.repo_config();
+    config.guard.allow.push(dotman::repo_config::Allow {
+        path: keys.to_owned(),
+        rule: "age-secret-key".to_owned(),
+    });
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .unwrap();
+    assert_eq!(env.token_of("status", keys).as_deref(), Some("held"));
+    exits(&env.run(&["sync"]), 3);
+    assert!(!remote_history(&env).contains("AGE-SECRET-KEY-"));
+}
+
+/// The age key rule needs the whole key shape: an alias that names the `AGE-SECRET-KEY-` prefix
+/// is managed and pushed like any file, and a real key from `age-keygen` is held.
+#[test]
+fn only_a_whole_age_key_is_held_and_a_real_one_is() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let alias = b"alias agekeys='grep AGE-SECRET-KEY- ~/.config/age/keys.txt'\n";
+    env.write(".config/app/aliases.zsh", alias, 0o644);
+    exits(&env.run(&["add", "--yes", ".config/app"]), 0);
+    exits(&env.run(&["sync"]), 0);
+    assert!(remote_tree(&env).contains(".config/app/aliases.zsh"));
+
+    if !age_installed() {
+        return;
+    }
+    let generated = env.root().join("generated.txt");
+    let out = std::process::Command::new("age-keygen")
+        .arg("-o")
+        .arg(&generated)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "age-keygen failed");
+    let key = fs::read_to_string(&generated).unwrap();
+    fs::remove_file(&generated).unwrap();
+    let secret = key
+        .lines()
+        .find(|line| line.starts_with("AGE-SECRET-KEY-1"))
+        .unwrap()
+        .to_owned();
+    env.write(".config/app/notes.txt", key.as_bytes(), 0o600);
+    assert_eq!(
+        env.token_of("status", ".config/app/notes.txt").as_deref(),
+        Some("held")
+    );
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(
+        err.contains("line 3 holds an age secret key"),
+        "the reason is named"
+    );
+    assert!(!err.contains(&secret), "the key is never printed");
+    assert!(!remote_history(&env).contains(&secret));
+    assert!(!env.repo().join(".config/app/notes.txt").exists());
+}
+
+/// `add <dir>` holds each file that holds a credential, lists it with the commands that resolve
+/// it, adds the rest and exits 3; sync holds it too, and `add --allow-plain <dir>` takes it.
+#[test]
+fn a_directory_holds_a_file_that_holds_a_credential() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let pat = format!("glpat-{}", "Q7w".repeat(8));
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.write(
+        ".config/app/remote.conf",
+        format!("token={pat}\n").as_bytes(),
+        0o600,
+    );
+    let err = exits(&env.run(&["add", "--yes", ".config/app"]), 3);
+    let path = env.home().join(".config/app/remote.conf");
+    assert!(
+        err.contains(&format!(
+            "held .config/app/remote.conf: line 1 holds a gitlab-pat; `dotman add --encrypt {}` stores it encrypted",
+            path.display()
+        )),
+        "{err}"
+    );
+    assert!(!err.contains(&pat), "{err}");
+    let listed: Vec<String> = env.porcelain("list").into_iter().map(|(_, k)| k).collect();
+    assert_eq!(listed, [".config/app/a.conf"]);
+    exits(&env.run(&["sync"]), 3);
+    assert!(!remote_history(&env).contains(&pat));
+
+    exits(
+        &env.run(&["add", "--allow-plain", "--yes", ".config/app"]),
+        0,
+    );
+    assert_eq!(
+        allow_entries(&env),
+        [(
+            ".config/app/remote.conf".to_owned(),
+            "gitlab-pat".to_owned()
+        )]
+    );
+    exits(&env.run(&["sync"]), 0);
+    assert!(remote_tree(&env).contains(".config/app/remote.conf"));
+}
+
+/// A local edit that adds a credential to a managed file is held by the sync capture, at every
+/// sync: exit 3, the repo copy unchanged, nothing pushed.
+#[test]
+fn a_local_edit_that_adds_a_credential_is_held() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.ok(&["add", ".config/app/a.conf"]);
+    env.ok(&["sync"]);
+    let slack = format!("xoxb-123456789012-{}", "AbC1".repeat(6));
+    env.write(
+        ".config/app/a.conf",
+        format!("a\nhook = {slack}\n").as_bytes(),
+        0o644,
+    );
+    for _ in 0..2 {
+        let err = exits(&env.run(&["sync"]), 3);
+        assert!(
+            err.contains(".config/app/a.conf: held, line 2 holds a slack-token"),
+            "{err}"
+        );
+        assert!(!err.contains(&slack), "{err}");
+    }
+    assert_eq!(
+        fs::read(env.repo().join(".config/app/a.conf")).unwrap(),
+        b"a\n"
+    );
+    assert!(!remote_history(&env).contains(&slack));
+}
+
+/// A credential written into the repo itself, as `dotman edit` or a hand edit does, reaches no
+/// capture; the sync staging guard keeps it out of the commit and names the rule and the line.
+#[test]
+fn the_staging_guard_keeps_a_credential_out_of_the_commit() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    let token = github_token();
+    let editor = env.write_script(
+        "ed.sh",
+        &format!("#!/bin/sh\necho 'GH={token}' >> \"$1\"\n"),
+    );
+    let editor = editor.to_string_lossy().into_owned();
+    env.ok_with(&[("EDITOR", &editor), ("VISUAL", "")], &["edit", ".a"]);
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(
+        err.contains("\n  .a: line 2 holds a github-token\n"),
+        "{err}"
+    );
+    assert!(!err.contains(&token), "{err}");
+    assert!(!remote_history(&env).contains(&token));
+}
+
 /// The age identity file named by `[age] identity`, and the file named by `DOTMAN_AGE_KEY_FILE`,
 /// are refused by `add`, plain or encrypted, and a directory add skips the identity: nothing is
 /// copied.

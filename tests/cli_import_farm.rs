@@ -515,7 +515,8 @@ fn a_dangling_link_is_reported_and_not_counted_as_converted() {
 fn held_files_are_reported_like_add_does() {
     let env = TestEnv::new();
     stow(&env);
-    env.write("dotfiles/keys/.age-key", b"AGE-SECRET-KEY-1ABCDEF\n", 0o600);
+    let key = format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58));
+    env.write("dotfiles/keys/.age-key", key.as_bytes(), 0o600);
     env.symlink(".age-key", "dotfiles/keys/.age-key");
     env.write("dotfiles/keys/.netrc", b"machine x\n", 0o600);
     env.symlink(".netrc", "dotfiles/keys/.netrc");

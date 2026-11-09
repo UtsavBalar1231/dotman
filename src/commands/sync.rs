@@ -16,7 +16,9 @@ use crate::name;
 use crate::output;
 use crate::prompt;
 use crate::remote;
-use crate::secrets;
+use crate::repo_config::Allow;
+use crate::secrets::{self, Finding};
+use crate::variant::Sources;
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -223,13 +225,15 @@ fn commit(
     if !allow_mass_delete {
         refuse_mass_delete(ctx, &before, dry_run)?;
     }
-    // `dotman edit` and hand edits in the repo reach no capture, so this is their only check.
-    let held: Vec<&StatusEntry> = before
+    // `dotman edit` and hand edits in the repo reach no capture, so this is their only check. A
+    // config that cannot be read allows nothing.
+    let allow = ctx.repo_config().map(|c| c.guard.allow).unwrap_or_default();
+    let held: Vec<(&StatusEntry, Finding)> = before
         .iter()
         .filter(|entry| entry.kind != StatusKind::Unmerged)
-        .filter(|entry| holds_secret_key(&ctx.paths.repo.join(&entry.path)))
+        .filter_map(|entry| Some((entry, holds_secret_key(ctx, &entry.path, &allow)?)))
         .collect();
-    let held_paths: Vec<PathBuf> = held.iter().map(|entry| entry.path.clone()).collect();
+    let held_paths: Vec<PathBuf> = held.iter().map(|(entry, _)| entry.path.clone()).collect();
     let mut changed = BTreeSet::new();
     if dry_run {
         changed.extend(captured.iter().cloned());
@@ -237,14 +241,14 @@ fn commit(
         ctx.git.stage_all_except(&held_paths)?;
         let staged: Vec<PathBuf> = held
             .iter()
-            .filter(|entry| entry.kind != StatusKind::Untracked && !entry.xy.starts_with('.'))
-            .map(|entry| entry.path.clone())
+            .filter(|(entry, _)| entry.kind != StatusKind::Untracked && !entry.xy.starts_with('.'))
+            .map(|(entry, _)| entry.path.clone())
             .collect();
         if !staged.is_empty() {
             ctx.git.unstage(&staged)?;
         }
     }
-    report_held(ctx, &held_paths, dry_run);
+    report_held(ctx, &held, dry_run);
     changed.extend(
         ctx.git
             .status()?
@@ -274,20 +278,25 @@ fn commit(
     Ok(held)
 }
 
-/// Whether the regular file at `path` holds an age identity. A FIFO swapped in cannot hang the
-/// open, and anything unreadable is left to `git add` to report.
-fn holds_secret_key(path: &Path) -> bool {
-    let Ok(mut file) = OpenOptions::new()
+/// What the content guard holds in the regular file at `path` in the repo, minus what `[guard]
+/// allow` covers for its key. A FIFO swapped in cannot hang the open, and anything unreadable is
+/// left to `git add` to report.
+fn holds_secret_key(ctx: &Context, path: &Path, allow: &[Allow]) -> Option<Finding> {
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-    else {
-        return false;
-    };
+        .open(ctx.paths.repo.join(path))
+        .ok()?;
     let mut bytes = Vec::new();
-    file.metadata().is_ok_and(|meta| meta.is_file())
-        && file.read_to_end(&mut bytes).is_ok()
-        && secrets::holds_secret_key(&bytes)
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) || file.read_to_end(&mut bytes).is_err() {
+        return None;
+    }
+    let source = path.to_string_lossy();
+    let key = Sources::group([source.as_ref()])
+        .keys()
+        .next()
+        .map(str::to_owned);
+    secrets::held(&bytes, key.as_deref().unwrap_or(&source), allow)
 }
 
 fn is_temp(path: &Path) -> bool {
@@ -295,22 +304,22 @@ fn is_temp(path: &Path) -> bool {
         .is_some_and(|name| name.as_bytes().starts_with(TEMP_PREFIX.as_bytes()))
 }
 
-fn report_held(ctx: &Context, held: &[PathBuf], dry_run: bool) {
+fn report_held(ctx: &Context, held: &[(&StatusEntry, Finding)], dry_run: bool) {
     if held.is_empty() {
         return;
     }
     output::warning(&format!(
-        "{} {} in the repo {} an age secret key (AGE-SECRET-KEY-), so {} {}committed; remove the key from {}, or keep such a file encrypted with `{} add --encrypt`:",
+        "{} {} in the repo {} an age secret key or a credential, so {} {}committed; remove it from {}, keep such a file encrypted with `{bin} add --encrypt`, or store a credential as it is with `{bin} add --allow-plain`:",
         held.len(),
         if held.len() == 1 { "file" } else { "files" },
         if held.len() == 1 { "holds" } else { "hold" },
         if held.len() == 1 { "it is" } else { "they are" },
         if dry_run { "would not be " } else { "not " },
         ctx.paths.repo.display(),
-        name::bin()
+        bin = name::bin()
     ));
-    for path in held {
-        output::warning(&format!("  {}", path.display()));
+    for (entry, found) in held {
+        output::warning(&format!("  {}: {found}", entry.path.display()));
     }
 }
 

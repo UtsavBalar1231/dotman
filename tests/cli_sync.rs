@@ -551,8 +551,10 @@ fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
     a.write(".b", b"harmless\n", 0o644);
 
     let err = exits(&a, 3, &["sync"]);
-    assert!(err.contains("an age secret key (AGE-SECRET-KEY-)"), "{err}");
-    assert!(err.contains("\n  .a\n"), "{err}");
+    assert!(
+        err.contains("\n  .a: line 2 holds an age secret key (AGE-SECRET-KEY-)\n"),
+        "{err}"
+    );
     assert!(
         err.contains("): .b\n"),
         "the message names only what was committed: {err}"

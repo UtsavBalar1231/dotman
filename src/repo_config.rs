@@ -38,6 +38,8 @@ const DEFAULT_SECRET_NAMES: &[&str] = &[
     "**/*token*",
     "**/*secret*",
     "**/gh/hosts.yml",
+    "**/*.ppk",
+    "**/rclone.conf",
 ];
 
 fn strings(items: &[&str]) -> Vec<String> {
@@ -86,14 +88,29 @@ impl Default for Ignore {
 pub struct Guard {
     /// Globs of new files under managed directories that are held back until added explicitly.
     pub secret_names: Vec<String>,
+    /// Credentials stored in plain text on purpose, which `add --allow-plain` records.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<Allow>,
 }
 
 impl Default for Guard {
     fn default() -> Self {
         Self {
             secret_names: strings(DEFAULT_SECRET_NAMES),
+            allow: Vec::new(),
         }
     }
+}
+
+/// One `[guard] allow` entry. It matches by key and rule, never by line, so an edit elsewhere in
+/// the file keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allow {
+    /// The key, as `$HOME`-relative as every other key.
+    pub path: String,
+    /// A content guard rule name, such as `github-token`.
+    pub rule: String,
 }
 
 /// The `[dirs]` table.
@@ -183,7 +200,7 @@ mod tests {
         assert_eq!(loaded, RepoConfig::parse("").unwrap());
         assert_eq!(loaded.ignore.patterns.len(), 8);
         assert!(loaded.ignore.patterns.contains(&"**/*.orig".to_owned()));
-        assert_eq!(loaded.guard.secret_names.len(), 14);
+        assert_eq!(loaded.guard.secret_names.len(), 16);
         assert!(
             loaded
                 .guard
@@ -202,7 +219,34 @@ mod tests {
         assert_eq!(config.guard, Guard::default());
         assert_eq!(config.dirs.paths, [".config/nvim"]);
         let only_header = RepoConfig::parse("[guard]\n").unwrap();
-        assert_eq!(only_header.guard.secret_names.len(), 14);
+        assert_eq!(only_header.guard.secret_names.len(), 16);
+        assert_eq!(only_header.guard.allow, Vec::<Allow>::new());
+    }
+
+    #[test]
+    fn guard_allow_entries_parse_inline_and_round_trip() {
+        let config = RepoConfig::parse(
+            "[guard]\nallow = [{ path = \".config/zsh/local.zsh\", rule = \"github-token\" }]\n",
+        )
+        .unwrap();
+        let entry = Allow {
+            path: ".config/zsh/local.zsh".to_owned(),
+            rule: "github-token".to_owned(),
+        };
+        assert_eq!(config.guard.allow, [entry]);
+        assert_eq!(config.guard.secret_names.len(), 16);
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert_eq!(RepoConfig::parse(&saved).unwrap(), config);
+        assert!(
+            !toml::to_string_pretty(&RepoConfig::default())
+                .unwrap()
+                .contains("allow"),
+            "an empty allow list is not written"
+        );
+        assert!(
+            RepoConfig::parse("[guard]\nallow = [{ path = \"x\", rule = \"r\", line = 2 }]\n")
+                .is_err()
+        );
     }
 
     #[test]

@@ -15,7 +15,8 @@ const HOSTS_AGE: &str = ".config/gh/hosts{age}.yml";
 const PLAIN: &[u8] = b"github.com:\n  oauth_token: gho_hunter2\n";
 const ARMOR: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 const MARKER: &[u8] = b"AGE-SECRET-KEY-";
-// Only the marker matters to the guard, so this need not be a real identity.
+// The guard matches the shape, `AGE-SECRET-KEY-1` and 58 bech32 characters, so this need not be a
+// real identity.
 const FAKE_KEY: &str =
     "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
 
@@ -212,7 +213,7 @@ fn a_new_key_file_under_a_managed_dir_is_held_and_never_pushed() {
     assert_eq!(env.token_of("status", keys).as_deref(), Some("held"));
     let human = String::from_utf8_lossy(&env.run(&["status"]).stdout).into_owned();
     assert!(
-        human.contains("keys.txt (holds an age secret key"),
+        human.contains("keys.txt (line 1 holds an age secret key"),
         "{human}"
     );
 

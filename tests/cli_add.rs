@@ -156,9 +156,13 @@ fn a_dry_run_exits_as_the_real_run_would() {
     exits(&env, 3, &["add", "--dry-run", ".config/zsh"]);
     assert_eq!(managed(&env), Vec::<String>::new());
 
-    env.write(".config/age.txt", b"AGE-SECRET-KEY-1QQQQ\n", 0o600);
+    let key = format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58));
+    env.write(".config/age.txt", key.as_bytes(), 0o600);
     let err = exits(&env, 1, &["add", "--dry-run", ".config/age.txt"]);
-    assert!(err.contains("could not add .config/age.txt"), "{err}");
+    assert!(
+        err.contains(".config/age.txt: line 1 holds an age secret key"),
+        "{err}"
+    );
     exits(&env, 1, &["add", ".config/age.txt"]);
     exits(&env, 0, &["add", "--dry-run", ".config/zsh/.zshrc"]);
 }

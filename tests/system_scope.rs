@@ -428,9 +428,50 @@ fn sync_holds_an_edit_that_holds_an_age_secret_key() {
     let env = setup(&["/etc"]);
     env.write_system(KEYD, b"one", 0o644);
     env.ok(&["add", "--system", KEYD]);
-    env.write_system(KEYD, b"AGE-SECRET-KEY-1ABC", 0o644);
+    let key = format!("x\nAGE-SECRET-KEY-1{}\n", "Q".repeat(58));
+    env.write_system(KEYD, key.as_bytes(), 0o644);
     let err = exits(&env, 3, &["sync"]);
-    assert!(err.contains("held"), "{err}");
+    assert!(
+        err.contains("held, line 2 holds an age secret key"),
+        "{err}"
+    );
+    let source = env.repo().join(".dotman/system/etc/keyd/default.conf");
+    assert_eq!(fs::read(source).expect("source"), b"one");
+}
+
+/// System scope does not encrypt, so a system file that holds a credential is refused by `add
+/// --system`, with or without `--allow-plain`, and held by sync once a managed one gains one. The
+/// message names the rule and the line, never the value.
+#[test]
+fn a_credential_in_a_system_file_is_refused_and_held() {
+    let env = setup(&["/etc"]);
+    let token = format!("ghp_{}", "a1B2".repeat(9));
+    let text = format!("[main]\nkey = {token}\n");
+    env.write_system("/etc/tok.conf", text.as_bytes(), 0o644);
+    for args in [
+        &["add", "--system", "/etc/tok.conf"][..],
+        &["add", "--system", "--allow-plain", "/etc/tok.conf"],
+    ] {
+        let err = exits(&env, 1, args);
+        assert!(
+            err.contains(
+                "/etc/tok.conf: line 2 holds a github-token, and system scope does not encrypt"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains(&token), "the value is never printed");
+    }
+    assert!(!env.repo().join(".dotman/system/etc/tok.conf").exists());
+
+    env.write_system(KEYD, b"one", 0o644);
+    env.ok(&["add", "--system", KEYD]);
+    env.write_system(KEYD, text.as_bytes(), 0o644);
+    let err = exits(&env, 3, &["sync"]);
+    assert!(
+        err.contains("/etc/keyd/default.conf: held, line 2 holds a github-token"),
+        "{err}"
+    );
+    assert!(!err.contains(&token), "{err}");
     let source = env.repo().join(".dotman/system/etc/keyd/default.conf");
     assert_eq!(fs::read(source).expect("source"), b"one");
 }

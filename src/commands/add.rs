@@ -18,8 +18,8 @@ use crate::paths::{
 };
 use crate::prompt;
 use crate::remote;
-use crate::repo_config::RepoConfig;
-use crate::secrets::{self, HoldsKey};
+use crate::repo_config::{Allow, RepoConfig};
+use crate::secrets::{self, Finding, Held};
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::system::{self, Ownership, Standing};
 use crate::variant::{self, Flag, Selection, Sources};
@@ -201,22 +201,28 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         public,
         args,
     )?;
+    let settled = drop_unchanged(&ctx, &repo_config, &state, &targets.sources, &mut plan);
+    let content = guard_content(&ctx, &mut plan, &repo_config, &targets, args)?;
     guarded.warn(public, &ctx.paths.home, args.for_conditions.as_deref());
+    for (key, found) in &content.held {
+        let path = pasteable(&ctx.paths.home, key);
+        output::warning(&format!("held {key}: {found}{}", found.remedy(Some(&path))));
+    }
     let specials = warn_held(&plan);
-    let outcome = if guarded.held.is_empty() && specials == 0 {
+    let outcome = if guarded.held.is_empty() && content.held.is_empty() && specials == 0 {
         Outcome::Done
     } else {
         Outcome::Attention
     };
 
-    let settled = drop_unchanged(&ctx, &repo_config, &state, &targets.sources, &mut plan);
     for dir in plan.dirs.iter().filter(|dir| !settled.contains(&dir.key)) {
         preview(dir);
     }
     let in_dirs: usize = plan.dirs.iter().map(|d| d.items.len()).sum();
     if dry_run {
         let (items, announced) = plan.items();
-        let failed = targets.try_all(&ctx, &items, &announced);
+        content.record(&mut repo_config, &items, true);
+        let failed = targets.try_all(&ctx, &items, &announced, &repo_config.guard.allow);
         if in_dirs > 0 {
             output::info(&format!("would add {in_dirs} files from directories"));
         }
@@ -237,6 +243,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
             repo_config.dirs.paths.push(dir.key.clone());
         }
     }
+    content.record(&mut repo_config, &items, false);
     let (added, failed) =
         targets.commit_all(&ctx, &mut repo_config, &mut state, &items, &announced);
     // The record names the set every `{age}` file is encrypted to; one that exists may mark a
@@ -344,7 +351,7 @@ struct Guarded {
 }
 
 /// `key` as a path to paste into a shell.
-fn pasteable(home: &Path, key: &str) -> String {
+pub(crate) fn pasteable(home: &Path, key: &str) -> String {
     shell_words::quote(&home.join(key).to_string_lossy()).into_owned()
 }
 
@@ -434,6 +441,105 @@ fn guard_secrets(
         }
     }
     Ok(guarded)
+}
+
+/// What the content guard left of a plan.
+#[derive(Default)]
+struct ContentGuard {
+    /// Files a directory brought in, taken out of its plan.
+    held: Vec<(String, Finding)>,
+    /// What `--allow-plain` lets in, to record in `[guard] allow` once the files are added.
+    allowed: Vec<(Allow, Finding)>,
+}
+
+impl ContentGuard {
+    /// Adds the entries of the files that are still in `items` to `[guard] allow`.
+    fn record(&self, repo_config: &mut RepoConfig, items: &BTreeMap<String, Leaf>, dry_run: bool) {
+        let kept = self
+            .allowed
+            .iter()
+            .filter(|(entry, _)| items.contains_key(&entry.path));
+        for (entry, found) in kept {
+            output::warning(&format!(
+                "{}: {found}; stored as it is, as --allow-plain asks, and [guard] allow in .dotman.toml {} it",
+                entry.path,
+                if dry_run { "would record" } else { "records" }
+            ));
+            repo_config.guard.allow.push(entry.clone());
+        }
+    }
+}
+
+/// The content guard, whatever the remote, over every file this run would store in plain text.
+/// A named file that holds a credential is refused, and a directory holds each such file back;
+/// `--allow-plain` lets it in, to be recorded by rule in `[guard] allow`. An age identity is never
+/// stored in plain text, whatever the flags.
+fn guard_content(
+    ctx: &Context,
+    plan: &mut Plan,
+    repo_config: &RepoConfig,
+    targets: &Targets,
+    args: &AddArgs,
+) -> Result<ContentGuard> {
+    let home = &ctx.paths.home;
+    let mut content = ContentGuard::default();
+    // An unreadable file, or one whose source cannot be chosen, fails later with its own error.
+    let mut check = |key: &str, leaf: &Leaf| -> Option<Finding> {
+        let source = targets.source_for(key).ok()?;
+        if !matches!(leaf, Leaf::File { .. })
+            || args.encrypt
+            || targets.sources.flag(key, &source) == Flag::Age
+        {
+            return None;
+        }
+        let Ok(Node::File { bytes, .. }) = read_node(home, key) else {
+            return None;
+        };
+        let allow = &repo_config.guard.allow;
+        let found = secrets::held(&bytes, key, allow)?;
+        if !args.allow_plain || secrets::findings(&bytes).any(|found| !found.overridable()) {
+            return Some(found);
+        }
+        let mut rules = BTreeSet::new();
+        for found in secrets::findings(&bytes) {
+            if !found.allowed(key, allow) && rules.insert(found.rule) {
+                let entry = Allow {
+                    path: key.to_owned(),
+                    rule: found.rule.to_owned(),
+                };
+                content.allowed.push((entry, found));
+            }
+        }
+        None
+    };
+    let mut refused = Vec::new();
+    for (key, leaf) in &plan.files {
+        if let Some(found) = check(key, leaf) {
+            refused.push(format!("{key}: {found}{}", found.remedy(None)));
+        }
+    }
+    if let [one] = refused.as_slice() {
+        bail!("{one}");
+    }
+    if !refused.is_empty() {
+        for line in &refused {
+            output::warning(line);
+        }
+        bail!(
+            "{} files hold a credential or an age secret key, so nothing was added",
+            refused.len()
+        );
+    }
+    let mut held = Vec::new();
+    for dir in &mut plan.dirs {
+        dir.items.retain(|key, leaf| {
+            let found = check(key, leaf);
+            held.extend(found.map(|found| (key.clone(), found)));
+            found.is_none()
+        });
+    }
+    content.held = held;
+    Ok(content)
 }
 
 struct Targets<'a> {
@@ -540,6 +646,7 @@ impl Targets<'_> {
         ctx: &Context,
         items: &BTreeMap<String, Leaf>,
         announced: &BTreeSet<String>,
+        allow: &[Allow],
     ) -> usize {
         let mut failed = 0usize;
         for (key, leaf) in items {
@@ -551,8 +658,8 @@ impl Targets<'_> {
             let checked = self.source_for(key).and_then(|source| {
                 let encrypted = self.encrypt || self.sources.flag(key, &source) == Flag::Age;
                 let plain_file = !encrypted && matches!(leaf, Leaf::File { .. });
-                if plain_file && holds_key(&ctx.paths.home, key) {
-                    return Err(HoldsKey.into());
+                if plain_file && let Some(found) = holds_key(&ctx.paths.home, key, allow) {
+                    return Err(Held(found).into());
                 }
                 worktree_parents(&ctx.paths.repo, &source, false)?;
                 Ok(source)
@@ -706,22 +813,25 @@ pub(crate) enum Hold {
     Large,
     Binary,
     SecretName,
-    SecretKey,
+    /// An age identity or a credential that `[guard] allow` does not cover.
+    Content(Finding),
     Special,
     Unreadable,
     Collision,
 }
 
 impl Hold {
-    pub(crate) const fn reason(self) -> &'static str {
+    pub(crate) fn reason(self) -> String {
         match self {
-            Self::Large => "over 1 MiB",
-            Self::Binary => "binary: NUL in the first 8 KiB",
-            Self::SecretName => "name matches [guard] secret_names",
-            Self::SecretKey => "holds an age secret key (AGE-SECRET-KEY-)",
-            Self::Special => "a socket, FIFO or device, which dotman never stores",
-            Self::Unreadable => "cannot be read",
-            Self::Collision => "differs only in case or Unicode normalization from another path",
+            Self::Large => "over 1 MiB".to_owned(),
+            Self::Binary => "binary: NUL in the first 8 KiB".to_owned(),
+            Self::SecretName => "name matches [guard] secret_names".to_owned(),
+            Self::Content(found) => format!("{found}{}", found.remedy(None)),
+            Self::Special => "a socket, FIFO or device, which dotman never stores".to_owned(),
+            Self::Unreadable => "cannot be read".to_owned(),
+            Self::Collision => {
+                "differs only in case or Unicode normalization from another path".to_owned()
+            }
         }
     }
 }
@@ -758,13 +868,13 @@ pub(crate) fn hold_by_name_and_size(secrets: &[Pattern], key: &str, size: u64) -
     }
 }
 
-/// The holds that need the bytes of a file that passed [`hold_by_name_and_size`].
-pub(crate) fn hold_by_content(bytes: &[u8]) -> Option<Hold> {
+/// The holds that need the bytes of `key`, a file that passed [`hold_by_name_and_size`].
+pub(crate) fn hold_by_content(bytes: &[u8], key: &str, allow: &[Allow]) -> Option<Hold> {
     let sniffed = usize::try_from(SNIFF_BYTES).unwrap_or(8192);
     if bytes.iter().take(sniffed).any(|b| *b == 0) {
         Some(Hold::Binary)
     } else {
-        secrets::holds_secret_key(bytes).then_some(Hold::SecretKey)
+        secrets::held(bytes, key, allow).map(Hold::Content)
     }
 }
 
@@ -820,7 +930,9 @@ pub(crate) fn scan_dirs(
         let hold = match leaf {
             Leaf::File { size, binary, .. } => hold_by_name_and_size(&secrets, &key, size)
                 .or_else(|| binary.then_some(Hold::Binary))
-                .or_else(|| holds_key(&ctx.paths.home, &key).then_some(Hold::SecretKey)),
+                .or_else(|| {
+                    holds_key(&ctx.paths.home, &key, &repo_config.guard.allow).map(Hold::Content)
+                }),
             Leaf::Link => secrets
                 .iter()
                 .any(|p| p.matches_with(&key, MATCH_SECRET))
@@ -1079,9 +1191,13 @@ fn printable(text: &str) -> String {
     })
 }
 
-// An unreadable file is not held here; capturing it fails and is reported then.
-pub(crate) fn holds_key(home: &Path, key: &str) -> bool {
-    matches!(read_node(home, key), Ok(Node::File { bytes, .. }) if secrets::holds_secret_key(&bytes))
+/// What the content guard holds in H of `key`. An unreadable file is not held here; capturing it
+/// fails and is reported then.
+pub(crate) fn holds_key(home: &Path, key: &str, allow: &[Allow]) -> Option<Finding> {
+    match read_node(home, key) {
+        Ok(Node::File { bytes, .. }) => secrets::held(&bytes, key, allow),
+        _ => None,
+    }
 }
 
 fn is_missing(home: &Path, key: &str) -> bool {
@@ -1172,9 +1288,9 @@ pub(crate) fn commit_one(
     let node = read_node(home, key)?;
     if let Node::File { bytes, .. } = &node
         && !encrypted
-        && secrets::holds_secret_key(bytes)
+        && let Some(found) = secrets::held(bytes, key, &repo_config.guard.allow)
     {
-        return Err(HoldsKey.into());
+        return Err(Held(found).into());
     }
     ensure_worktree_parents(repo, source)?;
     let plaintext = match (expected, node) {
@@ -1509,8 +1625,10 @@ fn read_system_file(
         Node::Symlink(_) => bail!("{key} is a symlink; system scope takes regular files only"),
         Node::Special => bail!("{key} is a socket, FIFO or device"),
     };
-    if secrets::holds_secret_key(&bytes) {
-        bail!("{key} holds an age secret key (AGE-SECRET-KEY-), and system scope does not encrypt");
+    if let Some(found) = secrets::findings(&bytes).next() {
+        bail!(
+            "{key}: {found}, and system scope does not encrypt, so it is never stored; keep secrets as {{age}} files under $HOME"
+        );
     }
 
     let checked = match system::package_owner(&scope.disk(&key))? {

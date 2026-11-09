@@ -19,7 +19,7 @@ use crate::name;
 use crate::output;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
-use crate::secrets::{HoldsKey, Locked};
+use crate::secrets::{self, Finding, Held, HoldsKey, Locked};
 use crate::state::{IdentitySnapshot, Kind, State};
 use crate::sys;
 use crate::system::escalate::{Escalator, Tool};
@@ -1172,7 +1172,8 @@ impl Run<'_> {
                 self.attention = true;
                 self.undecided.insert(key.to_owned());
                 output::warning(&format!(
-                    "{key}: held, it holds an age secret key (AGE-SECRET-KEY-) and system scope does not encrypt"
+                    "{key}: held, {}, and system scope does not encrypt",
+                    secrets::system_finding(self.ctx, key)
                 ));
             }
             Err(e) => {
@@ -1224,8 +1225,11 @@ impl Run<'_> {
         }
         if self.opts.dry_run {
             // Only a dry run reads H here; a real capture checks what it is about to store.
-            if !encrypted && add::holds_key(&self.ctx.paths.home, key) {
-                self.held_key(key);
+            if !encrypted
+                && let Some(found) =
+                    add::holds_key(&self.ctx.paths.home, key, &repo_config.guard.allow)
+            {
+                self.held_key(key, found);
                 return;
             }
             self.announce("capture", key);
@@ -1249,21 +1253,25 @@ impl Run<'_> {
                     .insert(key.to_owned(), entry.tuple.entry(&entry.source));
                 self.captured.insert(key.to_owned());
             }
-            Err(e) if e.is::<HoldsKey>() => self.held_key(key),
-            Err(e) => {
-                self.failed = self.failed.saturating_add(1);
-                self.uncaptured = self.uncaptured.saturating_add(1);
-                output::warning(&format!("{key}: cannot be captured: {e:#}"));
-            }
+            Err(e) => match e.downcast::<Held>() {
+                Ok(Held(found)) => self.held_key(key, found),
+                Err(e) => {
+                    self.failed = self.failed.saturating_add(1);
+                    self.uncaptured = self.uncaptured.saturating_add(1);
+                    output::warning(&format!("{key}: cannot be captured: {e:#}"));
+                }
+            },
         }
     }
 
     /// Never staged or committed; the pass after the pull leaves it alone too.
-    fn held_key(&mut self, key: &str) {
+    fn held_key(&mut self, key: &str, found: Finding) {
         self.attention = true;
         self.undecided.insert(key.to_owned());
+        let path = add::pasteable(&self.ctx.paths.home, key);
         output::warning(&format!(
-            "{key}: held, it {HoldsKey}; or keep it out with an [ignore] pattern"
+            "{key}: held, {found}{}; or keep it out with an [ignore] pattern",
+            found.remedy(Some(&path))
         ));
     }
 

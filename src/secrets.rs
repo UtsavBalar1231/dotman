@@ -3,16 +3,18 @@
 
 use crate::config::Config;
 use crate::context::Context;
-use crate::engine::observe;
 use crate::engine::write::{WriteOptions, WriteOutcome, safe_write};
+use crate::engine::{Node, observe};
 use crate::name;
 use crate::output;
 use crate::paths::{Paths, write_atomic};
 use crate::proc::{self, AGE_KEY_VAR};
+use crate::repo_config::Allow;
 use crate::state::Kind;
 use crate::sys;
 use crate::variant::Flag;
 use anyhow::{Context as _, Result, anyhow, bail};
+use regex::bytes::{Regex, RegexBuilder};
 use std::cell::{Cell, OnceCell};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -22,8 +24,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::LazyLock;
 
-const SECRET_KEY_MARKER: &[u8] = b"AGE-SECRET-KEY-";
 const ARMOR: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 // age reads identities from `-i -` since 1.1.0.
 const STDIN_IDENTITIES: (u32, u32, u32) = (1, 1, 0);
@@ -48,13 +50,201 @@ pub fn no_recipients() -> String {
     )
 }
 
-/// Whether `bytes` contain an age identity.
+/// The rule that finds an age identity. No `[guard] allow` entry covers it.
+pub const AGE_RULE: &str = "age-secret-key";
+
+// Every rule starts with a fixed prefix: without one, the combined scan is 100 times slower. The
+// age identity is `AGE-SECRET-KEY-1` and 58 characters of uppercase bech32 (32 bytes of key and
+// a 6-character checksum), so a bare `AGE-SECRET-KEY-` in a script is not one. Provider rules come
+// from the research for the content guard; none of them is a keyword or entropy rule.
+const RULES: [(&str, &str); 21] = [
+    (
+        AGE_RULE,
+        r"AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}",
+    ),
+    ("github-token", r"\bgh[pousr]_[0-9A-Za-z]{36,251}\b"),
+    (
+        "github-fine-grained-pat",
+        r"\bgithub_pat_[0-9A-Za-z_]{82,251}\b",
+    ),
+    ("gitlab-pat", r"\bglpat-[0-9A-Za-z_-]{20,}"),
+    (
+        "slack-token",
+        r"\bxox(?:b-[0-9]{8,14}-[0-9A-Za-z-]{10,}|[pe](?:-[0-9]{10,13}){3}-[0-9A-Za-z-]{28,34}|[os]-[0-9]+-[0-9]+-[0-9]+-[0-9A-Fa-f]+|[ar]-(?:[0-9]-)?[0-9A-Za-z]{8,48})",
+    ),
+    (
+        "slack-webhook",
+        r"hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
+    ),
+    (
+        "aws-access-key-id",
+        r"\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b",
+    ),
+    ("stripe-live-key", r"\b[sr]k_live_[0-9A-Za-z]{10,99}\b"),
+    (
+        "openai-api-key",
+        r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,}",
+    ),
+    (
+        "anthropic-api-key",
+        r"\bsk-ant-[a-z]{3,6}[0-9]{2}-[A-Za-z0-9_-]{40,}",
+    ),
+    ("npm-token", r"\bnpm_[A-Za-z0-9]{36}\b"),
+    ("pypi-token", r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}"),
+    ("digitalocean-token", r"\bdo[opr]_v1_[a-f0-9]{64}\b"),
+    (
+        "sendgrid-key",
+        r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b",
+    ),
+    ("huggingface-token", r"\b(?:hf_|api_org_)[A-Za-z]{34}\b"),
+    (
+        "private-key",
+        r"-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:\\[nr]|\s)*(?:[A-Za-z-]+:[^\n]*?(?:\\n|\n)(?:\\[nr]|\s)*)*[A-Za-z0-9+/=]{40,}",
+    ),
+    ("openrouter-key", r"\bsk-or-v1-[0-9a-f]{64}\b"),
+    ("groq-key", r"\bgsk_[A-Za-z0-9]{52}\b"),
+    ("xai-key", r"\bxai-[A-Za-z0-9]{80}\b"),
+    ("perplexity-key", r"\bpplx-[A-Za-z0-9]{48}\b"),
+    ("docker-pat", r"\bdckr_(?:pat|oat)_[A-Za-z0-9_-]{20,}"),
+];
+
+// One capture group per rule, in `RULES` order; the rules themselves only use `(?:...)`.
+static SCANNER: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| {
+    let combined = RULES
+        .iter()
+        .map(|(_, rule)| format!("({rule})"))
+        .collect::<Vec<_>>()
+        .join("|");
+    RegexBuilder::new(&combined).unicode(false).build()
+});
+
+/// What the content guard found: the rule, and the 1-based line where its match starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Finding {
+    /// A name from the rule list, such as `github-token`.
+    pub rule: &'static str,
+    /// 1-based.
+    pub line: usize,
+}
+
+impl Finding {
+    /// False for an age identity, which is never stored in plain text.
+    #[must_use]
+    pub fn overridable(self) -> bool {
+        self.rule != AGE_RULE
+    }
+
+    /// Whether a `[guard] allow` entry for `key` covers this finding.
+    #[must_use]
+    pub fn allowed(self, key: &str, allow: &[Allow]) -> bool {
+        self.overridable()
+            && allow
+                .iter()
+                .any(|entry| entry.path == key && entry.rule == self.rule)
+    }
+
+    /// What follows the finding in a message: how to resolve the hold, with the commands for
+    /// `path`, or with only the `add` flags.
+    #[must_use]
+    pub fn remedy(self, path: Option<&str>) -> String {
+        let bin = name::bin();
+        let never = ", which dotman never stores in plain text";
+        match (path, self.overridable()) {
+            (None, true) => {
+                "; --encrypt stores it encrypted, --allow-plain stores it as is".to_owned()
+            }
+            (None, false) => format!("{never}; --encrypt stores it encrypted"),
+            (Some(path), true) => format!(
+                "; `{bin} add --encrypt {path}` stores it encrypted, `{bin} add --allow-plain {path}` stores it as is"
+            ),
+            (Some(path), false) => {
+                format!("{never}; `{bin} add --encrypt {path}` stores it encrypted")
+            }
+        }
+    }
+}
+
+impl fmt::Display for Finding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.overridable() {
+            write!(f, "line {} holds a {}", self.line, self.rule)
+        } else {
+            write!(
+                f,
+                "line {} holds an age secret key (AGE-SECRET-KEY-)",
+                self.line
+            )
+        }
+    }
+}
+
+/// Every finding in `bytes`, in order. The whole file is scanned at once, so a match may span
+/// lines, as a PEM block does. Should the rules ever fail to compile, every file is held.
+pub fn findings(bytes: &[u8]) -> Box<dyn Iterator<Item = Finding> + '_> {
+    let Ok(scanner) = SCANNER.as_ref() else {
+        return Box::new(std::iter::once(Finding {
+            rule: "unscanned",
+            line: 1,
+        }));
+    };
+    Box::new(scanner.captures_iter(bytes).filter_map(move |caps| {
+        let (at, (rule, _)) = RULES
+            .iter()
+            .enumerate()
+            .find(|(at, _)| caps.get(at.saturating_add(1)).is_some())?;
+        let start = caps.get(at.saturating_add(1))?.start();
+        Some(Finding {
+            rule,
+            line: line_at(bytes, start),
+        })
+    }))
+}
+
+// The text before the match splits at each newline into one piece more than it has newlines,
+// which is the 1-based line the match starts on.
+fn line_at(bytes: &[u8], offset: usize) -> usize {
+    bytes
+        .get(..offset)
+        .unwrap_or(bytes)
+        .split(|b| *b == b'\n')
+        .count()
+}
+
+/// The first finding in `bytes` that no `[guard] allow` entry for `key` covers.
+#[must_use]
+pub fn held(bytes: &[u8], key: &str, allow: &[Allow]) -> Option<Finding> {
+    findings(bytes).find(|found| !found.allowed(key, allow))
+}
+
+/// Whether `bytes` hold an age identity or a credential a rule finds, whatever `[guard] allow`
+/// says: for captures that no allow entry reaches, such as system files.
 #[must_use]
 pub fn holds_secret_key(bytes: &[u8]) -> bool {
-    bytes
-        .windows(SECRET_KEY_MARKER.len())
-        .any(|window| window == SECRET_KEY_MARKER)
+    findings(bytes).next().is_some()
 }
+
+/// What [`holds_secret_key`] found in the system file `key`, for the message about a [`HoldsKey`]
+/// capture, which carries no finding.
+#[must_use]
+pub fn system_finding(ctx: &Context, key: &str) -> String {
+    match ctx.system_scope().node(key) {
+        Ok(Node::File { bytes, .. }) => findings(&bytes).next().map(|found| found.to_string()),
+        _ => None,
+    }
+    .unwrap_or_else(|| "it holds an age secret key or a credential".to_owned())
+}
+
+/// A plain capture would store what the content guard found.
+#[derive(Debug)]
+pub struct Held(pub Finding);
+
+impl fmt::Display for Held {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.0, self.0.remedy(None))
+    }
+}
+
+impl std::error::Error for Held {}
 
 /// No key here decrypts a source. Report-only: the path is left alone.
 #[derive(Debug)]
@@ -68,16 +258,15 @@ impl fmt::Display for Locked {
 
 impl std::error::Error for Locked {}
 
-/// A plain capture would store an age identity in the repo.
+/// A capture would store what [`holds_secret_key`] finds where no override applies, as in system
+/// scope.
 #[derive(Debug)]
 pub struct HoldsKey;
 
 impl fmt::Display for HoldsKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "holds an age secret key (AGE-SECRET-KEY-), which dotman never stores in plain text; `{} add --encrypt` stores it encrypted",
-            name::bin()
+        f.write_str(
+            "holds an age secret key or a credential, which system scope never stores because it does not encrypt",
         )
     }
 }
@@ -611,15 +800,174 @@ const fn files(n: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use tempfile::TempDir;
 
+    fn bech32(n: usize) -> String {
+        "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L"
+            .chars()
+            .cycle()
+            .take(n)
+            .collect()
+    }
+
+    fn age_key(data: &str) -> String {
+        format!("AGE-SECRET-KEY-1{data}")
+    }
+
+    fn found(text: &str) -> Vec<(&'static str, usize)> {
+        findings(text.as_bytes())
+            .map(|found| (found.rule, found.line))
+            .collect()
+    }
+
     #[test]
-    fn the_marker_is_found_anywhere_in_the_bytes() {
-        assert!(holds_secret_key(b"x\nAGE-SECRET-KEY-1ABC\n"));
-        assert!(holds_secret_key(b"AGE-SECRET-KEY-"));
-        assert!(!holds_secret_key(b"AGE-SECRET-KEY"));
-        assert!(!holds_secret_key(b"age-secret-key-1abc"));
-        assert!(!holds_secret_key(b""));
+    fn the_rules_compile_into_one_scanner() {
+        assert!(SCANNER.is_ok(), "{:?}", SCANNER.as_ref().err());
+        let names: BTreeSet<&str> = RULES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names.len(), RULES.len(), "rule names are unique");
+    }
+
+    #[test]
+    fn only_the_full_age_key_shape_is_an_age_key() {
+        let full = age_key(&bech32(58));
+        assert_eq!(found(&full), [(AGE_RULE, 1)]);
+        assert_eq!(found(&format!("# created\n{full}\n")), [(AGE_RULE, 2)]);
+        for text in [
+            "alias agekeys='grep AGE-SECRET-KEY- ~/.config/age/keys.txt'".to_owned(),
+            "AGE-SECRET-KEY-".to_owned(),
+            age_key(&bech32(57)),
+            age_key(&"B".repeat(58)),
+            age_key(&bech32(58).to_lowercase()),
+            format!("AGE-SECRET-KEY-2{}", bech32(58)),
+        ] {
+            assert_eq!(found(&text), [], "{text}");
+        }
+        assert!(holds_secret_key(full.as_bytes()));
+        assert!(!holds_secret_key(b"AGE-SECRET-KEY-1QQQQ"));
+    }
+
+    #[test]
+    fn each_rule_names_itself_and_near_misses_are_not_held() {
+        let alnum = |n: usize| "aB3".repeat(n).chars().take(n).collect::<String>();
+        let upper = |n: usize| "AB2C".repeat(n).chars().take(n).collect::<String>();
+        let hex = |n: usize| "a1f9".repeat(n).chars().take(n).collect::<String>();
+        let alpha = |n: usize| "aBc".repeat(n).chars().take(n).collect::<String>();
+        let pem_body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ";
+        let samples = [
+            ("github-token", format!("export GH=ghp_{}", alnum(36))),
+            (
+                "github-fine-grained-pat",
+                format!("github_pat_{}", alnum(82)),
+            ),
+            ("gitlab-pat", format!("glpat-{}", alnum(20))),
+            ("slack-token", format!("xoxb-12345678-{}", alnum(10))),
+            (
+                "slack-webhook",
+                format!("https://hooks.slack.com/services/{}", alnum(43)),
+            ),
+            ("aws-access-key-id", format!("AKIA{}", upper(16))),
+            ("stripe-live-key", format!("sk_live_{}", alnum(24))),
+            (
+                "openai-api-key",
+                format!("sk-proj-{}T3BlbkFJ{}", alnum(20), alnum(20)),
+            ),
+            ("anthropic-api-key", format!("sk-ant-api03-{}", alnum(40))),
+            ("npm-token", format!("npm_{}", alnum(36))),
+            ("pypi-token", format!("pypi-AgEIcHlwaS5vcmc{}", alnum(50))),
+            ("digitalocean-token", format!("dop_v1_{}", hex(64))),
+            ("sendgrid-key", format!("SG.{}.{}", alnum(22), alnum(43))),
+            ("huggingface-token", format!("hf_{}", alpha(34))),
+            (
+                "private-key",
+                format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{pem_body}\n"),
+            ),
+            ("openrouter-key", format!("sk-or-v1-{}", hex(64))),
+            ("groq-key", format!("gsk_{}", alnum(52))),
+            ("xai-key", format!("xai-{}", alnum(80))),
+            ("perplexity-key", format!("pplx-{}", alnum(48))),
+            ("docker-pat", format!("dckr_pat_{}", alnum(20))),
+        ];
+        let named: BTreeSet<&str> = samples.iter().map(|(rule, _)| *rule).collect();
+        assert_eq!(
+            named.len(),
+            RULES.len().saturating_sub(1),
+            "a sample per rule"
+        );
+        for (rule, text) in &samples {
+            assert_eq!(found(text), [(*rule, 1)], "{rule}");
+        }
+        for text in [
+            format!("ghp_{}", alnum(35)),
+            format!("xghp_{}", alnum(36)),
+            "token = \"sk-not-a-key\"".to_owned(),
+            format!("AKIA{}", upper(15)),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n".to_owned(),
+            "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\n".to_owned(),
+            "password = hunter2".to_owned(),
+        ] {
+            assert_eq!(found(&text), [], "{text}");
+        }
+    }
+
+    #[test]
+    fn the_line_is_where_the_match_starts_counted_from_one() {
+        let token = format!("ghp_{}", "x".repeat(36));
+        assert_eq!(found(&token), [("github-token", 1)]);
+        assert_eq!(found(&format!("\n{token}")), [("github-token", 2)]);
+        assert_eq!(
+            found(&format!("a\r\nb\r\n  {token}\r\n")),
+            [("github-token", 3)]
+        );
+        assert_eq!(
+            found(&format!("{token}\n\n{token} {token}\n")),
+            [
+                ("github-token", 1),
+                ("github-token", 3),
+                ("github-token", 3)
+            ]
+        );
+        let pem = format!(
+            "# key\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\n{}\n",
+            "A".repeat(64)
+        );
+        assert_eq!(found(&pem), [("private-key", 2)]);
+    }
+
+    #[test]
+    fn allow_entries_match_by_key_and_rule_and_never_cover_an_age_key() {
+        let allow = [Allow {
+            path: ".config/zsh/local.zsh".to_owned(),
+            rule: "github-token".to_owned(),
+        }];
+        let text = format!(
+            "a\nexport GH=ghp_{}\nexport NPM=npm_{}\n",
+            "x".repeat(36),
+            "y".repeat(36)
+        );
+        let held = |key: &str| held(text.as_bytes(), key, &allow);
+        assert_eq!(
+            held(".config/zsh/local.zsh"),
+            Some(Finding {
+                rule: "npm-token",
+                line: 3
+            })
+        );
+        assert_eq!(held(".zshrc").map(|f| f.rule), Some("github-token"));
+        let age = Finding {
+            rule: AGE_RULE,
+            line: 1,
+        };
+        let allow_age = [Allow {
+            path: "k".to_owned(),
+            rule: AGE_RULE.to_owned(),
+        }];
+        assert!(!age.allowed("k", &allow_age));
+        assert!(!age.overridable());
+        assert_eq!(
+            Held(age).to_string(),
+            "line 1 holds an age secret key (AGE-SECRET-KEY-), which dotman never stores in plain text; --encrypt stores it encrypted"
+        );
     }
 
     #[test]

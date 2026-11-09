@@ -629,7 +629,8 @@ impl Planner<'_> {
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        Ok(hold_by_content(&bytes).map_or_else(|| Ok((bytes, meta.mode() & 0o777)), Err))
+        // A fresh import has no `[guard] allow` entries.
+        Ok(hold_by_content(&bytes, key, &[]).map_or_else(|| Ok((bytes, meta.mode() & 0o777)), Err))
     }
 
     /// Everything below a folded link becomes a key below the link's path.

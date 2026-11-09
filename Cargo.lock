@@ -320,6 +320,7 @@ dependencies = [
  "minijinja",
  "predicates",
  "proptest",
+ "regex",
  "serde",
  "serde_json",
  "shell-words",
