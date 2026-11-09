@@ -75,7 +75,13 @@ fn row_4_clean_records_a_missing_state() {
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("clean"));
     fs::remove_file(env.state_dir().join("state.toml")).unwrap();
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("clean"));
+    let err = env.ok(&["status"]);
+    assert!(
+        err.contains("run `dotman apply` to record 1 path that already matches the repo"),
+        "{err}"
+    );
     env.ok(&["apply"]);
+    assert!(!env.ok(&["status"]).contains("to record"));
     env.write(".bashrc", b"edited\n", 0o644);
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("changed-locally"));
 }
@@ -683,4 +689,44 @@ fn special_bits_in_home_are_not_tracked_so_the_file_settles() {
     assert!(!err.contains("capture bin/tool"), "{err}");
     assert!(!env.ok(&["sync"]).contains("capture bin/tool"));
     assert_eq!(mode_of(&env.home().join("bin/tool")), 0o2755);
+}
+
+#[test]
+fn edit_applies_nothing_when_another_run_changed_the_state_meanwhile() {
+    let env = added(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    env.write_repo(".b", b"b upstream\n");
+    // While the editor is open, another run applies `.b`, which changes the state.
+    let editor = env.write_script(
+        "ed.sh",
+        &format!(
+            "#!/bin/sh\necho edited >> \"$1\"\n\"{}\" apply .b >/dev/null 2>&1\n",
+            env!("CARGO_BIN_EXE_dotman")
+        ),
+    );
+    let editor = editor.to_string_lossy().into_owned();
+    let out = env.run_with(&[("EDITOR", &editor), ("VISUAL", "")], &["edit", ".a"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("changed the state while the editor was open"),
+        "{err}"
+    );
+    assert!(err.contains("run `dotman status`"), "{err}");
+    assert_eq!(env.read(".a"), b"a\n");
+    assert_eq!(env.read(".b"), b"b upstream\n");
+    assert_eq!(fs::read(env.repo().join(".a")).unwrap(), b"a\nedited\n");
+}
+
+#[test]
+fn edit_without_an_editor_names_visual_and_editor() {
+    let env = added(&[(".a", b"a\n", 0o644)]);
+    let vars = [("EDITOR", "dotman-no-such-editor"), ("VISUAL", "")];
+    let out = env.run_with(&vars, &["edit", ".a"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("`dotman-no-such-editor` is not on PATH"),
+        "{err}"
+    );
+    assert!(err.contains("set $VISUAL or $EDITOR"), "{err}");
 }

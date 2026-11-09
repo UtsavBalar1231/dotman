@@ -78,13 +78,20 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     );
 
     let mut rows = Vec::new();
+    // Clean rows whose S lags, as after a run killed before it saved the state.
+    let mut unrecorded = 0_usize;
     for key in keys {
         if !in_scope(&key) {
             continue;
         }
         let label = match classify_key(&ctx, &variants, &state, &key) {
             Ok(Classified::Unmanaged) => continue,
-            Ok(Classified::Item(item)) => item.token(),
+            Ok(Classified::Item(item)) => {
+                if item.token() == "clean" && item.row() == (Row::Clean { update_state: true }) {
+                    unrecorded = unrecorded.saturating_add(1);
+                }
+                item.token()
+            }
             Ok(Classified::Ambiguous(_)) => "ambiguous",
             Ok(Classified::Invalid(_)) => "invalid",
             Ok(Classified::Locked(_)) => "locked",
@@ -140,14 +147,26 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         for note in &scan.notes {
             output::warning(note);
         }
-        let dirty = rows.iter().filter(|(label, _)| *label != "clean").count();
-        output::info(&format!(
-            "{} managed, {} clean, {dirty} to look at",
-            rows.len(),
-            rows.len().saturating_sub(dirty)
-        ));
+        summarize(&rows, unrecorded);
     }
     Ok(())
+}
+
+fn summarize(rows: &[(&str, String)], unrecorded: usize) {
+    let dirty = rows.iter().filter(|(label, _)| *label != "clean").count();
+    output::info(&format!(
+        "{} managed, {} clean, {dirty} to look at",
+        rows.len(),
+        rows.len().saturating_sub(dirty)
+    ));
+    if unrecorded > 0 {
+        output::info(&format!(
+            "run `{} apply` to record {unrecorded} {} that already {} the repo",
+            name::bin(),
+            if unrecorded == 1 { "path" } else { "paths" },
+            if unrecorded == 1 { "matches" } else { "match" }
+        ));
+    }
 }
 
 fn list_new(

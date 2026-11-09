@@ -289,6 +289,11 @@ struct Ready {
 }
 
 impl Item {
+    /// The row, before any identity change is accepted.
+    pub(crate) const fn row(&self) -> Row {
+        self.row
+    }
+
     pub(crate) const fn token(&self) -> &'static str {
         if self.identity {
             "identity-changed"
