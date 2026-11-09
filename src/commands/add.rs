@@ -838,9 +838,10 @@ impl Planner<'_> {
                 self.out.dirs.push(dir);
             }
             Found::Dangling => bail!("{key}: {DANGLING}, which dotman does not store"),
-            Found::Held(_, reason) | Found::Skip(reason) => {
+            Found::Held(Hold::Special, reason) => {
                 bail!("{key}: {reason}; dotman stores regular files, symlinks and directories")
             }
+            Found::Held(_, reason) | Found::Skip(reason) => bail!("{key}: {reason}"),
         }
         Ok(())
     }
