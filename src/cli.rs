@@ -264,6 +264,9 @@ pub struct SyncArgs {
     /// With --system: write the system files without asking
     #[arg(long, requires = "system")]
     pub yes: bool,
+    /// Commit even when the repo changes delete at least half of the tracked files (10 or more)
+    #[arg(long)]
+    pub allow_mass_delete: bool,
 }
 
 /// Arguments of `dotman diff`.

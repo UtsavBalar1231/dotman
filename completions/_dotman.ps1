@@ -194,6 +194,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             [CompletionResult]::new('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Show what would be captured, committed, pulled, applied and pushed; change nothing')
             [CompletionResult]::new('--system', '--system', [CompletionResultType]::ParameterName, 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'With --system: write the system files without asking')
+            [CompletionResult]::new('--allow-mass-delete', '--allow-mass-delete', [CompletionResultType]::ParameterName, 'Commit even when the repo changes delete at least half of the tracked files (10 or more)')
             [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress informational messages')

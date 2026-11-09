@@ -141,6 +141,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand sync" -l no-hooks -d 'Run 
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l dry-run -d 'Show what would be captured, committed, pulled, applied and pushed; change nothing'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l system -d 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l yes -d 'With --system: write the system files without asking'
+complete -c dotman -n "__fish_dotman_using_subcommand sync" -l allow-mass-delete -d 'Commit even when the repo changes delete at least half of the tracked files (10 or more)'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -s v -l verbose -d 'Show verbose output'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -s q -l quiet -d 'Suppress informational messages'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l no-pager -d 'Disable pager output'

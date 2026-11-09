@@ -182,6 +182,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --dry-run 'Show what would be captured, committed, pulled, applied and pushed; change nothing'
             cand --system 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call'
             cand --yes 'With --system: write the system files without asking'
+            cand --allow-mass-delete 'Commit even when the repo changes delete at least half of the tracked files (10 or more)'
             cand -v 'Show verbose output'
             cand --verbose 'Show verbose output'
             cand -q 'Suppress informational messages'

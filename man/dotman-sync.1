@@ -4,7 +4,7 @@
 .SH NAME
 dotman\-sync \- Capture local changes, commit, pull, apply what arrived and push
 .SH SYNOPSIS
-\fBdotman sync\fR [\fB\-m\fR|\fB\-\-message\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBdotman sync\fR [\fB\-m\fR|\fB\-\-message\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-\-allow\-mass\-delete\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Capture local changes, commit, pull, apply what arrived and push
 .SH OPTIONS
@@ -23,6 +23,9 @@ After the pull, also write the system files outside $HOME, through one sudo, doa
 .TP
 \fB\-\-yes\fR
 With \-\-system: write the system files without asking
+.TP
+\fB\-\-allow\-mass\-delete\fR
+Commit even when the repo changes delete at least half of the tracked files (10 or more)
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

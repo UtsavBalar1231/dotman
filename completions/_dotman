@@ -194,6 +194,7 @@ _arguments "${_arguments_options[@]}" : \
 '--dry-run[Show what would be captured, committed, pulled, applied and pushed; change nothing]' \
 '--system[After the pull, also write the system files outside \$HOME, through one sudo, doas or run0 call]' \
 '--yes[With --system\: write the system files without asking]' \
+'--allow-mass-delete[Commit even when the repo changes delete at least half of the tracked files (10 or more)]' \
 '-v[Show verbose output]' \
 '--verbose[Show verbose output]' \
 '-q[Suppress informational messages]' \

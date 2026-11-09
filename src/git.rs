@@ -352,7 +352,27 @@ impl Git {
 
     /// Stages every change, including paths ignored by `.gitignore`.
     pub fn stage_all(&self) -> Result<()> {
-        self.run(&["add", "-A", "-f", "--", "."]).map(drop)
+        self.stage_all_except(&[])
+    }
+
+    /// Like [`Git::stage_all`], leaving out `held`, repo-relative paths taken literally.
+    pub fn stage_all_except(&self, held: &[PathBuf]) -> Result<()> {
+        let mut args: Vec<OsString> = ["add", "-A", "-f", "--", "."].map(OsString::from).to_vec();
+        args.extend(held.iter().map(|path| pathspec(":(exclude,literal)", path)));
+        self.run(&args).map(drop)
+    }
+
+    /// Takes `paths` out of the index again, back to what `HEAD` has.
+    pub fn unstage(&self, paths: &[PathBuf]) -> Result<()> {
+        let mut args: Vec<OsString> = if self.head()?.is_some() {
+            ["reset", "-q", "--"].map(OsString::from).to_vec()
+        } else {
+            ["rm", "-q", "--cached", "--ignore-unmatch", "--"]
+                .map(OsString::from)
+                .to_vec()
+        };
+        args.extend(paths.iter().map(|path| pathspec(":(literal)", path)));
+        self.run(&args).map(drop)
     }
 
     /// Commits the staged changes; `None` when nothing is staged.
@@ -502,6 +522,16 @@ impl Git {
         self.operation().is_some()
     }
 
+    /// Fetches `branch` from `remote` into `FETCH_HEAD`.
+    pub fn fetch(&self, remote: &str, branch: &str) -> Result<()> {
+        self.run(&["fetch", "-q", remote, branch]).map(drop)
+    }
+
+    /// The best common ancestor of `a` and `b`; `None` when their histories are unrelated.
+    pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
+        self.optional(&["merge-base", a, b])
+    }
+
     /// Fails if the remote has commits `branch` lacks; pull first.
     pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
         self.run(&["push", remote, branch]).map(drop)
@@ -647,6 +677,12 @@ impl Git {
         self.run_with(cmd, &["config", scope, "--", key, value])
             .map(drop)
     }
+}
+
+fn pathspec(magic: &str, path: &Path) -> OsString {
+    let mut spec = OsString::from(magic);
+    spec.push(path);
+    spec
 }
 
 fn text(out: &Output) -> String {

@@ -8,22 +8,31 @@
 use crate::cli::SyncArgs;
 use crate::commands::Outcome;
 use crate::commands::apply::{self, Applied, Options, Pass};
-use crate::context::Context;
-use crate::git::PullOutcome;
+use crate::context::{Context, TEMP_PREFIX};
+use crate::git::{PullOutcome, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
 use crate::lock::Lock;
 use crate::name;
 use crate::output;
+use crate::prompt;
 use crate::remote;
 use crate::secrets;
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 
 const REMOTE: &str = "origin";
 
 // Paths named in the generated commit message; the rest are counted.
 const LISTED: usize = 3;
+
+// A commit that deletes this many tracked files, and at least half of them, looks like a broken
+// checkout or a lost worktree rather than an edit.
+const MASS_DELETE: usize = 10;
 
 pub(crate) fn identity_fix() -> String {
     let bin = name::bin();
@@ -64,7 +73,13 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         dry_run,
         never_ask: false,
     };
-    commit(&ctx, args.message.as_deref(), dry_run, &first.captured)?;
+    let held = commit(
+        &ctx,
+        args.message.as_deref(),
+        dry_run,
+        args.allow_mass_delete,
+        &first.captured,
+    )?;
 
     let branch = match ctx.git.remote_url(REMOTE)? {
         Some(_) => Some(
@@ -79,14 +94,14 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
             "no remote is set; add one with `{} init --remote <url>`",
             name::bin()
         ));
-        return without_remote(&ctx, args, first, policy);
+        return without_remote(&ctx, args, first, policy, held);
     };
     if !dry_run {
         remote::note_origin(&ctx, true);
     }
     // A failed path never stops the sync; the failure is reported after the push.
     let (first_failed, uncaptured) = (first.failed, first.uncaptured);
-    let mut attention = first.outcome == Outcome::Attention;
+    let mut attention = first.outcome == Outcome::Attention || held;
     let written = first.written;
     if dry_run {
         output::info(&format!(
@@ -99,13 +114,17 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     }
 
     // A remote without the branch is a first push: there is nothing to pull.
-    if ctx.git.remote_has_branch(REMOTE, &branch)?
-        && let PullOutcome::Conflict { paths } = ctx.git.pull_rebase(REMOTE, &branch)?
-    {
-        report_conflict(&ctx, &paths);
-        apply::check_failed(first_failed)?;
-        return Ok(Outcome::Conflict);
+    if ctx.git.remote_has_branch(REMOTE, &branch)? {
+        refuse_unrelated(&ctx, &branch)?;
+        if let PullOutcome::Conflict { paths } = ctx.git.pull_rebase(REMOTE, &branch)? {
+            report_conflict(&ctx, &paths);
+            apply::check_failed(first_failed)?;
+            return Ok(Outcome::Conflict);
+        }
     }
+    // The pull can bring a pair that only a case-sensitive filesystem holds; the pulled commits
+    // stay, and nothing is written for any key.
+    ctx.refuse_collisions()?;
 
     let mut second = apply::apply(
         &ctx,
@@ -120,7 +139,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     )?;
     attention |= second.outcome == Outcome::Attention;
     second.written.extend(written);
-    let reencrypted = reencrypt(&ctx, false);
+    let reencrypted = reencrypt(&ctx, args, false);
     let hooked = hooks::run(&ctx, &second.written, policy);
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured));
 
@@ -138,6 +157,7 @@ fn without_remote(
     args: &SyncArgs,
     first: Applied,
     policy: Policy,
+    held: bool,
 ) -> Result<Outcome> {
     let dry_run = args.dry_run;
     // A dry run captured nothing, so its captured keys are not reported a second time.
@@ -159,17 +179,17 @@ fn without_remote(
     )?;
     second.written.extend(first.written);
     second.failed = second.failed.saturating_add(first.uncaptured);
-    let reencrypted = reencrypt(ctx, dry_run);
+    let reencrypted = reencrypt(ctx, args, dry_run);
     let outcome = apply::finish(ctx, &second, policy);
     reencrypted?;
-    let attention = first.outcome == Outcome::Attention || outcome? == Outcome::Attention;
+    let attention = held || first.outcome == Outcome::Attention || outcome? == Outcome::Attention;
     Ok(finish(attention))
 }
 
 /// Commits a re-encryption with the generated message, whatever `-m` said.
-fn reencrypt(ctx: &Context, dry_run: bool) -> Result<()> {
+fn reencrypt(ctx: &Context, args: &SyncArgs, dry_run: bool) -> Result<()> {
     if secrets::reencrypt(ctx, dry_run)? > 0 {
-        commit(ctx, None, false, &BTreeSet::new())?;
+        commit(ctx, None, false, args.allow_mass_delete, &BTreeSet::new())?;
     }
     Ok(())
 }
@@ -182,28 +202,52 @@ const fn finish(attention: bool) -> Outcome {
     }
 }
 
-/// Stages everything and commits it. A dry run stages nothing, so it counts the keys that would
-/// be captured plus what the worktree already holds.
+/// Stages everything and commits it, except files that hold an age secret key, and returns
+/// whether any were held. A dry run stages nothing, so it counts the keys that would be captured
+/// plus what the worktree already holds.
 fn commit(
     ctx: &Context,
     message: Option<&str>,
     dry_run: bool,
+    allow_mass_delete: bool,
     captured: &BTreeSet<String>,
-) -> Result<()> {
+) -> Result<bool> {
+    let before = ctx.git.status()?;
+    if !allow_mass_delete {
+        refuse_mass_delete(ctx, &before, dry_run)?;
+    }
+    // `dotman edit` and hand edits in the repo reach no capture, so this is their only check.
+    let held: Vec<&StatusEntry> = before
+        .iter()
+        .filter(|entry| entry.kind != StatusKind::Unmerged)
+        .filter(|entry| holds_secret_key(&ctx.paths.repo.join(&entry.path)))
+        .collect();
+    let held_paths: Vec<PathBuf> = held.iter().map(|entry| entry.path.clone()).collect();
     let mut changed = BTreeSet::new();
     if dry_run {
         changed.extend(captured.iter().cloned());
     } else {
-        ctx.git.stage_all()?;
+        ctx.git.stage_all_except(&held_paths)?;
+        let staged: Vec<PathBuf> = held
+            .iter()
+            .filter(|entry| entry.kind != StatusKind::Untracked && !entry.xy.starts_with('.'))
+            .map(|entry| entry.path.clone())
+            .collect();
+        if !staged.is_empty() {
+            ctx.git.unstage(&staged)?;
+        }
     }
+    report_held(ctx, &held_paths, dry_run);
     changed.extend(
         ctx.git
             .status()?
             .iter()
+            .filter(|entry| !held_paths.contains(&entry.path) && !is_temp(&entry.path))
             .map(|entry| entry.path.to_string_lossy().into_owned()),
     );
+    let held = !held_paths.is_empty();
     if changed.is_empty() {
-        return Ok(());
+        return Ok(held);
     }
     let message = message.map_or_else(
         || default_message(&ctx.identity().host, &changed),
@@ -211,7 +255,7 @@ fn commit(
     );
     if dry_run {
         output::info(&format!("would commit: {message}"));
-        return Ok(());
+        return Ok(held);
     }
     if !ctx.git.identity_configured()? {
         bail!(identity_fix());
@@ -219,7 +263,98 @@ fn commit(
     if ctx.git.commit(&message)?.is_some() {
         output::success(&format!("committed: {message}"));
     }
-    Ok(())
+    Ok(held)
+}
+
+/// Whether the regular file at `path` holds an age identity. A FIFO swapped in cannot hang the
+/// open, and anything unreadable is left to `git add` to report.
+fn holds_secret_key(path: &Path) -> bool {
+    let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    file.metadata().is_ok_and(|meta| meta.is_file())
+        && file.read_to_end(&mut bytes).is_ok()
+        && secrets::holds_secret_key(&bytes)
+}
+
+fn is_temp(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_bytes().starts_with(TEMP_PREFIX.as_bytes()))
+}
+
+fn report_held(ctx: &Context, held: &[PathBuf], dry_run: bool) {
+    if held.is_empty() {
+        return;
+    }
+    output::warning(&format!(
+        "{} {} in the repo {} an age secret key (AGE-SECRET-KEY-), so {} {}committed; remove the key from {}, or keep such a file encrypted with `{} add --encrypt`:",
+        held.len(),
+        if held.len() == 1 { "file" } else { "files" },
+        if held.len() == 1 { "holds" } else { "hold" },
+        if held.len() == 1 { "it is" } else { "they are" },
+        if dry_run { "would not be " } else { "not " },
+        ctx.paths.repo.display(),
+        name::bin()
+    ));
+    for path in held {
+        output::warning(&format!("  {}", path.display()));
+    }
+}
+
+/// Refuses a commit that deletes at least [`MASS_DELETE`] tracked files and at least half of
+/// them, unless an interactive answer allows it.
+fn refuse_mass_delete(ctx: &Context, status: &[StatusEntry], dry_run: bool) -> Result<()> {
+    let deleted = status
+        .iter()
+        .filter(|entry| entry.kind == StatusKind::Ordinary && entry.xy.contains('D'))
+        .count();
+    if deleted < MASS_DELETE || ctx.git.head()?.is_none() {
+        return Ok(());
+    }
+    let tracked = ctx.git.ls_tree("HEAD")?.len();
+    if deleted.saturating_mul(2) < tracked {
+        return Ok(());
+    }
+    let what = format!("the changes in the repo delete {deleted} of its {tracked} tracked files");
+    if !dry_run && prompt::interactive() {
+        output::warning(&format!(
+            "{what}, which looks more like a broken checkout than an edit"
+        ));
+        if prompt::confirm("commit the deletions? [y/N]")? {
+            return Ok(());
+        }
+        bail!("nothing was committed or pushed");
+    }
+    let bin = name::bin();
+    bail!(
+        "{what}, which looks more like a broken checkout than an edit; nothing was committed or pushed. To bring the files back: `{bin} git checkout -- .`; if the deletions are meant: `{bin} sync --allow-mass-delete`"
+    )
+}
+
+/// Refuses to pull a `branch` that shares no commit with `HEAD`: rebasing onto a replaced or
+/// unrelated history would silently drop whatever only one side has.
+fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
+    if ctx.git.head()?.is_none() {
+        return Ok(());
+    }
+    ctx.git.fetch(REMOTE, branch)?;
+    if ctx.git.merge_base("HEAD", "FETCH_HEAD")?.is_some() {
+        return Ok(());
+    }
+    let bin = name::bin();
+    let repo = ctx.paths.repo.display();
+    let url = ctx.git.remote_url(REMOTE)?.map_or_else(
+        || "<url>".to_owned(),
+        |url| shell_words::quote(&url).into_owned(),
+    );
+    bail!(
+        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has:\n  mv {repo} {repo}.old\n  {bin} import {url}\n  {bin} import --overlay {repo}.old\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {branch}`, then `{bin} sync`"
+    )
 }
 
 /// `sync(<host>): a/b, c/d, e/f (+N more)`, naming the first three paths in sorted order.

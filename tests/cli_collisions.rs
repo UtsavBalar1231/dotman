@@ -68,3 +68,45 @@ fn a_variant_and_its_plain_file_are_not_twins() {
     );
     env.ok(&["apply", "--dry-run"]);
 }
+
+#[test]
+fn a_pair_that_arrives_with_the_pull_stops_sync_before_anything_is_written() {
+    let a = TestEnv::new();
+    a.ok(&["init"]);
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".a", b"a\n", 0o644);
+    a.ok(&["add", ".a"]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+
+    // Committed with plain git, as a case-sensitive machine would.
+    a.write_repo(".config/x/Case.conf", b"upper\n");
+    a.write_repo(".config/x/case.conf", b"lower\n");
+    let repo = a.repo().to_string_lossy().into_owned();
+    a.git(&["-C", &repo, "add", "-A"]);
+    a.git(&["-C", &repo, "commit", "-q", "-m", "both"]);
+    a.git(&["-C", &repo, "push", "-q", "origin", "main"]);
+    let published = a.remote_refs();
+
+    b.write(".a", b"edited on b\n", 0o644);
+    let err = b.fails(&["sync"]);
+    assert!(err.contains(".config/x/Case.conf"), "{err}");
+    assert!(err.contains("differ only in case or Unicode"), "{err}");
+    for key in [".config/x/Case.conf", ".config/x/case.conf"] {
+        assert!(!b.home().join(key).exists(), "{key}");
+        assert!(
+            b.repo().join(key).exists(),
+            "the pulled commits stay: {key}"
+        );
+    }
+    assert_eq!(b.remote_refs(), published, "nothing is pushed");
+}

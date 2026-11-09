@@ -467,3 +467,103 @@ fn failed_paths_do_not_stop_a_sync_without_a_remote_or_a_dry_run() {
     let log = env.git(&["-C", &repo_path(&env), "show", "HEAD:.a"]);
     assert_eq!(log, "changed\n");
 }
+
+#[test]
+fn a_remote_with_unrelated_history_is_refused_before_the_pull() {
+    let (a, _b) = pair(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    let elsewhere = a.root().join("rewrite");
+    let dir = elsewhere.to_string_lossy().into_owned();
+    a.git(&["init", "-q", &dir]);
+    fs::write(elsewhere.join(".a"), b"rewritten\n").expect("write");
+    a.git(&["-C", &dir, "add", "."]);
+    a.git(&["-C", &dir, "commit", "-q", "-m", "new root"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "-C",
+        &dir,
+        "push",
+        "-q",
+        "-f",
+        &remote,
+        "HEAD:refs/heads/main",
+    ]);
+    let rewritten = a.remote_refs();
+    let head = a.git(&["-C", &repo_path(&a), "rev-parse", "HEAD"]);
+
+    a.write(".b", b"edited after the rewrite\n", 0o644);
+    let err = a.fails(&["sync"]);
+    assert!(err.contains("shares no history"), "{err}");
+    assert!(err.contains("dotman import"), "{err}");
+    assert!(err.contains("dotman import --overlay"), "{err}");
+    assert!(err.contains("--allow-unrelated-histories"), "{err}");
+    assert_eq!(a.read(".a"), b"a\n");
+    assert_eq!(a.read(".b"), b"edited after the rewrite\n");
+    assert_eq!(a.remote_refs(), rewritten);
+    assert!(!a.repo().join(".git/rebase-merge").exists());
+    let log = a.git(&["-C", &repo_path(&a), "log", "--format=%H"]);
+    assert!(log.lines().any(|oid| oid == head.trim()), "{log}");
+}
+
+#[test]
+fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
+    let keys: Vec<String> = (0..12)
+        .map(|n| format!(".config/app/f{n:02}.conf"))
+        .collect();
+    let files: Vec<(&str, &[u8], u32)> = keys
+        .iter()
+        .map(|key| (key.as_str(), b"x\n".as_slice(), 0o644))
+        .collect();
+    let env = first_device(&files);
+    let published = env.remote_refs();
+    // A broken checkout: the worktree lost every managed file, HOME still has them.
+    for key in &keys {
+        fs::remove_file(env.repo().join(key)).expect("delete from the worktree");
+    }
+    for args in [&["sync", "--dry-run"][..], &["sync"]] {
+        let err = env.fails(args);
+        assert!(err.contains("delete 12 of its"), "{err}");
+        assert!(err.contains("--allow-mass-delete"), "{err}");
+        assert!(err.contains("dotman git checkout -- ."), "{err}");
+    }
+    assert_eq!(env.remote_refs(), published);
+    let status = env.git(&["-C", &repo_path(&env), "status", "--porcelain"]);
+    assert!(
+        status.lines().all(|line| line.starts_with(" D")),
+        "{status}"
+    );
+
+    exits(&env, 0, &["sync", "--allow-mass-delete"]);
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
+    assert!(!tree.contains(".config/app/"), "{tree}");
+    assert_eq!(env.read(".config/app/f00.conf"), b"x\n");
+}
+
+#[test]
+fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
+    let (a, _b) = pair(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    let key = "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+    let editor = a.write_script("ed.sh", &format!("#!/bin/sh\necho '{key}' >> \"$1\"\n"));
+    let editor = editor.to_string_lossy().into_owned();
+    a.ok_with(&[("EDITOR", &editor), ("VISUAL", "")], &["edit", ".a"]);
+    a.write(".b", b"harmless\n", 0o644);
+
+    let err = exits(&a, 3, &["sync"]);
+    assert!(err.contains("an age secret key (AGE-SECRET-KEY-)"), "{err}");
+    assert!(err.contains("\n  .a\n"), "{err}");
+    assert!(
+        err.contains("): .b\n"),
+        "the message names only what was committed: {err}"
+    );
+    assert_eq!(remote_file(&a, ".b"), "harmless\n");
+    assert_eq!(remote_file(&a, ".a"), "a\n");
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    let history = a.git(&["--git-dir", &remote, "log", "--all", "-p", "--format="]);
+    assert!(!history.contains("AGE-SECRET-KEY-"), "{history}");
+    let local = a.git(&["-C", &repo_path(&a), "log", "--all", "-p", "--format="]);
+    assert!(!local.contains("AGE-SECRET-KEY-"), "{local}");
+
+    a.write_repo(".a", b"a, key removed\n");
+    exits(&a, 0, &["sync"]);
+    assert_eq!(remote_file(&a, ".a"), "a, key removed\n");
+}
