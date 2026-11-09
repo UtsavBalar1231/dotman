@@ -711,7 +711,8 @@ fn a_history_that_holds_a_credential_is_squashed_into_its_current_tree() {
         &format!("  .oldrc: github-token, added in {first}"),
         "  .tokrc: github-token, added in ",
         "so the import is one commit of the current tree",
-        "the new repo has no remote",
+        "the new repo has no remote, and the source cannot be one: the source still holds the history this import left out, credentials included",
+        "Set a new, empty repo as the remote with `dotman init --remote <url>`",
         "imported the current tree of 2 commits as one commit into ",
     ] {
         assert!(err.contains(line), "{line}: {err}");

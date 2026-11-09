@@ -1428,7 +1428,7 @@ fn remote_notes(
         // The squashed commit shares nothing with the source's history, so sync would refuse to
         // pull from it, and pushing there would keep the credentials its history holds.
         _ if squash => notes.push(format!(
-            "the new repo has no remote: the source's history holds what the guard holds and shares no commit with this import; set a remote with `{} init --remote <url>`",
+            "the new repo has no remote, and the source cannot be one: the source still holds the history this import left out, credentials included, and shares no commit with it. Set a new, empty repo as the remote with `{} init --remote <url>`",
             name::bin()
         )),
         Source::Path(_) => {
