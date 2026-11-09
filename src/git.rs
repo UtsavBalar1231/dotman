@@ -214,7 +214,8 @@ pub enum StatusKind {
     Renamed,
     /// A path with unresolved conflicts (`u` record).
     Unmerged,
-    /// A path git does not track (`?` record).
+    /// A path git does not track: a `?` record, or a `!` one that a `.gitignore` matches, which
+    /// [`Git::stage_all_except`] stages all the same.
     Untracked,
 }
 
@@ -223,7 +224,7 @@ pub enum StatusKind {
 pub struct StatusEntry {
     /// The record type this entry was parsed from.
     pub kind: StatusKind,
-    /// Two-letter staged/unstaged code such as `M.`; `??` for untracked.
+    /// Two-letter staged/unstaged code such as `M.`; `??` for untracked, `!!` for ignored.
     pub xy: String,
     /// Relative to the repo root; raw bytes, not necessarily UTF-8.
     pub path: PathBuf,
@@ -770,8 +771,8 @@ impl Git {
         self.head()
     }
 
-    /// Parsed `git status --porcelain=v2`, including every untracked file except those the
-    /// [`LeaveOut`] picks. Never rewrites the index, so it is safe in a dry run.
+    /// Parsed `git status --porcelain=v2`, including every untracked file, ignored ones too,
+    /// except those the [`LeaveOut`] picks. Never rewrites the index, so it is safe in a dry run.
     pub fn status(&self) -> Result<Vec<StatusEntry>> {
         let entries = self.full_status()?;
         let left_out: BTreeSet<PathBuf> = self.left_out(&entries)?.into_iter().collect();
@@ -797,6 +798,10 @@ impl Git {
         }
     }
 
+    /// Lists what a tracked `.gitignore` ignores, since staging force-adds it: every check on
+    /// untracked files must see it. `traditional` with `--untracked-files=all` lists each file
+    /// under an ignored directory, where `matching` lists only the directory, which the content
+    /// guard cannot read.
     fn full_status(&self) -> Result<Vec<StatusEntry>> {
         let mut cmd = self.command();
         cmd.env("GIT_OPTIONAL_LOCKS", "0");
@@ -805,6 +810,7 @@ impl Git {
             "--porcelain=v2",
             "-z",
             "--untracked-files=all",
+            "--ignored=traditional",
             "--ignore-submodules=all",
         ];
         parse_status(&self.run_with(cmd, &args)?.stdout)
@@ -1319,7 +1325,7 @@ fn parse_status(raw: &[u8]) -> Result<Vec<StatusEntry>> {
             Some(b'1') => (StatusKind::Ordinary, 9),
             Some(b'2') => (StatusKind::Renamed, 10),
             Some(b'u') => (StatusKind::Unmerged, 11),
-            Some(b'?') => (StatusKind::Untracked, 2),
+            Some(b'?' | b'!') => (StatusKind::Untracked, 2),
             _ => bail!(
                 "unexpected git status record: {}",
                 String::from_utf8_lossy(record)
@@ -1334,10 +1340,10 @@ fn parse_status(raw: &[u8]) -> Result<Vec<StatusEntry>> {
                 String::from_utf8_lossy(record)
             );
         };
-        let xy = if kind == StatusKind::Untracked {
-            "??".to_owned()
-        } else {
-            String::from_utf8_lossy(xy).into_owned()
+        let xy = match record.first() {
+            Some(b'?') => "??".to_owned(),
+            Some(b'!') => "!!".to_owned(),
+            _ => String::from_utf8_lossy(xy).into_owned(),
         };
         let orig_path = if kind == StatusKind::Renamed {
             let orig = records

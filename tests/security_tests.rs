@@ -18,9 +18,10 @@ use common::{
     tree_checksum, write_plan, yadm_fixture,
 };
 use dotman::paths::{Env, Paths, ensure_not_root};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -1316,6 +1317,79 @@ fn the_staging_guard_keeps_a_credential_out_of_the_commit() {
     );
     assert!(!err.contains(&token), "{err}");
     assert!(!remote_history(&env).contains(&token));
+}
+
+/// A tracked `.gitignore` in a managed directory, as nvim's, is the user's file and not dotman's
+/// ignore list: what it matches in the repo goes through every check before sync commits it. A
+/// credential, in a matched file or under a matched directory, is held and never pushed, and
+/// status names it; a name that is not UTF-8 stays out; `[ignore]` and the temp names apply. A
+/// file the user added that the `.gitignore` matches is committed all the same.
+#[test]
+fn a_tracked_gitignore_never_lets_a_repo_file_skip_the_checks() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.write(".config/app/.gitignore", b"*.log\ndata\n", 0o644);
+    env.ok(&["add", ".config/app"]);
+    let mut config = env.repo_config();
+    config.ignore.patterns.push("**/debug.log".to_owned());
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    env.ok(&["sync"]);
+    env.write(".config/app/keep.log", b"kept\n", 0o644);
+    env.ok(&["add", ".config/app/keep.log"]);
+
+    let token = github_token();
+    let app = env.repo().join(".config/app");
+    let unnamed = app.join(OsStr::from_bytes(b"z\xff.log"));
+    let temp = app.join("data/.dotman-tmp-99999-a1B2c3");
+    let held = [".config/app/creds.log", ".config/app/data/tok"];
+    for key in held {
+        env.write_repo(key, format!("token: {token}\n").as_bytes());
+    }
+    env.write_repo(".config/app/debug.log", b"junk\n");
+    fs::write(&unnamed, b"junk\n").expect("write the unnamed file");
+    fs::write(&temp, b"junk\n").expect("write the temp file");
+
+    let listed: Vec<String> = env
+        .porcelain("status")
+        .into_iter()
+        .filter(|(token, _)| token == "held-in-repo")
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(listed, held, "{listed:?}");
+    let err = exits(&env.run(&["status"]), 0);
+    assert!(
+        err.contains("z\u{fffd}.log: in the repo, never committed"),
+        "{err}"
+    );
+    let err = exits(&env.run(&["sync"]), 3);
+    for key in held {
+        assert!(
+            err.contains(&format!("  {key}: line 1 holds a github-token")),
+            "{err}"
+        );
+    }
+    assert!(!err.contains(&token), "{err}");
+
+    for key in held {
+        fs::remove_file(env.repo().join(key)).expect("drop the credential");
+    }
+    exits(&env.run(&["sync"]), 0);
+    let tree = remote_tree(&env);
+    assert_eq!(
+        tree.lines().collect::<Vec<_>>(),
+        [
+            ".config/app/.gitignore",
+            ".config/app/a.conf",
+            ".config/app/keep.log",
+            ".dotman.toml",
+            "install.sh"
+        ]
+    );
+    assert!(!remote_history(&env).contains(&token));
+    assert!(unnamed.exists() && temp.exists());
 }
 
 /// Every importer leaves out a file that holds a credential, reports it as needing action and
