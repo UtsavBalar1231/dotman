@@ -87,7 +87,7 @@ What they miss:
 
 The generated `install.sh` downloads a pinned release tarball and verifies it against `checksums.txt`. Both come from the same release URL, so the checksum proves integrity, not authenticity: it catches a corrupt or truncated download, not a compromised release. `DOTMAN_BOOTSTRAP_BASE_URL` overrides the download base; set it only to a host you control.
 
-Every install path trusts the GitHub repository. `install/install.sh` is fetched from its `main` branch, and the tarball and `checksums.txt` from its releases; nothing is signed. To verify who published the binary, build from a tagged checkout.
+The install paths all trust the GitHub repository. `install/install.sh` is fetched from its `main` branch, and the tarball and `checksums.txt` from its releases; nothing is signed. To verify who published the binary, build from a tagged checkout.
 
 ## Not tested
 

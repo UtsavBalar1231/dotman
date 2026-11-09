@@ -75,7 +75,7 @@ Exit codes: 0 success; 1 an error; 2 a command line that cannot be parsed; 3 the
 
 `dotman status` lists each managed path that is not clean, with its state, then the new files under managed directories that `sync` would capture, the files held back, and the repo edits that `sync` holds ("held in the repo"). It ends with counts, such as `5 managed, 4 clean, 1 to look at (0 new, 1 held back)`, and with the commits to push or pull as of the last fetch: `1 commit to pull: run dotman sync`. It takes no lock and writes nothing.
 
-`dotman status --porcelain` prints one `<token>\t<key>\0` record per path. A template that does not render gets `template-error`. `dotman status --help` lists every token.
+`dotman status --porcelain` prints one `<token>\t<key>\0` record per path. A template that does not render gets `template-error`. `dotman status --help` lists the tokens and what each one means.
 
 ## Sync
 
@@ -152,7 +152,7 @@ dotman key import key.txt        # use an existing identity; --add-recipient add
 
 On a machine where you cannot place a file, set `DOTMAN_AGE_KEY` to the key text, or `DOTMAN_AGE_KEY_FILE` to a path. The key goes only to age's stdin and is stripped from every other child process. It is refused in `[template] env`. `DOTMAN_AGE_KEY` works with any age or rage that reads an identity from `-i -`: dotman checks that by decrypting a built-in test file, so it needs no `age-keygen`. Without an env var, the identity file is `$XDG_CONFIG_HOME/dotman/age-identity.txt`.
 
-Back the identity up now: keep it in a password manager and one offline copy. If every identity is lost, the encrypted data is lost, and no one can recover it. Add a second recipient (`dotman key init` on another machine, or `dotman key import --add-recipient`); `dotman doctor` warns while there is only one. When `[age] recipients` changes, here or upstream, the next `sync` on a machine whose key decrypts every encrypted file re-encrypts them all to the new set, without asking.
+Back the identity up now: keep it in a password manager and one offline copy. Without an identity, the encrypted data cannot be read, and no one can recover it. Add a second recipient (`dotman key init` on another machine, or `dotman key import --add-recipient`); `dotman doctor` warns while there is only one. When `[age] recipients` changes, here or upstream, the next `sync` on a machine whose key decrypts every encrypted file re-encrypts them all to the new set, without asking.
 
 ### The guards
 
