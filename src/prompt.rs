@@ -12,14 +12,18 @@ pub fn interactive() -> bool {
         && std::env::var_os("DOTMAN_NON_INTERACTIVE").is_none_or(|v| v.is_empty())
 }
 
-/// Prints `question` on stderr and returns the trimmed answer line.
+/// Prints `question` on stderr, kept on one line with control characters escaped, and returns
+/// the trimmed answer line.
 pub fn ask(question: &str) -> Result<String> {
-    let mut err = io::stderr().lock();
-    write!(err, "{question} ").context("cannot write to stderr")?;
+    ask_on(&mut io::stderr().lock(), &mut io::stdin().lock(), question)
+}
+
+// A question can name a key or a path from the repo.
+fn ask_on(err: &mut impl Write, input: &mut impl BufRead, question: &str) -> Result<String> {
+    write!(err, "{} ", output::escape_line(question)).context("cannot write to stderr")?;
     err.flush().context("cannot write to stderr")?;
     let mut line = String::new();
-    io::stdin()
-        .lock()
+    input
         .read_line(&mut line)
         .context("cannot read the answer")?;
     Ok(line.trim().to_owned())
@@ -107,6 +111,22 @@ mod tests {
     fn an_empty_answer_or_the_end_of_input_gives_nothing() {
         assert_eq!(reask(scripted(&[""]), |a| choice(a, 3)).unwrap(), None);
         assert_eq!(reask(scripted(&["x"]), |a| choice(a, 3)).unwrap(), None);
+    }
+
+    #[test]
+    fn the_question_is_shown_escaped_on_one_line() {
+        let mut shown = Vec::new();
+        let answer = ask_on(
+            &mut shown,
+            &mut b" y \n".as_slice(),
+            "keep d/\u{1b}]0;PWNED\u{7}x\r\nforged? [y/N]",
+        )
+        .unwrap();
+        assert_eq!(answer, "y");
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "keep d/\\u{1b}]0;PWNED\\u{7}x\\r\\nforged? [y/N] "
+        );
     }
 
     #[test]
