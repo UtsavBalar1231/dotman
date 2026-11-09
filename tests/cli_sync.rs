@@ -527,6 +527,12 @@ fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
         assert!(err.contains("--allow-mass-delete"), "{err}");
         assert!(err.contains("dotman git checkout -- ."), "{err}");
     }
+    // The dry run previews everything first, then says the real run would refuse.
+    let err = env.fails(&["sync", "--dry-run"]);
+    let preview = err.find("would pull origin main").expect("the preview");
+    let refusal = err.find("sync would refuse").expect("the refusal");
+    assert!(preview < refusal, "{err}");
+    assert!(err.contains("would commit: "), "{err}");
     assert_eq!(env.remote_refs(), published);
     let status = env.git(&["-C", &repo_path(&env), "status", "--porcelain"]);
     assert!(

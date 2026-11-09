@@ -84,7 +84,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         dry_run,
         never_ask: false,
     };
-    let held = commit(
+    let Committed { held, refusal } = commit(
         &ctx,
         args.message.as_deref(),
         dry_run,
@@ -105,7 +105,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
             "no remote is set; add one with `{} init --remote <url>`",
             name::bin()
         ));
-        return without_remote(&ctx, args, first, policy, held);
+        let outcome = without_remote(&ctx, args, first, policy, held);
+        return refused(refusal).and(outcome);
     };
     if !dry_run {
         remote::note_origin(&ctx, true);
@@ -120,7 +121,9 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         ));
         secrets::reencrypt(&ctx, true)?;
         let hooked = hooks::run(&ctx, &written, policy);
-        apply::check_failed(first_failed, uncaptured).and(hooked)?;
+        apply::check_failed(first_failed, uncaptured)
+            .and(hooked)
+            .and_then(|()| refused(refusal))?;
         return Ok(finish(attention));
     }
 
@@ -215,7 +218,7 @@ fn without_remote(
 /// Commits a re-encryption with the generated message, whatever `-m` said.
 fn reencrypt(ctx: &Context, args: &SyncArgs, dry_run: bool) -> Result<()> {
     if secrets::reencrypt(ctx, dry_run)? > 0 {
-        commit(ctx, None, false, args.allow_mass_delete, &BTreeSet::new())?;
+        commit(ctx, None, false, args.allow_mass_delete, &BTreeSet::new()).map(drop)?;
     }
     Ok(())
 }
@@ -228,20 +231,34 @@ const fn finish(attention: bool) -> Outcome {
     }
 }
 
-/// Stages everything and commits it, except files that hold an age secret key, and returns
-/// whether any were held. A dry run stages nothing, so it counts the keys that would be captured
-/// plus what the worktree already holds.
+/// What [`commit`] did.
+struct Committed {
+    /// Files that hold an age secret key were left out.
+    held: bool,
+    /// In a dry run, why the real run would refuse to commit; reported once the preview is done.
+    refusal: Option<String>,
+}
+
+/// Fails with `refusal`, if there is one.
+fn refused(refusal: Option<String>) -> Result<()> {
+    refusal.map_or(Ok(()), |why| Err(anyhow!(why)))
+}
+
+/// Stages everything and commits it, except files that hold an age secret key. A dry run stages
+/// nothing, so it counts the keys that would be captured plus what the worktree already holds.
 fn commit(
     ctx: &Context,
     message: Option<&str>,
     dry_run: bool,
     allow_mass_delete: bool,
     captured: &BTreeSet<String>,
-) -> Result<bool> {
+) -> Result<Committed> {
     let before = ctx.git.status()?;
-    if !allow_mass_delete {
-        refuse_mass_delete(ctx, &before, dry_run)?;
-    }
+    let refusal = if allow_mass_delete {
+        None
+    } else {
+        refuse_mass_delete(ctx, &before, dry_run)?
+    };
     let held = held_entries(ctx, &before);
     let held_paths: Vec<PathBuf> = held.iter().map(|(entry, _)| entry.path.clone()).collect();
     let mut changed = BTreeSet::new();
@@ -267,9 +284,12 @@ fn commit(
             .filter(|entry| !(entry.kind == StatusKind::Untracked && is_temp(&entry.path)))
             .map(|entry| entry.path.to_string_lossy().into_owned()),
     );
-    let held = !held_paths.is_empty();
+    let done = Committed {
+        held: !held_paths.is_empty(),
+        refusal,
+    };
     if changed.is_empty() {
-        return Ok(held);
+        return Ok(done);
     }
     let message = message.map_or_else(
         || default_message(&ctx.identity().host, &changed),
@@ -277,7 +297,7 @@ fn commit(
     );
     if dry_run {
         output::info(&format!("would commit: {message}"));
-        return Ok(held);
+        return Ok(done);
     }
     if !ctx.git.identity_configured()? {
         bail!(identity_fix());
@@ -285,7 +305,7 @@ fn commit(
     if ctx.git.commit(&message)?.is_some() {
         output::success(&format!("committed: {message}"));
     }
-    Ok(held)
+    Ok(done)
 }
 
 /// The changed worktree files the content guard holds, minus what `[guard] allow` covers.
@@ -379,8 +399,13 @@ fn report_held(ctx: &Context, held: &[(&StatusEntry, Finding)], dry_run: bool) {
 }
 
 /// Refuses a commit that deletes at least [`MASS_DELETE`] tracked files and at least half of
-/// them, unless an interactive answer allows it.
-fn refuse_mass_delete(ctx: &Context, status: &[StatusEntry], dry_run: bool) -> Result<()> {
+/// them, unless an interactive answer allows it. A dry run gets the refusal back instead, to
+/// report after its preview.
+fn refuse_mass_delete(
+    ctx: &Context,
+    status: &[StatusEntry],
+    dry_run: bool,
+) -> Result<Option<String>> {
     // Only files gone from the worktree: a lost index also lists every file as deleted.
     let deleted = status
         .iter()
@@ -388,11 +413,11 @@ fn refuse_mass_delete(ctx: &Context, status: &[StatusEntry], dry_run: bool) -> R
         .filter(|entry| fs::symlink_metadata(ctx.paths.repo.join(&entry.path)).is_err())
         .count();
     if deleted < MASS_DELETE || ctx.git.head()?.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let tracked = ctx.git.ls_tree("HEAD")?.len();
     if deleted.saturating_mul(2) < tracked {
-        return Ok(());
+        return Ok(None);
     }
     let what = format!("the changes in the repo delete {deleted} of its {tracked} tracked files");
     if !dry_run && prompt::interactive() {
@@ -400,13 +425,21 @@ fn refuse_mass_delete(ctx: &Context, status: &[StatusEntry], dry_run: bool) -> R
             "{what}, as a broken checkout or a forget of many files does"
         ));
         if prompt::confirm("commit the deletions? [y/N]")? {
-            return Ok(());
+            return Ok(None);
         }
         bail!("nothing was committed or pushed");
     }
     let bin = name::bin();
+    let fix = format!(
+        "To bring the files back: `{bin} git checkout -- .`; if the deletions are meant: `{bin} sync --allow-mass-delete`"
+    );
+    if dry_run {
+        return Ok(Some(format!(
+            "sync would refuse: {what}, as a broken checkout or a forget of many files does, and would commit or push nothing. {fix}"
+        )));
+    }
     bail!(
-        "{what}, as a broken checkout or a forget of many files does; nothing was committed or pushed. To bring the files back: `{bin} git checkout -- .`; if the deletions are meant: `{bin} sync --allow-mass-delete`"
+        "{what}, as a broken checkout or a forget of many files does; nothing was committed or pushed. {fix}"
     )
 }
 
