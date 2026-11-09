@@ -262,9 +262,18 @@ impl Context {
 
     /// A `.git` directory with no `HEAD`, or with a `config.lock` and no `dotman-id`, is what a
     /// killed `git init` or clone leaves. `dotman-id` is written last, so a repo that has it
-    /// finished its init, whatever else is broken.
+    /// finished its init, whatever else is broken. A `.git` file, as a linked worktree or a
+    /// submodule has, is refused too: the metadata dotman keeps in `.git` would not be there.
     pub(crate) fn refuse_incomplete(&self) -> Result<()> {
         let git_dir = self.paths.repo.join(".git");
+        if fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_file()) {
+            bail!(
+                "{} is a linked git worktree or a submodule (its .git is a file), and dotman needs a plain git repo there; point `repo` in {} at the main checkout, or move it aside and run `{} init <url>`",
+                self.paths.repo.display(),
+                self.paths.config_file.display(),
+                crate::name::bin()
+            );
+        }
         let incomplete = is_real_dir(&git_dir)
             && !git_dir.join("dotman-id").exists()
             && (!git_dir.join("HEAD").is_file() || git_dir.join("config.lock").exists());
@@ -332,7 +341,10 @@ impl Context {
                     crate::name::bin()
                 )
             }
-            Err(e) => Err(e).context("cannot read .git/dotman-id"),
+            Err(e) => {
+                self.refuse_incomplete()?;
+                Err(e).context("cannot read .git/dotman-id")
+            }
         }
     }
 

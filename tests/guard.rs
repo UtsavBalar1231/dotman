@@ -291,3 +291,37 @@ fn stale_git_locks_are_reported_with_the_recovery_steps() {
         assert!(err.contains(&step), "{step}: {err}");
     }
 }
+
+/// A repo path that is a linked worktree, whose `.git` is a file naming the real git dir, is
+/// refused by every subcommand with what dotman needs instead of a raw "Not a directory".
+#[test]
+fn a_linked_worktree_as_the_repo_is_refused_clearly() {
+    let env = committed();
+    let main = env.xdg_data().join("main");
+    fs::rename(env.repo(), &main).expect("move the repo aside");
+    let repo = env.repo().to_string_lossy().into_owned();
+    env.git(&[
+        "-C",
+        &main.to_string_lossy(),
+        "worktree",
+        "add",
+        "-q",
+        &repo,
+        "-b",
+        "linked",
+    ]);
+    assert!(env.repo().join(".git").is_file());
+    let home = common::tree_checksum(&env.home());
+    for (name, args) in MINIMAL_ARGS {
+        let mut full = vec![*name];
+        full.extend_from_slice(args);
+        let (code, err) = stderr_of(&env, &full);
+        assert_eq!(code, Some(1), "`dot {full:?}`: {err}");
+        assert!(
+            err.contains("is a linked git worktree or a submodule (its .git is a file)"),
+            "{name}: {err}"
+        );
+        assert!(!err.contains("Not a directory"), "{name}: {err}");
+    }
+    assert_eq!(common::tree_checksum(&env.home()), home);
+}
