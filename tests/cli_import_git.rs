@@ -838,6 +838,44 @@ fn a_token_only_on_another_branch_or_tag_stays_out_and_nothing_squashes() {
     }
 }
 
+/// A token in a commit message counts as one in the history: the import is squashed, the report
+/// names the commit, and the message reaches no object of the repo.
+#[test]
+fn a_token_in_a_commit_message_squashes_the_import() {
+    let env = TestEnv::new();
+    let token = github_token();
+    let work = work_tree(&env, "msg", &[(".bashrc", "alias ll=ls\n", false)], None);
+    git_in(
+        &env,
+        &work,
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!("token {token}"),
+        ],
+    );
+    let tip = git_in(&env, &work, &["rev-parse", "HEAD"]);
+    let tip = tip.trim().get(..12).unwrap_or_default();
+    let source = bare(&env, &work, &env.root().join("msg.git"), None);
+    let out = env.run(&["import", "--yes", &source.to_string_lossy()]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains(&format!("  commit message: github-token, in {tip}")),
+        "{err}"
+    );
+    assert!(
+        err.contains("so the import is one commit of the current tree"),
+        "{err}"
+    );
+    assert!(!err.contains(&token), "{err}");
+    let repo = env.repo();
+    assert_eq!(commits(&env, &repo), 1);
+    assert!(!every_object(&env, &repo.join(".git")).contains(&token));
+}
+
 #[test]
 fn a_populated_repo_is_refused_naming_overlay() {
     let env = TestEnv::new();

@@ -724,9 +724,10 @@ fn guard_content(repo: &Path, found: &mut Analysis, allow: &[Allow]) {
     }
 }
 
-/// A path in the source's history whose content the guard holds, with the commits that add it.
+/// A path in the source's history whose content the guard holds, with the commits that add it,
+/// or with no path, the commits whose messages it holds.
 struct Tainted {
-    path: String,
+    path: Option<String>,
     rule: &'static str,
     commits: Vec<String>,
 }
@@ -760,10 +761,11 @@ fn is_oid(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Every blob reachable from the clone's refs that the content guard holds, by path and rule. Each
-/// blob is read once: `rev-list --objects` lists them, `cat-file --batch-check` keeps the blobs
-/// that are not empty, and `cat-file --batch` streams them, where a binary blob is skipped after
-/// its first bytes. The lists go to git through files, which a large history cannot deadlock.
+/// Every blob and commit message reachable from the clone's refs, which are all the import takes,
+/// that the content guard holds, by path and rule. Each object is read once: `rev-list --objects`
+/// lists them, `cat-file --batch-check` keeps the commits and the blobs that are not empty, and
+/// `cat-file --batch` streams them, where a binary blob is skipped after its first bytes. The
+/// lists go to git through files, which a large history cannot deadlock.
 fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
     let git = &staging.git;
     let scratch = staging
@@ -772,13 +774,19 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
         .ok_or_else(|| anyhow!("{} has no parent directory", staging.repo.display()))?;
     let listed = git_stdout(git, &["rev-list", "--all", "--objects"], None)?;
     let mut paths: BTreeMap<String, String> = BTreeMap::new();
+    // Newest first; `rev-list` prints a commit with no path, and a tree or blob with one.
+    let mut commits = Vec::new();
     for line in String::from_utf8_lossy(&listed).lines() {
         let (oid, path) = line.split_once(' ').unwrap_or((line, ""));
-        if is_oid(oid) {
-            paths
-                .entry(oid.to_owned())
-                .or_insert_with(|| path.to_owned());
+        if !is_oid(oid) {
+            continue;
         }
+        if !line.contains(' ') {
+            commits.push(oid.to_owned());
+        }
+        paths
+            .entry(oid.to_owned())
+            .or_insert_with(|| path.to_owned());
     }
     let objects = scratch.join("objects.txt");
     write_lines(&objects, paths.keys())?;
@@ -791,15 +799,16 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
         Some(&objects),
     )?;
     let checked = String::from_utf8_lossy(&checked);
-    let blobs = checked.lines().filter_map(|line| {
+    let scanned = checked.lines().filter_map(|line| {
         let mut fields = line.split(' ');
         match (fields.next(), fields.next(), fields.next()) {
             (Some(oid), Some("blob"), Some(size)) if size != "0" => Some(oid),
+            (Some(oid), Some("commit"), Some(_)) => Some(oid),
             _ => None,
         }
     });
     let list = scratch.join("blobs.txt");
-    write_lines(&list, blobs)?;
+    write_lines(&list, scanned)?;
     let mut cmd = git.command();
     cmd.args(["cat-file", "--batch"])
         .stdin(File::open(&list).with_context(|| format!("cannot read {}", list.display()))?)
@@ -812,25 +821,36 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
         .ok_or_else(|| anyhow!("git cat-file gave no output"))
         .and_then(|stdout| scan_batch(&mut BufReader::new(stdout), &paths, allow));
     let status = child.wait().context("failed to run git")?;
-    let held = scanned?;
+    let mut held = scanned?;
     ensure!(status.success(), "`git cat-file --batch` failed ({status})");
-    if held.is_empty() {
-        return Ok(Vec::new());
+    let mut messages: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for commit in commits {
+        if let Some(rule) = held.remove(&commit) {
+            messages.entry(rule).or_default().push(commit);
+        }
     }
-    let commits = adding_commits(git, &held)?;
     let mut grouped: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
-    for (oid, rule) in &held {
-        let path = paths.get(oid).cloned().unwrap_or_default();
-        let entry = grouped.entry((path, *rule)).or_default();
-        for commit in commits.get(oid).into_iter().flatten() {
-            if !entry.contains(commit) {
-                entry.push(commit.clone());
+    if !held.is_empty() {
+        let adding = adding_commits(git, &held)?;
+        for (oid, rule) in &held {
+            let path = paths.get(oid).cloned().unwrap_or_default();
+            let entry = grouped.entry((path, *rule)).or_default();
+            for commit in adding.get(oid).into_iter().flatten() {
+                if !entry.contains(commit) {
+                    entry.push(commit.clone());
+                }
             }
         }
     }
-    Ok(grouped
+    let files = grouped
         .into_iter()
-        .map(|((path, rule), commits)| Tainted {
+        .map(|((path, rule), commits)| (Some(path), rule, commits));
+    let messages = messages
+        .into_iter()
+        .map(|(rule, commits)| (None, rule, commits));
+    Ok(files
+        .chain(messages)
+        .map(|(path, rule, commits)| Tainted {
             path,
             rule,
             commits,
@@ -847,8 +867,8 @@ fn write_lines(path: &Path, lines: impl Iterator<Item = impl AsRef<str>>) -> Res
     fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))
 }
 
-/// Reads `cat-file --batch` output: per blob a `<oid> <type> <size>` line, the content and a
-/// newline. Returns the rule the guard holds each blob for, keyed by oid.
+/// Reads `cat-file --batch` output: per object a `<oid> <type> <size>` line, the content and a
+/// newline. Returns the rule the guard holds each blob or commit for, keyed by oid.
 fn scan_batch(
     reader: &mut impl BufRead,
     paths: &BTreeMap<String, String>,
@@ -864,13 +884,26 @@ fn scan_batch(
         }
         let mut fields = header.split_whitespace();
         // `<oid> missing` has no size and no content.
-        let (Some(oid), Some(_), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
+        let (Some(oid), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
         let size: u64 = size
             .parse()
             .with_context(|| format!("git cat-file printed a bad size for {oid}"))?;
         let mut bytes = Vec::new();
+        if kind == "commit" {
+            // The whole commit, headers too: a merged tag's message travels in a header. No
+            // allow entry names a commit, and git refuses a NUL in a message, so none is skipped
+            // as binary.
+            reader.by_ref().take(size).read_to_end(&mut bytes)?;
+            if let Some(found) = secrets::held(&bytes, "", &[]) {
+                held.insert(oid.to_owned(), found.rule);
+            }
+            let mut newline = [0u8; 1];
+            reader.read_exact(&mut newline)?;
+            continue;
+        }
         reader
             .by_ref()
             .take(size.min(sniff))
@@ -940,10 +973,14 @@ fn warn_tainted(tainted: &[Tainted], squash: bool, commits: &str) {
             .map(|commit| commit.get(..12).unwrap_or(commit))
             .collect();
         let more = item.commits.len().saturating_sub(SHOWN_COMMITS);
-        let named = match short.as_slice() {
-            [] => "in a merge".to_owned(),
-            [one] => format!("added in {one}"),
-            _ => format!("added in {}", short.join(", ")),
+        let (place, verb) = item
+            .path
+            .as_deref()
+            .map_or(("commit message", "in"), |path| (path, "added in"));
+        let named = if short.is_empty() {
+            "in a merge".to_owned()
+        } else {
+            format!("{verb} {}", short.join(", "))
         };
         let more = if more > 0 {
             format!(" (+{more} more)")
@@ -951,8 +988,8 @@ fn warn_tainted(tainted: &[Tainted], squash: bool, commits: &str) {
             String::new()
         };
         output::warning(&output::escape_line(&format!(
-            "  {}: {}, {named}{more}",
-            item.path, item.rule
+            "  {place}: {}, {named}{more}",
+            item.rule
         )));
     }
     if squash {
