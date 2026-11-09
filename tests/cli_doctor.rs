@@ -112,6 +112,40 @@ fn damaged_objects_fail_the_object_check() {
 }
 
 #[test]
+fn an_empty_or_missing_dotman_toml_fails_with_the_restore_command() {
+    let env = committed();
+    let repo = env.repo().to_string_lossy().into_owned();
+    let config = env.repo().join(".dotman.toml");
+    assert_ne!(env.git(&["-C", &repo, "show", "HEAD:.dotman.toml"]), "");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(0), "{out}");
+    for how in ["empty", "missing"] {
+        if how == "empty" {
+            fs::write(&config, b"").expect("truncate");
+        } else {
+            fs::remove_file(&config).expect("remove");
+        }
+        let (code, out) = doctor(&env, &[]);
+        assert_eq!(code, Some(1), "{how}: {out}");
+        let failed = line(&out, "fail", ".dotman.toml").unwrap_or_default();
+        assert!(failed.contains(&format!("is {how}")), "{how}: {out}");
+        assert!(
+            failed.contains("dotman git checkout -- .dotman.toml"),
+            "{how}: {out}"
+        );
+        env.git(&["-C", &repo, "checkout", "--", ".dotman.toml"]);
+        let (code, out) = doctor(&env, &[]);
+        assert_eq!(code, Some(0), "restored after {how}: {out}");
+    }
+
+    fs::write(&config, b"").expect("truncate");
+    env.git(&["-C", &repo, "commit", "-qam", "an empty config"]);
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(0), "the last commit has it empty too: {out}");
+    assert!(line(&out, "fail", ".dotman.toml").is_none(), "{out}");
+}
+
+#[test]
 fn a_half_made_repo_is_named_with_a_fix_that_keeps_commits() {
     let repo_line = |env: &TestEnv| {
         let (code, out) = doctor(env, &[]);

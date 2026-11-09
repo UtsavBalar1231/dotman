@@ -423,6 +423,7 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
             Ok(_) => checks.push(pass("state")),
         },
     }
+    checks.extend(lost_config(ctx));
     match ctx.git.operation() {
         Some(op) => checks.push(fail(
             "git operation",
@@ -435,6 +436,41 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
         None => checks.push(pass("no git operation in progress")),
     }
     checks
+}
+
+/// A missing or empty `.dotman.toml` reads as the defaults, so `[dirs]`, `[modes]` and `[age]`
+/// would be lost, and the next sync would commit that; the last commit's copy is the one to restore.
+fn lost_config(ctx: &Context) -> Option<Check> {
+    let file = ctx.repo_config_file();
+    let how = match fs::symlink_metadata(&file) {
+        Ok(meta) if meta.len() > 0 => return None,
+        Ok(_) => "empty",
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
+        Err(e) => {
+            return Some(fail(
+                ".dotman.toml",
+                &format!("cannot stat {}: {e}", file.display()),
+                "check its permissions",
+            ));
+        }
+    };
+    let committed = ctx
+        .git
+        .show_blob("HEAD", ".dotman.toml")
+        .is_ok_and(|bytes| !bytes.is_empty());
+    committed.then(|| {
+        fail(
+            ".dotman.toml",
+            &format!(
+                "{} is {how}, but the last commit has it, so its [dirs], [modes] and [age] would be lost",
+                file.display()
+            ),
+            &format!(
+                "restore it with `{} git checkout -- .dotman.toml`",
+                name::bin()
+            ),
+        )
+    })
 }
 
 fn install_script(ctx: &Context) -> Option<Check> {
