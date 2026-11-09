@@ -603,33 +603,46 @@ fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
 
 /// A rename staged with `dotman git mv` whose new path holds an age key is held as a whole: the
 /// old path is not deleted from the history, in this sync or the next, until the new one can be
-/// committed.
+/// committed. A user's gitconfig that turns rename detection off changes nothing.
 #[test]
 fn a_held_rename_never_commits_the_deletion_of_its_old_path() {
-    let a = TestEnv::new();
-    a.ok(&["init"]);
-    a.write(".a", b"a\n", 0o644);
-    a.ok(&["add", ".a"]);
-    a.ok(&["sync"]);
-    a.ok(&["git", "mv", ".a", ".b"]);
-    a.write_repo(".b", format!("a\n{AGE_KEY}\n").as_bytes());
-    let tree = || a.git(&["-C", &repo_path(&a), "ls-tree", "-r", "--name-only", "HEAD"]);
-    for _ in 0..2 {
-        let err = exits(&a, 3, &["sync"]);
-        assert!(
-            err.contains("\n  .b: line 2 holds an age secret key"),
-            "{err}"
-        );
-        let names = tree();
-        assert!(names.lines().any(|name| name == ".a"), "{names}");
-        assert!(!names.lines().any(|name| name == ".b"), "{names}");
-    }
+    for gitconfig in [
+        "",
+        "[status]\n\trenames = false\n",
+        "[diff]\n\trenames = false\n",
+    ] {
+        let a = TestEnv::new();
+        let global = a.home().join(".gitconfig");
+        let mut text = fs::read_to_string(&global).expect("read .gitconfig");
+        text.push_str(gitconfig);
+        fs::write(&global, text).expect("write .gitconfig");
+        a.ok(&["init"]);
+        a.write(".a", b"a\n", 0o644);
+        a.ok(&["add", ".a"]);
+        a.ok(&["sync"]);
+        a.ok(&["git", "mv", ".a", ".b"]);
+        a.write_repo(".b", format!("a\n{AGE_KEY}\n").as_bytes());
+        let tree = || a.git(&["-C", &repo_path(&a), "ls-tree", "-r", "--name-only", "HEAD"]);
+        for _ in 0..2 {
+            let err = exits(&a, 3, &["sync"]);
+            assert!(
+                err.contains("\n  .b: line 2 holds an age secret key"),
+                "{gitconfig:?}: {err}"
+            );
+            let names = tree();
+            assert!(
+                names.lines().any(|name| name == ".a"),
+                "{gitconfig:?}: {names}"
+            );
+            assert!(!names.lines().any(|name| name == ".b"), "{names}");
+        }
 
-    a.write_repo(".b", b"a, renamed\n");
-    exits(&a, 0, &["sync"]);
-    let names = tree();
-    assert!(names.lines().any(|name| name == ".b"), "{names}");
-    assert!(!names.lines().any(|name| name == ".a"), "{names}");
+        a.write_repo(".b", b"a, renamed\n");
+        exits(&a, 0, &["sync"]);
+        let names = tree();
+        assert!(names.lines().any(|name| name == ".b"), "{names}");
+        assert!(!names.lines().any(|name| name == ".a"), "{names}");
+    }
 }
 
 /// Sets the modification time of `path` to an hour ago, well before the sweep's 10-minute cutoff.

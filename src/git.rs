@@ -24,7 +24,9 @@ const TRACKED_TEMP_FILES: &str = ":(glob)**/.dotman-tmp-*";
 /// `core.excludesFile=` must stay empty: otherwise the user's global ignore file hides files from `git status`.
 /// `core.hooksPath=/dev/null` makes every hook lookup fail, so no hook runs.
 /// `core.fsmonitor=false` keeps a configured monitor daemon from answering for the worktree.
-const ISOLATION: [&str; 16] = [
+/// `status.renames=true` keeps the rename records that a held rename relies on, whatever
+/// `status.renames` or `diff.renames` the user set.
+const ISOLATION: [&str; 18] = [
     "-c",
     "core.excludesFile=",
     "-c",
@@ -41,6 +43,8 @@ const ISOLATION: [&str; 16] = [
     "color.ui=false",
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "status.renames=true",
 ];
 
 /// How long a short local probe, such as `git --version`, may take before it counts as hung.
