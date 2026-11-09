@@ -67,7 +67,19 @@ enum Found {
     Leaf(Leaf),
     Dir,
     Dangling,
+    /// Under a managed directory this is held back; the text says why.
+    Held(Hold, String),
     Skip(String),
+}
+
+/// Why a walk left an entry out.
+enum Left {
+    /// Ignored, `.git` or a dotman temp file: never mentioned.
+    Quiet,
+    /// One of dotman's own files: listed in the preview only.
+    Own(String),
+    /// A name dotman cannot use as a key.
+    Name(String),
 }
 
 #[derive(Default)]
@@ -76,6 +88,10 @@ pub(crate) struct DirPlan {
     pub(crate) items: BTreeMap<String, Leaf>,
     pub(crate) skipped: Vec<String>,
     pub(crate) dangling: Vec<String>,
+    /// Sockets, FIFOs, devices and what cannot be read.
+    pub(crate) held: BTreeMap<String, Hold>,
+    /// Entries whose names cannot be keys.
+    pub(crate) notes: Vec<String>,
 }
 
 #[derive(Default)]
@@ -631,6 +647,9 @@ pub(crate) enum Hold {
     Binary,
     SecretName,
     SecretKey,
+    Special,
+    Unreadable,
+    Collision,
 }
 
 impl Hold {
@@ -640,6 +659,9 @@ impl Hold {
             Self::Binary => "binary: NUL in the first 8 KiB",
             Self::SecretName => "name matches [guard] secret_names",
             Self::SecretKey => "holds an age secret key (AGE-SECRET-KEY-)",
+            Self::Special => "a socket, FIFO or device, which dotman never stores",
+            Self::Unreadable => "cannot be read",
+            Self::Collision => "differs only in case or Unicode normalization from another path",
         }
     }
 }
@@ -649,7 +671,7 @@ impl Hold {
 pub(crate) struct Scan {
     pub new: BTreeMap<String, Kind>,
     pub held: BTreeMap<String, Hold>,
-    /// Dangling links and case or normalization collisions: reported, never captured.
+    /// Dangling links and names that cannot be keys: reported, never captured.
     pub notes: Vec<String>,
 }
 
@@ -701,6 +723,7 @@ pub(crate) fn scan_dirs(
     };
     let mut found: BTreeMap<String, Leaf> = BTreeMap::new();
     let mut dangling = BTreeSet::new();
+    let mut scan = Scan::default();
     for dir in &repo_config.dirs.paths {
         // The entry comes from a tracked file, so it is checked like a user-supplied path.
         let plain = validate_key(dir).is_ok()
@@ -713,17 +736,15 @@ pub(crate) fn scan_dirs(
         let walked = planner.walk(dir);
         found.extend(walked.items);
         dangling.extend(walked.dangling);
+        scan.held.extend(walked.held);
+        scan.notes.extend(walked.notes);
     }
     found.retain(|key, _| !known.contains(key));
     dangling.retain(|key| !known.contains(key));
+    scan.held.retain(|key, _| !known.contains(key));
+    scan.notes
+        .extend(dangling.into_iter().map(|key| format!("{key}: {DANGLING}")));
 
-    let mut scan = Scan {
-        notes: dangling
-            .into_iter()
-            .map(|key| format!("{key}: {DANGLING}"))
-            .collect(),
-        ..Scan::default()
-    };
     let colliding = find_collisions(
         known
             .iter()
@@ -732,9 +753,7 @@ pub(crate) fn scan_dirs(
     );
     for key in colliding.iter().flat_map(|(a, b)| [a, b]) {
         if found.remove(key).is_some() {
-            scan.notes.push(format!(
-                "{key}: differs only in case or normalization from another path"
-            ));
+            scan.held.insert(key.clone(), Hold::Collision);
         }
     }
     for (key, leaf) in found {
@@ -819,7 +838,7 @@ impl Planner<'_> {
                 self.out.dirs.push(dir);
             }
             Found::Dangling => bail!("{key}: {DANGLING}, which dotman does not store"),
-            Found::Skip(reason) => {
+            Found::Held(_, reason) | Found::Skip(reason) => {
                 bail!("{key}: {reason}; dotman stores regular files, symlinks and directories")
             }
         }
@@ -874,10 +893,10 @@ impl Planner<'_> {
                     size: meta.len(),
                     binary,
                 }),
-                Err(e) => Found::Skip(format!("unreadable: {e}")),
+                Err(e) => Found::Held(Hold::Unreadable, format!("unreadable: {e}")),
             }
         } else {
-            Found::Skip("socket, FIFO or device".to_owned())
+            Found::Held(Hold::Special, "socket, FIFO or device".to_owned())
         }
     }
 
@@ -896,11 +915,16 @@ impl Planner<'_> {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
-                    let at = e
-                        .path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    dir.skipped.push(format!("{at}: unreadable: {e}"));
+                    let at = e.path().unwrap_or_else(|| Path::new(""));
+                    let line = format!("{}: unreadable: {e}", at.display());
+                    match self.entry_key(at, true) {
+                        Ok(key) => {
+                            dir.held.insert(key, Hold::Unreadable);
+                        }
+                        Err(Left::Quiet | Left::Own(_)) => {}
+                        Err(Left::Name(_)) => dir.notes.push(line.clone()),
+                    }
+                    dir.skipped.push(line);
                     continue;
                 }
             };
@@ -908,14 +932,19 @@ impl Planner<'_> {
             let name = entry.file_name().to_string_lossy();
             let skip_silently = name.starts_with(TEMP_PREFIX) || name == ".git";
             let verdict = if skip_silently {
-                Err(None)
+                Err(Left::Quiet)
             } else {
                 self.entry_key(entry.path(), is_dir)
             };
             match verdict {
-                Err(reason) => {
-                    if let Some(reason) = reason {
-                        dir.skipped.push(reason);
+                Err(left) => {
+                    match left {
+                        Left::Quiet => {}
+                        Left::Own(line) => dir.skipped.push(line),
+                        Left::Name(line) => {
+                            dir.notes.push(line.clone());
+                            dir.skipped.push(line);
+                        }
                     }
                     if is_dir {
                         walk.skip_current_dir();
@@ -930,7 +959,15 @@ impl Planner<'_> {
                         dir.skipped.push(format!("{key}: {DANGLING}"));
                         dir.dangling.push(key);
                     }
-                    Found::Skip(reason) => dir.skipped.push(format!("{key}: {reason}")),
+                    Found::Held(hold, reason) => {
+                        dir.skipped.push(format!("{key}: {reason}"));
+                        dir.held.insert(key, hold);
+                    }
+                    Found::Skip(reason) => {
+                        let line = format!("{key}: {reason}");
+                        dir.notes.push(line.clone());
+                        dir.skipped.push(line);
+                    }
                     Found::Dir => {}
                 },
             }
@@ -938,27 +975,32 @@ impl Planner<'_> {
         dir
     }
 
-    // `Err(None)` is an entry left out silently, `Err(Some(_))` one that is reported.
-    fn entry_key(&self, path: &Path, is_dir: bool) -> std::result::Result<String, Option<String>> {
+    fn entry_key(&self, path: &Path, is_dir: bool) -> std::result::Result<String, Left> {
         let paths = &self.ctx.paths;
         let rel = path
             .strip_prefix(&paths.home)
-            .map_err(|e| Some(format!("{}: {e}", path.display())))?;
+            .map_err(|e| Left::Name(format!("{}: {e}", path.display())))?;
+        // Before the name checks, so an ignored entry is never reported, whatever its name.
+        if rel
+            .to_str()
+            .is_some_and(|text| self.ignore.matches(text, is_dir))
+        {
+            return Err(Left::Quiet);
+        }
         if let Err(e) = refuse_non_nfc(rel) {
-            return Err(Some(format!("{e}")));
+            return Err(Left::Name(format!("{e}")));
         }
         let key = rel
             .to_str()
-            .ok_or_else(|| Some(format!("{} is not valid UTF-8", path.display())))?;
-        validate_key(key).map_err(|e| Some(format!("{key}: {e}")))?;
+            .ok_or_else(|| Left::Name(format!("{} is not valid UTF-8", path.display())))?;
+        validate_key(key).map_err(|e| Left::Name(format!("{key}: {e}")))?;
         if !is_dir && !key.rsplit('/').next().is_some_and(variant::is_literal) {
-            return Err(Some(format!("{key}: {BLOCK_NAME}")));
+            return Err(Left::Name(format!("{key}: {BLOCK_NAME}")));
         }
         if paths.refuse_protected(path).is_err() {
-            return Err(Some(format!("{key}: dotman's own files are never managed")));
-        }
-        if self.ignore.matches(key, is_dir) {
-            return Err(None);
+            return Err(Left::Own(format!(
+                "{key}: dotman's own files are never managed"
+            )));
         }
         Ok(key.to_owned())
     }

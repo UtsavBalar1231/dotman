@@ -2,6 +2,9 @@ mod common;
 
 use common::{TestEnv, assert_converged, mode_of};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
+use std::process::Command;
 
 const TWO_MIB: usize = 2_097_152;
 
@@ -225,6 +228,83 @@ fn a_forget_does_not_bounce_back_from_the_other_device() {
     );
     exits(&a, 0, &["sync"]);
     assert!(!remote_tree(&a).contains(&".config/nvim/a.lua".to_owned()));
+}
+
+#[test]
+fn entries_the_scan_cannot_capture_are_reported_and_specials_are_held() {
+    let a = device();
+    let nvim = a.home().join(".config/nvim");
+    a.write(".config/nvim/cafe\u{301}.lua", b"nfd\n", 0o644);
+    a.write(".config/nvim/x{os=linux}.lua", b"brace\n", 0o644);
+    let made = Command::new("mkfifo")
+        .arg(nvim.join("pipe"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success());
+    let socket = UnixListener::bind(nvim.join("sock")).expect("bind a socket");
+    a.write(".config/nvim/locked.lua", b"locked\n", 0o000);
+    a.write(".config/nvim/private/x.lua", b"x\n", 0o644);
+    fs::set_permissions(nvim.join("private"), fs::Permissions::from_mode(0o000)).expect("chmod");
+    // root reads anything, so the unreadable cases mean nothing there.
+    let unreadable = fs::read(nvim.join("locked.lua")).is_err();
+
+    let status = tokens(&a);
+    let mut held = vec![".config/nvim/pipe", ".config/nvim/sock"];
+    if unreadable {
+        held.extend([".config/nvim/locked.lua", ".config/nvim/private"]);
+    }
+    for key in &held {
+        assert!(
+            status.contains(&("held".to_owned(), (*key).to_owned())),
+            "{key}: {status:?}"
+        );
+    }
+    let out = a.run(&["status"]);
+    let (human, err) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    assert!(human.contains("pipe (a socket, FIFO or device"), "{human}");
+    assert!(
+        err.contains("its NFC form is `caf\u{e9}.lua`") && err.contains("x{os=linux}.lua"),
+        "{err}"
+    );
+    if unreadable {
+        assert!(human.contains("locked.lua (cannot be read)"), "{human}");
+    }
+
+    let err = exits(&a, 3, &["sync"]);
+    assert!(
+        err.contains("held back") && err.contains("NFC form"),
+        "{err}"
+    );
+    let tree = remote_tree(&a);
+    assert!(
+        !tree.iter().any(|key| key.contains("pipe")
+            || key.contains("sock")
+            || key.contains("locked")
+            || key.contains("private")),
+        "{tree:?}"
+    );
+    fs::set_permissions(nvim.join("private"), fs::Permissions::from_mode(0o755)).expect("chmod");
+    drop(socket);
+}
+
+#[test]
+fn a_new_file_that_differs_only_in_case_from_a_managed_one_is_held() {
+    let a = device();
+    a.write(".config/nvim/Init.lua", b"-- other\n", 0o644);
+    assert_eq!(
+        a.token_of("status", ".config/nvim/Init.lua").as_deref(),
+        Some("held")
+    );
+    let human = String::from_utf8_lossy(&a.run(&["status"]).stdout).into_owned();
+    assert!(
+        human.contains("Init.lua (differs only in case or Unicode normalization"),
+        "{human}"
+    );
+    exits(&a, 3, &["sync"]);
+    assert!(!remote_tree(&a).contains(&".config/nvim/Init.lua".to_owned()));
 }
 
 #[test]
