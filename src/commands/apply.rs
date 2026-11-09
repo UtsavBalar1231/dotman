@@ -608,13 +608,13 @@ impl Run<'_> {
                 .filter(|(_, item)| !item.identity && (question.rows)(item.row))
                 .unzip();
             let choices = self.decide(question, &members, (question.flag)(self.opts.decisions))?;
-            let mut undecided = Vec::new();
+            let mut undecided: Vec<&Item> = Vec::new();
             for ((index, item), choice) in indices.iter().zip(&members).zip(choices) {
                 let action = match choice {
                     Choice::Local => Some(self.keep(question.local_action, item)),
                     Choice::Repo => Some(Action::Write),
                     Choice::Skip => {
-                        undecided.push(item.key.as_str());
+                        undecided.push(item);
                         self.undecided.insert(item.key.clone());
                         None
                     }
@@ -633,8 +633,14 @@ impl Run<'_> {
                     bin = name::bin(),
                     command = self.command(),
                 ));
-                for key in undecided {
-                    output::warning(&format!("  {key}"));
+                for item in &undecided {
+                    output::warning(&format!("  {}", item.key));
+                }
+                if let Some(add) = self.keep_here(question, &undecided) {
+                    output::warning(&format!(
+                        "{local} captures this machine's version into the repo for every machine; {add} instead keeps {} to this machine",
+                        if undecided.len() == 1 { "it" } else { "them" }
+                    ));
                 }
             }
         }
@@ -742,6 +748,17 @@ impl Run<'_> {
         output::context(&format!("{} {}:", items.len(), question.what));
         for item in items {
             output::context(&format!("  {:<26}{}", token(item.row), item.key));
+        }
+        if let Some(add) = self.keep_here(question, items) {
+            let (it, version) = if items.len() == 1 {
+                ("it", "version")
+            } else {
+                ("them", "versions")
+            };
+            output::context(&format!(
+                "[{}] captures this machine's {version} into the repo for every machine; to keep {it} to this machine only, answer [s] and run {add}",
+                question.local.letter
+            ));
         }
         loop {
             match parse_reply(question, &prompt::ask(&menu(question, true))?, true) {
@@ -1416,38 +1433,60 @@ impl Run<'_> {
     }
 
     /// Says once per run where the files kept local go, and how to keep them to this machine.
+    /// `sync`'s capture pass has already captured them, so there it says nothing: its question
+    /// offers the way to keep them here before the answer.
     fn report_kept(&self) {
-        if self.kept.is_empty() {
+        if self.kept.is_empty() || self.opts.pass == Pass::Capture {
             return;
         }
         let bin = name::bin();
         let them = if self.kept.len() == 1 { "it" } else { "them" };
-        let mut said = Vec::new();
-        if self.opts.pass == Pass::Apply {
-            said.push(format!(
-                "kept; the next `{bin} sync` captures {them} into the repo for every machine"
-            ));
+        let mut said = vec![format!(
+            "kept; the next `{bin} sync` captures {them} into the repo for every machine"
+        )];
+        let keys: Vec<&str> = self.kept.iter().map(String::as_str).collect();
+        if let Some(add) = self.for_host(&keys) {
+            said.push(format!("{add} keeps {them} to this machine"));
         }
+        output::info(&said.join("; "));
+    }
+
+    /// In `sync`'s capture pass, where keeping H captures it at once: the `add --for` that keeps
+    /// `items` to this machine instead, which only works while they are left undecided. Templates
+    /// are left out, since keeping H never captures over one.
+    fn keep_here(&self, question: &Question, items: &[&Item]) -> Option<String> {
+        if self.opts.pass != Pass::Capture || question.local_action != Action::KeepLocal {
+            return None;
+        }
+        let keys: Vec<&str> = items
+            .iter()
+            .filter(|item| !item.system && !item.r.as_ref().is_some_and(|r| r.template))
+            .map(|item| item.key.as_str())
+            .collect();
+        self.for_host(&keys)
+    }
+
+    /// `` `<bin> add --for host=<host> <paths>` ``, when `keys` is not empty and the host name is
+    /// one a variant condition can hold.
+    fn for_host(&self, keys: &[&str]) -> Option<String> {
         let host = &self.ctx.identity().host;
         // A variant condition takes only these characters.
         let named = !host.is_empty()
             && host
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        if named {
-            let paths: Vec<String> = self
-                .kept
-                .iter()
-                .map(|key| add::pasteable(&self.ctx.paths.home, key))
-                .collect();
-            said.push(format!(
-                "`{bin} add --for host={host} {}` keeps {them} to this machine",
-                paths.join(" ")
-            ));
+        if !named || keys.is_empty() {
+            return None;
         }
-        if !said.is_empty() {
-            output::info(&said.join("; "));
-        }
+        let paths: Vec<String> = keys
+            .iter()
+            .map(|key| add::pasteable(&self.ctx.paths.home, key))
+            .collect();
+        Some(format!(
+            "`{} add --for host={host} {}`",
+            name::bin(),
+            paths.join(" ")
+        ))
     }
 
     /// The mode R reached `$HOME` with; `None` when it did not. A skipped or failed write is

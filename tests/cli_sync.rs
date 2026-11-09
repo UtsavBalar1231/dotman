@@ -897,32 +897,54 @@ fn keep_local_saves_an_uncommitted_hand_edit_in_the_repo_before_capturing_over_i
     );
 }
 
-#[test]
-fn keep_local_in_sync_says_it_replaces_the_repo_version_and_once_how_to_keep_it_here() {
-    let env = TestEnv::new();
-    env.write_machine_config("[identity]\nhost = \"box\"\n");
-    env.ok(&["init"]);
-    env.ok(&["init", "--remote", &env.remote_url()]);
+/// Machine A, then machine B named `box`, whose `.a` and `.b` conflict in its capture pass: A's
+/// edit reached B's repo before B's own edit was captured.
+fn kept_pair() -> (TestEnv, TestEnv) {
+    let a = first_device(&[(".a", b"base\n", 0o644), (".b", b"base\n", 0o644)]);
+    let b = a.second_device();
+    b.write_machine_config("[identity]\nhost = \"box\"\n");
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
     for key in [".a", ".b"] {
-        env.write(key, b"base\n", 0o644);
+        a.write(key, b"from a\n", 0o644);
+        b.write(key, b"mine\n", 0o644);
     }
-    env.ok(&["add", ".a", ".b"]);
-    env.ok(&["sync"]);
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["git", "pull", "-q", "--rebase", "origin", "main"]);
     for key in [".a", ".b"] {
-        env.write_repo(key, b"theirs\n");
-        env.write(key, b"mine\n", 0o644);
+        assert_eq!(b.token_of("status", key).as_deref(), Some("both-changed"));
     }
-    exits(&env, 0, &["git", "commit", "-qam", "theirs"]);
+    (a, b)
+}
 
-    let err = exits(&env, 0, &["sync", "--keep-local"]);
+/// The capture is pushed by the time sync ends, so no step printed after it can keep the file to
+/// this machine.
+#[test]
+fn keep_local_in_sync_replaces_the_repo_version_for_every_machine_and_says_so() {
+    let (a, b) = kept_pair();
+    let err = exits(&b, 0, &["sync", "--keep-local"]);
     for key in [".a", ".b"] {
         let line = format!("capture {key} (replaces the repo version for every machine)");
         assert!(err.lines().any(|l| l == line), "{err}");
-        assert_eq!(remote_file(&env, key), "mine\n");
+        assert_eq!(remote_file(&b, key), "mine\n");
     }
-    assert_eq!(
-        err.matches("keeps them to this machine").count(),
-        1,
+    assert!(!err.contains("--for host="), "{err}");
+
+    exits(&a, 0, &["sync"]);
+    for key in [".a", ".b"] {
+        assert_eq!(a.read(key), b"mine\n");
+        assert_eq!(a.backups(key), [(b"from a\n".to_vec(), 0o600)]);
+    }
+}
+
+/// Offered while the paths are still undecided, the printed `add --for` keeps B's version to B
+/// and leaves the shared file and machine A as they were.
+#[test]
+fn the_way_to_keep_a_conflict_to_this_machine_is_offered_before_the_capture_and_works() {
+    let (a, b) = kept_pair();
+    let err = exits(&b, 3, &["sync"]);
+    assert!(err.contains("conflicts left undecided (2)"), "{err}");
+    assert!(
+        err.contains("--keep-local captures this machine's version into the repo for every machine; `dotman add --for host=box "),
         "{err}"
     );
     assert_eq!(
@@ -930,14 +952,29 @@ fn keep_local_in_sync_says_it_replaces_the_repo_version_and_once_how_to_keep_it_
         5,
         "both paths in one command: {err}"
     );
+    assert_eq!(remote_file(&b, ".a"), "from a\n", "{err}");
 
-    let out = common::run_hint(&env, &err, "add --for host=box");
+    let out = common::run_hint(&b, &err, "add --for host=box");
     assert!(out.status.success(), "{}", stderr(&out));
+    exits(&b, 0, &["sync"]);
+    exits(&a, 0, &["sync"]);
     for key in [".a", ".b"] {
-        let variant = env.repo().join(format!("{key}{{host=box}}"));
-        assert_eq!(fs::read(variant).expect("the variant"), b"mine\n");
-        assert_eq!(env.token_of("status", key).as_deref(), Some("clean"));
+        assert_eq!(remote_file(&b, key), "from a\n");
+        assert_eq!(remote_file(&b, &format!("{key}{{host=box}}")), "mine\n");
+        assert_eq!(a.read(key), b"from a\n");
+        assert_eq!(a.backups(key), Vec::new());
+        assert_eq!(b.read(key), b"mine\n");
+        assert_eq!(b.token_of("status", key).as_deref(), Some("clean"));
+        assert_eq!(a.token_of("status", key).as_deref(), Some("clean"));
     }
+
+    let Some(seen) = common::in_a_terminal(&kept_pair().1, &[], &["sync"], b"s\n") else {
+        return;
+    };
+    assert!(
+        seen.contains("[k] captures this machine's versions into the repo for every machine; to keep them to this machine only, answer [s] and run `dotman add --for host=box "),
+        "{seen}"
+    );
 }
 
 #[test]
