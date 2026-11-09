@@ -81,7 +81,19 @@ pub(crate) struct DirPlan {
 struct Plan {
     files: BTreeMap<String, Leaf>,
     dirs: Vec<DirPlan>,
-    skipped: Vec<String>,
+}
+
+impl Plan {
+    /// Every leaf to add, and the keys named explicitly, which are announced one by one.
+    fn items(&self) -> (BTreeMap<String, Leaf>, BTreeSet<String>) {
+        let mut items = self.files.clone();
+        for dir in &self.dirs {
+            for (key, leaf) in &dir.items {
+                items.entry(key.clone()).or_insert(*leaf);
+            }
+        }
+        (items, self.files.keys().cloned().collect())
+    }
 }
 
 pub(crate) const DANGLING: &str = "dangling symlink";
@@ -162,26 +174,23 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     let public = remote_is_public(&ctx, &mut state, dry_run)?;
     let guarded = guard_secrets(&mut plan, &repo_config, &targets.sources, public, args)?;
     guarded.warn(public);
-    let held = guarded.held;
+    let outcome = if guarded.held.is_empty() {
+        Outcome::Done
+    } else {
+        Outcome::Attention
+    };
 
-    for line in &plan.skipped {
-        output::warning(&format!("skipped {line}"));
-    }
     for dir in &plan.dirs {
         preview(dir);
     }
     let in_dirs: usize = plan.dirs.iter().map(|d| d.items.len()).sum();
     if dry_run {
-        for key in plan.files.keys() {
-            match targets.source_for(key) {
-                Ok(source) => output::action("would add", &shown(key, &source)),
-                Err(e) => output::warning(&format!("could not add {key}: {e:#}")),
-            }
-        }
+        let (items, announced) = plan.items();
+        let failed = targets.try_all(&ctx, &items, &announced);
         if in_dirs > 0 {
             output::info(&format!("would add {in_dirs} files from directories"));
         }
-        return Ok(Outcome::Done);
+        return finish(failed, items.len(), outcome);
     }
 
     if in_dirs > 0 && !args.yes && prompt::interactive() {
@@ -192,12 +201,8 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         }
     }
 
-    let announced: BTreeSet<String> = plan.files.keys().cloned().collect();
-    let mut items = plan.files;
+    let (items, announced) = plan.items();
     for dir in &plan.dirs {
-        for (key, leaf) in &dir.items {
-            items.entry(key.clone()).or_insert(*leaf);
-        }
         if !repo_config.dirs.paths.contains(&dir.key) {
             repo_config.dirs.paths.push(dir.key.clone());
         }
@@ -215,18 +220,21 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     }
     repo_config.save(&ctx.repo_config_file(), false)?;
     state.save(&ctx.paths.state_file(), false)?;
+    if failed == 0 {
+        output::success(&format!("added {}", crate::import::count(added, "path")));
+    }
+    finish(failed, items.len(), outcome)
+}
+
+/// A dry run ends here too, so it exits as the real run would.
+fn finish(failed: usize, total: usize, outcome: Outcome) -> Result<Outcome> {
     if failed > 0 {
         bail!(
             "{failed} of {} could not be added",
-            crate::import::count(items.len(), "path")
+            crate::import::count(total, "path")
         );
     }
-    output::success(&format!("added {}", crate::import::count(added, "path")));
-    Ok(if held.is_empty() {
-        Outcome::Done
-    } else {
-        Outcome::Attention
-    })
+    Ok(outcome)
 }
 
 /// Whether `origin` is known to be public. A remote with no stored result is checked first, and
@@ -382,6 +390,41 @@ impl Targets<'_> {
             }
         }
         (added, failed)
+    }
+
+    /// [`Targets::commit_all`] without writing: what a real run would add, announced, and the
+    /// number it would fail to add.
+    fn try_all(
+        &self,
+        ctx: &Context,
+        items: &BTreeMap<String, Leaf>,
+        announced: &BTreeSet<String>,
+    ) -> usize {
+        let mut failed = 0usize;
+        for (key, leaf) in items {
+            let explicit = announced.contains(key);
+            if !explicit && self.is_template(key) {
+                output::warning(&format!("{key}: rendered from a template; skipped"));
+                continue;
+            }
+            let checked = self.source_for(key).and_then(|source| {
+                let encrypted = self.encrypt || self.sources.flag(key, &source) == Flag::Age;
+                let plain_file = !encrypted && matches!(leaf, Leaf::File { .. });
+                if plain_file && holds_key(&ctx.paths.home, key) {
+                    return Err(HoldsKey.into());
+                }
+                Ok(source)
+            });
+            match checked {
+                Ok(source) if explicit => output::action("would add", &shown(key, &source)),
+                Ok(_) => {}
+                Err(e) => {
+                    failed = failed.saturating_add(1);
+                    output::warning(&format!("could not add {key}: {e:#}"));
+                }
+            }
+        }
+        failed
     }
 
     fn source_for(&self, key: &str) -> Result<String> {
@@ -663,7 +706,9 @@ impl Planner<'_> {
             .next()
             .is_some_and(|name| name.starts_with(TEMP_PREFIX))
         {
-            return Ok(());
+            bail!(
+                "{key}: names starting with {TEMP_PREFIX} are dotman's temporary files, which are never managed; rename it to add it"
+            );
         }
         let abs = absolute_input(input, &self.cwd, &paths.home);
         paths.refuse_protected(&abs)?;
@@ -687,16 +732,47 @@ impl Planner<'_> {
                 if !key.rsplit('/').next().is_some_and(variant::is_literal) {
                     bail!("{key}: {BLOCK_NAME}");
                 }
+                if matches!(leaf, Leaf::Link) {
+                    self.link_to_dir(&key);
+                }
                 self.out.files.insert(key, leaf);
             }
             Found::Dir => {
                 let dir = self.walk(&key);
                 self.out.dirs.push(dir);
             }
-            Found::Dangling => self.out.skipped.push(format!("{key}: {DANGLING}")),
-            Found::Skip(reason) => self.out.skipped.push(format!("{key}: {reason}")),
+            Found::Dangling => bail!("{key}: {DANGLING}, which dotman does not store"),
+            Found::Skip(reason) => {
+                bail!("{key}: {reason}; dotman stores regular files, symlinks and directories")
+            }
         }
         Ok(())
+    }
+
+    // Stored as a link, so the files behind it stay unmanaged.
+    fn link_to_dir(&self, key: &str) {
+        let paths = &self.ctx.paths;
+        let Ok(target) = fs::canonicalize(paths.home.join(key)) else {
+            return;
+        };
+        if !is_real_dir(&target) {
+            return;
+        }
+        let inside = std::iter::once(paths.home.as_path())
+            .chain(paths.home_real.as_deref())
+            .find_map(|root| target.strip_prefix(root).ok())
+            .filter(|rel| !rel.as_os_str().is_empty());
+        let hint = inside.map_or_else(String::new, |rel| {
+            format!(
+                "; to manage its files, add the directory: `{} add ~/{}`",
+                name::bin(),
+                rel.display()
+            )
+        });
+        output::warning(&format!(
+            "{key} is a symlink to the directory {}: only the link is stored, not the files in it{hint}",
+            target.display()
+        ));
     }
 
     fn inspect(&self, key: &str) -> Found {
@@ -1368,7 +1444,6 @@ mod tests {
                     .collect(),
                 ..DirPlan::default()
             }],
-            ..Plan::default()
         }
     }
 

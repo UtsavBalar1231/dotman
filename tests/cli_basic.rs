@@ -96,7 +96,7 @@ fn directory_preview_counts_match_the_fixture() {
 }
 
 #[test]
-fn absolute_symlink_targets_become_relative_and_dangling_links_are_skipped() {
+fn absolute_symlink_targets_become_relative_and_a_dangling_link_is_refused() {
     let env = TestEnv::new();
     env.ok(&["init"]);
     env.write(".bashrc", b"x", 0o644);
@@ -111,7 +111,7 @@ fn absolute_symlink_targets_become_relative_and_dangling_links_are_skipped() {
         ".config/outside",
         ".config/relative",
     ]);
-    let err = env.ok(&["add", "dangling"]);
+    let err = env.fails(&["add", "dangling"]);
     assert!(err.contains("dangling symlink"), "{err}");
 
     let target = |key: &str| fs::read_link(env.repo().join(key)).expect("read_link");

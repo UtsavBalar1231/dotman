@@ -4,6 +4,8 @@
 mod common;
 
 use common::TestEnv;
+use std::fs;
+use std::process::Command;
 
 fn exits(env: &TestEnv, code: i32, args: &[&str]) -> String {
     let out = env.run(args);
@@ -76,4 +78,85 @@ fn an_explicit_secret_named_file_is_added_with_one_warning() {
     assert!(!err.contains("held"), "{err}");
     let err = env.ok(&["add", "--allow-plain", ".config/zsh/secrets.zsh"]);
     assert!(!err.contains("secret_names"), "{err}");
+}
+
+#[test]
+fn an_explicit_input_that_cannot_be_stored_exits_1_and_adds_nothing() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".bashrc", b"x\n", 0o644);
+    env.symlink(".dangling", "/nonexistent/target");
+    let made = Command::new("mkfifo")
+        .arg(env.home().join(".fifo"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success());
+    env.write(".locked", b"secret\n", 0o000);
+
+    let mut cases = vec![
+        (".dangling", "dangling symlink"),
+        (".fifo", "socket, FIFO or device"),
+    ];
+    // root reads a 0000 file, so the case means nothing there.
+    if fs::read(env.home().join(".locked")).is_err() {
+        cases.push((".locked", "unreadable"));
+    }
+    for (input, why) in cases {
+        for dry_run in [false, true] {
+            let mut args = vec!["add", ".bashrc", input];
+            if dry_run {
+                args.push("--dry-run");
+            }
+            let err = env.fails(&args);
+            assert!(err.contains(why), "{input}: {err}");
+        }
+    }
+    assert_eq!(managed(&env), Vec::<String>::new());
+}
+
+#[test]
+fn a_file_named_like_a_dotman_temp_file_is_refused_with_the_reason() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".dotman-tmp-mine", b"x\n", 0o644);
+    let err = env.fails(&["add", ".dotman-tmp-mine"]);
+    assert!(
+        err.contains(
+            ".dotman-tmp-mine: names starting with .dotman-tmp- are dotman's temporary files"
+        ),
+        "{err}"
+    );
+    assert_eq!(managed(&env), Vec::<String>::new());
+}
+
+#[test]
+fn a_dry_run_exits_as_the_real_run_would() {
+    let env = TestEnv::new();
+    zsh(&env);
+    exits(&env, 3, &["add", "--dry-run", ".config/zsh"]);
+    assert_eq!(managed(&env), Vec::<String>::new());
+
+    env.write(".config/age.txt", b"AGE-SECRET-KEY-1QQQQ\n", 0o600);
+    let err = exits(&env, 1, &["add", "--dry-run", ".config/age.txt"]);
+    assert!(err.contains("could not add .config/age.txt"), "{err}");
+    exits(&env, 1, &["add", ".config/age.txt"]);
+    exits(&env, 0, &["add", "--dry-run", ".config/zsh/.zshrc"]);
+}
+
+#[test]
+fn a_symlink_to_a_directory_is_stored_as_a_link_with_a_hint() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write("dots/nvim/init.lua", b"-- init\n", 0o644);
+    env.symlink(".config/nvim", "../dots/nvim");
+    let err = env.ok(&["add", ".config/nvim"]);
+    assert!(
+        err.contains("only the link is stored, not the files in it")
+            && err.contains("add ~/dots/nvim"),
+        "{err}"
+    );
+    assert_eq!(
+        env.token_of("list", ".config/nvim").as_deref(),
+        Some("symlink")
+    );
 }
