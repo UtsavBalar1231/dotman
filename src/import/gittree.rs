@@ -1616,6 +1616,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     if matches!(source, Source::Path(_)) {
         staging.git.remove_remote("origin")?;
     }
+    let branched = branch_detached(&staging.git)?;
     let tree = staging.git.ls_tree("HEAD")?;
 
     let setup = yadm_setup(ctx, source, &tree)?;
@@ -1637,6 +1638,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         Some(Err(_)) => SourceConfig::Broken,
     };
     let mut report = tally(&found, !squash);
+    report.notes.extend(branched);
     report.notes.extend(home_modes_notes(&modes, config));
     report.notes.extend(remote_notes(
         source,
@@ -1695,6 +1697,22 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     output::success(&format!("imported {what}{added} into {}", repo.display()));
     super::print_next_steps();
     Ok(report.outcome())
+}
+
+/// Puts a clone whose HEAD is detached on a new branch, `main`, at that commit, since sync pushes
+/// a branch; returns the note that says so. A detached HEAD names no branch, and the clone of one
+/// brings no other, so there is no default branch to take instead.
+fn branch_detached(git: &Git) -> Result<Option<String>> {
+    if git.branch()?.is_some() {
+        return Ok(None);
+    }
+    // The empty old value refuses to move a `main` that exists.
+    git_stdout(git, &["update-ref", "refs/heads/main", "HEAD", ""], None)?;
+    git_stdout(git, &["symbolic-ref", "HEAD", "refs/heads/main"], None)?;
+    Ok(Some(
+        "the source's HEAD is detached, so the import puts its commit on a new branch, main"
+            .to_owned(),
+    ))
 }
 
 fn same_dir(a: &Path, source: &Source) -> bool {

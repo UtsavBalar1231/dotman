@@ -915,6 +915,42 @@ fn a_token_in_a_commit_author_is_named_by_its_field() {
     assert!(!every_object(&env, &repo.join(".git")).contains(&token));
 }
 
+/// A source whose HEAD is detached gives a repo on a new branch, `main`, at the imported commit,
+/// which the report names, so that sync has a branch to push.
+#[test]
+fn a_source_with_a_detached_head_is_imported_onto_a_new_main() {
+    let env = TestEnv::new();
+    let work = work_tree(&env, "loose", &[(".bashrc", "alias ll=ls\n", false)], None);
+    git_in(&env, &work, &["checkout", "-q", "--detach", "HEAD~1"]);
+    let detached = git_in(&env, &work, &["rev-parse", "HEAD"]);
+    let source = Source::new(work);
+    let out = env.run(&["import", "--yes", &source.to_string_lossy()]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains(
+            "the source's HEAD is detached, so the import puts its commit on a new branch, main"
+        ),
+        "{err}"
+    );
+    let repo = env.repo();
+    assert_eq!(
+        git_in(&env, &repo, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/main"
+    );
+    let first = git_in(&env, &repo, &["rev-list", "--max-parents=0", "HEAD"]);
+    assert_eq!(first.trim(), detached.trim(), "{err}");
+
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let err = env.ok(&["sync"]);
+    assert!(err.contains("to origin/main"), "{err}");
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    assert_eq!(
+        env.git(&["--git-dir", &remote, "rev-parse", "main"]),
+        git_in(&env, &repo, &["rev-parse", "HEAD"])
+    );
+}
+
 #[test]
 fn a_populated_repo_is_refused_naming_overlay() {
     let env = TestEnv::new();
