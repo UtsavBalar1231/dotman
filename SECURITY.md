@@ -25,23 +25,27 @@ A hostile repo, import source or system-write plan must never cause:
 
 How this is enforced:
 
-- Every home write goes through one path. It validates the key, refuses a symlinked parent, never writes through a symlink at the target, creates a temp file at 0600, strips setuid, setgid and sticky bits, and backs up what it replaces first.
-- Git runs with the user's excludes, hooks and filters disabled, so a global config or a tracked `.gitattributes` cannot change what is read or written. A `.git` path component is refused at any depth.
-- Hooks run only when the hash of the `[hooks]` table matches the one approved on this machine. Approval covers the command text, not the scripts it calls.
+- Managed files reach `$HOME` through one write engine (`safe_write` and `safe_symlink`). It validates the key, refuses a symlinked parent, never writes through a symlink at the target, creates a temp file at 0600 in the target's directory, strips setuid, setgid and sticky bits, reads the target again just before the rename, and backs up a file it replaces whose content differs.
+- Three other paths write under `$HOME`. `import --swap` replaces a symlink with a regular file or a directory holding the same bytes, and on a failure puts the links back; both check the link's target text before and after staging, rename onto the link itself, and record the links in the backups first. dotman's own files live at paths that come from the environment and the machine config, not from the repo: the machine config, `state.toml`, the age identity, the system-write plan and the files stored in the repo are written through a temp file, fsync and rename, and backups as new files opened without following a symlink. `init --git-global` runs `git config --global`, which writes git's own global config.
+- Approved hooks run with `$HOME` as their working directory, and can write anything there.
+- Every git child process runs with the isolation flags `-c core.excludesFile= -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.safecrlf=false -c core.quotePath=false -c log.showSignature=false -c color.ui=false -c core.fsmonitor=false -c status.renames=true`. Once the repo's `.git` exists, git gets it as `--git-dir` with `--work-tree`, so git does not search the parent directories for another repo. Each git child starts without the 18 variables that would point it at other refs, objects or history: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_PREFIX`, `GIT_NAMESPACE`, `GIT_CEILING_DIRECTORIES` (set again to the repo's parent), `GIT_DISCOVERY_ACROSS_FILESYSTEM`, `GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`, `GIT_REPLACE_REF_BASE`, `GIT_QUARANTINE_PATH`, `GIT_LITERAL_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` and `GIT_ICASE_PATHSPECS`. `GIT_CONFIG_*` is kept.
+- `init`, when it creates or adopts a repo, and every clone write `.git/info/attributes` with `* -text -filter -ident -working-tree-encoding`. It wins over a tracked `.gitattributes` for those four attributes, so no line-ending conversion, filter, `$Id$` expansion or re-encoding changes what is stored or applied. It sets nothing else: a tracked `.gitattributes` that sets `merge=union` makes `sync` join both sides of an edit made on two machines instead of stopping at the conflict. The file it replaced in `$HOME` is in the backups.
+- A `.git` path component is refused at any depth, in every spelling git refuses on NTFS: `.GIT`, `.git` followed by spaces or dots, `.git:stream`, and `git~1`.
+- Hooks run only after this machine approved the `[hooks]` table. The approval is the table itself, kept as canonical JSON and compared byte for byte, so a change to any command or glob needs approval again. Approval covers the command text, not the scripts it calls.
 - Templates use minijinja with no loader and no command functions. Environment variables are visible only if listed in `[template] env`.
 - Importers do not execute the source. The chezmoi importer copies only plain files to a scratch directory and runs chezmoi there with a config that sets only the umask, so the user's chezmoi config and its hooks are never read. `--render-templates` is the explicit opt-in to run chezmoi's templates.
-- System files are opt-in per machine, read as the user, and written by a helper that rechecks everything (below).
+- System files are opt-in per machine, read as the user, and written by a helper that checks everything again (below).
 
 ## The system-write helper
 
 `apply --system` builds a plan as the user, then escalates once through `sudo`, `doas` or `run0` to run `dotman system-write`. The helper runs with root's power, so it trusts nothing from the caller. It accepts a plan only if:
 
-- the plan is a regular file, not a symlink, at mode 0600, owned by the invoking user (`SUDO_UID`, else the user from `DOAS_USER`); when root starts the helper directly, the plan directory must be root-owned;
+- the plan is a regular file, not a symlink, at mode 0600, and it, its directory and that directory's parent are owned by the invoking user and not writable by group or others. The invoking user is `SUDO_UID`, else the user named by `DOAS_USER`, else the owner of the plan's directory, as when an escalator sets neither variable or root starts the helper itself in a directory root owns;
 - the roots embedded in the plan equal `[system] roots` in the invoking user's machine config, which must be a regular file, not a symlink, owned by that user and not writable by group or others;
-- each target is absolute and canonical, is not on the never-allowed list (`/`, `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, and the SIP paths on macOS), and lies inside a root;
+- each target is absolute and canonical, is listed once, is not a root itself, is not on the never-allowed list (`/`, `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, and the SIP paths on macOS), and lies inside a root;
 - the bytes match the embedded hash, owner and group resolve, and the mode has setuid, setgid and sticky stripped.
 
-It then walks each target from `/` with `openat(O_NOFOLLOW | O_DIRECTORY)`, creates no directories, and writes through a temp file and `renameat` in that directory descriptor. When it runs as root, it ignores `DOTMAN_SYSTEM_ROOT` and refuses any plan that carries a prefix; the prefix exists only for tests under `escalate = "none"`.
+It then walks each target from `/` with `openat(O_NOFOLLOW | O_DIRECTORY)`, creates no directories, refuses a symlink or anything but a regular file at the target, and writes through a temp file and `renameat` in that directory descriptor. When it runs as root, it refuses to run while `DOTMAN_SYSTEM_ROOT` is set and refuses any plan that carries a prefix; the prefix exists only for tests under `escalate = "none"`.
 
 **Do not add a `NOPASSWD` sudoers rule for `dotman system-write`.** The user controls `[system] roots` in a file they own, so such a rule lets that user write any root-allowed file, such as `/etc/sudoers.d/`, which is full root. Let the escalator ask for a password.
 
@@ -49,19 +53,47 @@ It then walks each target from `/` with `openat(O_NOFOLLOW | O_DIRECTORY)`, crea
 
 - `DOTMAN_AGE_KEY` reaches age only on its stdin (`-i -`). Every other child process, including git, `gh`, hooks, the editor, chezmoi and the escalator, starts without it. It is refused in `[template] env`.
 - Identity files are created at 0600. `key import` refuses to overwrite a different identity without `--force`, and backs the old one up first.
-- Any plain capture (`add`, `sync` of a new file, a local edit) checks the content for `AGE-SECRET-KEY-`. `add` refuses the file; `sync` holds it back and never commits it.
 - Plaintext goes to age on stdin and ciphertext comes back on stdout, so decrypted content never sits in the repo. `diff` decrypts into a 0700 temp directory that is removed afterwards.
 - A lost identity cannot be recovered. Keep it in a password manager plus one offline copy, and add a second recipient.
 - dotman keeps ciphertext in git history. Removing an old recipient does not revoke access to what they could already read.
+- Recipients added upstream are trusted. When `[age] recipients` in `.dotman.toml` changes, the next `sync` on a machine whose key decrypts every encrypted file re-encrypts them all to the new set without asking. Whoever can push to the repo can add a recipient and read every encrypted file after that sync. Check what changed with `dotman git log -p -- .dotman.toml`.
 
-## Container bootstrap
+## Backups hold plaintext
 
-The generated `install.sh` downloads a pinned release tarball and verifies it against `checksums.txt`. Both come from the same release URL, so the checksum proves integrity, not authenticity: it catches a corrupt or truncated download, not a compromised release. To verify who published the binary, build from a tagged checkout. `DOTMAN_BOOTSTRAP_BASE_URL` overrides the download base; set it only to a host you control.
+Before a write replaces a file in `$HOME`, the file is copied to `$XDG_STATE_HOME/dotman/backups/`, as a 0600 file inside 0700 directories. For an encrypted file, that copy is the decrypted file from `$HOME`. `restore` backs up the same way, and `key import --force` backs up the identity it replaces. Backups are never pruned; `dotman doctor` counts the copies that hold plaintext. Remove the runs you no longer need.
+
+## What the guards hold
+
+The content guard scans what a plain capture would store: `add`, new files under a managed directory, `sync` of a local edit, `import`, and every file `sync` is about to commit, which covers `dotman edit` and edits made by hand in the repo. It holds whatever the remote, public or not.
+
+- The rules: an age identity (`AGE-SECRET-KEY-1` and 58 bech32 characters), GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and fine-grained tokens (`github_pat_`), GitLab tokens, Slack tokens and webhooks, AWS access key IDs, Stripe live keys, and OpenAI, Anthropic, npm, PyPI, DigitalOcean, SendGrid, Hugging Face, OpenRouter, Groq, xAI, Perplexity and Docker tokens, and PEM private key blocks. Each rule starts with a fixed prefix.
+- A finding names the rule and the line, never the value.
+- An age identity is never stored in plain text: no flag and no `[guard] allow` entry lets one through. In a system file, `add --system` refuses any finding and `sync` holds it, since system scope does not encrypt and no allow entry applies there.
+- The name guard holds new files under a managed directory whose names match `[guard] secret_names`. With a remote known to be public, one that answers an anonymous `git ls-remote`, `add` also refuses a secret-named file you name, unless you pass `--encrypt` or `--allow-plain`.
+
+What they miss:
+
+- credentials without a known prefix, such as passwords, generic API keys and tokens of providers not on the list;
+- files that look binary, with a NUL byte in the first 8000 bytes, which are not scanned;
+- a file whose name does not match `secret_names` and whose content no rule finds.
+
+## Outside the threat model
+
+- **The escalated executable.** `apply --system` escalates by running the dotman executable it was started as. If that file or its directory is writable by your user, as `~/.cargo/bin/dotman` and `~/.local/bin/dotman` are, anything running as your user can replace it and gain root the next time you approve an escalation. On a machine that uses system files, install dotman root-owned, from a package or into `/usr/local/bin`.
+- **Old git.** dotman accepts git 2.25 or newer, and `init <path>` and `import <path>` clone local repositories. Git releases before the May 2024 security releases (2.45.1, and 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4 and 2.44.1 for older lines) have known flaws when they clone a crafted local repository, such as CVE-2024-32004 and CVE-2024-32021. Use a current git to import a repository you did not make.
+- **`[guard] allow` is per machine.** An entry lets one rule through for one path on this machine only, and dotman never reads one from the repo. The file it lets through still goes into the repo, and to every machine and remote the repo reaches.
+
+## Container bootstrap and releases
+
+The generated `install.sh` downloads a pinned release tarball and verifies it against `checksums.txt`. Both come from the same release URL, so the checksum proves integrity, not authenticity: it catches a corrupt or truncated download, not a compromised release. `DOTMAN_BOOTSTRAP_BASE_URL` overrides the download base; set it only to a host you control.
+
+Every install path trusts the GitHub repository. `install/install.sh` is fetched from its `main` branch, and the tarball and `checksums.txt` from its releases; nothing is signed. To verify who published the binary, build from a tagged checkout.
 
 ## Not tested
 
 - `restorecon` runs after a system write when SELinux is enforcing, but it has never run: there is no SELinux in CI.
 - The real-root write path runs only in CI containers. Everything else about the helper is tested unprivileged with `escalate = "none"`.
+- macOS has not been tested: there is no Mac to test on, and CI has not run on one.
 
 ## Dependencies
 
