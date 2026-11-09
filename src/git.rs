@@ -497,6 +497,12 @@ impl Git {
         self.clone_with(src, &[])
     }
 
+    /// [`Git::clone_from`], bringing only the branch `src`'s `HEAD` names, with no tags: an
+    /// import takes that history and nothing else.
+    pub fn clone_head_from(&self, src: &str) -> Result<()> {
+        self.clone_with(src, &["--single-branch", "--no-tags"])
+    }
+
     fn clone_with(&self, src: &str, refs: &[&str]) -> Result<()> {
         let src_origin = if Path::new(src).is_dir() {
             let out = self.output(

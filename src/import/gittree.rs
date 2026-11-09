@@ -270,7 +270,7 @@ impl Staging {
     }
 
     fn clone_source(&self, source: &Source) -> Result<()> {
-        self.git.clone_from(&source.git_arg()?)?;
+        self.git.clone_head_from(&source.git_arg()?)?;
         ensure!(
             self.git.head()?.is_some(),
             "{} has no commits",
@@ -1092,6 +1092,19 @@ fn home_modes_notes(modes: &BTreeMap<String, u32>, config: SourceConfig) -> Vec<
     notes
 }
 
+/// The subject of the conversion commit; `None` when the tree needs none.
+fn conversion(found: &Analysis) -> Option<&'static str> {
+    if !found.alternates.is_empty() {
+        Some("import: convert yadm alternates")
+    } else if !found.kept.iter().any(|kept| kept.to == ".dotman.toml") {
+        Some("import: add .dotman.toml")
+    } else if found.left.iter().any(|left| left.remove) {
+        Some("import: leave out files that hold a credential")
+    } else {
+        None
+    }
+}
+
 /// Writes the conversion into the worktree of `repo` and commits it.
 fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u32>) -> Result<()> {
     for left in found.left.iter().filter(|left| left.remove) {
@@ -1121,13 +1134,7 @@ fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u3
         );
         config.save(&repo.join(".dotman.toml"), false)?;
     }
-    let message = if !found.alternates.is_empty() {
-        "import: convert yadm alternates"
-    } else if !has_config {
-        "import: add .dotman.toml"
-    } else if found.left.iter().any(|left| left.remove) {
-        "import: leave out files that hold a credential"
-    } else {
+    let Some(message) = conversion(found) else {
         return Ok(());
     };
     git.stage_all()?;
@@ -1558,24 +1565,30 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     let commits = count(staging.git.log(&[], None)?.len(), "commit");
     warn_tainted(&tainted, squash, &commits);
     let repo = &ctx.paths.repo;
-    let what = if squash {
-        format!("the current tree of {commits} as one commit")
+    // The same count in every line, the conversion commit apart from the source's.
+    let (what, added, to_add) = if squash {
+        (
+            format!("the current tree of {commits} as one commit"),
+            "",
+            "",
+        )
+    } else if conversion(&found).is_some() {
+        (
+            commits,
+            " and added one conversion commit",
+            " and add one conversion commit",
+        )
     } else {
-        commits
+        (commits, "", "")
     };
     if args.dry_run {
-        let conversion = if squash {
-            ""
-        } else {
-            " and add one conversion commit"
-        };
         output::info(&format!(
-            "would import {what}{conversion} into {}",
+            "would import {what}{to_add} into {}",
             repo.display()
         ));
         return Ok(report.outcome());
     }
-    let question = format!("import {what} into {}? [y/N]", repo.display());
+    let question = format!("import {what}{to_add} into {}? [y/N]", repo.display());
     if !proceed(args, &question)? {
         output::info("nothing imported");
         return Ok(Outcome::Done);
@@ -1588,8 +1601,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     if let Some(machine) = setup.machine {
         machine.save(&ctx.paths.config_file, false)?;
     }
-    let total = count(ctx.git.log(&[], None)?.len(), "commit");
-    output::success(&format!("imported {total} into {}", repo.display()));
+    output::success(&format!("imported {what}{added} into {}", repo.display()));
     super::print_next_steps();
     Ok(report.outcome())
 }

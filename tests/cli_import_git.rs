@@ -712,6 +712,7 @@ fn a_history_that_holds_a_credential_is_squashed_into_its_current_tree() {
         "  .tokrc: github-token, added in ",
         "so the import is one commit of the current tree",
         "the new repo has no remote",
+        "imported the current tree of 2 commits as one commit into ",
     ] {
         assert!(err.contains(line), "{line}: {err}");
     }
@@ -754,6 +755,10 @@ fn keep_history_imports_a_credential_history_with_a_warning() {
         err.contains("--keep-history imports all 2 commits"),
         "{err}"
     );
+    assert!(
+        err.contains("imported 2 commits and added one conversion commit into "),
+        "the same count as the warning: {err}"
+    );
     assert_eq!(commits(&env, &env.repo()), 3);
 }
 
@@ -764,7 +769,73 @@ fn a_clean_history_keeps_every_commit() {
     let source = history_source(&env, false);
     let err = env.ok(&["import", "--yes", &source.to_string_lossy()]);
     assert!(!err.contains("history holds"), "{err}");
+    assert!(
+        err.contains("imported 2 commits and added one conversion commit into "),
+        "{err}"
+    );
     assert_eq!(commits(&env, &env.repo()), 3);
+}
+
+/// A bare source whose `main` is one clean commit. A token sits only where the import never
+/// looks: on the branch `feature`, and in a commit only the annotated tag `v1` reaches.
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+fn side_refs_source(env: &TestEnv) -> Source {
+    let work = env.root().join("work/side");
+    fs::create_dir_all(&work).expect("create work tree");
+    let git = |args: &[&str]| git_in(env, &work, args);
+    git(&["init", "-q"]);
+    git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+    fs::write(work.join(".bashrc"), "alias ll=ls\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    let secret = format!("export GH={}\n", github_token());
+    git(&["checkout", "-q", "-b", "feature"]);
+    fs::write(work.join(".featrc"), &secret).expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "feature"]);
+    git(&["checkout", "-q", "--detach", "main"]);
+    fs::write(work.join(".tagrc"), &secret).expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "tagged"]);
+    git(&["tag", "-a", "v1", "-m", "v1"]);
+    git(&["checkout", "-q", "main"]);
+    bare(env, &work, &env.root().join("side.git"), None)
+}
+
+/// An import takes `HEAD`'s history and nothing else: a token only on another branch or behind a
+/// tag neither squashes the import nor reaches the repo, with or without `--keep-history`, and
+/// no tag or other branch comes along. The counts agree from the prompt to the last line.
+#[test]
+fn a_token_only_on_another_branch_or_tag_stays_out_and_nothing_squashes() {
+    let token = github_token();
+    for keep in [false, true] {
+        let env = TestEnv::new();
+        let source = side_refs_source(&env);
+        let url = format!("file://{}", source.display());
+        let mut args = vec!["import", "--yes"];
+        if keep {
+            args.push("--keep-history");
+        }
+        args.push(&url);
+        let err = env.ok(&args);
+        assert!(!err.contains("history holds"), "{err}");
+        assert!(
+            err.contains("imported 1 commit and added one conversion commit into "),
+            "{err}"
+        );
+        let repo = env.repo();
+        assert_eq!(commits(&env, &repo), 2);
+        assert_eq!(tree_names(&env, &repo), [".bashrc", ".dotman.toml"]);
+        assert_eq!(git_in(&env, &repo, &["tag", "-l"]), "");
+        let refs = git_in(&env, &repo, &["for-each-ref", "--format=%(refname)"]);
+        assert!(
+            refs.lines()
+                .all(|name| name.ends_with("/main") || name.ends_with("/HEAD")),
+            "{refs}"
+        );
+        assert!(!every_object(&env, &repo.join(".git")).contains(&token));
+    }
 }
 
 #[test]
