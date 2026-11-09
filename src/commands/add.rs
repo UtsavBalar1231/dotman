@@ -990,11 +990,9 @@ impl Planner<'_> {
         let rel = path
             .strip_prefix(&paths.home)
             .map_err(|e| Left::Name(format!("{}: {e}", path.display())))?;
-        // Before the name checks, so an ignored entry is never reported, whatever its name.
-        if rel
-            .to_str()
-            .is_some_and(|text| self.ignore.matches(text, is_dir))
-        {
+        // Before the name checks, so an ignored entry is never reported, whatever its name; a
+        // name that is not UTF-8 matches in its lossy form.
+        if self.ignore.matches(&rel.to_string_lossy(), is_dir) {
             return Err(Left::Quiet);
         }
         if let Err(e) = refuse_non_nfc(rel) {

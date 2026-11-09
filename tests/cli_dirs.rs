@@ -1,7 +1,9 @@
 mod common;
 
 use common::{TestEnv, assert_converged, mode_of};
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::process::Command;
@@ -298,6 +300,23 @@ impl Drop for Readable {
     fn drop(&mut self) {
         let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
     }
+}
+
+#[test]
+fn a_name_that_is_not_utf8_is_noted_until_an_ignore_pattern_matches_its_lossy_form() {
+    let a = device();
+    let name = OsStr::from_bytes(b"bad\xff.lua");
+    fs::write(a.home().join(".config/nvim").join(name), b"x\n").expect("write");
+    let err = a.ok(&["status"]);
+    assert!(err.contains("not valid UTF-8"), "{err}");
+
+    let mut config = a.repo_config();
+    config.ignore.patterns.push("**/bad*.lua".to_owned());
+    config
+        .save(&a.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    let err = a.ok(&["status"]);
+    assert!(!err.contains("not valid UTF-8"), "{err}");
 }
 
 #[test]
