@@ -212,6 +212,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         targets.identity,
         public,
         args,
+        |key| holds_key(&ctx.paths.home, key, &ctx.machine.guard.allow),
     )?;
     let settled = drop_unchanged(&ctx, &repo_config, &state, &targets.sources, &mut plan);
     let content = guard_content(&ctx, &mut plan, &targets, args)?;
@@ -424,7 +425,8 @@ impl Guarded {
 /// A secret-named file goes in only when named explicitly or with `--allow-plain`, so a directory
 /// holds back each new one, whatever the remote. With a public remote, an explicit one also needs
 /// `--encrypt` or `--allow-plain`. A file counts as managed only when this machine applies a
-/// source for it: another host's `{age}` variant must not let a plain copy in.
+/// source for it: another host's `{age}` variant must not let a plain copy in. `holds` is what the
+/// content guard finds in a file.
 fn guard_secrets(
     plan: &mut Plan,
     repo_config: &RepoConfig,
@@ -432,6 +434,7 @@ fn guard_secrets(
     identity: &IdentitySnapshot,
     public: bool,
     args: &AddArgs,
+    holds: impl Fn(&str) -> Option<Finding>,
 ) -> Result<Guarded> {
     let secrets = secret_patterns(repo_config)?;
     let named = |key: &str| secrets.iter().any(|p| p.matches_with(key, MATCH_SECRET));
@@ -443,10 +446,17 @@ fn guard_secrets(
         .collect();
     let is_link = |key: &String| matches!(plan.files.get(key), Some(Leaf::Link));
     if public && !args.encrypt && !args.allow_plain && !explicit.is_empty() {
+        let found = explicit
+            .iter()
+            .find_map(|key| holds(key).map(|found| (key, found)));
         let fix = if explicit.iter().all(is_link) {
-            "pass --allow-plain to store the links as they are"
+            "pass --allow-plain to store the links as they are".to_owned()
+        } else if let Some((key, found)) = found {
+            // --allow-plain would publish the credential.
+            format!("{key}: {found}{}", found.remedy(None))
         } else {
             "pass --encrypt to store them encrypted, or --allow-plain to store them as they are"
+                .to_owned()
         };
         bail!(
             "{} match [guard] secret_names and the remote is public; {fix}",
@@ -2022,6 +2032,7 @@ mod tests {
             &here(),
             true,
             &args(false, false),
+            |_| None,
         )
         .unwrap_err()
         .to_string();
@@ -2036,6 +2047,7 @@ mod tests {
             &here(),
             false,
             &args(false, false),
+            |_| None,
         )
         .unwrap();
         assert!(
@@ -2093,14 +2105,23 @@ mod tests {
                 &me,
                 public,
                 &args(false, false),
+                |_| None,
             )
             .unwrap();
             assert_eq!(held_keys(&guarded), [".config/x/.env"], "public: {public}");
             assert_eq!(kept(&plan), [".config/x/managed.token", ".config/x/rc"]);
         }
         let mut plan = plan_of(&[], &items);
-        let guarded =
-            guard_secrets(&mut plan, &config, &managed, &me, false, &args(false, true)).unwrap();
+        let guarded = guard_secrets(
+            &mut plan,
+            &config,
+            &managed,
+            &me,
+            false,
+            &args(false, true),
+            |_| None,
+        )
+        .unwrap();
         assert_eq!(guarded.held.len(), 0);
         assert_eq!(kept(&plan).len(), 3);
     }
@@ -2118,6 +2139,7 @@ mod tests {
             &me,
             false,
             &args(false, false),
+            |_| None,
         )
         .unwrap();
         assert_eq!(held_keys(&guarded), [".config/x/.env"]);
@@ -2130,13 +2152,22 @@ mod tests {
         let me = here();
         let none = Sources::default();
         let mut plan = plan_of(&[".bashrc", ".env"], &[]);
-        let guarded =
-            guard_secrets(&mut plan, &config, &none, &me, false, &args(false, false)).unwrap();
+        let guarded = guard_secrets(
+            &mut plan,
+            &config,
+            &none,
+            &me,
+            false,
+            &args(false, false),
+            |_| None,
+        )
+        .unwrap();
         assert_eq!(guarded.plain, [".env"]);
         assert_eq!(plan.files.len(), 2);
         for flags in [args(true, false), args(false, true)] {
             let mut plan = plan_of(&[".env"], &[]);
-            let guarded = guard_secrets(&mut plan, &config, &none, &me, true, &flags).unwrap();
+            let guarded =
+                guard_secrets(&mut plan, &config, &none, &me, true, &flags, |_| None).unwrap();
             assert!(guarded.plain.is_empty() && guarded.held.is_empty());
         }
     }
@@ -2153,6 +2184,7 @@ mod tests {
             &here(),
             true,
             &args(false, false),
+            |_| None,
         )
         .unwrap_err()
         .to_string();
@@ -2165,6 +2197,35 @@ mod tests {
             err.contains("--encrypt") && err.contains("--allow-plain"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_public_remote_never_offers_allow_plain_for_a_file_that_holds_a_credential() {
+        let config = RepoConfig::default();
+        let none = Sources::default();
+        let mut plan = plan_of(&[".ENV", ".aws/credentials"], &[]);
+        let token = |key: &str| {
+            (key == ".aws/credentials").then_some(Finding {
+                rule: "github-token",
+                line: 2,
+            })
+        };
+        let err = guard_secrets(
+            &mut plan,
+            &config,
+            &none,
+            &here(),
+            true,
+            &args(false, false),
+            token,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(".aws/credentials: line 2 holds a github-token; --encrypt stores it encrypted; or remove the secret from the file"),
+            "{err}"
+        );
+        assert!(!err.contains("--allow-plain"), "{err}");
     }
 
     #[test]
