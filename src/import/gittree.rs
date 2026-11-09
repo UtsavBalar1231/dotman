@@ -42,6 +42,7 @@ use std::fs;
 use std::io;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -687,8 +688,58 @@ fn tally(found: &Analysis, recover: bool) -> Report {
     report
 }
 
-/// Writes the conversion into the worktree of `repo` and commits it.
-fn convert(git: &Git, repo: &Path, found: &Analysis) -> Result<()> {
+/// Modes git cannot carry: a file in `$HOME` with the same bytes as its blob and no group or other
+/// access, which the import would otherwise widen to git's 0644 or 0755 on the next apply.
+fn home_modes(ctx: &Context, git: &Git, found: &Analysis) -> BTreeMap<String, u32> {
+    let home = &ctx.paths.home;
+    let mut modes = BTreeMap::new();
+    for kept in &found.kept {
+        if kept.reserved || kept.from != kept.to || kept.body.is_some() {
+            continue;
+        }
+        let default = match kept.mode.as_str() {
+            "100644" => 0o644,
+            "100755" => 0o755,
+            _ => continue,
+        };
+        // The bytes are read only for a file whose mode alone already qualifies.
+        let stricter = fs::symlink_metadata(home.join(&kept.to)).is_ok_and(|meta| {
+            let mode = meta.mode() & 0o777;
+            let owner_only = mode | 0o700 == 0o700;
+            meta.is_file() && owner_only && mode != default
+        });
+        if !stricter {
+            continue;
+        }
+        if let Ok(Node::File { bytes, mode, .. }) = read_node(home, &kept.to)
+            && git
+                .show_blob("HEAD", &kept.from)
+                .is_ok_and(|blob| blob == bytes)
+        {
+            modes.insert(kept.to.clone(), mode & 0o777);
+        }
+    }
+    modes
+}
+
+fn home_modes_note(modes: &BTreeMap<String, u32>) -> Option<String> {
+    let shown_modes: Vec<String> = modes
+        .iter()
+        .map(|(key, mode)| format!("{key} {mode:04o}"))
+        .collect();
+    (!modes.is_empty()).then(|| {
+        format!(
+            "{} in $HOME {} the same bytes as the source and a stricter mode than git keeps; [modes] records it: {}",
+            count(modes.len(), "file"),
+            if modes.len() == 1 { "has" } else { "have" },
+            shown(&shown_modes)
+        )
+    })
+}
+
+/// Writes the conversion into the worktree of `repo` and commits it. `modes` go into `[modes]`
+/// where it has no entry yet.
+fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u32>) -> Result<()> {
     for left in found.left.iter().filter(|left| left.remove) {
         fs::remove_file(repo.join(&left.path))
             .with_context(|| format!("cannot remove {}", left.path))?;
@@ -707,13 +758,31 @@ fn convert(git: &Git, repo: &Path, found: &Analysis) -> Result<()> {
         }
     }
     let has_config = found.kept.iter().any(|kept| kept.to == ".dotman.toml");
-    if !has_config {
-        RepoConfig::default().save(&repo.join(".dotman.toml"), false)?;
+    let file = repo.join(".dotman.toml");
+    let mut config = if has_config {
+        // A source's own config that does not parse is kept as it is, without the modes.
+        RepoConfig::load(&file).ok()
+    } else {
+        Some(RepoConfig::default())
+    };
+    let mut recorded = false;
+    if let Some(config) = &mut config {
+        for (key, mode) in modes {
+            if !config.modes.contains_key(key) {
+                config.modes.insert(key.clone(), format!("{mode:04o}"));
+                recorded = true;
+            }
+        }
+        if recorded || !has_config {
+            config.save(&file, false)?;
+        }
     }
     let message = if !found.alternates.is_empty() {
         "import: convert yadm alternates"
     } else if !has_config {
         "import: add .dotman.toml"
+    } else if recorded {
+        "import: record the stricter modes $HOME has"
     } else {
         return Ok(());
     };
@@ -1099,7 +1168,9 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     let setup = yadm_setup(ctx, source, &tree)?;
     let identity = identity::current(setup.machine.as_ref().unwrap_or(&ctx.machine));
     let found = analyze(&staging.git, &tree, &identity);
+    let modes = home_modes(ctx, &staging.git, &found);
     let mut report = tally(&found, true);
+    report.notes.extend(home_modes_note(&modes));
     report
         .notes
         .extend(remote_notes(source, source_origin.as_deref(), &found));
@@ -1126,7 +1197,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         output::info("nothing imported");
         return Ok(Outcome::Done);
     }
-    convert(&staging.git, &staging.repo, &found)?;
+    convert(&staging.git, &staging.repo, &found, &modes)?;
     install_keeping_origin(ctx, &staging, edited.as_ref())?;
     if let Some(machine) = setup.machine {
         machine.save(&ctx.paths.config_file, false)?;

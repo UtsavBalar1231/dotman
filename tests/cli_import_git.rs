@@ -689,6 +689,43 @@ fn a_yadm_repo_in_the_places_older_yadm_used_is_found() {
 }
 
 #[test]
+fn a_stricter_mode_in_home_with_the_same_bytes_goes_into_modes() {
+    let env = TestEnv::new();
+    let files: [File; 3] = [
+        (".ssh/config", "Host x\n", false),
+        (".netrc", "machine x\n", false),
+        (".vimrc", "set nu\n", false),
+    ];
+    let (_, _dir) = dot_dir_bare(&env, &files, Some(&env.home()));
+    env.write(".ssh/config", b"Host x\n", 0o600);
+    env.write(".netrc", b"machine edited\n", 0o600);
+    env.write(".vimrc", b"set nu\n", 0o640);
+
+    let err = env.ok(&["import", "--no-bootstrap"]);
+    assert!(
+        err.contains("1 file in $HOME has the same bytes as the source and a stricter mode than git keeps; [modes] records it: .ssh/config 0600"),
+        "{err}"
+    );
+    let modes = env.repo_config().modes;
+    assert_eq!(modes.get(".ssh/config").map(String::as_str), Some("0600"));
+    assert!(
+        !modes.contains_key(".netrc") && !modes.contains_key(".vimrc"),
+        "{modes:?}"
+    );
+    assert_eq!(git_in(&env, &env.repo(), &["status", "--porcelain"]), "");
+
+    env.ok(&["apply", "--take-repo"]);
+    let mode = |key: &str| {
+        fs::metadata(env.home().join(key))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(".ssh/config"), 0o600);
+}
+
+#[test]
 fn a_converted_template_that_prints_the_os_warns_that_its_case_changes() {
     let env = TestEnv::new();
     let files: [File; 1] = [(".profile##template", "export OS={{ yadm.os }}\n", false)];
