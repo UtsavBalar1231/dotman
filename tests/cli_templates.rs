@@ -52,13 +52,28 @@ fn an_undefined_variable_fails_naming_the_file_and_the_variable() {
     assert!(err.contains("kitty{tmpl}.conf"), "{err}");
     assert!(err.contains("vars.size"), "{err}");
     assert!(
-        err.contains(".config/kitty/kitty.conf: skipped: .config/kitty/kitty{tmpl}.conf:1: "),
+        err.contains(
+            ".config/kitty/kitty.conf: skipped: template-error: .config/kitty/kitty{tmpl}.conf:1: "
+        ),
         "{err}"
     );
     assert!(err.contains("1 path could not be applied"), "{err}");
     assert!(!env.home().join(KEY).exists());
     assert_eq!(env.read(".plain"), b"x\n", "other paths still apply");
-    assert_eq!(token(&env, KEY).as_deref(), Some("unreadable"));
+    assert_eq!(token(&env, KEY).as_deref(), Some("template-error"));
+    let out = env.run(&["status"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(
+            ".config/kitty/kitty.conf: template-error: .config/kitty/kitty{tmpl}.conf:1: "
+        ) && err.contains("vars.size"),
+        "{err}"
+    );
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        shown.contains("template-error            .config/kitty/kitty.conf"),
+        "{shown}"
+    );
 }
 
 #[test]

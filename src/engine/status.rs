@@ -187,6 +187,17 @@ pub enum Content {
     Link(PathBuf),
 }
 
+/// R's template did not render; the error it carries names the source, the line and the
+/// template engine's message.
+#[derive(Debug)]
+pub struct TemplateError;
+
+impl std::fmt::Display for TemplateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("template-error")
+    }
+}
+
 /// Produces R for a key.
 pub trait Source {
     /// The winning entry, whose `source` is the repo path it came from.
@@ -288,8 +299,11 @@ impl<'a> Variants<'a> {
             );
         };
         let text = std::str::from_utf8(bytes)
-            .with_context(|| format!("{} is not valid UTF-8", entry.source))?;
-        let rendered = template::render(&entry.source, text, self.vars)?.into_bytes();
+            .with_context(|| format!("{} is not valid UTF-8", entry.source))
+            .context(TemplateError)?;
+        let rendered = template::render(&entry.source, text, self.vars)
+            .context(TemplateError)?
+            .into_bytes();
         entry.tuple = Tuple::of_file(&rendered, entry.tuple.mode);
         entry.content = Content::Bytes(rendered);
         entry.template = true;

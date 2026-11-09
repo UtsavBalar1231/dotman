@@ -5,7 +5,7 @@ use crate::commands::add::{self, Hold};
 use crate::commands::apply::{Classified, classify_key};
 use crate::commands::sync;
 use crate::context::{Context, is_under};
-use crate::engine::status::{Row, Variants, Worktree};
+use crate::engine::status::{Row, TemplateError, Variants, Worktree};
 use crate::git::StatusEntry;
 use crate::name;
 use crate::output::{self, escape_line};
@@ -178,7 +178,11 @@ fn home_label(
         Ok(Classified::Locked(_)) => "locked",
         Err(e) => {
             output::warning(&format!("{key}: {e:#}"));
-            UNREADABLE
+            if e.is::<TemplateError>() {
+                "template-error"
+            } else {
+                UNREADABLE
+            }
         }
     })
 }
