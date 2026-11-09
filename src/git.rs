@@ -651,7 +651,11 @@ impl Git {
             specs.extend_from_slice(spec.as_bytes());
             specs.push(0);
         }
-        let mut input = tempfile::tempfile().context("cannot create a temp file")?;
+        // In `.git`, not TMPDIR: a missing or read-only TMPDIR must not fail a sync after its
+        // captures were made.
+        let dir = self.repo.join(".git");
+        let mut input = tempfile::tempfile_in(&dir)
+            .with_context(|| format!("cannot create a temp file in {}", dir.display()))?;
         input
             .write_all(&specs)
             .and_then(|()| input.rewind())

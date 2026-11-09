@@ -2159,3 +2159,33 @@ fn a_stale_git_lock_gets_a_removal_step_that_works() {
     assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
     assert_eq!(remote_file(&a, ".a"), "edited\n");
 }
+
+/// The list of paths `git add` stages from goes to a file in `.git`, so a TMPDIR that is missing
+/// or read-only never fails a sync after it captured an edit.
+#[test]
+fn sync_needs_no_usable_tmpdir() {
+    let env = first_device(&[(".a", b"one\n", 0o644)]);
+    let missing = env.root().join("no-such-tmp");
+    env.write(".a", b"two\n", 0o644);
+    let err = exits_with(
+        &env,
+        &[("TMPDIR", &missing.to_string_lossy())],
+        0,
+        &["sync"],
+    );
+    assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
+    assert_eq!(remote_file(&env, ".a"), "two\n");
+
+    let read_only = env.root().join("read-only-tmp");
+    fs::create_dir_all(&read_only).expect("create the temp dir");
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555)).expect("chmod");
+    env.write(".a", b"three\n", 0o644);
+    let err = exits_with(
+        &env,
+        &[("TMPDIR", &read_only.to_string_lossy())],
+        0,
+        &["sync"],
+    );
+    assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
+    assert_eq!(remote_file(&env, ".a"), "three\n");
+}
