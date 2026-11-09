@@ -130,10 +130,10 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         ));
         secrets::reencrypt(&ctx, true)?;
         let hooked = hooks::run(&ctx, &written, policy);
-        apply::check_failed(first_failed, uncaptured)
+        let hooked = apply::check_failed(first_failed, uncaptured)
             .and(hooked)
-            .and_then(|()| refused(committed.refusal))?;
-        return Ok(finish(attention));
+            .and_then(|hooked| refused(committed.refusal).map(|()| hooked))?;
+        return Ok(finish(attention || hooked == Outcome::Attention));
     }
 
     let reached = |err| remote_error(err, committed.new_commit);
@@ -163,8 +163,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured), uncaptured);
 
     push(&ctx, &branch, pulled).map_err(reached)?;
-    failed.and(reencrypted).and(hooked)?;
-    Ok(finish(attention))
+    let hooked = failed.and(reencrypted).and(hooked)?;
+    Ok(finish(attention || hooked == Outcome::Attention))
 }
 
 /// Pushes `branch` and says how many commits went out. `pulled` means the pull left the remote's

@@ -509,6 +509,10 @@ fn a_table_changed_before_approval_runs_only_the_hooks_matching_the_held_back_ke
         )
         .as_bytes(),
     );
+    // The flag first shows the table that changed since the warning, and approves it when given
+    // again.
+    let err = exits(&env, 3, &["apply", "--approve-hooks"]);
+    assert!(!marker(&env).exists(), "{err}");
     exits(&env, 0, &["apply", "--approve-hooks"]);
     assert_eq!(fs::read_to_string(marker(&env)).unwrap_or_default(), "a\n");
     assert_eq!(pending(&env), Vec::<String>::new());
@@ -544,8 +548,103 @@ fn a_held_back_key_forgotten_upstream_runs_no_hook_once_a_new_table_is_approved(
     let b = held_back_then_swapped(&a, &[A]);
     let err = exits(&b, 0, &["sync"]);
     assert_eq!(pending(&b), Vec::<String>::new(), "{err}");
+    // No key waits any more, but the `**` table was never shown here: the flag shows it and
+    // approves nothing, and the same command again approves it.
+    let mark = marker(&a).display().to_string();
+    let err = exits(&b, 3, &["apply", "--approve-hooks"]);
+    assert!(err.contains("--approve-hooks approved nothing"), "{err}");
+    assert!(
+        err.lines()
+            .any(|line| line == format!("  ** -> echo second >> '{mark}'")),
+        "{err}"
+    );
+    assert_eq!(approved_line(&b), None, "{err}");
     let err = exits(&b, 0, &["apply", "--approve-hooks"]);
+    assert!(approved_line(&b).is_some(), "{err}");
     assert!(!marker(&a).exists(), "{err}");
+}
+
+/// Device B holds back the hook for A under a table that echoes `first`, and prints the approval
+/// step; device A then replaces the table with one that echoes `second`, which B never showed.
+/// Returns B and what its sync printed.
+fn held_back_then_replaced(a: &TestEnv) -> (TestEnv, String) {
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    let mark = marker(a).display().to_string();
+    set_hooks(a, &format!("echo first >> '{mark}'"));
+    a.write_repo(A, b"1\n");
+    exits(a, 0, &["sync", "--no-hooks"]);
+    let warned = exits(&b, 0, &["sync"]);
+    assert!(warned.contains("echo first"), "{warned}");
+    assert_eq!(pending(&b), [A]);
+    set_hooks(a, &format!("echo second >> '{mark}'"));
+    exits(a, 0, &["sync", "--no-hooks"]);
+    (b, warned)
+}
+
+/// What `--approve-hooks` refused with: the table B holds now, shown escaped, and nothing run.
+fn shown_and_refused(a: &TestEnv, b: &TestEnv, err: &str) {
+    let mark = marker(a).display().to_string();
+    assert!(
+        err.contains("--approve-hooks approved nothing: the [hooks] table in .dotman.toml changed since it was last shown on this machine"),
+        "{err}"
+    );
+    assert!(
+        err.contains("running the same command again approves this table and runs 1 hook once"),
+        "{err}"
+    );
+    let entry = format!("  .config/app/** -> echo second >> '{mark}'");
+    let below = err
+        .split_once("the [hooks] table now:")
+        .map(|(_, rest)| rest);
+    assert!(
+        below.is_some_and(|rest| rest.lines().any(|line| line == entry)),
+        "{err}"
+    );
+    assert!(!marker(a).exists(), "{err}");
+    assert_eq!(approved_line(b), None, "{err}");
+    assert_eq!(pending(b), [A], "{err}");
+}
+
+#[test]
+fn sync_approving_hooks_after_the_table_changed_upstream_shows_it_and_approves_it_only_when_run_again()
+ {
+    let a = first_device();
+    let (b, _) = held_back_then_replaced(&a);
+    let err = exits(&b, 3, &["sync", "--approve-hooks"]);
+    shown_and_refused(&a, &b, &err);
+
+    let err = exits(&b, 0, &["sync", "--approve-hooks"]);
+    let ran = fs::read_to_string(marker(&a)).unwrap_or_default();
+    assert_eq!(ran, "second\n", "{err}");
+    assert_eq!(pending(&b), Vec::<String>::new());
+}
+
+#[test]
+fn the_printed_approval_after_a_pull_changed_the_table_shows_it_and_approves_it_when_run_again() {
+    let a = first_device();
+    let (b, warned) = held_back_then_replaced(&a);
+    exits(&b, 0, &["git", "pull", "-q"]);
+
+    let before = b.four_trees();
+    let dry = exits(&b, 3, &["apply", "--dry-run", "--approve-hooks"]);
+    assert!(
+        dry.contains("--approve-hooks would approve nothing"),
+        "{dry}"
+    );
+    assert_eq!(b.four_trees(), before, "{dry}");
+
+    let out = common::run_hint(&b, &warned, "apply --approve-hooks");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    shown_and_refused(&a, &b, &err);
+
+    let out = common::run_hint(&b, &warned, "apply --approve-hooks");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let ran = fs::read_to_string(marker(&a)).unwrap_or_default();
+    assert_eq!(ran, "second\n", "{err}");
+    assert_eq!(pending(&b), Vec::<String>::new());
 }
 
 #[test]

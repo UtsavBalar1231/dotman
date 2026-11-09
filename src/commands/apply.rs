@@ -77,8 +77,12 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
 /// Runs the hooks for what `applied` wrote, then fails if a path or a hook failed.
 pub(crate) fn finish(ctx: &Context, applied: &Applied, policy: Policy) -> Result<Outcome> {
     let hooked = hooks::run(ctx, &applied.written, policy);
-    applied.check().and(hooked)?;
-    Ok(applied.outcome)
+    let hooked = applied.check().and(hooked)?;
+    Ok(if applied.outcome == Outcome::Done {
+        hooked
+    } else {
+        applied.outcome
+    })
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

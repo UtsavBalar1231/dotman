@@ -1,6 +1,7 @@
 //! Post-apply hooks: `[hooks]` in `.dotman.toml` maps a glob over keys to a shell command, run
 //! once after a command changed a matching path. A machine runs a table only after approving it.
 
+use crate::commands::Outcome;
 use crate::commands::add::MATCH;
 use crate::context::Context;
 use crate::output;
@@ -28,14 +29,15 @@ const RISK: &str = "Approval covers these command lines, not the scripts they ca
 
 /// Runs the hooks whose glob matches a key in `changed`, if this machine approves them. An
 /// approved table also runs, once, the hooks for the keys an unapproved one held back.
-/// Fails after running every hook when any of them failed.
-pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<()> {
+/// Fails after running every hook when any of them failed. [`Outcome::Attention`] when
+/// `--approve-hooks` approved nothing, because the table changed since it was shown.
+pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<Outcome> {
     if policy.no_hooks {
-        return Ok(());
+        return Ok(Outcome::Done);
     }
     let table = ctx.repo_config()?.hooks;
     if table.is_empty() {
-        return Ok(());
+        return Ok(Outcome::Done);
     }
     validate(&table)?;
     let json = canonical(&table)?;
@@ -43,7 +45,16 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     let dropped = drop_unmanaged(ctx, &mut state.hooks.pending)?;
     let standing = approval(&json, &state);
     let recorded = standing == Standing::Approved;
-    let mut approved = policy.approve || recorded;
+    // The flag approves the table last shown here, never one that has changed since: the user
+    // read the shown one. With none shown yet, it approves the table and prints it.
+    let unshown = policy.approve
+        && !recorded
+        && state
+            .hooks
+            .pending_table
+            .as_deref()
+            .is_some_and(|shown| shown != json);
+    let mut approved = recorded || (policy.approve && !unshown);
     let due_now = due(&table, changed)?;
     let with_pending = due(
         &table,
@@ -55,22 +66,13 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         && state.hooks.pending_table.as_deref() != Some(json.as_str())
         && !due(&table, &state.hooks.pending)?.is_empty();
     if policy.dry_run {
-        let would_ask = !approved && !policy.never_ask && prompt::interactive();
+        let would_ask = !approved && !unshown && !policy.never_ask && prompt::interactive();
         let due = if approved { with_pending } else { due_now };
-        for command in due {
-            let command = output::escape_line(command);
-            output::info(&if approved {
-                format!("would run hook: {command}")
-            } else if would_ask {
-                format!("would ask before running hook: {command}")
-            } else {
-                format!("hook not approved on this machine, would be skipped: {command}")
-            });
-        }
-        return Ok(());
+        return Ok(dry_run(&due, approved, would_ask, unshown));
     }
 
-    let asked = !approved && !due_now.is_empty() && !policy.never_ask && prompt::interactive();
+    let asked =
+        !approved && !unshown && !due_now.is_empty() && !policy.never_ask && prompt::interactive();
     if asked {
         approved = ask(&table)?;
     }
@@ -85,17 +87,21 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         }
     }
     if !approved {
-        if due_now.is_empty() && !swapped {
+        if due_now.is_empty() && !swapped && !unshown {
             if dropped {
                 state.save(&file, false)?;
             }
-            return Ok(());
+            return Ok(Outcome::Done);
         }
         let held = matched(&table, changed)?;
-        if dropped || swapped || !held.is_subset(&state.hooks.pending) {
+        if dropped || swapped || unshown || !held.is_subset(&state.hooks.pending) {
             state.hooks.pending.extend(held);
             state.hooks.pending_table = Some(json);
             state.save(&file, false)?;
+        }
+        if unshown {
+            show_unshown(&table, with_pending.len());
+            return Ok(Outcome::Attention);
         }
         let why = if swapped {
             "the [hooks] table in .dotman.toml changed while hooks for paths changed earlier waited for approval, and the new table, below, is not approved on this machine. Read it; then"
@@ -120,7 +126,7 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         if swapped {
             show_table("the new [hooks] table:", &table);
         }
-        return Ok(());
+        return Ok(Outcome::Done);
     }
 
     let ran = run_all(ctx, &with_pending);
@@ -129,7 +135,47 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         state.hooks.pending_table = None;
         state.save(&file, false)?;
     }
-    ran
+    ran.map(|()| Outcome::Done)
+}
+
+const CHANGED_SINCE_SHOWN: &str =
+    "the [hooks] table in .dotman.toml changed since it was last shown on this machine";
+
+/// Shows `table`, which `--approve-hooks` did not approve, and how to approve it; `due` hooks
+/// would run once it is.
+fn show_unshown(table: &BTreeMap<String, String>, due: usize) {
+    let runs = match due {
+        0 => String::new(),
+        n => format!(" and runs {} once", count(n)),
+    };
+    output::warning(&format!(
+        "--approve-hooks approved nothing: {CHANGED_SINCE_SHOWN}. Read the table it holds now, below; running the same command again approves this table{runs}"
+    ));
+    show_table("the [hooks] table now:", table);
+}
+
+/// Says what the run would do with each of `due`, and exits as the run would.
+fn dry_run(due: &[&str], approved: bool, would_ask: bool, unshown: bool) -> Outcome {
+    if unshown {
+        output::warning(&format!(
+            "--approve-hooks would approve nothing: {CHANGED_SINCE_SHOWN}"
+        ));
+    }
+    for command in due {
+        let command = output::escape_line(command);
+        output::info(&if approved {
+            format!("would run hook: {command}")
+        } else if would_ask {
+            format!("would ask before running hook: {command}")
+        } else {
+            format!("hook not approved on this machine, would be skipped: {command}")
+        });
+    }
+    if unshown {
+        Outcome::Attention
+    } else {
+        Outcome::Done
+    }
 }
 
 /// Drops the pending keys no longer managed, as one that upstream forgot, which no hook is run
