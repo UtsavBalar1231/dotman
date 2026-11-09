@@ -305,9 +305,16 @@ fn dry_runs_leave_all_four_trees_equal() {
     env.ok(&["add", ".bashrc", ".config/app"]);
     let before = env.four_trees();
     let err = env.ok(&["forget", "--dry-run", ".bashrc", ".config/app"]);
-    assert!(err.contains("forget"), "{err}");
+    for line in ["would forget .bashrc", "would forget .config/app/"] {
+        assert!(err.contains(line), "{err}");
+    }
     assert_eq!(env.four_trees(), before);
     assert_eq!(env.porcelain("list").len(), 2);
+    let err = env.ok(&["forget", ".bashrc"]);
+    assert!(
+        err.contains("forget .bashrc") && !err.contains("would"),
+        "{err}"
+    );
 }
 
 #[test]

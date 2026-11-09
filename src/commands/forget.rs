@@ -60,11 +60,12 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
         }
     }
 
+    let verb = if dry_run { "would forget" } else { "forget" };
     for key in &gone {
-        output::action("forget", key);
+        output::action(verb, key);
     }
     for dir in &dirs {
-        output::action("forget", &format!("{dir}/"));
+        output::action(verb, &format!("{dir}/"));
     }
     if dry_run {
         return Ok(());
