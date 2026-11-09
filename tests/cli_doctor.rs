@@ -120,6 +120,10 @@ fn a_half_made_repo_is_named_with_a_fix_that_keeps_commits() {
             line(&out, "fail", "repo id").is_none(),
             "no circular hint: {out}"
         );
+        assert!(
+            line(&out, "pass", "repo ").is_none(),
+            "an incomplete repo never also passes: {out}"
+        );
         line(&out, "fail", "is incomplete")
             .unwrap_or_default()
             .to_owned()
@@ -161,6 +165,27 @@ fn a_half_made_repo_is_named_with_a_fix_that_keeps_commits() {
         failed.contains(&format!("remove {}", lock.display())),
         "{failed}"
     );
+}
+
+#[test]
+fn a_reftable_repo_that_holds_commits_is_never_told_to_be_removed() {
+    let env = committed();
+    let repo = env.repo().display().to_string();
+    let migrated = env.git_raw(&["-C", &repo, "refs", "migrate", "--ref-format=reftable"]);
+    if !migrated.status.success() {
+        eprintln!("skipped: this git cannot migrate refs to reftable");
+        return;
+    }
+    assert!(
+        !env.repo().join(".git/refs/heads").is_dir(),
+        "the refs live in the reftable"
+    );
+    fs::remove_file(env.repo().join(".git/dotman-id")).expect("remove id");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(1), "{out}");
+    let failed = line(&out, "fail", "is incomplete").unwrap_or_default();
+    assert!(failed.contains("holds commits, so move"), "{out}");
+    assert!(!failed.contains(&format!("remove {repo}")), "{out}");
 }
 
 #[test]
@@ -214,6 +239,16 @@ fn the_old_store_and_an_old_dot_on_path_warn() {
     let (_, out) = doctor(&env, &[]);
     assert!(started.elapsed().as_secs() < 20, "the probe is bounded");
     assert!(line(&out, "warn", "dot:").is_none(), "{out}");
+
+    // A child that outlives the probe keeps its stdout open.
+    dot("sleep 30 &\necho dot 0.0.1");
+    let started = std::time::Instant::now();
+    let (_, out) = doctor(&env, &[]);
+    assert!(
+        started.elapsed().as_secs() < 20,
+        "a forked child does not hold doctor up"
+    );
+    assert!(line(&out, "warn", "dot:").is_some(), "{out}");
 }
 
 #[test]

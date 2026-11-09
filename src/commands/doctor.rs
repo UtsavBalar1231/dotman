@@ -19,7 +19,7 @@ use crate::variant::{Flag, Selection};
 use anyhow::{Context as _, Result};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -128,9 +128,9 @@ fn collect(online: bool) -> Vec<Check> {
         checks.push(identity(&git));
     }
     if let Some(ctx) = &ctx {
-        checks.extend(directories(ctx));
-        checks.extend(system_roots(ctx));
         let incomplete = repo_exists.then(|| incomplete(ctx)).flatten();
+        checks.extend(directories(ctx, incomplete.is_none()));
+        checks.extend(system_roots(ctx));
         if let Some(check) = incomplete {
             checks.push(check);
         } else if repo_exists {
@@ -179,7 +179,7 @@ fn incomplete(ctx: &Context) -> Option<Check> {
     } else {
         return None;
     };
-    let fix = if !holds_commits(&git_dir) {
+    let fix = if !holds_commits(ctx, &git_dir) {
         format!("remove {} and rerun {} init", repo.display(), name::bin())
     } else if stale_lock {
         format!("remove {}", lock.display())
@@ -197,11 +197,40 @@ fn incomplete(ctx: &Context) -> Option<Check> {
     ))
 }
 
-// Read from disk, since git cannot read a repo whose HEAD is gone.
-fn holds_commits(git_dir: &Path) -> bool {
-    let has_ref =
-        fs::read_dir(git_dir.join("refs/heads")).is_ok_and(|mut refs| refs.next().is_some());
-    has_ref || fs::metadata(git_dir.join("packed-refs")).is_ok_and(|meta| meta.len() > 0)
+/// Whether removing the repo could lose commits. git is asked, since only it reads every ref
+/// format, reftable included; `--git-dir` keeps it from finding a repo above this one. Where git
+/// cannot read the repo, as without `HEAD`, any object in it counts.
+fn holds_commits(ctx: &Context, git_dir: &Path) -> bool {
+    let mut cmd = ctx.git.command();
+    cmd.arg("--git-dir")
+        .arg(git_dir)
+        .args(["for-each-ref", "--count=1", "--format=%(refname)"])
+        .stdin(Stdio::null());
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            !out.stdout.is_empty() || !matches!(ctx.git.head(), Ok(None))
+        }
+        _ => has_objects(&git_dir.join("objects")),
+    }
+}
+
+fn has_objects(objects: &Path) -> bool {
+    let info = objects.join("info");
+    let mut stack = vec![objects.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() && path != info => stack.push(path),
+                Ok(kind) if !kind.is_dir() => return true,
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// `git fsck --connectivity-only`: every object a ref reaches is present and readable.
@@ -318,7 +347,9 @@ fn remote(git: &Git, online: bool) -> Check {
     }
 }
 
-fn directories(ctx: &Context) -> Vec<Check> {
+/// Ownership and modes of the dotman directories; the repo passes only when `repo_whole`, so an
+/// incomplete repo is never also reported as passing.
+fn directories(ctx: &Context, repo_whole: bool) -> Vec<Check> {
     let euid = sys::geteuid();
     let config_dir = ctx.paths.config_file.parent().map(Path::to_path_buf);
     let dirs = [
@@ -356,7 +387,7 @@ fn directories(ctx: &Context) -> Vec<Check> {
                     meta.mode() & 0o7777
                 ),
             ));
-        } else {
+        } else if name != "repo" || repo_whole {
             checks.push(pass(&format!("{name} {}", dir.display())));
         }
     }
@@ -700,12 +731,15 @@ fn old_dotman(ctx: &Context) -> Vec<Check> {
     checks
 }
 
-/// What `program --version` prints on stdout, or `None` when it fails or takes too long.
+/// What `program --version` prints on stdout, or `None` when it fails or takes too long. Stdout
+/// goes to an unnamed temp file rather than a pipe: a pipe stays open while any process it forked
+/// lives, and reading it would wait for them all.
 fn version_of(program: &Path) -> Option<String> {
+    let mut out = tempfile::tempfile().ok()?;
     let mut child = proc::command(program)
         .arg("--version")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(out.try_clone().ok()?))
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
@@ -725,13 +759,9 @@ fn version_of(program: &Path) -> Option<String> {
             }
         }
     }
+    out.seek(SeekFrom::Start(0)).ok()?;
     let mut text = String::new();
-    child
-        .stdout
-        .take()?
-        .take(4096)
-        .read_to_string(&mut text)
-        .ok()?;
+    out.take(4096).read_to_string(&mut text).ok()?;
     Some(text)
 }
 
