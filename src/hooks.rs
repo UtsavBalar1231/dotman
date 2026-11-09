@@ -6,6 +6,7 @@ use crate::context::Context;
 use crate::output;
 use crate::proc;
 use crate::prompt;
+use crate::state::State;
 use anyhow::{Context as _, Result, bail};
 use glob::Pattern;
 use sha2::{Digest, Sha256};
@@ -151,6 +152,30 @@ fn table_hash(table: &BTreeMap<String, String>) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
+/// Where this machine stands on the repo's `[hooks]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Empty,
+    Approved,
+    Unapproved,
+    /// This machine approved another table, or this one under the hash an older dotman used.
+    Changed,
+}
+
+/// Compares `table` with the approval that `state` holds; fails as [`validate`] does.
+pub fn standing(table: &BTreeMap<String, String>, state: &State) -> Result<Standing> {
+    if table.is_empty() {
+        return Ok(Standing::Empty);
+    }
+    validate(table)?;
+    let hash = table_hash(table)?;
+    Ok(match state.hooks.approved.as_deref() {
+        Some(approved) if approved == hash => Standing::Approved,
+        Some(_) => Standing::Changed,
+        None => Standing::Unapproved,
+    })
+}
+
 fn show_table(header: &str, table: &BTreeMap<String, String>) {
     output::context(header);
     for (glob, command) in table {
@@ -259,5 +284,22 @@ mod tests {
             let named = format!("`{}` = `{}`", output::escape(glob), output::escape(command));
             assert!(err.contains(&named), "the entry is named: {err}");
         }
+    }
+
+    #[test]
+    fn the_standing_tells_an_old_or_other_approval_from_none() {
+        let entries = table(&[("a", "x")]);
+        let mut state = State::default();
+        assert_eq!(
+            standing(&BTreeMap::new(), &state).ok(),
+            Some(Standing::Empty)
+        );
+        assert_eq!(standing(&entries, &state).ok(), Some(Standing::Unapproved));
+        // The xxh3-128 hex that the NUL-joined hash gave.
+        state.hooks.approved = Some("55c7a64d8992c4767b4d28afab1811bd".to_owned());
+        assert_eq!(standing(&entries, &state).ok(), Some(Standing::Changed));
+        state.hooks.approved = Some(hash(&[("a", "x")]));
+        assert_eq!(standing(&entries, &state).ok(), Some(Standing::Approved));
+        assert!(standing(&table(&[("a", "x\ry")]), &state).is_err());
     }
 }

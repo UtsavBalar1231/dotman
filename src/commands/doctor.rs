@@ -5,20 +5,28 @@ use crate::bootstrap::{self, Found};
 use crate::cli::DoctorArgs;
 use crate::context::Context;
 use crate::git::Git;
+use crate::hooks::{self, Standing};
+use crate::import::count;
 use crate::lock::Lock;
 use crate::name;
 use crate::output;
+use crate::proc;
 use crate::secrets::{self, Locked};
 use crate::state::State;
 use crate::sys;
 use crate::system::{self, Verdict};
 use crate::variant::{Flag, Selection};
 use anyhow::{Context as _, Result};
+use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+/// How long the version probe of an old binary on PATH may take before it is killed.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level {
@@ -122,11 +130,16 @@ fn collect(online: bool) -> Vec<Check> {
     if let Some(ctx) = &ctx {
         checks.extend(directories(ctx));
         checks.extend(system_roots(ctx));
-        if repo_exists {
+        let incomplete = repo_exists.then(|| incomplete(ctx)).flatten();
+        if let Some(check) = incomplete {
+            checks.push(check);
+        } else if repo_exists {
             if git_ok {
                 checks.push(remote(&git, online));
+                checks.push(objects(ctx));
             }
             checks.extend(repo_health(ctx));
+            checks.extend(hook_table(ctx));
             checks.extend(variants(ctx));
             checks.extend(encryption(ctx));
             checks.extend(system_files(ctx));
@@ -141,9 +154,123 @@ fn collect(online: bool) -> Vec<Check> {
     }
     checks.extend(warnings(ctx.as_ref(), &git, git_ok));
     if let Some(ctx) = &ctx {
-        checks.push(backups(&ctx.paths.state_dir.join("backups")));
+        checks.extend(old_dotman(ctx));
+        checks.extend(backups(ctx));
     }
     checks
+}
+
+/// A repo dir that a stopped `init` or clone left half made: no `HEAD`, no repo id, or a
+/// `config.lock` that no running git holds.
+fn incomplete(ctx: &Context) -> Option<Check> {
+    let repo = &ctx.paths.repo;
+    let git_dir = repo.join(".git");
+    let lock = git_dir.join("config.lock");
+    let lock_free = Lock::acquire(&ctx.paths.lock_file(), true).is_ok();
+    let (missing, stale_lock) = if !git_dir.join("HEAD").is_file() {
+        (".git/HEAD is missing", false)
+    } else if !git_dir.join("dotman-id").is_file() {
+        (".git/dotman-id is missing", false)
+    } else if lock_free && lock.exists() {
+        (
+            ".git/config.lock is left from a git run that was stopped",
+            true,
+        )
+    } else {
+        return None;
+    };
+    let fix = if !holds_commits(&git_dir) {
+        format!("remove {} and rerun {} init", repo.display(), name::bin())
+    } else if stale_lock {
+        format!("remove {}", lock.display())
+    } else {
+        format!(
+            "it holds commits, so move {} aside rather than removing it, then rerun {} init",
+            repo.display(),
+            name::bin()
+        )
+    };
+    Some(fail(
+        "repo",
+        &format!("{} is incomplete: {missing}", repo.display()),
+        &fix,
+    ))
+}
+
+// Read from disk, since git cannot read a repo whose HEAD is gone.
+fn holds_commits(git_dir: &Path) -> bool {
+    let has_ref =
+        fs::read_dir(git_dir.join("refs/heads")).is_ok_and(|mut refs| refs.next().is_some());
+    has_ref || fs::metadata(git_dir.join("packed-refs")).is_ok_and(|meta| meta.len() > 0)
+}
+
+/// `git fsck --connectivity-only`: every object a ref reaches is present and readable.
+fn objects(ctx: &Context) -> Check {
+    let mut cmd = ctx.git.command();
+    cmd.args([
+        "fsck",
+        "--connectivity-only",
+        "--no-dangling",
+        "--no-progress",
+    ])
+    .stdin(Stdio::null());
+    match cmd.output() {
+        Ok(out) if out.status.success() => pass("repo objects"),
+        Ok(out) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            let shown: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(3)
+                .collect();
+            fail(
+                "repo objects",
+                &format!("git fsck failed: {}", shown.join("; ")),
+                &format!(
+                    "move {} aside and rerun {} init <url> to clone it again",
+                    ctx.paths.repo.display(),
+                    name::bin()
+                ),
+            )
+        }
+        Err(e) => fail(
+            "repo objects",
+            &format!("cannot run git fsck: {e}"),
+            "install git",
+        ),
+    }
+}
+
+/// Whether this machine approved the repo's `[hooks]` table.
+fn hook_table(ctx: &Context) -> Option<Check> {
+    let table = ctx.repo_config().ok()?.hooks;
+    let state = ctx.state(&ctx.repo_id().ok()?).ok()?;
+    let approve = format!(
+        "read the [hooks] table in .dotman.toml, then run `{} apply --approve-hooks`",
+        name::bin()
+    );
+    match hooks::standing(&table, &state) {
+        Ok(Standing::Empty) => None,
+        Ok(Standing::Approved) => Some(pass("hooks approved")),
+        Ok(Standing::Unapproved) => Some(warn(
+            "hooks",
+            &format!("not approved on this machine, so none runs; {approve}"),
+        )),
+        Ok(Standing::Changed) => Some(warn(
+            "hooks",
+            &format!(
+                "the table changed since this machine approved it, or an older dotman approved it, so none runs; {approve}"
+            ),
+        )),
+        Err(e) => Some(Check {
+            level: Level::Fail,
+            line: format!("hooks: {e:#}"),
+        }),
+    }
 }
 
 fn identity(git: &Git) -> Check {
@@ -332,6 +459,26 @@ fn variants(ctx: &Context) -> Vec<Check> {
 
 fn encryption(ctx: &Context) -> Vec<Check> {
     let mut checks = Vec::new();
+    let identities = [
+        Some(&ctx.paths.age_identity),
+        ctx.paths.age_key_file.as_ref(),
+    ];
+    for identity in identities.into_iter().flatten() {
+        if let Ok(meta) = fs::metadata(identity)
+            && meta.is_file()
+            && meta.mode() & 0o044 != 0
+        {
+            checks.push(warn(
+                "age identity",
+                &format!(
+                    "{} has mode {:04o}, so other users can read the key; run chmod 600 {}",
+                    identity.display(),
+                    meta.mode() & 0o7777,
+                    identity.display()
+                ),
+            ));
+        }
+    }
     match ctx.age().key_reader() {
         Some(Ok(version)) => checks.push(pass(&format!("DOTMAN_AGE_KEY is read by age {version}"))),
         Some(Err(why)) => checks.push(fail(
@@ -519,27 +666,159 @@ fn warnings(ctx: Option<&Context>, git: &Git, git_ok: bool) -> Vec<Check> {
     checks
 }
 
-fn backups(dir: &Path) -> Check {
-    let mut total: u64 = 0;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(next) = stack.pop() {
-        let Ok(meta) = fs::symlink_metadata(&next) else {
-            continue;
-        };
-        if meta.is_dir() {
-            if let Ok(entries) = fs::read_dir(&next) {
-                stack.extend(entries.flatten().map(|e| e.path()));
+/// The store and the binary of dotman 0.0.1, which this dotman replaces.
+fn old_dotman(ctx: &Context) -> Vec<Check> {
+    let mut checks = Vec::new();
+    let store = ctx.paths.home.join(".dotman");
+    let legacy = store.join("index.bin").is_file() || store.join("commits").is_dir();
+    if legacy && store != ctx.paths.repo {
+        checks.push(warn(
+            "legacy store",
+            &format!(
+                "{} is the store of dotman 0.0.1; run `{} import {}` to bring its files into the repo",
+                store.display(),
+                name::bin(),
+                store.display()
+            ),
+        ));
+    }
+    if let Some(dot) = proc::find_program("dot")
+        && version_of(&dot).is_some_and(|text| is_old_version(&text))
+    {
+        checks.push(warn(
+            "dot",
+            &format!(
+                "{} is dotman 0.0.1, which reads another store; run `cargo uninstall dotman` to remove it",
+                dot.display()
+            ),
+        ));
+    }
+    checks
+}
+
+/// What `program --version` prints on stdout, or `None` when it fails or takes too long.
+fn version_of(program: &Path) -> Option<String> {
+    let mut child = proc::command(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if started.elapsed() < VERSION_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(20));
             }
-        } else {
-            total = total.saturating_add(meta.len());
+            Ok(Some(_)) => return None,
+            _ => {
+                // It may have exited since the poll, which makes the kill fail; the wait reaps it.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
         }
     }
-    let mut value = total;
+    let mut text = String::new();
+    child
+        .stdout
+        .take()?
+        .take(4096)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
+// dotman 0.0.1 named its binary dot; the alias of this dotman prints this version.
+fn is_old_version(text: &str) -> bool {
+    let words: Vec<&str> = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    matches!(words.as_slice(), ["dot" | "dotman", version] if version.starts_with("0.0."))
+}
+
+fn backups(ctx: &Context) -> Vec<Check> {
+    let dir = ctx.paths.state_dir.join("backups");
+    let plaintext = plaintext_keys(ctx);
+    let (mut total, mut files, mut runs, mut decrypted) = (0_u64, 0_usize, 0_usize, 0_usize);
+    for run in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let run = run.path();
+        if !fs::symlink_metadata(&run).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        runs = runs.saturating_add(1);
+        let mut stack = vec![run.clone()];
+        while let Some(next) = stack.pop() {
+            let Ok(meta) = fs::symlink_metadata(&next) else {
+                continue;
+            };
+            if meta.is_dir() {
+                if let Ok(entries) = fs::read_dir(&next) {
+                    stack.extend(entries.flatten().map(|e| e.path()));
+                }
+                continue;
+            }
+            total = total.saturating_add(meta.len());
+            files = files.saturating_add(1);
+            let key = next.strip_prefix(&run).ok().and_then(Path::to_str);
+            if key.is_some_and(|key| plaintext.contains(key)) {
+                decrypted = decrypted.saturating_add(1);
+            }
+        }
+    }
+    let mut checks = vec![info(
+        "backups",
+        &format!(
+            "{} in {} from {}, in {}",
+            size(total),
+            count(files, "file"),
+            count(runs, "run"),
+            dir.display()
+        ),
+    )];
+    if decrypted > 0 {
+        checks.push(info(
+            "backups",
+            &format!(
+                "{decrypted} of them copy an encrypted file or an age identity, and hold it in plaintext; remove the runs you no longer need"
+            ),
+        ));
+    }
+    checks
+}
+
+/// The keys whose backups hold plaintext: encrypted files as `$HOME` has them, and the identity
+/// backups that `key import --force` keeps.
+fn plaintext_keys(ctx: &Context) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    if let Some(name) = ctx.paths.age_identity.file_name() {
+        keys.insert(format!(".dotman/{}", name.to_string_lossy()));
+    }
+    let Ok(sources) = ctx.sources() else {
+        return keys;
+    };
+    for key in sources.keys() {
+        if let Selection::Winner(source) = sources.select(key, ctx.identity())
+            && sources.flag(key, source) == Flag::Age
+        {
+            keys.insert(key.to_owned());
+        }
+    }
+    keys
+}
+
+fn size(bytes: u64) -> String {
+    let mut value = bytes;
     let mut unit = 0_usize;
     while value >= 1024 && unit < 3 {
         value /= 1024;
         unit = unit.saturating_add(1);
     }
     let name = ["B", "KiB", "MiB", "GiB"].get(unit).copied().unwrap_or("B");
-    info("backups", &format!("{value} {name} in {}", dir.display()))
+    format!("{value} {name}")
 }
