@@ -464,52 +464,15 @@ fn saving_an_approval_prints_the_table_even_with_quiet() {
     assert_eq!(runs(&env), 2);
 }
 
-/// Runs the binary with `args` under `script`, so stdin is a terminal, feeding it `input`, with
-/// colour off so that any escape byte in the output came from the repo. `None` without `script`.
-#[cfg(target_os = "linux")]
-fn in_a_terminal(env: &TestEnv, args: &[&str], input: &[u8]) -> Option<String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let script = std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join("script"))
-        .find(|path| path.is_file())?;
-    let dot = env.dot_process();
-    let mut line = shell_words::quote(&dot.get_program().to_string_lossy()).into_owned();
-    for arg in args {
-        line.push(' ');
-        line.push_str(&shell_words::quote(arg));
-    }
-    let mut cmd = Command::new(script);
-    cmd.env_clear();
-    for (name, value) in dot.get_envs() {
-        if let Some(value) = value {
-            cmd.env(name, value);
-        }
-    }
-    let mut child = cmd
-        .env("DOTMAN_NON_INTERACTIVE", "")
-        .env("NO_COLOR", "1")
-        .env("TERM", "dumb")
-        .current_dir(env.home())
-        .args(["-qec", &line, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(input).ok()?;
-    let out = child.wait_with_output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-#[cfg(target_os = "linux")]
 #[test]
 fn the_approval_prompt_shows_the_table_even_with_quiet() {
     for quiet in [false, true] {
         let env = hooked();
         set_hooks(&env, &append(&env));
         let args: &[&str] = if quiet { &["-q", "apply"] } else { &["apply"] };
-        let Some(seen) = in_a_terminal(&env, args, b"y\n") else {
+        // Colour off, so any escape byte in what the terminal shows came from the repo.
+        let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+        let Some(seen) = common::in_a_terminal(&env, &plain, args, b"y\n") else {
             eprintln!("skipped: no script(1) to give dotman a terminal");
             return;
         };

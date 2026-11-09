@@ -1279,6 +1279,53 @@ pub const GIT_HOOKS: [&str; 10] = [
     "reference-transaction",
 ];
 
+/// Runs the binary with `args` under `script(1)`, so its stdin and stdout are a terminal, as an
+/// interactive run with the harness environment plus `vars`, feeding it `input`. Returns what the
+/// terminal showed, or `None` where there is no `script` to run.
+pub fn in_a_terminal(
+    env: &TestEnv,
+    vars: &[(&str, &str)],
+    args: &[&str],
+    input: &[u8],
+) -> Option<String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let script = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("script"))
+        .find(|path| path.is_file())?;
+    let dot = env.dot_process();
+    let mut line = shell_words::quote(&dot.get_program().to_string_lossy()).into_owned();
+    for arg in args {
+        line.push(' ');
+        line.push_str(&shell_words::quote(arg));
+    }
+    let mut cmd = StdCommand::new(script);
+    cmd.env_clear();
+    for (name, value) in dot.get_envs() {
+        if let Some(value) = value {
+            cmd.env(name, value);
+        }
+    }
+    cmd.env("DOTMAN_NON_INTERACTIVE", "");
+    for (name, value) in vars {
+        cmd.env(name, value);
+    }
+    let mut child = cmd
+        .current_dir(env.home())
+        .args(["-qec", &line, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(input).ok()?;
+    let out = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Writes an executable hook of every name in [`GIT_HOOKS`] into `hooks_dir`; each appends its
 /// name to `marker`.
 pub fn plant_git_hooks(hooks_dir: &Path, marker: &Path) {
