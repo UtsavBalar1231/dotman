@@ -642,6 +642,131 @@ fn a_repo_directory_with_other_files_is_refused_before_anything_is_cloned() {
     assert_eq!(fs::read(env.repo().join("README")).expect("kept"), b"mine");
 }
 
+/// A token shape, built here so no token-shaped literal sits in the source.
+fn github_token() -> String {
+    format!("ghp_{}", "Zq7".repeat(12))
+}
+
+/// A bare source of two commits: `.tokrc` holds a token in both, `.oldrc` only in the first, and
+/// `.bashrc` none. With `tainted` false, neither holds one.
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+fn history_source(env: &TestEnv, tainted: bool) -> Source {
+    let work = env.root().join("work/history");
+    fs::create_dir_all(&work).expect("create work tree");
+    git_in(env, &work, &["init", "-q"]);
+    git_in(env, &work, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    let secret = if tainted {
+        github_token()
+    } else {
+        "none".to_owned()
+    };
+    fs::write(work.join(".bashrc"), "alias ll=ls\n").expect("write");
+    fs::write(work.join(".tokrc"), format!("export GH={secret}\n")).expect("write");
+    fs::write(work.join(".oldrc"), format!("export OLD={secret}\n")).expect("write");
+    git_in(env, &work, &["add", "-A"]);
+    git_in(env, &work, &["commit", "-q", "-m", "one"]);
+    fs::remove_file(work.join(".oldrc")).expect("remove");
+    fs::write(work.join(".bashrc"), "alias ll=ls\nalias la=ls\n").expect("write");
+    git_in(env, &work, &["add", "-A"]);
+    git_in(env, &work, &["commit", "-q", "-m", "two"]);
+    bare(env, &work, &env.root().join("history.git"), None)
+}
+
+/// Every object in the store at `git_dir`, reachable or not, as one text.
+fn every_object(env: &TestEnv, git_dir: &Path) -> String {
+    env.git(&[
+        "--git-dir",
+        &git_dir.to_string_lossy(),
+        "cat-file",
+        "--batch-all-objects",
+        "--batch",
+    ])
+}
+
+/// The reviewer's case: a URL source whose history holds a token, in an old commit and in its
+/// current tree. The import is one commit of the guarded tree, with no origin to push the old
+/// history back to, so after a sync to a new remote no object anywhere holds the token. The
+/// report names the files, the rule and the commits; the source is never changed.
+#[test]
+fn a_history_that_holds_a_credential_is_squashed_into_its_current_tree() {
+    let env = TestEnv::new();
+    let source = history_source(&env, true);
+    let token = github_token();
+    let url = format!("file://{}", source.display());
+    let first = git_in(&env, &source, &["rev-parse", "main~1"]);
+    let first = first.trim().get(..12).unwrap_or_default();
+
+    let out = env.run(&["import", "--dry-run", &url]);
+    assert!(
+        stderr(&out).contains("would import the current tree of 2 commits as one commit"),
+        "{}",
+        stderr(&out)
+    );
+    let out = env.run(&["import", "--yes", &url]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    for line in [
+        "the source's history holds credentials or age secret keys:",
+        &format!("  .oldrc: github-token, added in {first}"),
+        "  .tokrc: github-token, added in ",
+        "so the import is one commit of the current tree",
+        "the new repo has no remote",
+    ] {
+        assert!(err.contains(line), "{line}: {err}");
+    }
+    assert!(!err.contains(&token), "{err}");
+    assert!(
+        !err.contains("HEAD~1:"),
+        "no history to show it from: {err}"
+    );
+    let repo = env.repo();
+    assert_eq!(commits(&env, &repo), 1);
+    assert_eq!(tree_names(&env, &repo), [".bashrc", ".dotman.toml"]);
+    assert_eq!(blob(&env, &repo, ".bashrc"), "alias ll=ls\nalias la=ls\n");
+    assert!(!every_object(&env, &repo.join(".git")).contains(&token));
+    assert_eq!(git_in(&env, &repo, &["remote"]).trim(), "");
+    assert!(repo.join(".git/dotman-id").exists());
+    assert!(repo.join(".git/info/attributes").exists());
+
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.ok(&["sync"]);
+    let pushed = every_object(&env, &env.remote_path());
+    assert!(pushed.contains("alias la=ls"), "the tree was pushed");
+    assert!(!pushed.contains(&token));
+}
+
+/// `--keep-history` imports every commit of a history that holds a credential, and says so.
+#[test]
+fn keep_history_imports_a_credential_history_with_a_warning() {
+    let env = TestEnv::new();
+    let source = history_source(&env, true);
+    let out = env.run(&[
+        "import",
+        "--yes",
+        "--keep-history",
+        &source.to_string_lossy(),
+    ]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("  .oldrc: github-token, added in "), "{err}");
+    assert!(
+        err.contains("--keep-history imports all 2 commits"),
+        "{err}"
+    );
+    assert_eq!(commits(&env, &env.repo()), 3);
+}
+
+/// A history the guard finds nothing in keeps every commit.
+#[test]
+fn a_clean_history_keeps_every_commit() {
+    let env = TestEnv::new();
+    let source = history_source(&env, false);
+    let err = env.ok(&["import", "--yes", &source.to_string_lossy()]);
+    assert!(!err.contains("history holds"), "{err}");
+    assert_eq!(commits(&env, &env.repo()), 3);
+}
+
 #[test]
 fn a_populated_repo_is_refused_naming_overlay() {
     let env = TestEnv::new();

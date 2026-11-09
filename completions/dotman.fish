@@ -164,6 +164,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand import" -l overlay -d 'Add
 complete -c dotman -n "__fish_dotman_using_subcommand import" -l include-missing -d 'With `--overlay`, add the files the repo lacks without asking'
 complete -c dotman -n "__fish_dotman_using_subcommand import" -l render-templates -d 'For a chezmoi source, run its templates and import this host\'s rendering'
 complete -c dotman -n "__fish_dotman_using_subcommand import" -l swap -d 'Replace the symlinks of an imported farm with real files holding the same bytes'
+complete -c dotman -n "__fish_dotman_using_subcommand import" -l keep-history -d 'For a git source whose history holds a credential or an age secret key, import every commit instead of one commit of the current tree'
 complete -c dotman -n "__fish_dotman_using_subcommand import" -l yes -d 'Do not ask before writing'
 complete -c dotman -n "__fish_dotman_using_subcommand import" -l no-bootstrap -d 'Do not write install.sh, the script that sets up `dotman` in a container'
 complete -c dotman -n "__fish_dotman_using_subcommand import" -l dry-run -d 'Show the report and change nothing'

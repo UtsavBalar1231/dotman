@@ -31,6 +31,7 @@ use crate::paths::{
     create_private_dir, is_reserved_root_name, private_temp_dir, validate_key, write_atomic,
 };
 use crate::repo_config::RepoConfig;
+use crate::secrets;
 use crate::state::IdentitySnapshot;
 use crate::template::{self, Vars};
 use crate::variant::{Selection, Sources};
@@ -38,12 +39,13 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read};
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use tempfile::TempDir;
 
 const SUBMODULE: &str = "submodules, which dotman never fetches: vendor or install them separately";
@@ -58,6 +60,7 @@ const BLOCKED: &str = "files the repo holds in another form";
 
 const MAX_PROBED: usize = 500;
 const SHOWN: usize = 10;
+const SHOWN_COMMITS: usize = 3;
 
 /// A source `dotman import` found by itself.
 pub(super) struct Candidate {
@@ -721,6 +724,295 @@ fn guard_content(repo: &Path, found: &mut Analysis, allow: &[Allow]) {
     }
 }
 
+/// A path in the source's history whose content the guard holds, with the commits that add it.
+struct Tainted {
+    path: String,
+    rule: &'static str,
+    commits: Vec<String>,
+}
+
+/// Stdout of `git <args>` in `git`'s repo, with `input` as stdin when given. An error unless git
+/// exits 0.
+fn git_stdout<S: AsRef<OsStr>>(git: &Git, args: &[S], input: Option<&Path>) -> Result<Vec<u8>> {
+    let mut cmd = git.command();
+    cmd.args(args);
+    match input {
+        Some(path) => {
+            cmd.stdin(File::open(path).with_context(|| format!("cannot read {}", path.display()))?)
+        }
+        None => cmd.stdin(Stdio::null()),
+    };
+    let out = cmd.output().context("failed to run git")?;
+    let shown: Vec<String> = args
+        .iter()
+        .map(|arg| arg.as_ref().to_string_lossy().into_owned())
+        .collect();
+    ensure!(
+        out.status.success(),
+        "`git {}` failed: {}",
+        shown.join(" "),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(out.stdout)
+}
+
+fn is_oid(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Every blob reachable from the clone's refs that the content guard holds, by path and rule. Each
+/// blob is read once: `rev-list --objects` lists them, `cat-file --batch-check` keeps the blobs
+/// that are not empty, and `cat-file --batch` streams them, where a binary blob is skipped after
+/// its first bytes. The lists go to git through files, which a large history cannot deadlock.
+fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
+    let git = &staging.git;
+    let scratch = staging
+        .repo
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", staging.repo.display()))?;
+    let listed = git_stdout(git, &["rev-list", "--all", "--objects"], None)?;
+    let mut paths: BTreeMap<String, String> = BTreeMap::new();
+    for line in String::from_utf8_lossy(&listed).lines() {
+        let (oid, path) = line.split_once(' ').unwrap_or((line, ""));
+        if is_oid(oid) {
+            paths
+                .entry(oid.to_owned())
+                .or_insert_with(|| path.to_owned());
+        }
+    }
+    let objects = scratch.join("objects.txt");
+    write_lines(&objects, paths.keys())?;
+    let checked = git_stdout(
+        git,
+        &[
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        ],
+        Some(&objects),
+    )?;
+    let checked = String::from_utf8_lossy(&checked);
+    let blobs = checked.lines().filter_map(|line| {
+        let mut fields = line.split(' ');
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some(oid), Some("blob"), Some(size)) if size != "0" => Some(oid),
+            _ => None,
+        }
+    });
+    let list = scratch.join("blobs.txt");
+    write_lines(&list, blobs)?;
+    let mut cmd = git.command();
+    cmd.args(["cat-file", "--batch"])
+        .stdin(File::open(&list).with_context(|| format!("cannot read {}", list.display()))?)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().context("failed to run git")?;
+    let scanned = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("git cat-file gave no output"))
+        .and_then(|stdout| scan_batch(&mut BufReader::new(stdout), &paths, allow));
+    let status = child.wait().context("failed to run git")?;
+    let held = scanned?;
+    ensure!(status.success(), "`git cat-file --batch` failed ({status})");
+    if held.is_empty() {
+        return Ok(Vec::new());
+    }
+    let commits = adding_commits(git, &held)?;
+    let mut grouped: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
+    for (oid, rule) in &held {
+        let path = paths.get(oid).cloned().unwrap_or_default();
+        let entry = grouped.entry((path, *rule)).or_default();
+        for commit in commits.get(oid).into_iter().flatten() {
+            if !entry.contains(commit) {
+                entry.push(commit.clone());
+            }
+        }
+    }
+    Ok(grouped
+        .into_iter()
+        .map(|((path, rule), commits)| Tainted {
+            path,
+            rule,
+            commits,
+        })
+        .collect())
+}
+
+fn write_lines(path: &Path, lines: impl Iterator<Item = impl AsRef<str>>) -> Result<()> {
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(line.as_ref());
+        text.push('\n');
+    }
+    fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Reads `cat-file --batch` output: per blob a `<oid> <type> <size>` line, the content and a
+/// newline. Returns the rule the guard holds each blob for, keyed by oid.
+fn scan_batch(
+    reader: &mut impl BufRead,
+    paths: &BTreeMap<String, String>,
+    allow: &[Allow],
+) -> Result<BTreeMap<String, &'static str>> {
+    let sniff = u64::try_from(secrets::SNIFF_BYTES).unwrap_or(u64::MAX);
+    let mut held = BTreeMap::new();
+    let mut header = String::new();
+    loop {
+        header.clear();
+        if reader.read_line(&mut header)? == 0 {
+            return Ok(held);
+        }
+        let mut fields = header.split_whitespace();
+        // `<oid> missing` has no size and no content.
+        let (Some(oid), Some(_), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        let size: u64 = size
+            .parse()
+            .with_context(|| format!("git cat-file printed a bad size for {oid}"))?;
+        let mut bytes = Vec::new();
+        reader
+            .by_ref()
+            .take(size.min(sniff))
+            .read_to_end(&mut bytes)?;
+        let rest = size.saturating_sub(size.min(sniff));
+        if secrets::looks_binary(&bytes) {
+            io::copy(&mut reader.by_ref().take(rest), &mut io::sink())?;
+        } else {
+            reader.by_ref().take(rest).read_to_end(&mut bytes)?;
+            let path = paths.get(oid).map_or("", String::as_str);
+            if let Some(found) = secrets::held(&bytes, path, allow) {
+                held.insert(oid.to_owned(), found.rule);
+            }
+        }
+        let mut newline = [0u8; 1];
+        reader.read_exact(&mut newline)?;
+    }
+}
+
+/// The commits that put each blob in `held` at some path, newest first, from one walk of the
+/// history. A blob that only a merge brings has none.
+fn adding_commits(
+    git: &Git,
+    held: &BTreeMap<String, &'static str>,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let log = git_stdout(
+        git,
+        &[
+            "log",
+            "--all",
+            "--root",
+            "--no-renames",
+            "--no-abbrev",
+            "--raw",
+            "--format=commit %H",
+        ],
+        None,
+    )?;
+    let mut commits: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut current = String::new();
+    for line in String::from_utf8_lossy(&log).lines() {
+        if let Some(commit) = line.strip_prefix("commit ") {
+            commit.clone_into(&mut current);
+        } else if line.starts_with(':')
+            && let Some(blob) = line.split_whitespace().nth(3)
+            && held.contains_key(blob)
+        {
+            commits
+                .entry(blob.to_owned())
+                .or_default()
+                .push(current.clone());
+        }
+    }
+    Ok(commits)
+}
+
+fn warn_tainted(tainted: &[Tainted], squash: bool, commits: &str) {
+    if tainted.is_empty() {
+        return;
+    }
+    output::warning("the source's history holds credentials or age secret keys:");
+    for item in tainted {
+        let short: Vec<&str> = item
+            .commits
+            .iter()
+            .take(SHOWN_COMMITS)
+            .map(|commit| commit.get(..12).unwrap_or(commit))
+            .collect();
+        let more = item.commits.len().saturating_sub(SHOWN_COMMITS);
+        let named = match short.as_slice() {
+            [] => "in a merge".to_owned(),
+            [one] => format!("added in {one}"),
+            _ => format!("added in {}", short.join(", ")),
+        };
+        let more = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        output::warning(&output::escape_line(&format!(
+            "  {}: {}, {named}{more}",
+            item.path, item.rule
+        )));
+    }
+    if squash {
+        output::warning(&format!(
+            "so the import is one commit of the current tree, and the history is left out; `--keep-history` imports all {commits} instead"
+        ));
+    } else {
+        output::warning(&format!(
+            "--keep-history imports all {commits}, so the repo keeps these, and so does every remote it is pushed to"
+        ));
+    }
+}
+
+/// Replaces the clone's history with one commit of its current tree, in a `.git` of its own, so
+/// that no object of the old history reaches the repo, not even an unreachable one.
+fn squash_history(staging: &Staging) -> Result<()> {
+    let git = &staging.git;
+    let branch = format!(
+        "refs/heads/{}",
+        git.branch()?.unwrap_or_else(|| "main".to_owned())
+    );
+    let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).trim().to_owned();
+    // `HEAD:` names HEAD's root tree.
+    let tree = text(git_stdout(git, &["rev-parse", "--verify", "HEAD:"], None)?);
+    let commit = text(git_stdout(
+        git,
+        &[
+            "commit-tree",
+            &tree,
+            "-m",
+            "import: the current tree; the source's history holds credentials",
+        ],
+        None,
+    )?);
+    git_stdout(git, &["update-ref", &branch, &commit], None)?;
+    let history = staging
+        .repo
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", staging.repo.display()))?
+        .join("history.git");
+    fs::rename(staging.repo.join(".git"), &history)
+        .with_context(|| format!("cannot move {}", history.display()))?;
+    git.init()?;
+    git_stdout(
+        git,
+        &[
+            OsStr::new("fetch"),
+            OsStr::new("-q"),
+            OsStr::new("--no-tags"),
+            history.as_os_str(),
+            OsStr::new(&branch),
+        ],
+        None,
+    )?;
+    git_stdout(git, &["update-ref", &branch, "FETCH_HEAD"], None)?;
+    git_stdout(git, &["symbolic-ref", "HEAD", &branch], None)?;
+    git_stdout(git, &["reset", "-q"], None)?;
+    fs::remove_dir_all(&history).with_context(|| format!("cannot remove {}", history.display()))
+}
+
 /// Modes git cannot carry: a file in `$HOME` with the same bytes as its blob and no group or other
 /// access, which the import would otherwise widen to git's 0644 or 0755 on the next apply.
 fn home_modes(ctx: &Context, git: &Git, found: &Analysis) -> BTreeMap<String, u32> {
@@ -1081,9 +1373,20 @@ fn vcsh_siblings(ctx: &Context, source: &Path) -> Option<String> {
     })
 }
 
-fn remote_notes(source: &Source, source_origin: Option<&str>, found: &Analysis) -> Vec<String> {
+fn remote_notes(
+    source: &Source,
+    source_origin: Option<&str>,
+    found: &Analysis,
+    squash: bool,
+) -> Vec<String> {
     let mut notes = vec![format!("imported from {}", source.display())];
     match source {
+        // The squashed commit shares nothing with the source's history, so sync would refuse to
+        // pull from it, and pushing there would keep the credentials its history holds.
+        _ if squash => notes.push(format!(
+            "the new repo has no remote: the source's history holds what the guard holds and shares no commit with this import; set a remote with `{} init --remote <url>`",
+            name::bin()
+        )),
         Source::Path(_) => {
             let advice = source_origin.map_or_else(
                 || format!("add one with `{} init --remote <url>`", name::bin()),
@@ -1224,6 +1527,8 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     let own = has_own.then(|| RepoConfig::load(&staging.repo.join(".dotman.toml")));
     let allow = &ctx.machine.guard.allow;
     guard_content(&staging.repo, &mut found, allow);
+    let tainted = tainted_history(&staging, allow)?;
+    let squash = !tainted.is_empty() && !args.keep_history;
     let mut modes = home_modes(ctx, &staging.git, &found);
     let config = match own {
         None => SourceConfig::None,
@@ -1233,11 +1538,14 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         }
         Some(Err(_)) => SourceConfig::Broken,
     };
-    let mut report = tally(&found, true);
+    let mut report = tally(&found, !squash);
     report.notes.extend(home_modes_notes(&modes, config));
-    report
-        .notes
-        .extend(remote_notes(source, source_origin.as_deref(), &found));
+    report.notes.extend(remote_notes(
+        source,
+        source_origin.as_deref(),
+        &found,
+        squash,
+    ));
     report.notes.extend(setup.notes(ctx, &found, args.dry_run));
     if let Source::Path(path) = source {
         report.notes.extend(vcsh_siblings(ctx, path));
@@ -1248,20 +1556,34 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     report.print();
 
     let commits = count(staging.git.log(&[], None)?.len(), "commit");
+    warn_tainted(&tainted, squash, &commits);
     let repo = &ctx.paths.repo;
+    let what = if squash {
+        format!("the current tree of {commits} as one commit")
+    } else {
+        commits
+    };
     if args.dry_run {
+        let conversion = if squash {
+            ""
+        } else {
+            " and add one conversion commit"
+        };
         output::info(&format!(
-            "would import {commits} and add one conversion commit into {}",
+            "would import {what}{conversion} into {}",
             repo.display()
         ));
         return Ok(report.outcome());
     }
-    let question = format!("import {commits} into {}? [y/N]", repo.display());
+    let question = format!("import {what} into {}? [y/N]", repo.display());
     if !proceed(args, &question)? {
         output::info("nothing imported");
         return Ok(Outcome::Done);
     }
     convert(&staging.git, &staging.repo, &found, &modes)?;
+    if squash {
+        squash_history(&staging)?;
+    }
     install_keeping_origin(ctx, &staging, edited.as_ref())?;
     if let Some(machine) = setup.machine {
         machine.save(&ctx.paths.config_file, false)?;

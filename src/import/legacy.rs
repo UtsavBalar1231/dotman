@@ -1657,6 +1657,7 @@ mod tests {
             include_missing: false,
             render_templates: false,
             swap: false,
+            keep_history: false,
             yes,
             no_bootstrap: false,
             dry_run,

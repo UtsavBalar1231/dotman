@@ -377,6 +377,7 @@ fn offer_import(
         include_missing: false,
         render_templates: false,
         swap: false,
+        keep_history: false,
         yes: false,
         no_bootstrap: args.no_bootstrap,
         dry_run: args.dry_run,

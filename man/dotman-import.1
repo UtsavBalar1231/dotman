@@ -4,7 +4,7 @@
 .SH NAME
 dotman\-import \- Convert another setup into the repo, or add what the repo lacks from one
 .SH SYNOPSIS
-\fBdotman import\fR [\fB\-\-overlay\fR] [\fB\-\-include\-missing\fR] [\fB\-\-render\-templates\fR] [\fB\-\-swap\fR] [\fB\-\-yes\fR] [\fB\-\-no\-bootstrap\fR] [\fB\-\-dry\-run\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISOURCE\fR]
+\fBdotman import\fR [\fB\-\-overlay\fR] [\fB\-\-include\-missing\fR] [\fB\-\-render\-templates\fR] [\fB\-\-swap\fR] [\fB\-\-keep\-history\fR] [\fB\-\-yes\fR] [\fB\-\-no\-bootstrap\fR] [\fB\-\-dry\-run\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISOURCE\fR]
 .SH DESCRIPTION
 Convert another setup into the repo, or add what the repo lacks from one
 .SH OPTIONS
@@ -20,6 +20,9 @@ For a chezmoi source, run its templates and import this host\*(Aqs rendering
 .TP
 \fB\-\-swap\fR
 Replace the symlinks of an imported farm with real files holding the same bytes
+.TP
+\fB\-\-keep\-history\fR
+For a git source whose history holds a credential or an age secret key, import every commit instead of one commit of the current tree
 .TP
 \fB\-\-yes\fR
 Do not ask before writing

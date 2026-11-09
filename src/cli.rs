@@ -386,6 +386,9 @@ pub struct ImportArgs {
         conflicts_with_all = ["source", "overlay", "include_missing", "render_templates"]
     )]
     pub swap: bool,
+    /// For a git source whose history holds a credential or an age secret key, import every commit instead of one commit of the current tree
+    #[arg(long, conflicts_with_all = ["overlay", "swap"])]
+    pub keep_history: bool,
     /// Do not ask before writing
     #[arg(long)]
     pub yes: bool,

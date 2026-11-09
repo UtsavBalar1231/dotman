@@ -210,7 +210,7 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__import)
-            opts="-v -q -h --overlay --include-missing --render-templates --swap --yes --no-bootstrap --dry-run --verbose --quiet --no-pager --allow-root --help"
+            opts="-v -q -h --overlay --include-missing --render-templates --swap --keep-history --yes --no-bootstrap --dry-run --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
