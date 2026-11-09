@@ -2,6 +2,7 @@
 
 use crate::cli::ListArgs;
 use crate::context::Context;
+use crate::output::escape;
 use crate::state::Kind;
 use crate::system;
 use crate::variant::{Flag, Sources};
@@ -41,9 +42,9 @@ pub fn run(args: &ListArgs) -> Result<()> {
         if args.porcelain {
             write!(out, "{kind}\t{key}\0")
         } else if source == key {
-            writeln!(out, "{kind:<8}{key}{flag}")
+            writeln!(out, "{kind:<8}{}{flag}", escape(key))
         } else {
-            writeln!(out, "{kind:<8}{key}  ({source}){flag}")
+            writeln!(out, "{kind:<8}{}  ({}){flag}", escape(key), escape(source))
         }
         .context("cannot write to stdout")?;
     }
@@ -64,13 +65,14 @@ pub fn run(args: &ListArgs) -> Result<()> {
         if args.porcelain {
             write!(out, "system\t{key}\0")
         } else if source == rel {
-            writeln!(out, "{:<8}{key}", "system")
+            writeln!(out, "{:<8}{}", "system", escape(&key))
         } else {
             writeln!(
                 out,
-                "{:<8}{key}  ({})",
+                "{:<8}{}  ({})",
                 "system",
-                system::source_path(source)
+                escape(&key),
+                escape(&system::source_path(source))
             )
         }
         .context("cannot write to stdout")?;

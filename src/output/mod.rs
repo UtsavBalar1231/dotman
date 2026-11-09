@@ -1,8 +1,12 @@
 //! Styled status output on stderr, gated by a global verbosity level.
+//!
+//! Every message is escaped before it is styled, so a file name or a command from the repo cannot
+//! move the cursor, retitle the terminal or overwrite a line already printed.
 
 mod progress;
 
 use colored::Colorize;
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub use progress::Progress;
@@ -34,22 +38,41 @@ pub fn get_verbosity() -> Verbosity {
     }
 }
 
+/// `text` with each control character other than newline and tab (C0, DEL and C1) written as
+/// `char::escape_debug` writes it, such as `\u{1b}` or `\r`. Everything else is left alone.
+#[must_use]
+pub fn escape(text: &str) -> Cow<'_, str> {
+    let unsafe_char = |c: char| c.is_control() && c != '\n' && c != '\t';
+    if !text.chars().any(unsafe_char) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if unsafe_char(c) {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Prints a success message in green (respects quiet mode).
 pub fn success(message: &str) {
     if get_verbosity() == Verbosity::Quiet {
         return;
     }
-    eprintln!("{}", message.green());
+    eprintln!("{}", escape(message).green());
 }
 
 /// Prints an error message in bold red (always shown).
 pub fn error(message: &str) {
-    eprintln!("{}", message.red().bold());
+    eprintln!("{}", escape(message).red().bold());
 }
 
 /// Prints a warning message in bold yellow (always shown).
 pub fn warning(message: &str) {
-    eprintln!("{}", message.yellow().bold());
+    eprintln!("{}", escape(message).yellow().bold());
 }
 
 /// Prints an informational message in dimmed color (respects quiet mode).
@@ -57,7 +80,13 @@ pub fn info(message: &str) {
     if get_verbosity() == Verbosity::Quiet {
         return;
     }
-    eprintln!("{}", message.dimmed());
+    eprintln!("{}", escape(message).dimmed());
+}
+
+/// Prints what a question is about, in dimmed color. Always shown: `-q` must not hide what an
+/// answer approves.
+pub fn context(message: &str) {
+    eprintln!("{}", escape(message).dimmed());
 }
 
 /// Prints a verbose debug message (only in verbose mode).
@@ -65,7 +94,7 @@ pub fn verbose(message: &str) {
     if get_verbosity() != Verbosity::Verbose {
         return;
     }
-    eprintln!("{}", message.dimmed());
+    eprintln!("{}", escape(message).dimmed());
 }
 
 /// Prints a git-style action message with dimmed verb and normal message.
@@ -73,7 +102,7 @@ pub fn action(verb: &str, message: &str) {
     if get_verbosity() == Verbosity::Quiet {
         return;
     }
-    eprintln!("{} {}", verb.dimmed().bold(), message);
+    eprintln!("{} {}", escape(verb).dimmed().bold(), escape(message));
 }
 
 /// Starts a new progress bar for tracking long operations.
@@ -94,5 +123,19 @@ mod tests {
             set_verbosity(*level);
             assert_eq!(get_verbosity(), *level);
         }
+    }
+
+    #[test]
+    fn control_characters_are_escaped_and_the_rest_is_kept() {
+        assert!(matches!(escape("a/b c\t\"q\" \\n\né"), Cow::Borrowed(_)));
+        assert_eq!(
+            escape("d/\u{1b}]0;TITLE\u{7}\u{1b}[31mred\u{1b}[0m"),
+            "d/\\u{1b}]0;TITLE\\u{7}\\u{1b}[31mred\\u{1b}[0m"
+        );
+        assert_eq!(escape("x #\r\u{1b}[2K y"), "x #\\r\\u{1b}[2K y");
+        assert_eq!(escape("\0\u{7f}\u{9b}\u{85}"), "\\0\\u{7f}\\u{9b}\\u{85}");
+        assert_eq!(escape("line\nnext\ttab"), "line\nnext\ttab");
+        let once = escape("\u{1b}[2J").into_owned();
+        assert_eq!(escape(&once), once);
     }
 }
