@@ -132,16 +132,22 @@ fn committed() -> TestEnv {
     env
 }
 
+/// A newline or a comment alone holds no settings, so it loses them just as an empty file does,
+/// and sync never commits it.
 #[test]
 fn every_subcommand_but_log_refuses_a_lost_dotman_toml() {
-    for emptied in [false, true] {
+    for (how, written) in [
+        ("is missing", None),
+        ("is empty", Some(&b""[..])),
+        ("holds no settings", Some(b"\n")),
+        ("holds no settings", Some(b"# todo\n")),
+    ] {
         for (name, args) in MINIMAL_ARGS {
             let env = committed();
             let config = env.repo().join(".dotman.toml");
-            if emptied {
-                fs::write(&config, b"").expect("empty the config");
-            } else {
-                fs::remove_file(&config).expect("delete the config");
+            match written {
+                Some(bytes) => fs::write(&config, bytes).expect("overwrite the config"),
+                None => fs::remove_file(&config).expect("delete the config"),
             }
             let mut full = vec![*name];
             full.extend_from_slice(args);
@@ -151,13 +157,15 @@ fn every_subcommand_but_log_refuses_a_lost_dotman_toml() {
                 continue;
             }
             assert_eq!(code, Some(1), "`dot {full:?}`: {err}");
-            let how = if emptied { "is empty" } else { "is missing" };
             assert!(err.contains(how), "{name}: {err}");
             assert!(
                 err.contains("dotman git checkout -- .dotman.toml"),
                 "{name}: {err}"
             );
-            assert_eq!(fs::read(&config).ok().filter(|b| !b.is_empty()), None);
+            assert_eq!(fs::read(&config).ok().as_deref(), written);
+            let repo = env.repo().to_string_lossy().into_owned();
+            let committed = env.git(&["-C", &repo, "show", "HEAD:.dotman.toml"]);
+            assert!(committed.contains("[ignore]"), "{name}: {committed}");
         }
     }
 }

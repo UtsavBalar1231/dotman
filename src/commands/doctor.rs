@@ -438,31 +438,29 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
     checks
 }
 
-/// A missing or empty `.dotman.toml` reads as the defaults, so `[dirs]`, `[modes]` and `[age]`
-/// would be lost, and the next sync would commit that; the last commit's copy is the one to restore.
+/// A `.dotman.toml` that is missing or holds no settings reads as the defaults, so `[dirs]`,
+/// `[modes]` and `[age]` would be lost, and the next sync would commit that; the last commit's
+/// copy is the one to restore. The same rule as the guard's.
 fn lost_config(ctx: &Context) -> Option<Check> {
     let file = ctx.repo_config_file();
-    let how = match fs::symlink_metadata(&file) {
-        Ok(meta) if meta.len() > 0 => return None,
-        Ok(_) => "empty",
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
+    let how = match ctx.config_without_settings() {
+        Ok(how) => how?,
         Err(e) => {
             return Some(fail(
                 ".dotman.toml",
-                &format!("cannot stat {}: {e}", file.display()),
+                &format!("{e:#}"),
                 "check its permissions",
             ));
         }
     };
     let committed = ctx
-        .git
-        .show_blob("HEAD", ".dotman.toml")
-        .is_ok_and(|bytes| !bytes.is_empty());
+        .committed_config_has_settings()
+        .is_ok_and(|settings| settings == Some(true));
     committed.then(|| {
         fail(
             ".dotman.toml",
             &format!(
-                "{} is {how}, but the last commit has it, so its [dirs], [modes] and [age] would be lost",
+                "{} {how}, but the last commit has it, so its [dirs], [modes] and [age] would be lost",
                 file.display()
             ),
             &format!(

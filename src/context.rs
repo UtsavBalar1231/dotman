@@ -217,7 +217,7 @@ impl Context {
     }
 
     /// Fails when the repo is incomplete, with [`InProgress`] while a git operation or a conflict
-    /// is unfinished in it, and when HEAD has a non-empty `.dotman.toml` that is gone or empty. Every
+    /// is unfinished in it, and when HEAD's `.dotman.toml` has settings and the worktree's none. Every
     /// command except `doctor` and `git` calls it, after taking its lock; `log`, which only reads
     /// the history, skips all but the first check.
     pub(crate) fn guard(&self) -> Result<()> {
@@ -287,32 +287,57 @@ impl Context {
         Ok(())
     }
 
-    /// An empty or missing `.dotman.toml` would read as the defaults, losing `[dirs]`, `[modes]`
-    /// and `[age]`, and the next sync would commit that. When the last commit's copy is empty too,
-    /// there is nothing to lose, and restoring it would only bring back an empty file.
+    /// A `.dotman.toml` that is missing or holds no settings would read as the defaults, losing
+    /// `[dirs]`, `[modes]` and `[age]`, and the next sync would commit that. When the last commit's
+    /// copy holds no settings either, there is nothing to lose, and restoring it would bring back
+    /// no settings.
     fn refuse_lost_config(&self) -> Result<()> {
         let file = self.repo_config_file();
-        let how = match fs::symlink_metadata(&file) {
-            Ok(meta) if meta.len() > 0 => return Ok(()),
-            Ok(_) => "empty",
-            Err(e) if e.kind() == io::ErrorKind::NotFound => "missing",
-            Err(e) => return Err(e).with_context(|| format!("cannot stat {}", file.display())),
+        let Some(how) = self.config_without_settings()? else {
+            return Ok(());
         };
-        let tracked =
-            self.git.head()?.is_some() && self.git.tree_mode("HEAD", ".dotman.toml")?.is_some();
-        if tracked && self.git.show_blob("HEAD", ".dotman.toml")?.is_empty() {
-            crate::output::info(&format!(
-                "{} is {how}, as in the last commit, so the defaults apply",
-                file.display()
-            ));
-        } else if tracked {
-            bail!(
-                "{} is {how}, but the last commit has it, so its [dirs], [modes] and [age] would be lost; restore it with `{} git checkout -- .dotman.toml`",
+        match self.committed_config_has_settings()? {
+            Some(true) => bail!(
+                "{} {how}, but the last commit has it, so its [dirs], [modes] and [age] would be lost; restore it with `{} git checkout -- .dotman.toml`",
                 file.display(),
                 crate::name::bin()
-            );
+            ),
+            // A committed file of comments alone is deliberate, so it is not noted on every run.
+            Some(false) if how != HOLDS_NO_SETTINGS => crate::output::info(&format!(
+                "{} {how}, as in the last commit, so the defaults apply",
+                file.display()
+            )),
+            _ => {}
         }
         Ok(())
+    }
+
+    /// How `.dotman.toml` in the worktree reads as the defaults: "is missing", "is empty", or
+    /// [`HOLDS_NO_SETTINGS`] when it has only blank lines and comments. `None` when it holds
+    /// settings, or is not a readable regular file or not TOML, which loading it reports.
+    pub(crate) fn config_without_settings(&self) -> Result<Option<&'static str>> {
+        let file = self.repo_config_file();
+        let how = match fs::symlink_metadata(&file) {
+            Ok(meta) if !meta.is_file() => None,
+            Ok(meta) if meta.len() == 0 => Some("is empty"),
+            Ok(_) => fs::read(&file)
+                .ok()
+                .filter(|bytes| holds_no_settings(bytes))
+                .map(|_| HOLDS_NO_SETTINGS),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Some("is missing"),
+            Err(e) => return Err(e).with_context(|| format!("cannot stat {}", file.display())),
+        };
+        Ok(how)
+    }
+
+    /// Whether the last commit's `.dotman.toml` holds settings; `None` when the last commit has
+    /// none. A copy that is not TOML counts as holding them.
+    pub(crate) fn committed_config_has_settings(&self) -> Result<Option<bool>> {
+        if self.git.head()?.is_none() || self.git.tree_mode("HEAD", ".dotman.toml")?.is_none() {
+            return Ok(None);
+        }
+        let committed = self.git.show_blob("HEAD", ".dotman.toml")?;
+        Ok(Some(!holds_no_settings(&committed)))
     }
 
     /// Path of `.dotman.toml` in the repo.
@@ -610,6 +635,16 @@ fn leftover_pid(name: &OsStr, prefix: &str) -> Option<u32> {
     } else {
         None
     }
+}
+
+const HOLDS_NO_SETTINGS: &str = "holds no settings";
+
+/// Whether `.dotman.toml` text is blank lines and comments only, which reads as the defaults.
+fn holds_no_settings(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(text).ok())
+        .is_some_and(|table| table.is_empty())
 }
 
 /// Whether any of `paths` lies under `dir`.

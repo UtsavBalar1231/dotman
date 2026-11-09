@@ -119,16 +119,21 @@ fn an_empty_or_missing_dotman_toml_fails_with_the_restore_command() {
     assert_ne!(env.git(&["-C", &repo, "show", "HEAD:.dotman.toml"]), "");
     let (code, out) = doctor(&env, &[]);
     assert_eq!(code, Some(0), "{out}");
-    for how in ["empty", "missing"] {
-        if how == "empty" {
-            fs::write(&config, b"").expect("truncate");
-        } else {
-            fs::remove_file(&config).expect("remove");
+    // A newline or a comment alone holds no settings, so it loses them just as an empty file does.
+    for (how, written) in [
+        ("is empty", Some(&b""[..])),
+        ("is missing", None),
+        ("holds no settings", Some(b"\n")),
+        ("holds no settings", Some(b"# todo\n")),
+    ] {
+        match written {
+            Some(bytes) => fs::write(&config, bytes).expect("overwrite"),
+            None => fs::remove_file(&config).expect("remove"),
         }
         let (code, out) = doctor(&env, &[]);
         assert_eq!(code, Some(1), "{how}: {out}");
         let failed = line(&out, "fail", ".dotman.toml").unwrap_or_default();
-        assert!(failed.contains(&format!("is {how}")), "{how}: {out}");
+        assert!(failed.contains(how), "{how}: {out}");
         assert!(
             failed.contains("dotman git checkout -- .dotman.toml"),
             "{how}: {out}"
