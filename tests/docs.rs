@@ -427,6 +427,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "status_reports_renamed_paths",
             "inherited_git_variables_never_redirect_sync",
             "planted_git_hooks_never_run",
+            "the_user_s_git_config_and_template_dir_never_shape_the_checkout",
         ],
     ),
     (
@@ -434,6 +435,15 @@ const CLAIMS: &[(&str, &[&str])] = &[
         &[
             "init_sets_main_attributes_and_stable_id",
             "ignored_crlf_and_text_auto_content_survives_commit_and_clone",
+            "a_tracked_merge_driver_never_joins_a_conflict",
+        ],
+    ),
+    (
+        "writes the line again before it changes anything",
+        &[
+            "an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write",
+            "an_attributes_line_an_older_dotman_wrote_warns_with_a_step_that_works",
+            "only_context_lock_takes_the_lock_to_write",
         ],
     ),
     (
