@@ -40,6 +40,30 @@ log_bold() {
 	echo -e "${BOLD}$1${NC}" >&2
 }
 
+# Every failing step ends the install through here, because bash ignores set -e inside a function
+# that runs as an if condition.
+fail() {
+	log_error "$1"
+	exit 1
+}
+
+TEMP_DIR=""
+cleanup() {
+	if [[ -n "$TEMP_DIR" ]]; then
+		rm -rf "$TEMP_DIR"
+	fi
+}
+trap cleanup EXIT
+
+# The directory goes to mkdir, cp and a shell startup file, so it must be absolute, which also
+# keeps it from being read as an option.
+check_install_dir() {
+	case "$INSTALL_DIR" in
+	/*) ;;
+	*) fail "The install directory must be an absolute path, not '$INSTALL_DIR'" ;;
+	esac
+}
+
 # Platform detection
 detect_platform() {
 	local os arch
@@ -144,31 +168,26 @@ install_from_github() {
 
 	local archive="dotman-v$version-$target.tar.gz"
 	local base="${DOWNLOAD_BASE:-$REPO_URL/releases/download/v$version}"
-	local temp_dir
-	temp_dir=$(mktemp -d)
+	local binary_path="$INSTALL_DIR/$BINARY_NAME"
+	TEMP_DIR=$(mktemp -d) || fail "Cannot create a temporary directory"
 
 	log_info "Downloading from $base/$archive"
-	if ! fetch "$base/$archive" "$temp_dir/$archive" || ! fetch "$base/checksums.txt" "$temp_dir/checksums.txt"; then
-		log_error "Download failed"
-		rm -rf "$temp_dir"
-		return 1
+	if ! fetch "$base/$archive" "$TEMP_DIR/$archive" || ! fetch "$base/checksums.txt" "$TEMP_DIR/checksums.txt"; then
+		fail "Download failed"
 	fi
 
-	if ! verify_checksum "$temp_dir" "$archive"; then
-		log_error "Checksum verification failed; nothing was installed"
-		rm -rf "$temp_dir"
-		return 1
+	if ! verify_checksum "$TEMP_DIR" "$archive"; then
+		fail "Checksum verification failed; nothing was installed"
 	fi
 
-	tar -xzf "$temp_dir/$archive" -C "$temp_dir"
-
-	mkdir -p "$INSTALL_DIR"
-
-	cp "$temp_dir/$BINARY_NAME" "$INSTALL_DIR/"
-	chmod +x "$INSTALL_DIR/$BINARY_NAME"
-	binary_path="$INSTALL_DIR/$BINARY_NAME"
-
-	rm -rf "$temp_dir"
+	tar -xzf "$TEMP_DIR/$archive" -C "$TEMP_DIR" || fail "Cannot unpack $archive"
+	mkdir -p "$INSTALL_DIR" || fail "Cannot create $INSTALL_DIR"
+	# cp would copy into a directory there and report success.
+	if [[ -d "$binary_path" ]]; then
+		fail "$binary_path is a directory"
+	fi
+	cp "$TEMP_DIR/$BINARY_NAME" "$binary_path" || fail "Cannot copy dotman to $binary_path"
+	chmod 0755 "$binary_path" || fail "Cannot make $binary_path executable"
 
 	log_success "dotman installed to $binary_path"
 }
@@ -219,41 +238,29 @@ add_to_path() {
 		;;
 	esac
 
+	local line
 	if [[ "$shell_rc" == *.fish ]]; then
-		mkdir -p "${shell_rc%/*}"
-		echo "set -gx PATH $INSTALL_DIR \$PATH" >>"$shell_rc"
+		mkdir -p "${shell_rc%/*}" || fail "Cannot create ${shell_rc%/*}"
+		line="set -gx PATH $INSTALL_DIR \$PATH"
 	else
-		echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >>"$shell_rc"
+		line="export PATH=\"$INSTALL_DIR:\$PATH\""
 	fi
+	if [[ -f "$shell_rc" ]] && grep -qxF "$line" "$shell_rc"; then
+		log_info "$shell_rc already adds $INSTALL_DIR to PATH"
+		return 0
+	fi
+	echo "$line" >>"$shell_rc" || fail "Cannot write $shell_rc"
 
 	log_success "Added $INSTALL_DIR to PATH in $shell_rc"
 	log_warning "Please restart your shell or run: source $shell_rc"
 }
 
-# Verify installation
+# By absolute path, never through PATH, where an older dotman may come first.
 verify_installation() {
-	local binary_path
-
-	if [[ -x "$INSTALL_DIR/$BINARY_NAME" ]]; then
-		binary_path="$INSTALL_DIR/$BINARY_NAME"
-	elif command_exists "$BINARY_NAME"; then
-		binary_path=$(command -v "$BINARY_NAME")
-	else
-		log_error "Installation verification failed. Binary not found."
-		return 1
-	fi
-
-	# Test the binary
-	if "$binary_path" --version >/dev/null 2>&1; then
-		local version
-		version=$("$binary_path" --version | awk '{print $2}')
-		log_success "Installation verified! dotman $version is ready to use."
-		log_info "Try: $BINARY_NAME --help"
-		return 0
-	else
-		log_error "Binary found but not working correctly"
-		return 1
-	fi
+	local binary_path="$INSTALL_DIR/$BINARY_NAME" version
+	version=$("$binary_path" --version 2>/dev/null) || fail "$binary_path does not run"
+	log_success "Installation verified! dotman ${version#* } is ready to use."
+	log_info "Try: $BINARY_NAME --help"
 }
 
 # Where each shell loads the script from is kept in one place, completions/README.md.
@@ -261,31 +268,23 @@ show_completion_setup() {
 	log_info "Shell completions: \`$BINARY_NAME completion <bash|zsh|fish|elvish|powershell>\` prints the script; completions/README.md in the repo says where each shell loads it from"
 }
 
+# No step runs as an if condition, so set -e stays in force in each of them.
 main() {
 	log_bold "dotman Installation Script"
+	check_install_dir
 
 	local platform
 	platform=$(detect_platform)
 	log_info "Detected platform: $platform"
 
-	if install_from_github "$platform"; then
-		add_dot_alias
-		add_to_path
-	else
-		log_error "Installation failed"
-		exit 1
-	fi
+	install_from_github "$platform"
+	add_dot_alias
+	add_to_path
+	verify_installation
+	show_completion_setup
 
-	# Verify the installation
-	if verify_installation; then
-		show_completion_setup
-
-		log_bold "🎉 Installation complete!"
-		log_info "Get started with: $BINARY_NAME init"
-	else
-		log_error "Installation failed verification"
-		exit 1
-	fi
+	log_bold "🎉 Installation complete!"
+	log_info "Get started with: $BINARY_NAME init"
 }
 
 # Handle command line arguments

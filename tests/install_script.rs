@@ -93,8 +93,10 @@ fn run_installer_in(
     if let Some(path) = path {
         cmd.env("PATH", path);
     }
+    // A relative install dir would land in the working directory, so that is the temp root.
     Ok(cmd
         .arg(script)
+        .current_dir(root)
         .env("HOME", root)
         .env("SHELL", shell)
         .env_remove("ZDOTDIR")
@@ -275,5 +277,118 @@ fn an_install_dir_that_needs_quoting_is_never_written_into_a_startup_file() -> R
     assert_eq!(startup_files(tmp.path()), Vec::<&str>::new());
     assert!(err.contains("add it to PATH yourself"), "{err}");
     assert!(!marker.exists());
+    Ok(())
+}
+
+/// A `PATH` whose first `dotman` is an older one, then only the installer's tools.
+fn path_with_an_old_dotman(root: &Path) -> Result<OsString, Box<dyn Error>> {
+    let old = root.join("oldbin");
+    fs::create_dir_all(&old)?;
+    let stub = old.join("dotman");
+    fs::write(&stub, "#!/bin/sh\necho 'dotman 9.9.9-old'\n")?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
+    Ok(std::env::join_paths([old, path_without_dot(root)?.into()])?)
+}
+
+#[test]
+fn a_step_that_fails_fails_the_install_even_with_a_dotman_on_path() -> R {
+    let tmp = tempfile::tempdir()?;
+    let release = tmp.path().join("release");
+    if !fake_release(tmp.path(), &release, None)? {
+        return Ok(());
+    }
+    let path = path_with_an_old_dotman(tmp.path())?;
+    let blocker = tmp.path().join("blocker");
+    fs::write(&blocker, "a file where a directory goes")?;
+    let taken = tmp.path().join("taken");
+    fs::create_dir_all(taken.join("dotman"))?;
+    let read_only = tmp.path().join("read-only");
+    fs::create_dir_all(&read_only)?;
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555))?;
+    let mut cases = vec![
+        (blocker.join("bin"), "Cannot create"),
+        (taken.clone(), "is a directory"),
+    ];
+    // Root writes into a 0555 directory.
+    if dotman::sys::geteuid() != 0 {
+        cases.push((read_only, "Cannot copy dotman"));
+    }
+    for (dir, why) in cases {
+        let out = run_installer_in(tmp.path(), &release, Some(path.clone()), &dir, "/bin/bash")?;
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{}: {err}", dir.display());
+        assert!(err.contains(why), "{}: {err}", dir.display());
+        assert!(!err.contains("[SUCCESS]"), "{}: {err}", dir.display());
+    }
+    assert!(!taken.join("dotman/dotman").exists());
+    Ok(())
+}
+
+#[test]
+fn the_check_runs_the_binary_just_installed() -> R {
+    let tmp = tempfile::tempdir()?;
+    let release = tmp.path().join("release");
+    if !fake_release(tmp.path(), &release, None)? {
+        return Ok(());
+    }
+    let path = path_with_an_old_dotman(tmp.path())?;
+    let out = run_installer_in(
+        tmp.path(),
+        &release,
+        Some(path),
+        &tmp.path().join("bin"),
+        "/bin/bash",
+    )?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("dotman 0.0.0-fake is ready to use"), "{err}");
+    assert!(!err.contains("9.9.9-old"), "{err}");
+    Ok(())
+}
+
+#[test]
+fn a_rerun_writes_the_path_line_once() -> R {
+    let tmp = tempfile::tempdir()?;
+    let release = tmp.path().join("release");
+    if !fake_release(tmp.path(), &release, None)? {
+        return Ok(());
+    }
+    let dir = tmp.path().join("bin");
+    for _ in 0..2 {
+        let path = path_without_dot(tmp.path())?;
+        let out = run_installer_in(tmp.path(), &release, Some(path), &dir, "/bin/bash")?;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let text = fs::read_to_string(tmp.path().join(".bashrc"))?;
+    assert_eq!(text, format!("export PATH=\"{}:$PATH\"\n", dir.display()));
+    Ok(())
+}
+
+#[test]
+fn an_install_dir_that_is_not_absolute_is_refused_before_anything_is_written() -> R {
+    let tmp = tempfile::tempdir()?;
+    let release = tmp.path().join("release");
+    if !fake_release(tmp.path(), &release, None)? {
+        return Ok(());
+    }
+    for dir in ["bin", "-x", "~/bin"] {
+        let path = path_without_dot(tmp.path())?;
+        let out = run_installer_in(
+            tmp.path(),
+            &release,
+            Some(path),
+            Path::new(dir),
+            "/bin/bash",
+        )?;
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{dir}: {err}");
+        assert!(err.contains("must be an absolute path"), "{dir}: {err}");
+        assert_eq!(startup_files(tmp.path()), Vec::<&str>::new(), "{dir}");
+        assert!(!tmp.path().join(dir).exists(), "{dir}");
+    }
     Ok(())
 }
