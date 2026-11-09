@@ -939,6 +939,84 @@ fn a_name_hold_hint_never_offers_allow_plain_for_a_file_that_holds_a_credential(
     assert!(!files_containing(&env.repo(), token.as_bytes()).contains(&secrets.to_owned()));
 }
 
+/// Every object reachable in the remote, as `git cat-file -p` prints it.
+fn remote_objects(env: &TestEnv) -> String {
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    env.git(&["--git-dir", &remote, "rev-list", "--all", "--objects"])
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|id| env.git(&["--git-dir", &remote, "cat-file", "-p", id]))
+        .collect()
+}
+
+/// A new file under `[dirs]` whose name matches `[guard] secret_names` and which holds a
+/// credential is listed by its finding. `status`, `sync --dry-run` and `sync` never offer
+/// `--allow-plain` for it, and running every command they print for it, as printed and with
+/// `<file>` filled in, then `sync`, never sends the token to the remote.
+#[test]
+fn a_secret_named_dirs_file_that_holds_a_credential_is_never_offered_allow_plain() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let keyed = age_installed();
+    if keyed {
+        env.ok(&["key", "init"]);
+    }
+    env.write(".config/zsh/.zshrc", b"source secrets.zsh\n", 0o644);
+    env.ok(&["add", "--yes", ".config/zsh"]);
+    env.ok(&["sync"]);
+
+    let token = github_token();
+    let secrets = ".config/zsh/secrets.zsh";
+    env.write(
+        secrets,
+        format!("# tokens\nexport GH={token}\n").as_bytes(),
+        0o600,
+    );
+    let mut printed = std::collections::BTreeSet::new();
+    for (args, code) in [
+        (&["status"][..], 0),
+        (&["sync", "--dry-run"], 3),
+        (&["sync"], 3),
+    ] {
+        let out = env.run(args);
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr(&out));
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {text}");
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(secrets)).collect();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("line 2 holds a github-token")),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("--allow-plain"), "{args:?}: {text}");
+        assert!(!text.contains(&token), "the value is never printed");
+        printed.extend(
+            lines
+                .iter()
+                .flat_map(|line| line.split('`').skip(1).step_by(2))
+                .map(str::to_owned),
+        );
+    }
+    assert!(!printed.is_empty());
+
+    let path = env.home().join(secrets).to_string_lossy().into_owned();
+    let filled = printed
+        .iter()
+        .map(|command| command.replace("<file>", &shell_words::quote(&path)));
+    // A sync after each, so no later command can hide what an earlier one let through.
+    for command in printed.iter().cloned().chain(filled) {
+        let words = shell_words::split(&command).expect("a pasteable command");
+        let args: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
+        env.run(&args);
+        env.run(&["sync"]);
+        assert!(!remote_objects(&env).contains(&token), "{command}");
+    }
+    assert!(!files_containing(&env.repo(), token.as_bytes()).contains(&secrets.to_owned()));
+    if keyed {
+        assert!(remote_tree(&env).contains(".config/zsh/secrets{age}.zsh"));
+    }
+}
+
 /// `add --allow-plain` stores the file and records `[guard] allow` by key and rule; later edits,
 /// which move the line, sync without a hold, while a credential of another rule is held.
 #[test]

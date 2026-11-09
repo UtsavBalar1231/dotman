@@ -1093,11 +1093,18 @@ pub(crate) fn scan_dirs(
     }
     for (key, leaf) in found {
         let hold = match leaf {
-            Leaf::File { size, binary, .. } => hold_by_name_and_size(&secrets, &key, size)
-                .or_else(|| binary.then_some(Hold::Binary))
-                .or_else(|| {
+            Leaf::File { size, binary, .. } => {
+                let content = || {
                     holds_key(&ctx.paths.home, &key, &ctx.machine.guard.allow).map(Hold::Content)
-                }),
+                };
+                match hold_by_name_and_size(&secrets, &key, size) {
+                    // The finding wins: a name hold's hint offers --allow-plain. The guard never
+                    // scans a binary file, so one is not read.
+                    Some(Hold::SecretName) if !binary => content().or(Some(Hold::SecretName)),
+                    Some(hold) => Some(hold),
+                    None => binary.then_some(Hold::Binary).or_else(content),
+                }
+            }
             Leaf::Link => secrets
                 .iter()
                 .any(|p| p.matches_with(&key, MATCH_SECRET))
