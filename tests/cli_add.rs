@@ -172,6 +172,43 @@ fn a_parent_directory_mode_is_recorded_once_and_never_replaced() {
 }
 
 #[test]
+fn adding_a_managed_directory_again_previews_only_what_changed() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/app/a.conf", b"a\n", 0o644);
+    env.write(".config/app/b.conf", b"b\n", 0o644);
+    env.ok(&["add", ".config/app"]);
+
+    let err = env.ok(&["add", ".config/app"]);
+    assert!(
+        err.contains(".config/app/: 2 files already managed and unchanged"),
+        "{err}"
+    );
+    assert!(!err.contains("total size"), "no preview:\n{err}");
+
+    env.write(".config/app/b.conf", b"b edited\n", 0o644);
+    env.write(".config/app/c.conf", b"c\n", 0o644);
+    let err = env.ok(&["add", ".config/app"]);
+    assert!(
+        err.contains(".config/app/: 1 file already managed and unchanged")
+            && err.contains("files: 2"),
+        "{err}"
+    );
+    assert_eq!(
+        managed(&env),
+        [
+            ".config/app/a.conf",
+            ".config/app/b.conf",
+            ".config/app/c.conf"
+        ]
+    );
+    assert_eq!(
+        fs::read(env.repo().join(".config/app/b.conf")).expect("read"),
+        b"b edited\n"
+    );
+}
+
+#[test]
 fn a_symlink_to_a_directory_is_stored_as_a_link_with_a_hint() {
     let env = TestEnv::new();
     env.ok(&["init"]);

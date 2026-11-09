@@ -4,8 +4,9 @@
 
 use crate::cli::AddArgs;
 use crate::commands::Outcome;
+use crate::commands::apply::{Classified, classify_key};
 use crate::context::{Context, TEMP_PREFIX, is_real_dir};
-use crate::engine::status::{Content, SourceEntry, Worktree};
+use crate::engine::status::{Content, SourceEntry, Variants, Worktree};
 use crate::engine::{
     Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
 };
@@ -184,7 +185,8 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         Outcome::Attention
     };
 
-    for dir in &plan.dirs {
+    let settled = drop_unchanged(&ctx, &repo_config, &state, &targets.sources, &mut plan);
+    for dir in plan.dirs.iter().filter(|dir| !settled.contains(&dir.key)) {
         preview(dir);
     }
     let in_dirs: usize = plan.dirs.iter().map(|d| d.items.len()).sum();
@@ -228,6 +230,46 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         output::success(&format!("added {}", crate::import::count(added, "path")));
     }
     finish(failed, items.len(), outcome)
+}
+
+/// Takes the files a directory already manages, unchanged, out of its plan, so that adding it
+/// again previews and adds only what changed. Returns the directories left with nothing to add.
+fn drop_unchanged(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    state: &State,
+    sources: &Sources,
+    plan: &mut Plan,
+) -> BTreeSet<String> {
+    let mut settled = BTreeSet::new();
+    let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
+    let variants = Variants::new(
+        worktree,
+        sources,
+        ctx.identity(),
+        ctx.template_vars(),
+        ctx.age(),
+    );
+    for dir in &mut plan.dirs {
+        let before = dir.items.len();
+        dir.items.retain(|key, _| {
+            !sources.contains(key)
+                || !matches!(classify_key(ctx, &variants, state, key),
+                    Ok(Classified::Item(item)) if item.token() == "clean")
+        });
+        let same = before.saturating_sub(dir.items.len());
+        if same > 0 {
+            output::info(&format!(
+                "{}/: {} already managed and unchanged",
+                dir.key,
+                crate::import::count(same, "file")
+            ));
+            if dir.items.is_empty() {
+                settled.insert(dir.key.clone());
+            }
+        }
+    }
+    settled
 }
 
 /// A dry run ends here too, so it exits as the real run would.
