@@ -131,8 +131,8 @@ fn a_stale_git_lock_fails_with_the_removal_step_that_works() {
     assert_eq!(code, Some(0), "{out}");
 }
 
-/// The attributes line of an older dotman, without `merge=text`, is flagged before any command
-/// writes, and the step doctor prints, run as printed, clears it.
+/// The attributes lines of older dotman versions, without `merge` or with `merge=text`, are
+/// flagged before any command writes, and the step doctor prints, run as printed, clears them.
 #[test]
 fn an_attributes_line_an_older_dotman_wrote_warns_with_a_step_that_works() {
     let env = committed();
@@ -141,27 +141,28 @@ fn an_attributes_line_an_older_dotman_wrote_warns_with_a_step_that_works() {
     assert_eq!(code, Some(0), "{out}");
     assert!(line(&out, "pass", "git attributes").is_some(), "{out}");
 
-    fs::write(
-        &attributes,
+    for old in [
         "* -text -filter -ident -working-tree-encoding\n",
-    )
-    .expect("age it");
-    let (code, out) = doctor(&env, &[]);
-    assert_eq!(code, Some(0), "{out}");
-    let warned = line(&out, "warn", "git attributes").unwrap_or_default();
-    assert!(warned.contains(&attributes.display().to_string()), "{out}");
-    assert_eq!(
-        fs::read(&attributes).expect("doctor writes nothing"),
-        b"* -text -filter -ident -working-tree-encoding\n"
-    );
-    let ran = common::run_hint(&env, warned, "apply");
-    assert!(
-        ran.status.success(),
-        "{}",
-        String::from_utf8_lossy(&ran.stderr)
-    );
-    let (_, out) = doctor(&env, &[]);
-    assert!(line(&out, "pass", "git attributes").is_some(), "{out}");
+        "* -text -filter -ident -working-tree-encoding merge=text\n",
+    ] {
+        fs::write(&attributes, old).expect("age it");
+        let (code, out) = doctor(&env, &[]);
+        assert_eq!(code, Some(0), "{out}");
+        let warned = line(&out, "warn", "git attributes").unwrap_or_default();
+        assert!(warned.contains(&attributes.display().to_string()), "{out}");
+        assert_eq!(
+            fs::read_to_string(&attributes).expect("doctor writes nothing"),
+            old
+        );
+        let ran = common::run_hint(&env, warned, "apply");
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let (_, out) = doctor(&env, &[]);
+        assert!(line(&out, "pass", "git attributes").is_some(), "{out}");
+    }
 }
 
 #[test]

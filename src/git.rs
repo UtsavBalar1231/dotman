@@ -16,9 +16,11 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use xxhash_rust::xxh3::xxh3_128;
 
-/// `merge=text` beats a tracked `merge=union`, which would join both sides of a conflict without a
-/// word. Not `-merge`: unset means binary, which keeps one side.
-const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding merge=text\n";
+/// `merge`, set with no value, is git's built-in text merge whatever a tracked `merge=union`, a
+/// `merge.<name>.driver` or `merge.default` says; either of those could join both sides of a
+/// conflict without a word. Not `merge=text`: git looks a driver named `text` up in the user's
+/// config first. Not `-merge`: unset means binary, which keeps one side.
+const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding merge\n";
 
 const MIN_VERSION: (u32, u32) = (2, 25);
 
@@ -594,7 +596,7 @@ impl Git {
     }
 
     /// Whether `.git/info/attributes` holds exactly the line `init` and every clone write. One
-    /// that an older dotman wrote lacks `merge=text`.
+    /// that an older dotman wrote lacks `merge`, or has `merge=text`.
     #[must_use]
     pub fn attributes_current(&self) -> bool {
         fs::read(self.attributes_path()).is_ok_and(|bytes| bytes == ATTRIBUTES.as_bytes())

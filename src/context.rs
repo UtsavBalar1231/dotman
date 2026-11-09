@@ -227,7 +227,7 @@ impl Context {
 
     /// Takes the lock for a command that writes, then runs [`Context::guard`]. Outside a dry run it
     /// also brings `.git/info/attributes` up to date in a repo `init` finished, so a repo an older
-    /// dotman made gets `merge=text` before anything is merged or checked out.
+    /// dotman made gets git's built-in text merge before anything is merged or checked out.
     pub(crate) fn lock(&self, dry_run: bool) -> Result<Lock> {
         let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;
         self.guard()?;

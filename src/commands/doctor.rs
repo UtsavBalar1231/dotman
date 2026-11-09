@@ -461,7 +461,7 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
         checks.push(warn(
             "git attributes",
             &format!(
-                "{} is not the line dotman pins, as in a repo an older dotman made, so a tracked .gitattributes can still choose the merge driver; the next command that writes rewrites it, or run `{} apply` now",
+                "{} is not the line dotman pins, as in a repo an older dotman made, so a tracked .gitattributes or your git config can still choose the merge driver; the next command that writes rewrites it, or run `{} apply` now",
                 ctx.paths.repo.join(".git/info/attributes").display(),
                 name::bin()
             ),

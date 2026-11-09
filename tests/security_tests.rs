@@ -1730,13 +1730,63 @@ fn a_tracked_merge_driver_never_joins_a_conflict() {
     assert_eq!(fs::read(b.repo().join(".conf")).unwrap(), b"from-two\n");
 }
 
-/// A repo an older dotman made holds the attributes line without `merge=text`. A dry run leaves
-/// it; the next `apply` writes the pinned line, and so does `sync`, before its pull, so a tracked
-/// `merge=union` still stops on the conflict. A missing file is written too.
+/// Git config that would settle every conflict without a word: a driver that exits 0, under the
+/// name `merge=text` looks up, and `union` for files whose merge attribute is unspecified.
+fn settle_conflicts_in_git_config(env: &TestEnv) -> std::io::Result<()> {
+    let gitconfig = env.home().join(".gitconfig");
+    let mut config = fs::read_to_string(&gitconfig)?;
+    config.push_str(
+        "[merge \"text\"]\n\tname = custom\n\tdriver = true\n[merge]\n\tdefault = union\n",
+    );
+    fs::write(&gitconfig, config)
+}
+
+/// A merge driver in the user's git config, named `text`, or `merge.default`, never settles a
+/// conflict: with a tracked `* merge=union` as well, the second sync stops, exit 4, and keeps its
+/// own edit, and the pull it prints stops on conflict markers.
+#[test]
+fn a_merge_driver_in_the_user_s_git_config_never_settles_a_conflict() {
+    let a = device_with_a_symlink();
+    a.write(".conf", b"line1\nshared=base\nline3\n", 0o644);
+    a.write(".gitattributes", b"* merge=union\n", 0o644);
+    a.ok(&["add", ".conf", ".gitattributes"]);
+    a.ok(&["sync"]);
+    let b = a.second_device();
+    settle_conflicts_in_git_config(&b).unwrap();
+    exits(&b.run(&["init", &a.remote_url()]), 0);
+
+    a.write(".conf", b"line1\nshared=FROM-A\nline3\n", 0o644);
+    a.ok(&["sync"]);
+    b.write(".conf", b"line1\nshared=FROM-B\nline3\n", 0o644);
+    let err = exits(&b.run(&["sync"]), 4);
+    assert!(err.contains("conflicting paths:\n  .conf"), "{err}");
+    assert_eq!(b.read(".conf"), b"line1\nshared=FROM-B\nline3\n");
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    assert_eq!(
+        a.git(&["--git-dir", &remote, "show", "main:.conf"]),
+        "line1\nshared=FROM-A\nline3\n"
+    );
+
+    let pull = "dotman git pull --rebase origin main";
+    assert!(err.contains(pull), "{err}");
+    let args: Vec<&str> = pull.split(' ').skip(1).collect();
+    let out = b.run(&args);
+    assert!(!out.status.success(), "{}", stderr(&out));
+    let merged = fs::read_to_string(b.repo().join(".conf")).unwrap();
+    for marker in ["<<<<<<<", "shared=FROM-A", "shared=FROM-B", ">>>>>>>"] {
+        assert!(merged.contains(marker), "{merged}");
+    }
+}
+
+/// A repo an older dotman made holds an attributes line without the bare `merge`: none, or
+/// `merge=text`, which the user's git config can redefine. A dry run leaves it; the next `apply`
+/// writes the pinned line, and so does `sync`, before its pull, so neither a tracked `merge=union`
+/// nor the user's drivers settle the conflict. A missing file is written too.
 #[test]
 fn an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write() {
     const OLD: &[u8] = b"* -text -filter -ident -working-tree-encoding\n";
-    const PINNED: &[u8] = b"* -text -filter -ident -working-tree-encoding merge=text\n";
+    const NAMED: &[u8] = b"* -text -filter -ident -working-tree-encoding merge=text\n";
+    const PINNED: &[u8] = b"* -text -filter -ident -working-tree-encoding merge\n";
     let a = device_with_a_symlink();
     a.write(".conf", b"line1\n", 0o644);
     a.write(".gitattributes", b"* merge=union\n", 0o644);
@@ -1762,8 +1812,9 @@ fn an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write()
     assert_eq!(fs::read(&attributes).unwrap(), PINNED);
     assert_eq!(mode_of(&attributes), 0o644);
 
-    for (round, stale) in [Some(OLD), None].into_iter().enumerate() {
+    for (round, stale) in [Some(OLD), Some(NAMED), None].into_iter().enumerate() {
         let (b, attributes) = device();
+        settle_conflicts_in_git_config(&b).unwrap();
         match stale {
             Some(bytes) => fs::write(&attributes, bytes).unwrap(),
             None => fs::remove_file(&attributes).unwrap(),
