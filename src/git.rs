@@ -3,10 +3,11 @@
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
 
 use anyhow::{Context, Result, anyhow, bail};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -607,15 +608,39 @@ impl Git {
     }
 
     fn stage(&self, left_out: &[PathBuf]) -> Result<()> {
-        let mut args: Vec<OsString> = ["add", "-A", "-f", "--", ".", TEMP_FILES, TEMP_DIRS]
+        // On stdin: tens of thousands of left-out paths as arguments overflow the kernel's
+        // argument limit, and `git add` fails with E2BIG.
+        let mut specs: Vec<u8> = Vec::new();
+        let left_out = left_out
+            .iter()
+            .map(|path| pathspec(":(exclude,literal)", path));
+        for spec in [".", TEMP_FILES, TEMP_DIRS]
             .map(OsString::from)
-            .to_vec();
-        args.extend(
-            left_out
-                .iter()
-                .map(|path| pathspec(":(exclude,literal)", path)),
-        );
-        self.run(&args)?;
+            .into_iter()
+            .chain(left_out)
+        {
+            specs.extend_from_slice(spec.as_bytes());
+            specs.push(0);
+        }
+        let mut input = tempfile::tempfile().context("cannot create a temp file")?;
+        input
+            .write_all(&specs)
+            .and_then(|()| input.rewind())
+            .context("cannot write a temp file")?;
+        let args = [
+            "add",
+            "-A",
+            "-f",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ];
+        self.check_version()?;
+        let mut cmd = self.command();
+        cmd.args(args);
+        let out = self.spawn_with(cmd, Stdio::from(input))?;
+        if !out.status.success() {
+            return Err(self.failure(&args, &out));
+        }
         // Untracks the leftovers that earlier versions committed.
         let args = [
             "rm",
@@ -716,12 +741,12 @@ impl Git {
     /// [`LeaveOut`] picks. Never rewrites the index, so it is safe in a dry run.
     pub fn status(&self) -> Result<Vec<StatusEntry>> {
         let entries = self.full_status()?;
-        let left_out = self.left_out(&entries)?;
+        let left_out: BTreeSet<PathBuf> = self.left_out(&entries)?.into_iter().collect();
         Ok(entries
             .into_iter()
             .filter(|entry| {
                 entry.kind != StatusKind::Untracked
-                    || !left_out.iter().any(|root| entry.path.starts_with(root))
+                    || !entry.path.ancestors().any(|root| left_out.contains(root))
             })
             .collect())
     }

@@ -192,6 +192,41 @@ fn nested_git_dirs_are_never_listed_and_an_ignore_pattern_hides_a_file() {
     );
 }
 
+/// Ignored junk beside a managed file in the repo copy is left out of the commit path by path.
+/// Those paths reach git on stdin: as arguments, 6500 of these 1 KiB ones come to over 6 MiB,
+/// the kernel's ceiling whatever the stack limit, and staging failed with E2BIG.
+#[test]
+fn thousands_of_left_out_paths_reach_git_without_overflowing_its_arguments() {
+    let a = device();
+    let dir = format!(
+        ".config/nvim/{}/{}/{}",
+        "d".repeat(250),
+        "e".repeat(250),
+        "f".repeat(250)
+    );
+    a.write(format!("{dir}/keep.lua"), b"-- keep\n", 0o644);
+    let mut config = a.repo_config();
+    config.ignore.patterns.push("**/*.bak".to_owned());
+    config
+        .save(&a.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    exits(&a, 0, &["sync"]);
+    let junk = a.repo().join(&dir);
+    let tail = "x".repeat(240);
+    for i in 0..6500 {
+        fs::write(junk.join(format!("{i:05}-{tail}.bak")), b"").expect("write junk");
+    }
+    a.write(".config/nvim/init.lua", b"-- edited\n", 0o644);
+
+    exits(&a, 0, &["sync"]);
+    let tree = remote_tree(&a);
+    assert!(tree.contains(&format!("{dir}/keep.lua")), "{tree:?}");
+    assert!(!tree.iter().any(|k| k.contains(".bak")), "{tree:?}");
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    let pushed = a.git(&["--git-dir", &remote, "show", "main:.config/nvim/init.lua"]);
+    assert_eq!(pushed, "-- edited\n");
+}
+
 #[test]
 fn a_forgotten_file_under_a_managed_dir_stays_out_of_the_repo() {
     let a = device();
