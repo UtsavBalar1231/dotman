@@ -647,3 +647,18 @@ fn a_managed_directory_replaced_by_a_file_gets_a_clear_message() {
         b"opts\n"
     );
 }
+
+#[test]
+fn a_mode_loosened_on_another_machine_is_applied_and_not_kept_private() {
+    let (a, b) = pair(&[(".zshrc", b"z\n", 0o600)]);
+    assert_eq!(mode_of(&b.home().join(".zshrc")), 0o600);
+    // Back to git's default, so the capture removes the `[modes]` entry.
+    fs::set_permissions(b.home().join(".zshrc"), fs::Permissions::from_mode(0o644)).expect("chmod");
+    exits(&b, 0, &["sync"]);
+    let err = exits(&a, 0, &["sync"]);
+    assert!(!err.contains("kept at"), "{err}");
+    assert_eq!(mode_of(&a.home().join(".zshrc")), 0o644);
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(mode_of(&b.home().join(".zshrc")), 0o644);
+}

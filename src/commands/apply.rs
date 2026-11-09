@@ -264,6 +264,8 @@ pub(crate) struct Item {
     /// H as the write path reads it again before renaming. It differs from the classified H only
     /// for an absolute link into `$HOME`, which classification compares in its relative form.
     raw: Home,
+    /// S, as recorded for a home key.
+    s: Option<Tuple>,
     /// The identity change since the snapshot moved this key to another source. Until the change
     /// is accepted, the key is left alone.
     identity: bool,
@@ -877,6 +879,7 @@ impl Run<'_> {
                         row,
                         r,
                         raw: h,
+                        s: None,
                         identity: false,
                         system: true,
                     });
@@ -1325,12 +1328,20 @@ impl Run<'_> {
 
     /// R's mode, unless it would give group or other access to a file that has none. Without a
     /// `[modes]` entry R's mode is only git's default, which a private H must not widen to. A
-    /// template is left out: its H is never captured, so the kept mode would drift forever.
+    /// mode that differs from S's was changed in the repo on purpose, as when another machine
+    /// loosened it, so it applies. A template is left out: its H is never captured, so the kept
+    /// mode would drift forever.
     fn kept_mode(&self, item: &Item, r: &SourceEntry) -> u32 {
         let shared = |mode: u32| mode & 0o077 != 0;
         let private =
             matches!(&item.raw, Home::Present(h) if h.kind == Kind::File && !shared(h.mode));
-        if private && shared(r.tuple.mode) && !r.template && !self.modes.contains_key(&r.source) {
+        let unchanged = item.s.as_ref().is_none_or(|s| s.mode == r.tuple.mode);
+        if private
+            && unchanged
+            && shared(r.tuple.mode)
+            && !r.template
+            && !self.modes.contains_key(&r.source)
+        {
             r.tuple.mode & 0o700
         } else {
             r.tuple.mode
@@ -1411,6 +1422,7 @@ pub(crate) fn classify_key(
         row,
         r,
         raw,
+        s,
         identity,
         system: false,
     }))
