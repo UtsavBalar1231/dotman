@@ -245,6 +245,7 @@ fn entries_the_scan_cannot_capture_are_reported_and_specials_are_held() {
     a.write(".config/nvim/locked.lua", b"locked\n", 0o000);
     a.write(".config/nvim/private/x.lua", b"x\n", 0o644);
     fs::set_permissions(nvim.join("private"), fs::Permissions::from_mode(0o000)).expect("chmod");
+    let _restore = Readable(nvim.join("private"));
     // root reads anything, so the unreadable cases mean nothing there.
     let unreadable = fs::read(nvim.join("locked.lua")).is_err();
 
@@ -286,8 +287,17 @@ fn entries_the_scan_cannot_capture_are_reported_and_specials_are_held() {
             || key.contains("private")),
         "{tree:?}"
     );
-    fs::set_permissions(nvim.join("private"), fs::Permissions::from_mode(0o755)).expect("chmod");
     drop(socket);
+}
+
+/// Makes a directory readable again when dropped, so a failed assertion cannot leave the temp
+/// root undeletable.
+struct Readable(std::path::PathBuf);
+
+impl Drop for Readable {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
 }
 
 #[test]

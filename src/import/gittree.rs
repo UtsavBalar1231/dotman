@@ -1222,7 +1222,7 @@ fn check_source(source: &Source) -> Result<()> {
     if let Source::Path(path) = source {
         ensure!(
             is_git_source(path),
-            "{} is not a source `{} import` understands; a legacy dotman repo holds index.bin or commits/, and a git source is a repo, a bare repo or a URL",
+            "{} is not a source `{} import` understands; a legacy dotman repo holds index.bin, or HEAD and commits/, and a git source is a repo, a bare repo or a URL",
             path.display(),
             name::bin()
         );
