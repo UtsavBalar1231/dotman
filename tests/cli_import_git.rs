@@ -1200,3 +1200,110 @@ fn an_import_of_a_repo_without_commits_is_refused() {
     assert!(err.contains("no commits"), "{err}");
     assert!(!env.repo().exists(), "nothing is left behind");
 }
+
+/// A staging directory a killed import left beside the repo is swept once it is stale, by the
+/// next import and by `apply`: one named with a dead PID, or with none as older versions named it.
+/// One whose PID is alive, or that was touched in the last ten minutes, stays. An import names its
+/// own staging directory with its PID.
+#[test]
+fn the_staging_a_killed_import_left_is_swept() {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut env = TestEnv::new();
+    let parent = env.xdg_data();
+    let old = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(1200))
+        .expect("a time before now");
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("run true");
+    let dead = child.id();
+    child.wait().expect("wait for true");
+    let stage = |name: &str, at: Option<std::time::SystemTime>| {
+        let path = parent.join(name);
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .expect("make a staging dir");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("chmod");
+        fs::create_dir(path.join("repo")).expect("a half clone");
+        if let Some(at) = at {
+            fs::File::open(&path)
+                .and_then(|dir| dir.set_modified(at))
+                .expect("age it");
+        }
+        path
+    };
+    let unnamed = stage(".dotman-import-a1B2c3", Some(old));
+    let killed = stage(&format!(".dotman-import-{dead}-d1B2c3"), Some(old));
+    let young = stage(".dotman-import-y1B2c3", None);
+    let alive = stage(".dotman-import-1-l1B2c3", Some(old));
+
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git on PATH");
+    let stubs = env.root().join("git-log");
+    let log = env.root().join("git-args");
+    fs::create_dir_all(&stubs).expect("stub dir");
+    fs::write(
+        stubs.join("git"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real.display()
+        ),
+    )
+    .expect("write the wrapper");
+    fs::set_permissions(stubs.join("git"), fs::Permissions::from_mode(0o755)).expect("chmod");
+    env.prepend_path(&stubs);
+
+    let work = work_tree(&env, "src", &[(".a", "a\n", false)], None);
+    env.ok(&["import", &work.to_string_lossy(), "--no-bootstrap"]);
+    assert!(!unnamed.exists() && !killed.exists());
+    assert!(young.exists() && alive.exists());
+    let args = fs::read_to_string(&log).expect("read the git log");
+    let staging = format!("{}/.dotman-import-", parent.display());
+    let rest = args
+        .lines()
+        .filter(|line| line.contains(" clone "))
+        .find_map(|line| line.split_once(&staging))
+        .map(|(_, rest)| rest)
+        .expect("a clone into the staging dir");
+    let pid: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    assert!(
+        !pid.is_empty() && rest.strip_prefix(&pid).is_some_and(|r| r.starts_with('-')),
+        "{args}"
+    );
+
+    let again = stage(".dotman-import-z1B2c3", Some(old));
+    env.ok(&["apply"]);
+    assert!(!again.exists());
+    assert!(young.exists() && alive.exists());
+
+    // A dry run stages in the temp directory and removes nothing there; `apply` does.
+    let tmp = env.root().join("tmp");
+    fs::create_dir_all(&tmp).expect("a temp dir");
+    let in_tmp = tmp.join(".dotman-import-t1B2c3");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&in_tmp)
+        .expect("make a staging dir");
+    fs::set_permissions(&in_tmp, fs::Permissions::from_mode(0o700)).expect("chmod");
+    fs::File::open(&in_tmp)
+        .and_then(|dir| dir.set_modified(old))
+        .expect("age it");
+    let tmp_var = tmp.to_string_lossy().into_owned();
+    let vars = [("TMPDIR", tmp_var.as_str())];
+    let other = work_tree(&env, "other", &[(".b", "b\n", false)], None);
+    let out = env.run_with(
+        &vars,
+        &["import", "--dry-run", "--overlay", &other.to_string_lossy()],
+    );
+    assert!(
+        stderr(&out).contains(".b: not in the repo"),
+        "the clone ran"
+    );
+    assert!(in_tmp.exists(), "{}", stderr(&out));
+    env.ok_with(&vars, &["apply"]);
+    assert!(!in_tmp.exists());
+}

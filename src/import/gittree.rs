@@ -260,7 +260,11 @@ impl Staging {
         } else {
             std::env::temp_dir()
         };
-        let dir = private_temp_dir(".dotman-import-", &base)?;
+        if beside_repo {
+            crate::context::sweep_import_staging(&base);
+        }
+        let prefix = format!("{}{}-", crate::context::IMPORT_STAGING, std::process::id());
+        let dir = private_temp_dir(&prefix, &base)?;
         let repo = dir.path().join("repo");
         Ok(Self {
             git: git_at(&repo),

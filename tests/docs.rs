@@ -783,8 +783,8 @@ const DELETIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/context.rs",
-        2,
-        "leftover `.dotman-tmp-` entries, a name no key and so no backup copy can have",
+        3,
+        "leftover `.dotman-tmp-` entries, a name no key and so no backup copy can have, and the `.dotman-import-` staging directories a killed import left beside the repo or in the temp directory, which hold only its clone",
     ),
     (
         "src/engine/write.rs",

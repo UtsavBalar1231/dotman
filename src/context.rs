@@ -518,6 +518,11 @@ impl Context {
                     .filter(|path| is_leftover(path, TEMP_PREFIX)),
             );
         }
+        // An import stages its clone beside the repo, or in the temp directory for a dry run.
+        let tmp = std::env::temp_dir();
+        for dir in repo.parent().into_iter().chain([tmp.as_path()]) {
+            stale.extend(import_leftovers(dir));
+        }
         for path in &stale {
             let removed = if is_real_dir(path) {
                 fs::remove_dir_all(path)
@@ -734,9 +739,53 @@ const STALE_AFTER: Duration = Duration::from_secs(600);
 /// directory of this user, as dotman makes them; untouched for [`STALE_AFTER`]; and its PID no
 /// live process. A user's file of a similar name, and names from older versions, stay.
 pub(crate) fn is_leftover(path: &Path, prefix: &str) -> bool {
-    let Some(pid) = path.file_name().and_then(|name| leftover_pid(name, prefix)) else {
+    path.file_name()
+        .and_then(|name| leftover_pid(name, prefix))
+        .is_some_and(|pid| is_stale(path, Some(pid)))
+}
+
+/// What an import names its staging directory before the PID and tempfile's 6 letters or digits.
+pub(crate) const IMPORT_STAGING: &str = ".dotman-import-";
+
+/// [`is_leftover`] for an import's staging directory, which versions before the PID was added
+/// named with tempfile's 6 letters or digits alone. Such a one is stale once untouched for
+/// [`STALE_AFTER`]: every import holds the lock that the sweep holds too.
+pub(crate) fn is_leftover_import(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
         return false;
     };
+    if let Some(pid) = leftover_pid(name, IMPORT_STAGING) {
+        return is_real_dir(path) && is_stale(path, Some(pid));
+    }
+    let unnamed = name
+        .to_str()
+        .and_then(|name| name.strip_prefix(IMPORT_STAGING))
+        .is_some_and(|rest| rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_alphanumeric()));
+    unnamed && is_real_dir(path) && is_stale(path, None)
+}
+
+/// Removes what [`is_leftover_import`] finds in `dir`. The caller holds the lock.
+pub(crate) fn sweep_import_staging(dir: &Path) {
+    for path in import_leftovers(dir) {
+        if let Err(e) = fs::remove_dir_all(&path) {
+            crate::output::warning(&format!("cannot remove {}: {e}", path.display()));
+        }
+    }
+}
+
+fn import_leftovers(dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| is_leftover_import(path))
+        .collect()
+}
+
+/// A regular file, a symlink, or a 0700 directory of this user, untouched for [`STALE_AFTER`],
+/// whose `pid`, when there is one, is no live process.
+fn is_stale(path: &Path, pid: Option<u32>) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -748,7 +797,8 @@ pub(crate) fn is_leftover(path: &Path, prefix: &str) -> bool {
         .ok()
         .and_then(|at| at.elapsed().ok())
         .is_some_and(|age| age >= STALE_AFTER);
-    ours && untouched && pid != std::process::id() && !sys::pid_alive(pid)
+    let dead = pid.is_none_or(|pid| pid != std::process::id() && !sys::pid_alive(pid));
+    ours && untouched && dead
 }
 
 fn leftover_pid(name: &OsStr, prefix: &str) -> Option<u32> {
