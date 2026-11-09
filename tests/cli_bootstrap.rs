@@ -682,6 +682,14 @@ fn an_overlay_right_after_an_import_takes_the_generated_script_into_its_commit()
 
     let out = env.run(&["import", "--overlay", &second_arg, "--include-missing"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        text(&out)
+            .lines()
+            .any(|line| line.starts_with("committed: ")
+                && line.ends_with(" (1 file, plus install.sh)")),
+        "{}",
+        text(&out)
+    );
     assert_eq!(
         count().trim().parse::<u32>()?,
         before.trim().parse::<u32>()? + 1

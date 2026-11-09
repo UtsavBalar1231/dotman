@@ -17,7 +17,7 @@ use crate::commands::sync::identity_fix;
 use crate::config::Allow;
 use crate::context::Context;
 use crate::engine::write::{back_up_bytes, backup_run_dir};
-use crate::git::redact_credentials;
+use crate::git::{StatusEntry, redact_credentials};
 use crate::name;
 use crate::output;
 use crate::prompt;
@@ -318,24 +318,29 @@ pub fn is_fresh(ctx: &Context) -> Result<bool> {
     Ok(!repo.is_dir() || ctx.managed()?.is_empty())
 }
 
-/// An overlay needs a clean worktree, except for the `install.sh` an import just wrote, which
-/// goes into the overlay commit.
-pub fn require_clean(ctx: &Context) -> Result<()> {
+/// An overlay needs a clean worktree, except for the unedited `install.sh` an import wrote, which
+/// goes into the overlay commit. Returns the text that names it in the commit summary,
+/// `, plus install.sh`, or an empty one when it is not there.
+pub fn require_clean(ctx: &Context) -> Result<String> {
     let generated = matches!(
         bootstrap::inspect(&ctx.paths.repo)?,
         bootstrap::Found::Unedited { .. }
     );
-    let dirty =
-        ctx.git.status()?.iter().any(|entry| {
-            !(generated && entry.xy == "??" && entry.path == Path::new(bootstrap::FILE))
-        });
+    let script = |entry: &StatusEntry| {
+        generated && entry.xy == "??" && entry.path == Path::new(bootstrap::FILE)
+    };
+    let status = ctx.git.status()?;
     ensure!(
-        !dirty,
+        status.iter().all(script),
         "the repo at {} has uncommitted changes; run `{} sync` first, so the overlay commit holds only the overlay",
         ctx.paths.repo.display(),
         name::bin()
     );
-    Ok(())
+    Ok(if status.is_empty() {
+        String::new()
+    } else {
+        format!(", plus {}", bootstrap::FILE)
+    })
 }
 
 /// The error names `--overlay`, the way to add to a repo that already has content.

@@ -1901,7 +1901,7 @@ fn overlay_message(ctx: &Context, source: &Source) -> String {
 pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Result<Outcome> {
     check_source(source)?;
     ctx.repo_id()?;
-    require_clean(ctx)?;
+    let script = require_clean(ctx)?;
     let staging = Staging::new(ctx, false)?;
     staging.clone_source(source)?;
     let tree = staging.git.ls_tree("HEAD")?;
@@ -1916,7 +1916,7 @@ pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Resu
     }
     report.print();
     let message = overlay_message(ctx, source);
-    let summary = count(files.len(), "file");
+    let summary = format!("{}{script}", count(files.len(), "file"));
     if files.is_empty() {
         output::info("nothing to overlay; no commit made");
         return Ok(report.outcome());

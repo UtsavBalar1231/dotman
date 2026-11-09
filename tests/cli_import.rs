@@ -392,6 +392,32 @@ fn overlay_records_missing_modes_reports_missing_files_and_makes_one_commit() {
     pristine.check();
 }
 
+/// Right after an import, the overlay commit takes the `install.sh` the import wrote, and its
+/// summary names it beside the counts; with no such script, the summary is the counts alone.
+#[test]
+fn the_overlay_summary_names_the_script_its_commit_takes() {
+    let pristine = legacy_fixture();
+    let env = TestEnv::new();
+    let src = overlay_source(&env, 0o644, BASHRC);
+    env.ok(&["import", &src.to_string_lossy()]);
+    assert!(env.repo().join("install.sh").is_file());
+
+    let out = env.run(&["import", "--overlay", FIXTURE]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    let summary = format!("committed: {OVERLAY_MESSAGE} (2 modes, 0 files, plus install.sh)");
+    assert!(err.lines().any(|line| line == summary), "{err}");
+    assert!(changed_files(&env).contains("install.sh"), "{err}");
+
+    let env = overlay_env(0o644, BASHRC);
+    let out = env.run(&["import", "--overlay", FIXTURE]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    let summary = format!("committed: {OVERLAY_MESSAGE} (2 modes, 0 files)");
+    assert!(err.lines().any(|line| line == summary), "{err}");
+    assert!(!changed_files(&env).contains("install.sh"), "{err}");
+    pristine.check();
+}
+
 #[test]
 fn overlay_with_include_missing_adds_the_file() {
     let pristine = legacy_fixture();

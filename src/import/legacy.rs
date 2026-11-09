@@ -1120,7 +1120,7 @@ fn make_executable(path: &Path) -> Result<()> {
 /// one commit.
 pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Outcome> {
     ctx.repo_id()?;
-    require_clean(ctx)?;
+    let script = require_clean(ctx)?;
     let mut found = compare(ctx, root, args.include_missing)?;
     if add_missing(args, &found.missing)? {
         found = compare(ctx, root, true)?;
@@ -1137,7 +1137,7 @@ pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<O
     }
     report.print();
     let summary = format!(
-        "{}, {}",
+        "{}, {}{script}",
         count(fixes.len(), "mode"),
         count(files.len(), "file")
     );
