@@ -472,7 +472,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "writes the line again before it changes anything",
+        "checks the file before it changes anything: lines you added are kept",
         &[
             "an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write",
             "an_attributes_file_without_the_pinned_line_last_warns_with_a_step_that_works",
