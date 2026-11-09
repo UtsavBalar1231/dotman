@@ -97,9 +97,14 @@ fn steps(err: &str) -> Vec<String> {
 /// Runs `line` as it runs pasted into a shell, with this build's `dotman` first on PATH. A trailing
 /// comment or a parenthesised note does not survive a paste into every shell, and an editor that
 /// fails stands for one that cannot open here.
+fn paste(env: &TestEnv, line: &str) -> Output {
+    paste_with(env, &[], line)
+}
+
+/// Like [`paste`], with extra environment variables.
 // reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
 #[allow(clippy::expect_used)]
-fn paste(env: &TestEnv, line: &str) -> Output {
+fn paste_with(env: &TestEnv, vars: &[(&str, &str)], line: &str) -> Output {
     assert!(
         !line.contains(" #") && !line.contains(" ("),
         "not pasteable: {line}"
@@ -110,6 +115,7 @@ fn paste(env: &TestEnv, line: &str) -> Output {
     env.process_for(Path::new("sh"))
         .env("EDITOR", "false")
         .env("VISUAL", "false")
+        .envs(vars.iter().copied())
         .arg("-c")
         .arg(format!(
             "PATH={}:\"$PATH\"; {line}",
@@ -287,13 +293,20 @@ fn sealed_pair() -> (TestEnv, TestEnv) {
 
 /// Both devices edit an encrypted file. The steps say which side `--ours` and `--theirs` stand for
 /// and keep one version whole; run as printed, either pick reaches both devices, and the plaintext
-/// it replaces is backed up.
+/// it replaces is backed up. Git before 2.26, whose apply backend `rebase.backend=apply` stands in
+/// for, stops on the commit that taking the upstream version empties, and the printed skip goes on.
 #[test]
 fn an_encrypted_conflict_keeps_the_version_the_printed_step_picks() {
     if !common::age_installed() {
         return;
     }
-    for (side, kept) in [("--ours", "from a\n"), ("--theirs", "from b\n")] {
+    let apply_backend = format!("{} 'rebase.backend=apply'", common::NO_NETWORK);
+    let older = [("GIT_CONFIG_PARAMETERS", apply_backend.as_str())];
+    for (side, kept, git) in [
+        ("--ours", "from a\n", &[][..]),
+        ("--theirs", "from b\n", &[][..]),
+        ("--ours", "from a\n", &older[..]),
+    ] {
         let (a, b) = sealed_pair();
         a.write(SEALED, b"from a\n", 0o600);
         exits(&a, 0, &["sync"]);
@@ -322,13 +335,33 @@ fn an_encrypted_conflict_keeps_the_version_the_printed_step_picks() {
             "{err}"
         );
 
-        assert!(!paste(&b, &pull).status.success(), "the pull stops");
+        let mut resume = resume.lines();
+        let (resume, skip) = (resume.next().unwrap_or_default(), resume.next_back());
+        assert_eq!(resume, "dotman git -c core.editor=true rebase --continue");
+        assert_eq!(skip, Some("dotman git rebase --skip"));
+
+        assert!(
+            !paste_with(&b, git, &pull).status.success(),
+            "the pull stops"
+        );
         let chosen = format!("dotman git checkout {side} -- {file}");
         assert!(pick.lines().any(|line| line == chosen), "{pick}");
-        for step in [&chosen, &add, &resume, &sync] {
-            let out = paste(&b, step);
+        for step in [chosen.as_str(), &add] {
+            let out = paste_with(&b, git, step);
             assert!(out.status.success(), "{side} {step}: {}", stderr(&out));
         }
+        let out = paste_with(&b, git, resume);
+        if git.is_empty() {
+            assert!(out.status.success(), "{side}: {}", stderr(&out));
+        } else {
+            // git am prints it on stdout.
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(said.contains("No changes"), "{said}{}", stderr(&out));
+            let out = paste_with(&b, git, skip.unwrap_or_default());
+            assert!(out.status.success(), "skip: {}", stderr(&out));
+        }
+        let out = paste(&b, &sync);
+        assert!(out.status.success(), "{side} sync: {}", stderr(&out));
         exits(&a, 0, &["sync"]);
         assert_eq!(b.read(SEALED), kept.as_bytes(), "{side}");
         assert_eq!(a.read(SEALED), kept.as_bytes(), "{side}");

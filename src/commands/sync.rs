@@ -268,7 +268,8 @@ struct Committed {
     held: bool,
     /// In a dry run, why the real run would refuse to commit; reported once the preview is done.
     refusal: Option<String>,
-    /// Tells a remote failure after it apart from one that left nothing new to send.
+    /// A remote that cannot be reached after it leaves this run's changes committed locally, which
+    /// the error says.
     new_commit: bool,
 }
 
@@ -720,9 +721,18 @@ fn report_conflict(ctx: &Context, branch: &str, paths: &[PathBuf]) {
     }
     let all: Vec<&PathBuf> = paths.iter().collect();
     steps.push(vec![format!("{bin} git add {}", quoted(&all))]);
-    steps.push(vec![format!(
-        "{bin} git -c core.editor=true rebase --continue"
-    )]);
+    let mut resume = vec![format!("{bin} git -c core.editor=true rebase --continue")];
+    // Git before 2.26 rebases with the apply backend, which stops on a commit that taking the
+    // upstream version emptied instead of dropping it.
+    if !sealed.is_empty() {
+        resume.extend([
+            format!(
+                "if git says there are no changes, as older git does when the one from {REMOTE}/{branch} leaves this machine's commit empty, skip that commit instead:"
+            ),
+            format!("  {bin} git rebase --skip"),
+        ]);
+    }
+    steps.push(resume);
     steps.push(vec![format!("{bin} sync")]);
     print_steps(&steps);
     if !sealed.is_empty() {
