@@ -900,3 +900,27 @@ fn a_stricter_mode_kept_on_one_machine_stays_on_that_machine() {
     assert_eq!(mode(&b, ".bashrc"), 0o644);
     assert_eq!(b.token_of("status", ".bashrc").as_deref(), Some("clean"));
 }
+
+/// Both passes of one sync replace the same file: B's local edit before the pull, then the
+/// version the pull brings. Each backup lands in its own directory.
+#[test]
+fn a_file_backed_up_by_both_passes_of_a_sync_keeps_both_copies() {
+    let (a, b) = pair(&[(".bashrc", b"v1\n", 0o644)]);
+    a.write(".bashrc", b"v2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    // B's repo is ahead of its state, as after a pull by hand.
+    b.ok(&["git", "pull", "-q", "--rebase", "origin", "main"]);
+    b.write(".bashrc", b"B local edit\n", 0o644);
+    a.write(".bashrc", b"v3\n", 0o644);
+    exits(&a, 0, &["sync"]);
+
+    exits(&b, 0, &["sync", "--take-repo"]);
+    assert_eq!(b.read(".bashrc"), b"v3\n");
+    let mut copies: Vec<Vec<u8>> = b
+        .backups(".bashrc")
+        .into_iter()
+        .map(|(bytes, _)| bytes)
+        .collect();
+    copies.sort();
+    assert_eq!(copies, [b"B local edit\n".to_vec(), b"v2\n".to_vec()]);
+}

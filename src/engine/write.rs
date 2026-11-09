@@ -146,14 +146,20 @@ pub fn safe_symlink(
 }
 
 /// `<backups>/<UTC timestamp>-<pid>`, the directory for one run's backups, created on first use.
-/// The timestamp is `YYYYMMDDTHHMMSSZ`.
+/// The timestamp is `YYYYMMDDTHHMMSSZ`. When that directory exists, as for `sync`'s second pass
+/// in the same second, a `-2`, `-3` and so on is added, so a key backed up by both passes keeps
+/// both copies.
 pub fn backup_run_dir(backups: &Path, now: SystemTime) -> Result<PathBuf> {
     let secs = now
         .duration_since(UNIX_EPOCH)
         .context("the system clock is before 1970")?
         .as_secs();
     let stamp = utc_stamp(secs).ok_or_else(|| anyhow!("the system clock is out of range"))?;
-    Ok(backups.join(format!("{stamp}-{}", std::process::id())))
+    let base = format!("{stamp}-{}", std::process::id());
+    std::iter::once(backups.join(&base))
+        .chain((2_u32..=u32::MAX).map(|n| backups.join(format!("{base}-{n}"))))
+        .find(|dir| fs::symlink_metadata(dir).is_err())
+        .ok_or_else(|| anyhow!("no free backup directory name under {}", backups.display()))
 }
 
 /// Appends `key<TAB>target` to `<dir>/.dotman/links.txt`, the record a restore reads, and returns
