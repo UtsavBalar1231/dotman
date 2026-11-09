@@ -1025,6 +1025,118 @@ fn the_way_to_keep_a_conflict_to_this_machine_is_offered_before_the_capture_and_
     );
 }
 
+const OWN: &str = ".a{host=box+profile=work}";
+
+/// Machine A, then machine `box` with the profile `work`, which applies its own `OWN` for `.a` and
+/// shares `.b`. A edits `OWN` in the repo and `.b` in `$HOME`, and box edits both in `$HOME`, so
+/// both conflict in box's capture pass.
+fn own_variant_pair() -> (TestEnv, TestEnv) {
+    let a = first_device(&[(".a", b"base\n", 0o644), (".b", b"base\n", 0o644)]);
+    let b = a.second_device();
+    b.write_machine_config("profiles = [\"work\"]\n[identity]\nhost = \"box\"\n");
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    b.write(".a", b"box's own\n", 0o644);
+    b.ok(&["add", "--for", "host=box+profile=work", ".a"]);
+    b.ok(&["sync"]);
+    exits(&a, 0, &["sync"]);
+    a.write_repo(OWN, b"from a\n");
+    a.write(".b", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    for key in [".a", ".b"] {
+        b.write(key, b"mine\n", 0o644);
+    }
+    exits(&b, 0, &["git", "pull", "-q", "--rebase", "origin", "main"]);
+    for key in [".a", ".b"] {
+        assert_eq!(b.token_of("status", key).as_deref(), Some("both-changed"));
+    }
+    (a, b)
+}
+
+/// Keeping box's `.a` captures it into `OWN`, which no other machine applies, so no `add --for`
+/// is offered for it; `.b` goes into the repo for every machine, and the printed step for it alone
+/// keeps it to box.
+#[test]
+fn keeping_a_file_whose_winner_names_this_host_says_where_it_goes_and_offers_no_step() {
+    let (a, b) = own_variant_pair();
+    let err = exits(&b, 3, &["sync"]);
+    let own = format!("--keep-local captures .a into {OWN}, which only this machine applies");
+    assert!(err.lines().any(|line| line == own), "{err}");
+    assert!(
+        err.contains("--keep-local captures this machine's version of .b into the repo for every machine; `dotman add --for host=box "),
+        "{err}"
+    );
+    let step = common::hint(&err, "add --for host=box");
+    assert_eq!(step.len(), 4, "only .b: {err}");
+    assert!(
+        step.last().is_some_and(|path| path.ends_with("/.b")),
+        "{err}"
+    );
+    let out = common::run_hint(&b, &err, "add --for host=box");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let err = exits(&b, 0, &["sync", "--keep-local"]);
+    let line = format!("capture .a (replaces {OWN}, which only this machine applies)");
+    assert!(err.lines().any(|l| l == line), "{err}");
+    assert!(!err.contains("for every machine"), "{err}");
+    assert_eq!(remote_file(&b, OWN), "mine\n");
+    assert_eq!(remote_file(&b, ".a"), "base\n");
+    assert_eq!(remote_file(&b, ".b{host=box}"), "mine\n");
+    assert_eq!(remote_file(&b, ".b"), "from a\n");
+    exits(&a, 0, &["sync"]);
+    assert_eq!(a.read(".a"), b"base\n");
+    assert_eq!(a.read(".b"), b"from a\n");
+    for key in [".a", ".b"] {
+        assert_eq!(b.read(key), b"mine\n");
+        assert_eq!(b.token_of("status", key).as_deref(), Some("clean"));
+    }
+}
+
+#[test]
+fn apply_keep_local_of_a_file_whose_winner_names_this_host_says_where_the_next_sync_puts_it() {
+    let (_, b) = own_variant_pair();
+    let err = exits(&b, 0, &["apply", "--keep-local"]);
+    let own = format!(
+        "kept; the next `dotman sync` captures .a into {OWN}, which only this machine applies"
+    );
+    assert!(err.lines().any(|line| line == own), "{err}");
+    assert!(
+        err.contains("kept; the next `dotman sync` captures .b into the repo for every machine; `dotman add --for host=box "),
+        "{err}"
+    );
+    assert_eq!(common::hint(&err, "add --for host=box").len(), 4, "{err}");
+
+    let Some(seen) = common::in_a_terminal(&own_variant_pair().1, &[], &["sync"], b"s\n") else {
+        return;
+    };
+    assert!(
+        seen.contains(&format!(
+            "[k] captures .a into {OWN}, which only this machine applies"
+        )),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("[k] captures this machine's version of .b into the repo for every machine; to keep it to this machine only, answer [s] and run `dotman add --for host=box "),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("[k] keep all local (capture them into the repo)  [t]"),
+        "{seen}"
+    );
+
+    let Some(seen) = common::in_a_terminal(&own_variant_pair().1, &[], &["sync"], b"p\ns\ns\n")
+    else {
+        return;
+    };
+    assert!(
+        seen.contains(".a [k] keep local (capture it into this machine's own variant)  [t]"),
+        "{seen}"
+    );
+    assert!(
+        seen.contains(".b [k] keep local (capture it into the repo for every machine)  [t]"),
+        "{seen}"
+    );
+}
+
 #[test]
 fn apply_keep_local_saves_an_edit_made_with_dotman_edit_before_sync_replaces_it() {
     let env = first_device(&[(".a", b"base\n", 0o644)]);

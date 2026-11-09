@@ -26,7 +26,7 @@ use crate::sys;
 use crate::system::escalate::{Escalator, Tool};
 use crate::system::helper::{self, Plan, PlanEntry, Reported};
 use crate::system::{self, Scope, Verdict};
-use crate::variant::{Flag, Selection, Sources};
+use crate::variant::{self, Flag, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -444,6 +444,59 @@ const fn choice(local: bool, repo: bool) -> Option<Choice> {
     }
 }
 
+/// Where keeping `$HOME`'s version captures each key: into its winning source when that names
+/// this host, so that no other machine applies it, or into the repo for every machine.
+#[derive(Default)]
+struct Keeping<'k> {
+    shared: Vec<&'k str>,
+    /// Each key with its winning source.
+    own: Vec<(&'k str, String)>,
+}
+
+impl Keeping<'_> {
+    /// Such as `.p into .p{host=b}, which only this machine applies`.
+    fn own(&self) -> Option<String> {
+        if self.own.is_empty() {
+            return None;
+        }
+        let into: Vec<String> = self
+            .own
+            .iter()
+            .map(|(key, source)| format!("{key} into {source}"))
+            .collect();
+        Some(format!(
+            "{}, which only this machine applies",
+            into.join(", ")
+        ))
+    }
+
+    /// What follows "this machine's version": nothing when the shared keys are all of them, which
+    /// were listed already, and their names otherwise.
+    fn of(&self) -> String {
+        if self.own.is_empty() {
+            String::new()
+        } else {
+            format!(" of {}", self.shared.join(", "))
+        }
+    }
+
+    const fn them(&self) -> &'static str {
+        if self.shared.len() == 1 { "it" } else { "them" }
+    }
+
+    /// The keep answer's text, when it captures some keys into sources of their own.
+    const fn label(&self, bulk: bool) -> Option<&'static str> {
+        match (self.own.is_empty(), self.shared.is_empty(), bulk) {
+            (true, _, _) => None,
+            (false, true, false) => Some("keep local (capture it into this machine's own variant)"),
+            (false, true, true) => {
+                Some("keep all local (capture them into this machine's own variants)")
+            }
+            (false, false, _) => Some("keep all local (capture them into the repo)"),
+        }
+    }
+}
+
 struct Run<'a> {
     ctx: &'a Context,
     opts: &'a Options,
@@ -651,11 +704,17 @@ impl Run<'_> {
                 for item in &undecided {
                     output::warning(&format!("  {}", item.key));
                 }
-                if let Some(add) = self.keep_here(question, &undecided) {
-                    output::warning(&format!(
-                        "{local} captures this machine's version into the repo for every machine; {add} instead keeps {} to this machine",
-                        if undecided.len() == 1 { "it" } else { "them" }
-                    ));
+                if let Some(keeping) = self.keep_here(question, &undecided) {
+                    if let Some(own) = keeping.own() {
+                        output::warning(&format!("{local} captures {own}"));
+                    }
+                    if let Some(add) = self.for_host(&keeping.shared) {
+                        output::warning(&format!(
+                            "{local} captures this machine's version{} into the repo for every machine; {add} instead keeps {} to this machine",
+                            keeping.of(),
+                            keeping.them()
+                        ));
+                    }
                 }
             }
         }
@@ -765,19 +824,28 @@ impl Run<'_> {
         for item in items {
             output::context(&format!("  {:<26}{}", token(item.row), item.key));
         }
-        if let Some(add) = self.keep_here(question, items) {
-            let (it, version) = if items.len() == 1 {
-                ("it", "version")
-            } else {
-                ("them", "versions")
-            };
-            output::context(&format!(
-                "[{}] captures this machine's {version} into the repo for every machine; to keep {it} to this machine only, answer [s] and run {add}",
-                question.local.letter
-            ));
+        let keeping = self.keeping_items(question, items);
+        let letter = question.local.letter;
+        if let Some(keeping) = keeping.as_ref().filter(|_| self.opts.pass == Pass::Capture) {
+            if let Some(own) = keeping.own() {
+                output::context(&format!("[{letter}] captures {own}"));
+            }
+            if let Some(add) = self.for_host(&keeping.shared) {
+                let version = if keeping.shared.len() == 1 {
+                    "version"
+                } else {
+                    "versions"
+                };
+                output::context(&format!(
+                    "[{letter}] captures this machine's {version}{} into the repo for every machine; to keep {} to this machine only, answer [s] and run {add}",
+                    keeping.of(),
+                    keeping.them()
+                ));
+            }
         }
+        let label = keeping.and_then(|keeping| keeping.label(true));
         loop {
-            match parse_reply(question, &prompt::ask(&menu(question, true))?, true) {
+            match parse_reply(question, &prompt::ask(&menu(question, true, label))?, true) {
                 Some(Reply::Choose(choice)) => return Ok(vec![choice; items.len()]),
                 Some(Reply::Diffs) => self.show_diffs(items),
                 Some(Reply::PerFile) => {
@@ -792,8 +860,11 @@ impl Run<'_> {
     }
 
     fn decide_one(&self, question: &Question, item: &Item) -> Result<Choice> {
+        let label = self
+            .keeping_items(question, &[item])
+            .and_then(|keeping| keeping.label(false));
         loop {
-            let asked = format!("{} {}", item.key, menu(question, false));
+            let asked = format!("{} {}", item.key, menu(question, false, label));
             match parse_reply(question, &prompt::ask(&asked)?, false) {
                 Some(Reply::Choose(choice)) => return Ok(choice),
                 Some(Reply::Diffs) => self.show_diffs(&[item]),
@@ -849,10 +920,12 @@ impl Run<'_> {
                     if item.row == Row::ChangedLocally {
                         self.announce("capture", key);
                     } else {
-                        self.announce(
-                            "capture",
-                            &format!("{key} (replaces the repo version for every machine)"),
-                        );
+                        let replaced = if variant::names_host(source, &self.ctx.identity().host) {
+                            format!("{source}, which only this machine applies")
+                        } else {
+                            "the repo version for every machine".to_owned()
+                        };
+                        self.announce("capture", &format!("{key} (replaces {replaced})"));
                         self.kept.push(key.clone());
                     }
                 }
@@ -1457,30 +1530,67 @@ impl Run<'_> {
             return;
         }
         let bin = name::bin();
-        let them = if self.kept.len() == 1 { "it" } else { "them" };
+        let keeping = self.keeping(self.kept.iter().map(String::as_str));
+        if let Some(own) = keeping.own() {
+            output::info(&format!("kept; the next `{bin} sync` captures {own}"));
+        }
+        if keeping.shared.is_empty() {
+            return;
+        }
+        let them = keeping.them();
+        let what = if keeping.own.is_empty() {
+            them.to_owned()
+        } else {
+            keeping.shared.join(", ")
+        };
         let mut said = vec![format!(
-            "kept; the next `{bin} sync` captures {them} into the repo for every machine"
+            "kept; the next `{bin} sync` captures {what} into the repo for every machine"
         )];
-        let keys: Vec<&str> = self.kept.iter().map(String::as_str).collect();
-        if let Some(add) = self.for_host(&keys) {
+        if let Some(add) = self.for_host(&keeping.shared) {
             said.push(format!("{add} keeps {them} to this machine"));
         }
         output::info(&said.join("; "));
     }
 
-    /// In `sync`'s capture pass, where keeping H captures it at once: the `add --for` that keeps
-    /// `items` to this machine instead, which only works while they are left undecided. Templates
-    /// are left out, since keeping H never captures over one.
-    fn keep_here(&self, question: &Question, items: &[&Item]) -> Option<String> {
-        if self.opts.pass != Pass::Capture || question.local_action != Action::KeepLocal {
+    /// In `sync`'s capture pass, where keeping H captures it at once, where `items` would go; the
+    /// `add --for` that keeps the shared ones to this machine instead only works while they are
+    /// left undecided.
+    fn keep_here<'i>(&self, question: &Question, items: &[&'i Item]) -> Option<Keeping<'i>> {
+        if self.opts.pass != Pass::Capture {
             return None;
         }
-        let keys: Vec<&str> = items
-            .iter()
-            .filter(|item| !item.system && !item.r.as_ref().is_some_and(|r| r.template))
-            .map(|item| item.key.as_str())
-            .collect();
-        self.for_host(&keys)
+        self.keeping_items(question, items)
+    }
+
+    /// Where keeping `$HOME`'s version of `items` puts them, for a question whose local answer
+    /// keeps it. Templates and system files are left out: keeping H never captures over them.
+    fn keeping_items<'i>(&self, question: &Question, items: &[&'i Item]) -> Option<Keeping<'i>> {
+        (question.local_action == Action::KeepLocal).then(|| {
+            self.keeping(
+                items
+                    .iter()
+                    .filter(|item| !item.system && !item.r.as_ref().is_some_and(|r| r.template))
+                    .map(|item| item.key.as_str()),
+            )
+        })
+    }
+
+    fn keeping<'k>(&self, keys: impl IntoIterator<Item = &'k str>) -> Keeping<'k> {
+        let identity = self.ctx.identity();
+        let mut keeping = Keeping::default();
+        for key in keys {
+            let own = self
+                .sources
+                .select(key, identity)
+                .winner()
+                .filter(|source| variant::names_host(source, &identity.host))
+                .map(|source| (*source).to_owned());
+            match own {
+                Some(source) => keeping.own.push((key, source)),
+                None => keeping.shared.push(key),
+            }
+        }
+        keeping
     }
 
     /// `` `<bin> add --for host=<host> <paths>` ``, when `keys` is not empty and the host name is
@@ -1842,12 +1952,14 @@ fn summarize(items: &[Item], locked: usize) {
     ));
 }
 
-fn menu(question: &Question, bulk: bool) -> String {
+/// The answers to `question`; `label` replaces the local answer's text.
+fn menu(question: &Question, bulk: bool, label: Option<&str>) -> String {
     let (local, repo) = if bulk {
         (question.local.all, question.repo.all)
     } else {
         (question.local.one, question.repo.one)
     };
+    let local = label.unwrap_or(local);
     let mut answers = vec![
         format!("[{}] {local}", question.local.letter),
         format!("[{}] {repo}", question.repo.letter),
@@ -1918,14 +2030,17 @@ mod tests {
             );
         }
         assert_eq!(
-            menu(conflicts, true),
+            menu(conflicts, true, None),
             "[k] keep all local (capture them into the repo for every machine)  [t] take all from repo  [d] show diffs  [p] decide per file  [s] skip:"
         );
         assert_eq!(
-            menu(conflicts, false),
+            menu(conflicts, false, None),
             "[k] keep local (capture it into the repo for every machine)  [t] take from repo  [d] show diff  [s] skip:"
         );
-        assert_eq!(menu(deletions, false), "[f] forget  [r] restore  [s] skip:");
+        assert_eq!(
+            menu(deletions, false, None),
+            "[f] forget  [r] restore  [s] skip:"
+        );
     }
 
     #[test]

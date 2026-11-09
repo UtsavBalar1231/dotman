@@ -188,6 +188,14 @@ pub fn is_literal(name: &str) -> bool {
     parse_name(name) == Name::Literal
 }
 
+/// Whether `source`'s block holds `host=<host>`, so that no other machine applies it.
+#[must_use]
+pub fn names_host(source: &str, host: &str) -> bool {
+    let (_, name) = split_name(source);
+    matches!(parse_name(name), Name::Variant { conditions, .. }
+        if conditions.iter().any(|c| c.key == Key::Host && !c.negated && c.value == host))
+}
+
 /// The source path that makes `key` a variant for `conditions`, such as `host=laptop+os=linux`.
 /// The block goes before the last `.` of the name, unless that dot is the name's first character.
 pub fn variant_source(key: &str, conditions: &str) -> Result<String> {

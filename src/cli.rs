@@ -305,7 +305,7 @@ pub struct InitArgs {
 // reason: independent answers to separate prompts, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct Decisions {
-    /// Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, so to keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted
+    /// Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted
     #[arg(long, help_heading = "Decisions", conflicts_with = "take_repo")]
     pub keep_local: bool,
     /// Take the repo version of conflicting and existing files, after backing them up
