@@ -977,7 +977,7 @@ impl Planner<'_> {
                 Ok(entry) => entry,
                 Err(e) => {
                     let at = e.path().unwrap_or_else(|| Path::new(""));
-                    let line = format!("{}: unreadable: {e}", at.display());
+                    let line = printable(&format!("{}: unreadable: {e}", at.display()));
                     match self.entry_key(at, true) {
                         Ok(key) => {
                             dir.held.insert(key, Hold::Unreadable);
@@ -1038,23 +1038,24 @@ impl Planner<'_> {
 
     fn entry_key(&self, path: &Path, is_dir: bool) -> std::result::Result<String, Left> {
         let paths = &self.ctx.paths;
+        let named = |text: String| Left::Name(printable(&text));
         let rel = path
             .strip_prefix(&paths.home)
-            .map_err(|e| Left::Name(format!("{}: {e}", path.display())))?;
+            .map_err(|e| named(format!("{}: {e}", path.display())))?;
         // Before the name checks, so an ignored entry is never reported, whatever its name; a
         // name that is not UTF-8 matches in its lossy form.
         if self.ignore.matches(&rel.to_string_lossy(), is_dir) {
             return Err(Left::Quiet);
         }
         if let Err(e) = refuse_non_nfc(rel) {
-            return Err(Left::Name(format!("{e}")));
+            return Err(named(format!("{e}")));
         }
         let key = rel
             .to_str()
-            .ok_or_else(|| Left::Name(format!("{} is not valid UTF-8", path.display())))?;
-        validate_key(key).map_err(|e| Left::Name(format!("{key}: {e}")))?;
+            .ok_or_else(|| named(format!("{} is not valid UTF-8", path.display())))?;
+        validate_key(key).map_err(|e| named(format!("{key}: {e}")))?;
         if !is_dir && !key.rsplit('/').next().is_some_and(variant::is_literal) {
-            return Err(Left::Name(format!("{key}: {BLOCK_NAME}")));
+            return Err(named(format!("{key}: {BLOCK_NAME}")));
         }
         if paths.refuse_protected(path).is_err() {
             return Err(Left::Own(format!(
@@ -1063,6 +1064,19 @@ impl Planner<'_> {
         }
         Ok(key.to_owned())
     }
+}
+
+/// Scan notes reach the terminal, so a name's control characters are escaped: a newline would
+/// forge a line of output, an ESC would drive the terminal.
+fn printable(text: &str) -> String {
+    text.chars().fold(String::new(), |mut out, c| {
+        if c.is_control() {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
+        }
+        out
+    })
 }
 
 // An unreadable file is not held here; capturing it fails and is reported then.

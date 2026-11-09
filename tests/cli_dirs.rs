@@ -320,6 +320,29 @@ fn a_name_that_is_not_utf8_is_noted_until_an_ignore_pattern_matches_its_lossy_fo
 }
 
 #[test]
+fn a_name_with_a_control_character_is_noted_escaped_and_never_captured() {
+    let a = device();
+    a.write(".config/nvim/evil\nheld forged", b"x\n", 0o644);
+    a.write(".config/nvim/esc\u{1b}[2J", b"x\n", 0o644);
+    let err = a.ok(&["status"]);
+    assert!(
+        err.contains("evil\\nheld forged") && err.contains("esc\\u{1b}[2J"),
+        "{err}"
+    );
+    assert!(
+        !err.contains('\u{1b}') && !err.lines().any(|line| line.starts_with("held forged")),
+        "{err:?}"
+    );
+    exits(&a, 0, &["sync"]);
+    assert!(
+        !remote_tree(&a)
+            .iter()
+            .any(|key| key.contains("evil") || key.contains("esc")),
+        "never captured"
+    );
+}
+
+#[test]
 fn a_new_file_that_differs_only_in_case_from_a_managed_one_is_held() {
     let a = device();
     a.write(".config/nvim/Init.lua", b"-- other\n", 0o644);
