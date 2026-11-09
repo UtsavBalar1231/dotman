@@ -219,11 +219,10 @@ fn list_new(
     if !held.is_empty() {
         writeln!(
             out,
-            "\nheld back; `{} add <file>` keeps one, or add an [ignore] pattern to .dotman.toml:",
-            name::bin()
+            "\nheld back; an [ignore] pattern in .dotman.toml silences one:"
         )?;
         for (key, hold) in held {
-            writeln!(out, "  {} ({})", escape_line(key), hold.reason())?;
+            writeln!(out, "  {} ({})", escape_line(key), hold.listed())?;
         }
     }
     Ok(())

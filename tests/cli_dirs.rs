@@ -106,10 +106,15 @@ fn big_binary_and_secret_named_files_are_held_and_sync_exits_3_but_pushes_the_re
     let human = String::from_utf8_lossy(&a.run(&["status"]).stdout).into_owned();
     assert!(human.contains("dotman add <file>"), "{human}");
     assert!(
-        human.contains("hosts.yml (name matches [guard] secret_names)"),
+        human.contains(
+            "hosts.yml (name matches [guard] secret_names; `dotman add --encrypt <file>`"
+        ),
         "{human}"
     );
-    assert!(human.contains("big.dat (over 1 MiB)"), "{human}");
+    assert!(
+        human.contains("big.dat (over 1 MiB; `dotman add <file>` adds it)"),
+        "{human}"
+    );
     assert!(human.contains("blob.bin (binary"), "{human}");
 
     let before = (a.four_trees(), a.remote_refs());
@@ -267,13 +272,21 @@ fn entries_the_scan_cannot_capture_are_reported_and_specials_are_held() {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     );
-    assert!(human.contains("pipe (a socket, FIFO or device"), "{human}");
+    // Only a kind `add` can store gets `add` as its remedy.
+    assert!(
+        human.contains("pipe (a socket, FIFO or device, which dotman never stores)\n")
+            && !human.contains("keeps one"),
+        "{human}"
+    );
     assert!(
         err.contains("its NFC form is `caf\u{e9}.lua`") && err.contains("x{os=linux}.lua"),
         "{err}"
     );
     if unreadable {
-        assert!(human.contains("locked.lua (cannot be read)"), "{human}");
+        assert!(
+            human.contains("locked.lua (cannot be read; fix its permissions"),
+            "{human}"
+        );
     }
 
     let err = exits(&a, 3, &["sync"]);

@@ -1220,12 +1220,11 @@ impl Run<'_> {
         if !scan.held.is_empty() {
             self.attention = true;
             output::warning(&format!(
-                "{} new files held back; `{} add <file>` keeps one, an [ignore] pattern in .dotman.toml silences it:",
+                "{} new files held back; an [ignore] pattern in .dotman.toml silences one:",
                 scan.held.len(),
-                name::bin()
             ));
             for (key, hold) in &scan.held {
-                output::warning(&format!("  {key} ({})", hold.reason()));
+                output::warning(&format!("  {key} ({})", hold.listed()));
             }
         }
     }

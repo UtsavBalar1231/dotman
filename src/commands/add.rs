@@ -908,6 +908,23 @@ impl Hold {
             }
         }
     }
+
+    /// The reason, and what lets the file in, for the lists of held files; an `[ignore]` pattern
+    /// silences any of them.
+    pub(crate) fn listed(self) -> String {
+        let bin = name::bin();
+        match self {
+            Self::Large | Self::Binary => format!("{}; `{bin} add <file>` adds it", self.reason()),
+            Self::SecretName => format!(
+                "{}; `{bin} add --encrypt <file>` stores it encrypted, `{bin} add --allow-plain <file>` as it is",
+                self.reason()
+            ),
+            Self::Content(found) => format!("{found}{}", found.remedy(Some("<file>"))),
+            Self::Unreadable => format!("{}; fix its permissions to add it", self.reason()),
+            Self::Collision => format!("{}; rename one of them", self.reason()),
+            Self::Special => self.reason(),
+        }
+    }
 }
 
 /// Candidates under the `[dirs]` entries that no key and no ignore pattern covers.
