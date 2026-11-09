@@ -187,7 +187,18 @@ impl Git {
     /// It does not check the git version.
     #[must_use]
     pub fn command(&self) -> Command {
-        self.command_in(&self.repo)
+        let mut cmd = self.command_in(&self.repo);
+        // Named outright, so git never searches: a `.git` without a usable HEAD is an error here,
+        // not a reason to look in the parent directories, where the user's own repo may be.
+        let git_dir = self.repo.join(".git");
+        if fs::symlink_metadata(&git_dir).is_ok() {
+            let mut dir = OsString::from("--git-dir=");
+            dir.push(&git_dir);
+            let mut tree = OsString::from("--work-tree=");
+            tree.push(&self.repo);
+            cmd.arg(dir).arg(tree);
+        }
+        cmd
     }
 
     fn command_in(&self, dir: &Path) -> Command {
@@ -201,9 +212,10 @@ impl Git {
         for var in LOCAL_REPO_ENV {
             cmd.env_remove(var);
         }
-        // With a broken `.git`, git would look for a repo in the parent directories and could
-        // find the user's own, such as a `~/.git` dotfiles repo, and commit there.
-        if let Some(parent) = self.repo.parent().filter(|p| p.is_absolute()) {
+        // Where git does search, as for a repo with no `.git` yet, it stops at the repo's
+        // parent. Git compares the real path, so a symlinked repo path is resolved first.
+        let real = fs::canonicalize(&self.repo).unwrap_or_else(|_| self.repo.clone());
+        if let Some(parent) = real.parent().filter(|p| p.is_absolute()) {
             cmd.env("GIT_CEILING_DIRECTORIES", parent);
         }
         for (k, v) in &self.env {

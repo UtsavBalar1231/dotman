@@ -1528,6 +1528,51 @@ fn templates_read_only_the_listed_environment() {
     assert!(!env.home().join(".config/app/conf").exists());
 }
 
+/// The repo path is a symlink to `~/dotfiles`, `$HOME` is itself a git repo with a remote, and the
+/// dotman repo has lost `.git/HEAD`. Every command fails naming the missing HEAD, and the outer
+/// repo's HEAD, index and remote are as they were: git never searches above the dotman repo.
+#[test]
+fn a_broken_repo_behind_a_symlinked_path_never_reaches_a_home_repo() {
+    let env = TestEnv::new();
+    let home = env.home().to_string_lossy().into_owned();
+    let outer_remote = env.root().join("outer.git").to_string_lossy().into_owned();
+    env.git(&["init", "-q", "--bare", &outer_remote]);
+    env.write(".bashrc", b"home rc\n", 0o644);
+    env.git(&["-C", &home, "init", "-q"]);
+    env.git(&["-C", &home, "add", ".bashrc"]);
+    env.git(&["-C", &home, "commit", "-q", "-m", "outer"]);
+    env.git(&["-C", &home, "remote", "add", "origin", &outer_remote]);
+    env.git(&["-C", &home, "push", "-q", "origin", "HEAD:refs/heads/main"]);
+    fs::create_dir(env.home().join("dotfiles")).unwrap();
+    fs::create_dir_all(env.xdg_data()).unwrap();
+    symlink(env.home().join("dotfiles"), env.repo()).unwrap();
+    env.ok(&["init", "--no-import", "--remote", &env.remote_url()]);
+    env.ok(&["add", ".bashrc"]);
+    env.ok(&["sync"]);
+
+    fs::remove_file(env.home().join("dotfiles/.git/HEAD")).unwrap();
+    env.write(".bashrc", b"home rc, edited\n", 0o644);
+    let outer = |args: &[&str]| {
+        let mut full = vec!["-C", home.as_str()];
+        full.extend_from_slice(args);
+        env.git(&full)
+    };
+    let head = outer(&["rev-parse", "HEAD"]);
+    let index = fs::read(env.home().join(".git/index")).unwrap();
+    let published = env.git(&["ls-remote", &outer_remote]);
+    for args in [&["sync"][..], &["status"], &["apply"], &["add", ".bashrc"]] {
+        let err = exits(&env.run(args), 1);
+        assert!(
+            err.contains(".git/HEAD is missing or corrupt"),
+            "{args:?}: {err}"
+        );
+    }
+    assert_eq!(outer(&["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read(env.home().join(".git/index")).unwrap(), index);
+    assert_eq!(env.git(&["ls-remote", &outer_remote]), published);
+    assert_eq!(outer(&["stash", "list"]), "");
+}
+
 // Network and gh
 
 /// `init --create-github` with the harness's refusing `gh` exits 1 and creates nothing, and a
