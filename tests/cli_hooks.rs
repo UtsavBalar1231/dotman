@@ -514,6 +514,74 @@ fn a_table_changed_before_approval_runs_only_the_hooks_matching_the_held_back_ke
     assert_eq!(pending(&env), Vec::<String>::new());
 }
 
+/// Device B holds back the hooks for `keys` under a first table; device A then forgets A and
+/// replaces the table with `"**"`, which echoes `second` into the marker. Returns B.
+fn held_back_then_swapped(a: &TestEnv, keys: &[&str]) -> TestEnv {
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    let mark = marker(a).display().to_string();
+    set_hooks(a, &format!("echo first >> '{mark}'"));
+    for key in keys {
+        a.write_repo(key, b"1\n");
+    }
+    exits(a, 0, &["sync", "--no-hooks"]);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("echo first"), "{err}");
+    assert_eq!(pending(&b), keys);
+
+    exits(a, 0, &["forget", A]);
+    a.write_repo(
+        ".dotman.toml",
+        format!("[hooks]\n\"**\" = \"echo second >> '{mark}'\"\n").as_bytes(),
+    );
+    exits(a, 0, &["sync", "--no-hooks"]);
+    b
+}
+
+#[test]
+fn a_held_back_key_forgotten_upstream_runs_no_hook_once_a_new_table_is_approved() {
+    let a = first_device();
+    let b = held_back_then_swapped(&a, &[A]);
+    let err = exits(&b, 0, &["sync"]);
+    assert_eq!(pending(&b), Vec::<String>::new(), "{err}");
+    let err = exits(&b, 0, &["apply", "--approve-hooks"]);
+    assert!(!marker(&a).exists(), "{err}");
+}
+
+#[test]
+fn a_table_swapped_while_hooks_wait_is_shown_before_the_printed_approval_runs_it() {
+    let a = first_device();
+    let b = held_back_then_swapped(&a, &[A, B]);
+    let mark = marker(&a).display().to_string();
+    let err = exits(&b, 0, &["sync"]);
+    assert_eq!(pending(&b), [B], "{err}");
+    assert!(
+        err.contains("changed while hooks for paths changed earlier waited for approval"),
+        "{err}"
+    );
+    assert!(
+        err.contains("`dotman apply --approve-hooks` approves it and runs it once:"),
+        "{err}"
+    );
+    let below = err
+        .split_once("the new [hooks] table:")
+        .map(|(_, rest)| rest);
+    let entry = format!("  ** -> echo second >> '{mark}'");
+    assert!(
+        below.is_some_and(|rest| rest.lines().any(|line| line == entry)),
+        "{err}"
+    );
+    assert!(!marker(&a).exists(), "{err}");
+    let again = exits(&b, 0, &["sync"]);
+    assert!(!again.contains("not run"), "said once: {again}");
+
+    let out = common::run_hint(&b, &err, "apply --approve-hooks");
+    assert_eq!(out.status.code(), Some(0));
+    let ran = fs::read_to_string(marker(&a)).unwrap_or_default();
+    assert_eq!(ran, "second\n", "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(pending(&b), Vec::<String>::new());
+}
+
 #[test]
 fn a_cloned_table_approved_later_runs_the_hooks_for_what_the_clone_applied() {
     let source = hooked();

@@ -40,6 +40,7 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     validate(&table)?;
     let json = canonical(&table)?;
     let mut state = ctx.state(&ctx.repo_id()?)?;
+    let dropped = drop_unmanaged(ctx, &mut state.hooks.pending)?;
     let standing = approval(&json, &state);
     let recorded = standing == Standing::Approved;
     let mut approved = policy.approve || recorded;
@@ -48,6 +49,11 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         &table,
         &changed.union(&state.hooks.pending).cloned().collect(),
     )?;
+    // Approving would run this table for the pending keys, though it is not the one shown with
+    // them.
+    let swapped = !approved
+        && state.hooks.pending_table.as_deref() != Some(json.as_str())
+        && !due(&table, &state.hooks.pending)?.is_empty();
     if policy.dry_run {
         let would_ask = !approved && !policy.never_ask && prompt::interactive();
         let due = if approved { with_pending } else { due_now };
@@ -70,7 +76,7 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     }
     let file = ctx.paths.state_file();
     if approved && !recorded {
-        state.hooks.approved = Some(json);
+        state.hooks.approved = Some(json.clone());
         state.save(&file, false)?;
         if asked {
             output::context("approved the [hooks] table above on this machine");
@@ -79,37 +85,66 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         }
     }
     if !approved {
-        if due_now.is_empty() {
+        if due_now.is_empty() && !swapped {
+            if dropped {
+                state.save(&file, false)?;
+            }
             return Ok(());
         }
         let held = matched(&table, changed)?;
-        if !held.is_subset(&state.hooks.pending) {
+        if dropped || swapped || !held.is_subset(&state.hooks.pending) {
             state.hooks.pending.extend(held);
+            state.hooks.pending_table = Some(json);
             state.save(&file, false)?;
         }
-        let why = if standing == (Standing::Changed { old_format: true }) {
+        let why = if swapped {
+            "the [hooks] table in .dotman.toml changed while hooks for paths changed earlier waited for approval, and the new table, below, is not approved on this machine. Read it; then"
+        } else if standing == (Standing::Changed { old_format: true }) {
             "the approval format changed, so the approval an older dotman saved for the [hooks] table in .dotman.toml no longer counts. Read the table; then"
         } else {
             "the [hooks] table in .dotman.toml is not approved on this machine. Read it; then"
         };
         output::warning(&format!(
             "{} not run: {why} `{} apply --approve-hooks` approves it and runs {} once:",
-            count(due_now.len()),
+            count(with_pending.len()),
             crate::name::bin(),
-            if due_now.len() == 1 { "it" } else { "them" }
+            if with_pending.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
         ));
-        for command in due_now {
+        for command in &with_pending {
             output::warning(&format!("  {}", output::escape_line(command)));
+        }
+        if swapped {
+            show_table("the new [hooks] table:", &table);
         }
         return Ok(());
     }
 
     let ran = run_all(ctx, &with_pending);
-    if !state.hooks.pending.is_empty() {
+    if dropped || !state.hooks.pending.is_empty() || state.hooks.pending_table.is_some() {
         state.hooks.pending.clear();
+        state.hooks.pending_table = None;
         state.save(&file, false)?;
     }
     ran
+}
+
+/// Drops the pending keys no longer managed, as one that upstream forgot, which no hook is run
+/// for any more. Returns whether it dropped any.
+fn drop_unmanaged(ctx: &Context, pending: &mut BTreeSet<String>) -> Result<bool> {
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    let (home, system) = (ctx.sources()?, ctx.system_sources()?);
+    let before = pending.len();
+    pending.retain(|key| {
+        key.strip_prefix('/')
+            .map_or_else(|| home.contains(key), |rel| system.contains(rel))
+    });
+    Ok(pending.len() != before)
 }
 
 /// Runs each of `due`, and fails after the last when any of them failed.

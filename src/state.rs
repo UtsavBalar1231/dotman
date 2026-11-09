@@ -77,6 +77,10 @@ pub struct Hooks {
     /// approved, its hooks that match one of them run once, and the set is emptied.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub pending: BTreeSet<String>,
+    /// The table, in the approval's form, last shown with `pending`. Another table is shown again
+    /// before an approval could run it for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_table: Option<String>,
 }
 
 /// One applied path.
@@ -251,6 +255,7 @@ mod tests {
             hooks: Hooks {
                 approved: Some("deadbeef".to_owned()),
                 pending: BTreeSet::from([".config/app/a.conf".to_owned()]),
+                pending_table: Some(r#"{"a":"x"}"#.to_owned()),
             },
             files: BTreeMap::from([
                 (".bashrc".to_owned(), entry),
