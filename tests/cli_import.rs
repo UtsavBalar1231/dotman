@@ -582,15 +582,19 @@ fn rich_legacy(env: &TestEnv) -> std::path::PathBuf {
 }
 
 #[test]
-fn import_carries_the_tracked_directories_and_reports_what_it_leaves_behind() {
+fn import_lists_the_tracked_directories_and_reports_what_it_leaves_behind() {
     let env = TestEnv::new();
     let legacy = rich_legacy(&env);
     let err = env.ok(&["import", &legacy.to_string_lossy(), "--no-bootstrap"]);
     assert_eq!(accounting(&err), (6, 6, 0), "{err}");
+    let home = env.home();
+    let config = home.join(".config");
+    let bin = home.join(".local/bin");
     for note in [
-        "[dirs] tracks 2 directories, as the old store did: .config, .local/bin",
-        "add [ignore] patterns before `dotman sync`",
-        "tracked directories left out of [dirs]: /srv/elsewhere",
+        "the old store tracked 2 directories: .config, .local/bin; [dirs] is left empty, so the first sync does not capture every file already in them",
+        &format!("  dotman add {}", config.display()),
+        &format!("  dotman add {}", bin.display()),
+        "tracked directories that cannot be added: /srv/elsewhere",
         "names the remote `origin` at https://example.invalid/dots; `dotman init --remote https://example.invalid/dots` sets it here",
         "index.bin holds staged changes",
         "these branches are not: wip",
@@ -598,20 +602,44 @@ fn import_carries_the_tracked_directories_and_reports_what_it_leaves_behind() {
     ] {
         assert!(err.contains(note), "missing `{note}` in:\n{err}");
     }
+    assert_eq!(env.repo_config().dirs.paths, Vec::<String>::new());
 
-    assert_eq!(env.repo_config().dirs.paths, [".config", ".local/bin"]);
-    let first = git_in(&env, &env.repo(), &["rev-list", "--max-parents=0", "HEAD"]);
-    let root_config = blob(&env, &format!("{}:.dotman.toml", first.trim()));
-    let root_config =
-        RepoConfig::parse(&String::from_utf8(root_config).expect("utf8")).expect("parse");
-    assert_eq!(root_config.dirs.paths, Vec::<String>::new());
+    // Nothing already in those directories reaches the first sync.
+    env.write(".config/tool/state.json", b"{}\n", 0o644);
+    assert_eq!(env.token_of("status", ".config/tool/state.json"), None);
+}
 
-    // The tracked directories make new files show up, as they did with the old store.
-    env.write(".config/new.conf", b"new\n", 0o644);
-    assert_eq!(
-        env.token_of("status", ".config/new.conf").as_deref(),
-        Some("new")
+#[test]
+fn a_remote_with_credentials_is_never_put_into_a_command() {
+    let env = TestEnv::new();
+    let legacy = rich_legacy(&env);
+    fs::write(
+        env.xdg_config().join("dotman/config"),
+        "[remotes.origin]\nurl = \"https://user:hunter2@example.invalid/dots\"\n",
+    )
+    .expect("write the old config");
+    let err = env.ok(&["import", &legacy.to_string_lossy(), "--dry-run"]);
+    assert!(!err.contains("hunter2"), "{err}");
+    assert!(
+        err.contains(
+            "`dotman init --remote <url>` sets it here, given the URL with its credentials"
+        ),
+        "{err}"
     );
+    assert!(!err.contains("init --remote https://"), "{err}");
+}
+
+#[test]
+fn branches_behind_a_symlinked_refs_directory_are_not_read() {
+    let env = TestEnv::new();
+    let legacy = rich_legacy(&env);
+    let elsewhere = env.root().join("elsewhere-heads");
+    fs::create_dir_all(&elsewhere).expect("create dir");
+    fs::rename(legacy.join("refs/heads"), elsewhere.join("heads")).expect("move heads");
+    std::os::unix::fs::symlink(elsewhere.join("heads"), legacy.join("refs/heads"))
+        .expect("link heads");
+    let err = env.ok(&["import", &legacy.to_string_lossy(), "--dry-run"]);
+    assert!(!err.contains("these branches are not"), "{err}");
 }
 
 #[test]
@@ -621,7 +649,16 @@ fn overlay_names_the_tracked_directories_and_leaves_dirs_alone() {
     let out = env.run(&["import", "--overlay", &legacy.to_string_lossy()]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("the old store tracked 2 directories, which an overlay leaves out of [dirs]"),
+        err.contains(
+            "the old store tracked 2 directories: .config, .local/bin; an overlay leaves [dirs] as it is"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "  dotman add {}",
+            env.home().join(".config").display()
+        )),
         "{err}"
     );
     assert!(err.contains("index.bin holds staged changes"), "{err}");
