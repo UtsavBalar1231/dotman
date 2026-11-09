@@ -213,7 +213,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     )?;
     let settled = drop_unchanged(&ctx, &repo_config, &state, &targets.sources, &mut plan);
     let content = guard_content(&ctx, &mut plan, &targets, args)?;
-    guarded.warn(public, &ctx.paths.home, args.for_conditions.as_deref());
+    guarded.warn(&ctx, public, args.for_conditions.as_deref());
     for (key, found) in &content.held {
         let path = pasteable(&ctx.paths.home, key);
         output::warning(&format!("held {key}: {found}{}", found.remedy(Some(&path))));
@@ -367,20 +367,25 @@ pub(crate) fn pasteable(home: &Path, key: &str) -> String {
 
 impl Guarded {
     /// `conditions` is the `--for` of this run, which an `--encrypt` hint has to repeat.
-    fn warn(&self, public: bool, home: &Path, conditions: Option<&str>) {
+    fn warn(&self, ctx: &Context, public: bool, conditions: Option<&str>) {
+        let (home, allow) = (&ctx.paths.home, &ctx.machine.guard.allow);
         let bin = name::bin();
         let keep = if public { "--allow-plain " } else { "" };
         for (key, leaf) in &self.held {
             let path = pasteable(home, key);
-            let hint = match leaf {
+            let hint = match (leaf, holds_key(home, key, allow)) {
                 // --encrypt takes regular files only.
-                Leaf::Link => format!("`{bin} add {keep}{path}` stores the link as it is"),
-                Leaf::File { .. } => format!(
-                    "`{bin} add --encrypt {path}` stores it encrypted, `{bin} add {keep}{path}` stores it as it is"
+                (Leaf::Link, _) => format!("; `{bin} add {keep}{path}` stores the link as it is"),
+                // Storing it as it is would put the credential in the repo.
+                (Leaf::File { .. }, Some(found)) => format!(
+                    ", and {found}; `{bin} add --encrypt {path}` stores it encrypted, or remove the secret from it, then add it"
+                ),
+                (Leaf::File { .. }, None) => format!(
+                    "; `{bin} add --encrypt {path}` stores it encrypted, `{bin} add {keep}{path}` stores it as it is"
                 ),
             };
             output::warning(&format!(
-                "held {key}: name matches [guard] secret_names; {hint}"
+                "held {key}: name matches [guard] secret_names{hint}"
             ));
         }
         let (verb, which) = match self.plain.as_slice() {

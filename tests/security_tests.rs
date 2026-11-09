@@ -884,6 +884,59 @@ fn add_refuses_a_named_file_that_holds_a_credential() {
     );
 }
 
+/// A file that `add <dir>` holds by its name is scanned too. When it holds a credential, the hint
+/// names the finding and offers `--encrypt` only, never `--allow-plain`, and running every command
+/// the run printed, as printed, never sends the token to the public remote.
+#[test]
+fn a_name_hold_hint_never_offers_allow_plain_for_a_file_that_holds_a_credential() {
+    let env = TestEnv::new();
+    let origin = env.remote_url();
+    env.ok(&["init", "--remote", &origin]);
+    let state_file = env.state_dir().join("state.toml");
+    let mut state = dotman::state::State::read(&state_file)
+        .expect("read state")
+        .expect("state");
+    state.remote_public = Some(dotman::state::RemotePublic::True);
+    state.remote_url = Some(origin);
+    state.remote_checked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_secs());
+    state.save(&state_file, false).expect("save state");
+
+    let token = github_token();
+    env.write(".config/zsh/.zshrc", b"source secrets.zsh\n", 0o644);
+    let secrets = ".config/zsh/secrets.zsh";
+    env.write(
+        secrets,
+        format!("# tokens\nexport GH={token}\n").as_bytes(),
+        0o600,
+    );
+    let err = exits(&env.run(&["add", ".config/zsh"]), 3);
+    let held = err
+        .lines()
+        .find(|line| line.contains(&format!("held {secrets}")))
+        .expect("the hold line");
+    assert!(held.contains("line 2 holds a github-token"), "{err}");
+    assert!(!held.contains("--allow-plain"), "{err}");
+    assert!(!err.contains(&token), "the value is never printed: {err}");
+
+    let printed: Vec<Vec<String>> = err
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|command| shell_words::split(command).expect("a pasteable command"))
+        .collect();
+    assert!(!printed.is_empty(), "{err}");
+    for command in printed {
+        let args: Vec<&str> = command.iter().skip(1).map(String::as_str).collect();
+        env.run(&args);
+    }
+    env.run(&["sync"]);
+    assert!(!remote_history(&env).contains(&token));
+    assert!(!files_containing(&env.repo(), token.as_bytes()).contains(&secrets.to_owned()));
+}
+
 /// `add --allow-plain` stores the file and records `[guard] allow` by key and rule; later edits,
 /// which move the line, sync without a hold, while a credential of another rule is held.
 #[test]
