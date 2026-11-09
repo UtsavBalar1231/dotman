@@ -37,7 +37,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List the managed files')
             [CompletionResult]::new('status', 'status', [CompletionResultType]::ParameterValue, 'Compare $HOME, the repo and the last applied state')
             [CompletionResult]::new('apply', 'apply', [CompletionResultType]::ParameterValue, 'Write the repo''s files into $HOME')
-            [CompletionResult]::new('diff', 'diff', [CompletionResultType]::ParameterValue, 'Show how $HOME differs from the repo')
+            [CompletionResult]::new('diff', 'diff', [CompletionResultType]::ParameterValue, 'Show how $HOME differs from the repo, as a diff from repo/ to home/')
             [CompletionResult]::new('edit', 'edit', [CompletionResultType]::ParameterValue, 'Open a managed file''s source in $VISUAL or $EDITOR, then apply it')
             [CompletionResult]::new('sync', 'sync', [CompletionResultType]::ParameterValue, 'Capture local changes, commit, pull, apply what arrived and push')
             [CompletionResult]::new('log', 'log', [CompletionResultType]::ParameterValue, 'Show the repo''s history')

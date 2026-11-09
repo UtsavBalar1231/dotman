@@ -34,7 +34,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand list 'List the managed files'
             cand status 'Compare $HOME, the repo and the last applied state'
             cand apply 'Write the repo''s files into $HOME'
-            cand diff 'Show how $HOME differs from the repo'
+            cand diff 'Show how $HOME differs from the repo, as a diff from repo/ to home/'
             cand edit 'Open a managed file''s source in $VISUAL or $EDITOR, then apply it'
             cand sync 'Capture local changes, commit, pull, apply what arrived and push'
             cand log 'Show the repo''s history'

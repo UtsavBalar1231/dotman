@@ -370,7 +370,7 @@ _dotman_commands() {
 'list:List the managed files' \
 'status:Compare \$HOME, the repo and the last applied state' \
 'apply:Write the repo'\''s files into \$HOME' \
-'diff:Show how \$HOME differs from the repo' \
+'diff:Show how \$HOME differs from the repo, as a diff from repo/ to home/' \
 'edit:Open a managed file'\''s source in \$VISUAL or \$EDITOR, then apply it' \
 'sync:Capture local changes, commit, pull, apply what arrived and push' \
 'log:Show the repo'\''s history' \

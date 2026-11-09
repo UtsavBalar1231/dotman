@@ -36,7 +36,7 @@ complete -c dotman -n "__fish_dotman_needs_command" -f -a "forget" -d 'Stop mana
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "list" -d 'List the managed files'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "status" -d 'Compare $HOME, the repo and the last applied state'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "apply" -d 'Write the repo\'s files into $HOME'
-complete -c dotman -n "__fish_dotman_needs_command" -f -a "diff" -d 'Show how $HOME differs from the repo'
+complete -c dotman -n "__fish_dotman_needs_command" -f -a "diff" -d 'Show how $HOME differs from the repo, as a diff from repo/ to home/'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "edit" -d 'Open a managed file\'s source in $VISUAL or $EDITOR, then apply it'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "sync" -d 'Capture local changes, commit, pull, apply what arrived and push'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "log" -d 'Show the repo\'s history'
