@@ -16,7 +16,6 @@ use crate::engine::{
 };
 use crate::hooks::{self, Policy};
 use crate::identity;
-use crate::lock::Lock;
 use crate::name;
 use crate::output;
 use crate::prompt;
@@ -43,8 +42,7 @@ use std::time::SystemTime;
 /// the lock, two keys collide by case or normalization, a path cannot be applied, or a hook fails.
 pub fn run(args: &ApplyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("apply")?;
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(args.dry_run)?;
     // Before git is asked about the index, which needs a repo to exist.
     ctx.repo_id()?;
     ctx.refuse_collisions()?;

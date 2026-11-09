@@ -2,6 +2,7 @@
 //!
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
 
+use crate::paths::write_atomic;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -571,16 +572,42 @@ impl Git {
 
     fn write_metadata(&self) -> Result<()> {
         let git_dir = self.repo.join(".git");
-        let info = git_dir.join("info");
-        fs::create_dir_all(&info)
-            .with_context(|| format!("failed to create {}", info.display()))?;
-        fs::write(info.join("attributes"), ATTRIBUTES)
-            .context("failed to write .git/info/attributes")?;
+        self.write_attributes()?;
         let id_path = git_dir.join("dotman-id");
         if !id_path.exists() {
             fs::write(&id_path, self.new_repo_id()?).context("failed to write .git/dotman-id")?;
         }
         Ok(())
+    }
+
+    fn attributes_path(&self) -> PathBuf {
+        self.repo.join(".git/info/attributes")
+    }
+
+    fn write_attributes(&self) -> Result<()> {
+        let path = self.attributes_path();
+        let info = self.repo.join(".git/info");
+        fs::create_dir_all(&info)
+            .with_context(|| format!("failed to create {}", info.display()))?;
+        write_atomic(&path, ATTRIBUTES.as_bytes(), 0o644)
+            .context("failed to write .git/info/attributes")
+    }
+
+    /// Whether `.git/info/attributes` holds exactly the line `init` and every clone write. One
+    /// that an older dotman wrote lacks `merge=text`.
+    #[must_use]
+    pub fn attributes_current(&self) -> bool {
+        fs::read(self.attributes_path()).is_ok_and(|bytes| bytes == ATTRIBUTES.as_bytes())
+    }
+
+    /// Writes `.git/info/attributes` again unless [`Git::attributes_current`]; returns whether
+    /// it wrote.
+    pub fn refresh_attributes(&self) -> Result<bool> {
+        if self.attributes_current() {
+            return Ok(false);
+        }
+        self.write_attributes()?;
+        Ok(true)
     }
 
     fn new_repo_id(&self) -> Result<String> {

@@ -9,7 +9,6 @@ use crate::cli::RestoreArgs;
 use crate::context::Context;
 use crate::engine::write::{WriteOptions, WriteOutcome, backup_run_dir, safe_symlink, safe_write};
 use crate::engine::{Home, Tuple, hash_hex, observe, observe_portable, recorded_mode};
-use crate::lock::Lock;
 use crate::output;
 use crate::paths::{create_private_dir, derive_key, private_temp_dir};
 use crate::secrets::{Locked, key_hint};
@@ -37,8 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn run(args: &RestoreArgs) -> Result<()> {
     let ctx = Context::resolve("restore")?;
     let dry_run = args.dry_run;
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(dry_run)?;
     ctx.repo_id()?;
     ctx.git.check_version()?;
     let repo_config = ctx.repo_config()?;

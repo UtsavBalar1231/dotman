@@ -131,6 +131,39 @@ fn a_stale_git_lock_fails_with_the_removal_step_that_works() {
     assert_eq!(code, Some(0), "{out}");
 }
 
+/// The attributes line of an older dotman, without `merge=text`, is flagged before any command
+/// writes, and the step doctor prints, run as printed, clears it.
+#[test]
+fn an_attributes_line_an_older_dotman_wrote_warns_with_a_step_that_works() {
+    let env = committed();
+    let attributes = env.repo().join(".git/info/attributes");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(line(&out, "pass", "git attributes").is_some(), "{out}");
+
+    fs::write(
+        &attributes,
+        "* -text -filter -ident -working-tree-encoding\n",
+    )
+    .expect("age it");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(0), "{out}");
+    let warned = line(&out, "warn", "git attributes").unwrap_or_default();
+    assert!(warned.contains(&attributes.display().to_string()), "{out}");
+    assert_eq!(
+        fs::read(&attributes).expect("doctor writes nothing"),
+        b"* -text -filter -ident -working-tree-encoding\n"
+    );
+    let ran = common::run_hint(&env, warned, "apply");
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let (_, out) = doctor(&env, &[]);
+    assert!(line(&out, "pass", "git attributes").is_some(), "{out}");
+}
+
 #[test]
 fn damaged_objects_fail_the_object_check() {
     let env = committed();

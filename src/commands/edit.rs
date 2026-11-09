@@ -6,7 +6,6 @@ use crate::commands::apply::{self, Options};
 use crate::context::Context;
 use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::hooks::Policy;
-use crate::lock::Lock;
 use crate::name;
 use crate::output;
 use crate::paths::derive_key;
@@ -72,8 +71,7 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
         bail!("the editor exited with {status}; nothing was applied");
     }
 
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(false)?;
     let after = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
     // A sync or apply that ran meanwhile may have written this key with H matching what it saw;
     // applying on top would compare against a state the edit never saw.

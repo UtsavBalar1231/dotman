@@ -11,7 +11,6 @@ use crate::engine::status::{Content, SourceEntry, Variants, Worktree};
 use crate::engine::{
     Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
 };
-use crate::lock::Lock;
 use crate::name;
 use crate::output;
 use crate::paths::{
@@ -170,8 +169,7 @@ impl Ignore {
 pub fn run(args: &AddArgs) -> Result<Outcome> {
     let mut ctx = Context::resolve("add")?;
     let dry_run = args.dry_run;
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(dry_run)?;
     if !dry_run {
         ctx.sweep_temp_files()?;
     }

@@ -4,6 +4,7 @@ use crate::commands::add::Ignore;
 use crate::config::Config;
 use crate::git::{Git, Operation};
 use crate::identity;
+use crate::lock::Lock;
 use crate::paths::{Env, Paths, derive_key, find_collisions, is_reserved_root_name, validate_key};
 use crate::repo_config::RepoConfig;
 use crate::secrets::Age;
@@ -224,10 +225,30 @@ impl Context {
         Scope::new(&self.paths, &self.machine)
     }
 
+    /// Takes the lock for a command that writes, then runs [`Context::guard`]. Outside a dry run it
+    /// also brings `.git/info/attributes` up to date in a repo `init` finished, so a repo an older
+    /// dotman made gets `merge=text` before anything is merged or checked out.
+    pub(crate) fn lock(&self, dry_run: bool) -> Result<Lock> {
+        let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;
+        self.guard()?;
+        let git_dir = self.paths.repo.join(".git");
+        if !dry_run
+            && is_real_dir(&git_dir)
+            && git_dir.join("dotman-id").is_file()
+            && self.git.refresh_attributes()?
+        {
+            crate::output::info(&format!(
+                "rewrote {} with the attributes dotman pins",
+                git_dir.join("info/attributes").display()
+            ));
+        }
+        Ok(lock)
+    }
+
     /// Fails when the repo is incomplete, with [`InProgress`] while a git operation or a conflict
     /// is unfinished in it, and when HEAD's `.dotman.toml` has settings and the worktree's none. Every
-    /// command except `doctor` and `git` calls it, after taking its lock; `log`, which only reads
-    /// the history, skips all but the first check.
+    /// command except `doctor` and `git` calls it, the writing ones through [`Context::lock`]; `log`,
+    /// which only reads the history, skips all but the first check.
     pub(crate) fn guard(&self) -> Result<()> {
         self.refuse_incomplete()?;
         if self.command == "log" || !is_real_dir(&self.paths.repo.join(".git")) {

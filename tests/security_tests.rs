@@ -1730,6 +1730,54 @@ fn a_tracked_merge_driver_never_joins_a_conflict() {
     assert_eq!(fs::read(b.repo().join(".conf")).unwrap(), b"from-two\n");
 }
 
+/// A repo an older dotman made holds the attributes line without `merge=text`. A dry run leaves
+/// it; the next `apply` writes the pinned line, and so does `sync`, before its pull, so a tracked
+/// `merge=union` still stops on the conflict. A missing file is written too.
+#[test]
+fn an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write() {
+    const OLD: &[u8] = b"* -text -filter -ident -working-tree-encoding\n";
+    const PINNED: &[u8] = b"* -text -filter -ident -working-tree-encoding merge=text\n";
+    let a = device_with_a_symlink();
+    a.write(".conf", b"line1\n", 0o644);
+    a.write(".gitattributes", b"* merge=union\n", 0o644);
+    a.ok(&["add", ".conf", ".gitattributes"]);
+    a.ok(&["sync"]);
+    let device = || {
+        let b = a.second_device();
+        exits(&b.run(&["init", &a.remote_url()]), 0);
+        let attributes = b.repo().join(".git/info/attributes");
+        assert_eq!(fs::read(&attributes).unwrap(), PINNED);
+        (b, attributes)
+    };
+
+    let (b, attributes) = device();
+    fs::write(&attributes, OLD).unwrap();
+    let before = b.four_trees();
+    for dry_run in [&["apply", "--dry-run"][..], &["sync", "--dry-run"]] {
+        exits(&b.run(dry_run), 0);
+        assert_eq!(b.four_trees(), before, "{dry_run:?}");
+    }
+    let err = exits(&b.run(&["apply"]), 0);
+    assert!(err.contains("rewrote "), "{err}");
+    assert_eq!(fs::read(&attributes).unwrap(), PINNED);
+    assert_eq!(mode_of(&attributes), 0o644);
+
+    for (round, stale) in [Some(OLD), None].into_iter().enumerate() {
+        let (b, attributes) = device();
+        match stale {
+            Some(bytes) => fs::write(&attributes, bytes).unwrap(),
+            None => fs::remove_file(&attributes).unwrap(),
+        }
+        a.write(".conf", format!("from-one {round}\n").as_bytes(), 0o644);
+        a.ok(&["sync"]);
+        b.write(".conf", b"from-two\n", 0o644);
+        let err = exits(&b.run(&["sync"]), 4);
+        assert!(err.contains("conflicting paths:\n  .conf"), "{err}");
+        assert_eq!(fs::read(&attributes).unwrap(), PINNED);
+        assert_eq!(b.read(".conf"), b"from-two\n");
+    }
+}
+
 /// Every object in the store at `git_dir`, reachable or not, as one text.
 fn every_object(env: &TestEnv, git_dir: &Path) -> String {
     env.git(&[

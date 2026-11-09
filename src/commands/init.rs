@@ -8,7 +8,6 @@ use crate::context::{Context, is_real_dir};
 use crate::git::Git;
 use crate::hooks::Policy;
 use crate::import;
-use crate::lock::Lock;
 use crate::name;
 use crate::output;
 use crate::paths::private_temp_dir;
@@ -46,8 +45,7 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
             return Ok(outcome);
         }
     }
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(dry_run)?;
     let repo = &ctx.paths.repo;
     let config_file = ctx.repo_config_file();
     let exists = repo.join(".git").exists();
@@ -117,8 +115,7 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
 fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outcome> {
     check_url(source)?;
     let dry_run = args.dry_run;
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(dry_run)?;
     let repo = &ctx.paths.repo;
     if repo.join(".git").exists() {
         bail!(
@@ -392,8 +389,7 @@ fn offer_import(
         no_bootstrap: args.no_bootstrap,
         dry_run: args.dry_run,
     };
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(args.dry_run)?;
     let outcome = import::run(ctx, &import_args)?;
     if !args.dry_run {
         if let Some(url) = &args.remote {

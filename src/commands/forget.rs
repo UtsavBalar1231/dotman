@@ -5,7 +5,6 @@ use crate::commands::add::Ignore;
 use crate::context::{Context, is_real_dir, is_under};
 use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::engine::{Node, Tuple, read_node};
-use crate::lock::Lock;
 use crate::output;
 use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
@@ -27,8 +26,7 @@ use std::time::SystemTime;
 pub fn run(args: &ForgetArgs) -> Result<()> {
     let ctx = Context::resolve("forget")?;
     let dry_run = args.dry_run;
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(dry_run)?;
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;

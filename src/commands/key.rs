@@ -7,7 +7,6 @@ use crate::cli::{KeyArgs, KeyCommand, KeyImportArgs};
 use crate::commands::Outcome;
 use crate::context::Context;
 use crate::engine::write::{back_up_bytes, backup_run_dir};
-use crate::lock::Lock;
 use crate::name;
 use crate::output;
 use crate::paths::{create_private_dir, write_atomic};
@@ -36,8 +35,7 @@ pub fn run(args: &KeyArgs) -> Result<Outcome> {
 }
 
 fn init(ctx: &Context) -> Result<Outcome> {
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(false)?;
     ctx.repo_id()?;
     if fs::symlink_metadata(&ctx.paths.age_identity).is_ok() {
         return list_existing(ctx);
@@ -126,8 +124,7 @@ fn import(ctx: &Context, args: &KeyImportArgs) -> Result<Outcome> {
     };
     let text =
         read_input(&args.file, from_stdin).with_context(|| format!("cannot read {shown}"))?;
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(false)?;
     ctx.repo_id()?;
     let incoming = validate(ctx, &text, &shown)?;
     install(ctx, &incoming, args.force, args.add_recipient)

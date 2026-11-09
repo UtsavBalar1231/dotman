@@ -14,7 +14,6 @@ use crate::context::{Context, TEMP_PREFIX, is_under};
 use crate::engine::{Node, read_node};
 use crate::git::{PullOutcome, RemoteFailure, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
-use crate::lock::Lock;
 use crate::name;
 use crate::output;
 use crate::prompt;
@@ -66,8 +65,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     }
     let ctx = Context::resolve("sync")?;
     let dry_run = args.dry_run;
-    let _lock = Lock::acquire(&ctx.paths.lock_file(), dry_run)?;
-    ctx.guard()?;
+    let _lock = ctx.lock(dry_run)?;
     // Before git is asked about the index, which needs a repo to exist.
     ctx.repo_id()?;
     ctx.refuse_git_locks()?;
