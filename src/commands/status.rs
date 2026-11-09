@@ -162,7 +162,22 @@ fn report_remote(ctx: &Context) -> Result<()> {
         return Ok(());
     };
     let upstream = format!("refs/remotes/origin/{branch}");
+    let commits = |n: usize| if n == 1 { "commit" } else { "commits" };
+    // No branch was ever pushed, as when every push after `init --remote` failed.
     if git.resolve_commit(&upstream)?.is_none() {
+        let out = git
+            .command()
+            .args(["rev-list", "--count", "HEAD", "--not", "--remotes", "--"])
+            .output()
+            .context("failed to run git")?;
+        let count = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>();
+        if let (Ok(n @ 1..), true) = (count, out.status.success()) {
+            output::info(&format!(
+                "{n} {} not pushed yet: run `{} sync`",
+                commits(n),
+                name::bin()
+            ));
+        }
         return Ok(());
     }
     let out = git
@@ -180,7 +195,6 @@ fn report_remote(ctx: &Context) -> Result<()> {
     let (&[ahead, behind], true) = (counts.as_slice(), out.status.success()) else {
         return Ok(());
     };
-    let commits = |n: usize| if n == 1 { "commit" } else { "commits" };
     let position = match (ahead, behind) {
         (0, 0) => return Ok(()),
         (ahead, 0) => format!("{ahead} {} to push", commits(ahead)),

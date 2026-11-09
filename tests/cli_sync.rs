@@ -763,6 +763,41 @@ fn status_counts_the_commits_to_push_and_pull_and_the_printed_sync_settles_them(
     assert_eq!(position(&a), ["2 commits to pull: run `dotman sync`"]);
 }
 
+/// With no `origin/<branch>` yet, as after every push failed, status counts what no remote ref has.
+#[test]
+fn status_counts_the_commits_never_pushed_and_the_printed_sync_pushes_them() {
+    let env = TestEnv::new();
+    let later = env.root().join("later.git");
+    env.ok(&["init"]);
+    env.ok(&["init", "--remote", &format!("file://{}", later.display())]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok(&["add", ".a"]);
+    let err = env.fails(&["sync"]);
+    assert!(err.contains("could not reach origin"), "{err}");
+
+    let err = exits(&env, 0, &["status"]);
+    let repo = repo_path(&env);
+    let count = env.git(&["-C", &repo, "rev-list", "--count", "HEAD"]);
+    let commits = if count.trim() == "1" {
+        "commit"
+    } else {
+        "commits"
+    };
+    let line = format!(
+        "{} {commits} not pushed yet: run `dotman sync`",
+        count.trim()
+    );
+    assert!(err.lines().any(|l| l == line), "{err}");
+
+    env.git(&["init", "--bare", "-q", &later.to_string_lossy()]);
+    let out = common::run_hint(&env, &err, "sync");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = exits(&env, 0, &["status"]);
+    assert!(!err.contains("not pushed"), "{err}");
+    let pushed = env.git(&["--git-dir", &later.to_string_lossy(), "rev-parse", "main"]);
+    assert_eq!(pushed, env.git(&["-C", &repo, "rev-parse", "HEAD"]));
+}
+
 #[test]
 fn the_printed_answer_to_a_conflict_in_sync_does_what_it_says() {
     for (answer, home) in [
