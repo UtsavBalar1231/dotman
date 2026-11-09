@@ -597,7 +597,10 @@ fn a_held_rename_never_commits_the_deletion_of_its_old_path() {
     let tree = || a.git(&["-C", &repo_path(&a), "ls-tree", "-r", "--name-only", "HEAD"]);
     for _ in 0..2 {
         let err = exits(&a, 3, &["sync"]);
-        assert!(err.contains("\n  .b\n"), "{err}");
+        assert!(
+            err.contains("\n  .b: line 2 holds an age secret key"),
+            "{err}"
+        );
         let names = tree();
         assert!(names.lines().any(|name| name == ".a"), "{names}");
         assert!(!names.lines().any(|name| name == ".b"), "{names}");
@@ -786,10 +789,13 @@ fn a_held_edit_stops_sync_before_the_pull_by_either_route() {
         for args in [&["sync", "--dry-run"][..], &["sync"]] {
             let err = exits(&b, 3, args);
             assert!(err.contains("stopped before the pull"), "{err}");
-            assert!(err.contains("\n  .zshrc\n"), "{err}");
+            assert!(
+                err.contains("\n  .zshrc: line 1 holds an age secret key"),
+                "{err}"
+            );
             for remedy in [
                 "dotman add --encrypt",
-                "remove the key",
+                "remove the secret",
                 "dotman git checkout -- <file>",
             ] {
                 assert!(err.contains(remedy), "{remedy}: {err}");
