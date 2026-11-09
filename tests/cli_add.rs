@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::TestEnv;
+use common::{TestEnv, mode_of};
 use dotman::state::{RemotePublic, State};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -230,6 +230,57 @@ fn adding_a_managed_directory_again_previews_only_what_changed() {
         fs::read(env.repo().join(".config/app/b.conf")).expect("read"),
         b"b edited\n"
     );
+}
+
+/// Adding a managed directory again records the modes it and a subdirectory were tightened to,
+/// though none of its files changed, so another machine creates them that way. A dry run records
+/// nothing, and an entry already there is never replaced or removed.
+#[test]
+fn adding_a_managed_directory_again_records_its_tightened_modes() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".config/nvim/init.lua", b"-- init\n", 0o644);
+    env.write(".config/nvim/lua/a.lua", b"return {}\n", 0o644);
+    env.ok(&["add", ".config/nvim"]);
+    let dir_mode = |key: &str| env.repo_config().modes.get(key).cloned();
+    assert_eq!(dir_mode(".config/nvim/"), None);
+
+    let chmod = |key: &str, mode: u32| {
+        fs::set_permissions(env.home().join(key), fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    chmod(".config/nvim", 0o700);
+    chmod(".config/nvim/lua", 0o750);
+    env.ok(&["add", "--dry-run", ".config/nvim"]);
+    assert_eq!(dir_mode(".config/nvim/"), None);
+    let err = env.ok(&["add", ".config/nvim"]);
+    assert!(
+        err.contains("2 files already managed and unchanged"),
+        "{err}"
+    );
+    assert_eq!(dir_mode(".config/nvim/").as_deref(), Some("0700"));
+    assert_eq!(dir_mode(".config/nvim/lua/").as_deref(), Some("0750"));
+    assert_eq!(dir_mode(".config/"), None);
+
+    // Another machine's umask gives 0755 here; adding the directory again keeps the entries.
+    chmod(".config/nvim", 0o755);
+    env.ok(&["add", ".config/nvim"]);
+    assert_eq!(dir_mode(".config/nvim/").as_deref(), Some("0700"));
+    chmod(".config/nvim", 0o700);
+    env.ok(&["sync"]);
+    // A bare remote's HEAD names `master` until something says otherwise, and a clone follows it.
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    env.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+
+    let other = env.second_device();
+    other.ok(&["init", &env.remote_url()]);
+    assert_eq!(mode_of(&other.home().join(".config/nvim")), 0o700);
+    assert_eq!(mode_of(&other.home().join(".config/nvim/lua")), 0o750);
 }
 
 #[test]

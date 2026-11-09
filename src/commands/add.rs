@@ -90,6 +90,8 @@ pub(crate) struct DirPlan {
     pub(crate) held: BTreeMap<String, Hold>,
     /// Entries whose names cannot be keys.
     pub(crate) notes: Vec<String>,
+    /// Files it already manages unchanged, taken out of `items`.
+    pub(crate) unchanged: Vec<String>,
 }
 
 #[derive(Default)]
@@ -248,11 +250,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     }
 
     let (items, announced) = plan.items();
-    for dir in &plan.dirs {
-        if !repo_config.dirs.paths.contains(&dir.key) {
-            repo_config.dirs.paths.push(dir.key.clone());
-        }
-    }
+    adopt_dirs(&ctx, &mut repo_config, &plan.dirs)?;
     content.record(&mut ctx.machine, &ctx.paths.config_file, &items, false)?;
     let (added, failed) =
         targets.commit_all(&ctx, &mut repo_config, &mut state, &items, &announced);
@@ -294,9 +292,13 @@ fn drop_unchanged(
     for dir in &mut plan.dirs {
         let before = dir.items.len();
         dir.items.retain(|key, _| {
-            !sources.contains(key)
+            let changed = !sources.contains(key)
                 || !matches!(classify_key(ctx, &variants, state, key),
-                    Ok(Classified::Item(item)) if item.token() == "clean")
+                    Ok(Classified::Item(item)) if item.token() == "clean");
+            if !changed {
+                dir.unchanged.push(key.clone());
+            }
+            changed
         });
         let same = before.saturating_sub(dir.items.len());
         if same > 0 {
@@ -311,6 +313,22 @@ fn drop_unchanged(
         }
     }
     settled
+}
+
+/// Lists each directory in `[dirs]`, and records the modes of the directories above the files it
+/// already manages unchanged, which no capture records: adding it again is how a tightened
+/// directory mode reaches the repo.
+fn adopt_dirs(ctx: &Context, repo_config: &mut RepoConfig, dirs: &[DirPlan]) -> Result<()> {
+    let mut modes = BTreeMap::new();
+    for dir in dirs {
+        if !repo_config.dirs.paths.contains(&dir.key) {
+            repo_config.dirs.paths.push(dir.key.clone());
+        }
+        for key in &dir.unchanged {
+            record_dirs(repo_config, &mut modes, &ctx.paths.home, key)?;
+        }
+    }
+    Ok(())
 }
 
 /// Lists the sockets, FIFOs, devices and unreadable entries the directories hold back, which
@@ -1442,16 +1460,7 @@ pub(crate) fn commit_one(
         }
         _ => bail!("it changed while being added"),
     };
-    // Machines differ in umask, so an entry, which may be another machine's, is never replaced or
-    // removed here; otherwise each capture would flip it.
-    for parent in parents(key) {
-        let entry = format!("{parent}/");
-        if repo_config.modes.contains_key(&entry) {
-            continue;
-        }
-        let mode = dir_mode(dir_modes, home, parent)?;
-        record_mode(repo_config, &entry, mode, 0o755);
-    }
+    record_dirs(repo_config, dir_modes, home, key)?;
     if let Some(entry) = plaintext {
         return Ok(entry);
     }
@@ -1493,6 +1502,26 @@ fn store_encrypted(
     }
     let ciphertext = ctx.age().encrypt(plaintext, recipients)?;
     secrets::write_ciphertext(repo, source, &ciphertext)
+}
+
+/// Records the mode of each directory above `key` that `[modes]` has no entry for. Machines differ
+/// in umask, so an entry, which may be another machine's, is never replaced or removed here;
+/// otherwise each capture would flip it.
+fn record_dirs(
+    repo_config: &mut RepoConfig,
+    cache: &mut BTreeMap<String, u32>,
+    home: &Path,
+    key: &str,
+) -> Result<()> {
+    for parent in parents(key) {
+        let entry = format!("{parent}/");
+        if repo_config.modes.contains_key(&entry) {
+            continue;
+        }
+        let mode = dir_mode(cache, home, parent)?;
+        record_mode(repo_config, &entry, mode, 0o755);
+    }
+    Ok(())
 }
 
 fn dir_mode(cache: &mut BTreeMap<String, u32>, home: &Path, parent: &str) -> Result<u32> {
