@@ -11,6 +11,7 @@ use crate::engine::{Home, Node, observe_portable, read_node};
 use crate::git::Git;
 use crate::output;
 use crate::paths::{create_private_dir, private_temp_dir};
+use crate::proc;
 use crate::secrets::Locked;
 use crate::sys;
 use crate::system::{self, Verdict};
@@ -23,6 +24,10 @@ use std::io::IsTerminal;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long `git config` or `git var` may take to name the pager.
+const PAGER_PROBE: Duration = Duration::from_secs(5);
 
 /// Runs `dotman diff`. Takes no lock and writes nothing outside its temp tree; differences are not an error.
 ///
@@ -153,8 +158,9 @@ fn show_all(
         fs::create_dir_all(side).with_context(|| format!("cannot create {}", side.display()))?;
     }
 
-    let mut cmd = Git::new(tmp.path(), "diff").command();
-    if no_pager {
+    let git = Git::new(tmp.path(), "diff");
+    let mut cmd = git.command();
+    if no_pager || (std::io::stdout().is_terminal() && pager_missing(&git)) {
         cmd.arg("--no-pager");
     }
     // `--no-index` keeps each side's directory in the path, so `--no-prefix` with sides named
@@ -182,6 +188,34 @@ fn show_all(
         None if status.signal() == Some(libc::SIGPIPE) => Ok(()),
         _ => bail!("git diff --no-index failed ({status})"),
     }
+}
+
+// Whether the pager git would start for `diff` cannot be found. git then dies before it shows
+// anything ("cannot run less", on a system without less), so the diff goes without one. A pager
+// that starts and then fails keeps git's behaviour.
+fn pager_missing(git: &Git) -> bool {
+    let ask = |args: &[&str]| {
+        let mut cmd = git.command();
+        cmd.args(args);
+        proc::output_within(&mut cmd, PAGER_PROBE)
+            .ok()
+            .flatten()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    // `git var` does not know `pager.diff`, which git reads first.
+    if ask(&["config", "--get", "pager.diff"]).is_some() {
+        return false;
+    }
+    let Some(pager) = ask(&["var", "GIT_PAGER"]).filter(|pager| pager != "cat") else {
+        return false;
+    };
+    let words = shell_words::split(&pager).unwrap_or_default();
+    // Leading `NAME=value` words set the pager's environment, as in `LESS=FRX less`.
+    words
+        .iter()
+        .find(|word| !word.contains('='))
+        .is_some_and(|program| proc::find_program(program).is_none())
 }
 
 // git ignores NO_COLOR, and an inherited GIT_PAGER_IN_USE makes its `auto` colour a pipe.
