@@ -381,3 +381,120 @@ fn an_empty_state_file_is_refused_with_the_way_out() {
     }
     assert_eq!(fs::read(&state).unwrap(), b"");
 }
+
+fn real_git() -> Option<std::path::PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    text.as_bytes()
+        .chunks(2)
+        .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
+}
+
+/// Names under the repo's parent directory, where init stages its work.
+fn beside_repo(env: &TestEnv) -> Vec<String> {
+    fs::read_dir(env.xdg_data()).map_or_else(
+        |_| Vec::new(),
+        |dir| {
+            dir.filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        },
+    )
+}
+
+#[test]
+fn a_clone_whose_checkout_fails_leaves_nothing_at_the_repo_path() {
+    let env = TestEnv::new();
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let file = env.root().join("object");
+    let object = |kind: &str, bytes: &[u8]| {
+        fs::write(&file, bytes).unwrap();
+        let path = file.to_string_lossy().into_owned();
+        env.git(&[
+            "--git-dir",
+            &remote,
+            "hash-object",
+            "-t",
+            kind,
+            "-w",
+            "--literally",
+            &path,
+        ])
+        .trim()
+        .to_owned()
+    };
+    let blob = unhex(&object("blob", b"x\n"));
+    let mut inner = b"100644 x\0".to_vec();
+    inner.extend_from_slice(&blob);
+    // A name every git's checkout refuses (core.protectNTFS), so the clone fails half way.
+    let mut outer = b"40000 GIT~1\0".to_vec();
+    outer.extend_from_slice(&unhex(&object("tree", &inner)));
+    outer.extend_from_slice(b"100644 a.conf\0");
+    outer.extend_from_slice(&blob);
+    let tree = object("tree", &outer);
+    let commit = env.git(&["--git-dir", &remote, "commit-tree", &tree, "-m", "dotfiles"]);
+    env.git(&[
+        "--git-dir",
+        &remote,
+        "update-ref",
+        "refs/heads/main",
+        commit.trim(),
+    ]);
+    env.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+
+    for _ in 0..2 {
+        let err = env.fails(&["init", &env.remote_url(), "--take-repo"]);
+        assert!(err.contains("GIT~1"), "{err}");
+        assert!(!env.repo().exists(), "{err}");
+        assert_eq!(beside_repo(&env), Vec::<String>::new());
+    }
+    assert!(!env.home().join("a.conf").exists());
+}
+
+#[test]
+fn a_git_init_that_dies_leaves_no_skeleton_and_a_rerun_works() {
+    let mut env = TestEnv::new();
+    let stubs = env.root().join("stubs");
+    fs::create_dir(&stubs).unwrap();
+    let stub = stubs.join("git");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\n\"{}\" \"$@\"; rc=$?\ncase \" $* \" in *\" init -q \"*) [ -e \"$STOP\" ] && exit 137;; esac\nexit $rc\n",
+            real_git().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    env.prepend_path(&stubs);
+    let stop = env.root().join("stop").to_string_lossy().into_owned();
+    fs::write(&stop, b"").unwrap();
+
+    let out = env.run_with(&[("STOP", &stop)], &["init", "--no-import"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!env.repo().exists());
+    assert_eq!(beside_repo(&env), Vec::<String>::new());
+
+    fs::remove_file(&stop).unwrap();
+    env.ok(&["init", "--no-import"]);
+    assert!(env.repo().join(".git/dotman-id").is_file());
+    assert_eq!(beside_repo(&env), ["dotman"]);
+
+    // A repo path that already holds files keeps them.
+    let other = TestEnv::new();
+    other.write_repo("notes.txt", b"mine\n");
+    other.ok(&["init", "--no-import"]);
+    assert_eq!(fs::read(other.repo().join("notes.txt")).unwrap(), b"mine\n");
+    other.ok(&["status"]);
+}

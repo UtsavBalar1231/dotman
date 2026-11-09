@@ -5,6 +5,7 @@ use crate::cli::{Decisions, ImportArgs, InitArgs};
 use crate::commands::wizard::{self, Ask, Wizard};
 use crate::commands::{Outcome, apply};
 use crate::context::Context;
+use crate::git::Git;
 use crate::hooks::Policy;
 use crate::import;
 use crate::lock::Lock;
@@ -14,8 +15,10 @@ use crate::paths::private_temp_dir;
 use crate::prompt;
 use crate::remote;
 use crate::repo_config::RepoConfig;
-use anyhow::{Result, anyhow, bail};
-use std::path::PathBuf;
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 /// Runs `dotman init`.
 ///
@@ -82,7 +85,11 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
         return Ok(Outcome::Done);
     }
 
-    ctx.git.init()?;
+    if exists {
+        ctx.git.init()?;
+    } else {
+        init_into_place(&ctx)?;
+    }
     if !config_file.exists() {
         RepoConfig::default().save(&config_file, false)?;
     }
@@ -138,7 +145,7 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
         ..Policy::default()
     };
     if !dry_run {
-        ctx.git.clone_from(source)?;
+        clone_into_place(ctx, source)?;
         output::success(&format!("cloned {source} into {}", repo.display()));
         remote::note_origin(ctx, false);
         let ask = if prompt::interactive() {
@@ -173,6 +180,58 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let planning = Context::new(clone.paths.clone(), wizard.machine_for(&answers), "init");
     let applied = apply::apply(&planning, &[], &opts)?;
     apply::finish(&planning, &applied, policy)
+}
+
+/// A repo built in a directory beside the repo path, so that moving it into place is one rename.
+/// Dropping it removes whatever is left; a killed run leaves only this directory, never a half
+/// repo at the repo path.
+struct Staging {
+    _dir: TempDir,
+    git: Git,
+}
+
+impl Staging {
+    fn new(ctx: &Context) -> Result<Self> {
+        let repo = &ctx.paths.repo;
+        let parent = repo
+            .parent()
+            .ok_or_else(|| anyhow!("{} has no parent directory", repo.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+        let dir = private_temp_dir(".dotman-init-", parent)?;
+        let git = Git::new(dir.path().join("repo"), "init");
+        Ok(Self { _dir: dir, git })
+    }
+
+    fn path(&self) -> &Path {
+        self.git.repo()
+    }
+}
+
+/// Clones `source` and moves the clone into place only once its checkout is complete.
+fn clone_into_place(ctx: &Context, source: &str) -> Result<()> {
+    let staging = Staging::new(ctx)?;
+    staging.git.clone_from(source)?;
+    // An empty remote leaves HEAD unborn, with nothing to check out.
+    let complete = staging.git.head()?.is_none() || staging.git.status()?.is_empty();
+    ensure!(
+        complete,
+        "the checkout of {source} left files missing or changed; nothing was created at {}",
+        ctx.paths.repo.display()
+    );
+    let repo = &ctx.paths.repo;
+    fs::rename(staging.path(), repo)
+        .with_context(|| format!("cannot move the clone to {}", repo.display()))
+}
+
+/// Creates `.git` with its metadata, then moves it into the repo path, which may already hold files.
+fn init_into_place(ctx: &Context) -> Result<()> {
+    let staging = Staging::new(ctx)?;
+    staging.git.init()?;
+    let repo = &ctx.paths.repo;
+    fs::create_dir_all(repo).with_context(|| format!("cannot create {}", repo.display()))?;
+    fs::rename(staging.path().join(".git"), repo.join(".git"))
+        .with_context(|| format!("cannot move the new repo to {}", repo.display()))
 }
 
 /// `None` when the user chose to start fresh and `init` goes on.
