@@ -253,7 +253,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     adopt_dirs(&ctx, &mut repo_config, &plan.dirs)?;
     content.record(&mut ctx.machine, &ctx.paths.config_file, &items, false)?;
     let (added, failed) =
-        targets.commit_all(&ctx, &mut repo_config, &mut state, &items, &announced);
+        targets.commit_all(&ctx, &mut repo_config, &mut state, &items, &announced)?;
     // The record names the set every `{age}` file is encrypted to; one that exists may mark a
     // re-encryption that is still due, so only a missing one is created.
     if args.encrypt && added > 0 && secrets::read_record(&ctx.paths.repo)?.is_none() {
@@ -678,9 +678,39 @@ impl Targets<'_> {
         state: &mut State,
         items: &BTreeMap<String, Leaf>,
         announced: &BTreeSet<String>,
-    ) -> (usize, usize) {
+    ) -> Result<(usize, usize)> {
         let (mut added, mut failed) = (0usize, 0usize);
         let mut dir_modes = BTreeMap::new();
+        // Every plain file's mode in one save before any content, rather than one save per file
+        // in `commit_one`, which a directory of 0600 files would make quadratic. An encrypted
+        // file without an entry applies at 0600, so it can wait for `commit_one`.
+        let (home, mut changed) = (&ctx.paths.home, false);
+        for (key, leaf) in items {
+            let Ok(source) = self.source_for(key) else {
+                continue;
+            };
+            let encrypted = self.encrypt || self.sources.flag(key, &source) == Flag::Age;
+            let file_mode = match leaf {
+                Leaf::File { mode, .. } if !encrypted => Some(*mode),
+                _ => None,
+            };
+            // A failure here fails the key in `commit_one`; what it recorded first is saved.
+            changed = match record_ahead(
+                repo_config,
+                &mut dir_modes,
+                home,
+                key,
+                &source,
+                file_mode,
+                false,
+            ) {
+                Ok((more, _)) => changed || more,
+                Err(_) => true,
+            };
+        }
+        if changed {
+            repo_config.save(&ctx.repo_config_file(), false)?;
+        }
         for (key, leaf) in items {
             if !announced.contains(key) && self.is_template(key) {
                 output::warning(&format!("{key}: rendered from a template; skipped"));
@@ -699,7 +729,7 @@ impl Targets<'_> {
                 }
             }
         }
-        (added, failed)
+        Ok((added, failed))
     }
 
     /// [`Targets::commit_all`] without writing: what a real run would add, announced, and the
@@ -1431,10 +1461,27 @@ pub(crate) fn commit_one(
         return Err(Held(found).into());
     }
     ensure_worktree_parents(repo, source)?;
+    let file_mode = match (expected, &node) {
+        (Kind::File, Node::File { mode, .. }) => Some(*mode),
+        _ => None,
+    };
+    let (changed, remove_later) = record_ahead(
+        repo_config,
+        dir_modes,
+        home,
+        key,
+        source,
+        file_mode,
+        encrypted,
+    )?;
+    // Saved first, so a kill before the content lands leaves a mode without its content, never
+    // content that other machines would apply at the default.
+    if changed {
+        repo_config.save(&ctx.repo_config_file(), false)?;
+    }
     let plaintext = match (expected, node) {
         (Kind::File, Node::File { bytes, mode, .. }) if encrypted => {
             store_encrypted(ctx, &repo_config.age.recipients, source, &bytes)?;
-            keep_private(repo_config, key, source, safe_mode(mode))?;
             Some(SourceEntry {
                 source: source.to_owned(),
                 tuple: Tuple::of_file(&bytes, safe_mode(mode)),
@@ -1444,9 +1491,7 @@ pub(crate) fn commit_one(
             })
         }
         (Kind::File, Node::File { bytes, mode, .. }) => {
-            let stored = if mode & 0o111 == 0 { 0o644 } else { 0o755 };
-            write_atomic(&target, &bytes, stored)?;
-            record_mode(repo_config, source, mode & 0o777, stored);
+            write_atomic(&target, &bytes, stored_mode(mode))?;
             None
         }
         (Kind::Symlink, Node::Symlink(_)) if encrypted => {
@@ -1460,13 +1505,54 @@ pub(crate) fn commit_one(
         }
         _ => bail!("it changed while being added"),
     };
-    record_dirs(repo_config, dir_modes, home, key)?;
+    if remove_later {
+        repo_config.modes.remove(source);
+    }
     if let Some(entry) = plaintext {
         return Ok(entry);
     }
     Worktree::new(repo, &repo_config.modes)
         .get(source)?
         .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))
+}
+
+/// The mode git can store for a file at `mode`.
+const fn stored_mode(mode: u32) -> u32 {
+    if mode & 0o111 == 0 { 0o644 } else { 0o755 }
+}
+
+/// Puts in `[modes]` what capturing `key` as `source` adds or changes, for a file at `file_mode`
+/// and the directories above it. Returns whether anything changed, and whether the file's entry
+/// is to go, which waits for the content: until then the old content would apply at the default.
+fn record_ahead(
+    repo_config: &mut RepoConfig,
+    dir_modes: &mut BTreeMap<String, u32>,
+    home: &Path,
+    key: &str,
+    source: &str,
+    file_mode: Option<u32>,
+    encrypted: bool,
+) -> Result<(bool, bool)> {
+    let mut changed = record_dirs(repo_config, dir_modes, home, key)?;
+    let mut remove_later = false;
+    if let Some(mode) = file_mode {
+        let old = repo_config.modes.get(source).cloned();
+        if encrypted {
+            keep_private(repo_config, key, source, safe_mode(mode))?;
+        } else {
+            record_mode(repo_config, source, mode & 0o777, stored_mode(mode));
+        }
+        let new = repo_config.modes.get(source).cloned();
+        match (old, new) {
+            (Some(old), None) => {
+                repo_config.modes.insert(source.to_owned(), old);
+                remove_later = true;
+            }
+            (old, Some(new)) => changed = changed || old.as_ref() != Some(&new),
+            (None, None) => {}
+        }
+    }
+    Ok((changed, remove_later))
 }
 
 // A secret never loosens to group or other access through a capture: such a mode is not recorded,
@@ -1504,15 +1590,16 @@ fn store_encrypted(
     secrets::write_ciphertext(repo, source, &ciphertext)
 }
 
-/// Records the mode of each directory above `key` that `[modes]` has no entry for. Machines differ
-/// in umask, so an entry, which may be another machine's, is never replaced or removed here;
-/// otherwise each capture would flip it.
+/// Records the mode of each directory above `key` that `[modes]` has no entry for, and returns
+/// whether it added one. Machines differ in umask, so an entry, which may be another machine's, is
+/// never replaced or removed here; otherwise each capture would flip it.
 fn record_dirs(
     repo_config: &mut RepoConfig,
     cache: &mut BTreeMap<String, u32>,
     home: &Path,
     key: &str,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut added = false;
     for parent in parents(key) {
         let entry = format!("{parent}/");
         if repo_config.modes.contains_key(&entry) {
@@ -1520,8 +1607,9 @@ fn record_dirs(
         }
         let mode = dir_mode(cache, home, parent)?;
         record_mode(repo_config, &entry, mode, 0o755);
+        added = added || mode != 0o755;
     }
-    Ok(())
+    Ok(added)
 }
 
 fn dir_mode(cache: &mut BTreeMap<String, u32>, home: &Path, parent: &str) -> Result<u32> {

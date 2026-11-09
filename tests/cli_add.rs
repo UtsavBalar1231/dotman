@@ -195,6 +195,67 @@ fn a_parent_directory_mode_is_recorded_once_and_never_replaced() {
     assert_eq!(dir_mode(".config/"), None);
 }
 
+/// A capture records a private file's mode in `.dotman.toml` before it writes the content into
+/// the repo, so an interruption between the two never leaves the content without its mode, which
+/// other machines would apply at 0644. A repo root that cannot take the `.dotman.toml` write
+/// stands in for the interruption: the content is never written.
+#[test]
+fn a_private_file_s_mode_is_recorded_before_its_content_reaches_the_repo() {
+    if dotman::sys::geteuid() == 0 {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let key = ".config/x/secret.conf";
+    env.write(key, b"private\n", 0o600);
+    fs::create_dir_all(env.repo().join(".config/x")).expect("repo dirs");
+    let chmod = |mode: u32| {
+        fs::set_permissions(env.repo(), fs::Permissions::from_mode(mode)).expect("chmod repo");
+    };
+    chmod(0o500);
+    let out = env.run(&["add", key]);
+    chmod(0o755);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        !env.repo().join(key).exists(),
+        "the content reached the repo without its mode"
+    );
+    assert_eq!(env.repo_config().modes.get(key), None);
+
+    env.ok(&["add", key]);
+    assert_eq!(
+        env.repo_config().modes.get(key).map(String::as_str),
+        Some("0600")
+    );
+    assert_eq!(
+        fs::read(env.repo().join(key)).expect("stored"),
+        b"private\n"
+    );
+
+    // Loosened back to the default, the entry goes only once the new content is in place.
+    env.write(key, b"public now\n", 0o644);
+    env.ok(&["add", key]);
+    assert_eq!(env.repo_config().modes.get(key), None);
+
+    // sync's capture of a new file under [dirs] goes through the same order.
+    env.ok(&["add", ".config/x"]);
+    let new = ".config/x/new.conf";
+    env.write(new, b"new and private\n", 0o600);
+    chmod(0o500);
+    let out = env.run(&["sync"]);
+    chmod(0o755);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        !env.repo().join(new).exists(),
+        "sync captured the content without its mode"
+    );
+    env.ok(&["sync"]);
+    assert_eq!(
+        env.repo_config().modes.get(new).map(String::as_str),
+        Some("0600")
+    );
+}
+
 #[test]
 fn adding_a_managed_directory_again_previews_only_what_changed() {
     let env = TestEnv::new();
