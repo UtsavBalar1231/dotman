@@ -20,6 +20,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::ops::RangeInclusive;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -29,8 +30,9 @@ use std::time::SystemTime;
 ///
 /// # Errors
 ///
-/// Fails when the path is not managed, `--from` is neither a revision nor a date after the first
-/// commit, the file is absent from that commit, the lock is held, or the file cannot be written.
+/// Fails when the path is not managed, `--from` is neither a commit nor a date in an accepted form,
+/// every commit is newer than that date, the file is absent from that commit, the lock is held, or
+/// the file cannot be written.
 pub fn run(args: &RestoreArgs) -> Result<()> {
     let ctx = Context::resolve("restore")?;
     let dry_run = args.dry_run;
@@ -50,13 +52,7 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
     let flag = sources.flag(&key, source);
     let template = flag == Flag::Tmpl;
 
-    let from = args.from.as_deref().unwrap_or("HEAD");
-    let rev = match ctx.git.resolve_commit(from)? {
-        Some(rev) => rev,
-        None => ctx.git.rev_before(from)?.ok_or_else(|| {
-            anyhow!("`{from}` is neither a revision nor a date after the first commit")
-        })?,
-    };
+    let rev = resolve(&ctx, args.from.as_deref().unwrap_or("HEAD"))?;
     let short = rev.get(..8).unwrap_or(&rev);
     let git_mode = ctx
         .git
@@ -137,6 +133,66 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
     }
 }
 
+/// The commit `from` names, or the newest one before the date it names.
+fn resolve(ctx: &Context, from: &str) -> Result<String> {
+    if let Some(rev) = ctx.git.resolve_commit(from)? {
+        return Ok(rev);
+    }
+    if !is_date(from) {
+        bail!(
+            "`{from}` is neither a commit nor a date. Give a revision such as HEAD~2 or a commit hash, or a date such as 2024-05-01, \"2024-05-01 13:30\", 2.days.ago or yesterday"
+        );
+    }
+    ctx.git
+        .rev_before(from)?
+        .ok_or_else(|| anyhow!("every commit is newer than `{from}`"))
+}
+
+/// Whether `--from` names a date: `YYYY-MM-DD`, optionally followed by a space or `T` and `HH:MM`
+/// or `HH:MM:SS`; `N.units.ago` or `N units ago`; or `yesterday`. git reads nearly any text as a
+/// date, so a mistyped revision such as `mian` would otherwise pick some commit.
+fn is_date(text: &str) -> bool {
+    text == "yesterday" || is_calendar_date(text) || is_relative_date(text)
+}
+
+fn digits(part: &str, len: usize, range: RangeInclusive<u32>) -> bool {
+    part.len() == len
+        && part.bytes().all(|b| b.is_ascii_digit())
+        && part.parse().is_ok_and(|n| range.contains(&n))
+}
+
+fn is_calendar_date(text: &str) -> bool {
+    let (day, time) = text
+        .split_once([' ', 'T'])
+        .map_or((text, None), |(day, time)| (day, Some(time)));
+    let day: Vec<&str> = day.split('-').collect();
+    let day_ok = matches!(day.as_slice(), [y, m, d]
+        if digits(y, 4, 1970..=9999) && digits(m, 2, 1..=12) && digits(d, 2, 1..=31));
+    let time_ok = time.is_none_or(|time| {
+        let parts: Vec<&str> = time.split(':').collect();
+        match parts.as_slice() {
+            [h, m] => digits(h, 2, 0..=23) && digits(m, 2, 0..=59),
+            [h, m, s] => digits(h, 2, 0..=23) && digits(m, 2, 0..=59) && digits(s, 2, 0..=59),
+            _ => false,
+        }
+    });
+    day_ok && time_ok
+}
+
+fn is_relative_date(text: &str) -> bool {
+    let words: Vec<&str> = text.split(['.', ' ']).collect();
+    let [count, unit, "ago"] = words.as_slice() else {
+        return false;
+    };
+    let unit = unit.strip_suffix('s').unwrap_or(unit);
+    (1..=6).contains(&count.len())
+        && count.bytes().all(|b| b.is_ascii_digit())
+        && matches!(
+            unit,
+            "second" | "minute" | "hour" | "day" | "week" | "month" | "year"
+        )
+}
+
 /// What `$HOME` receives for `blob`, the source in revision `short`; `None` when that is `blob`.
 fn convert(
     ctx: &Context,
@@ -189,4 +245,49 @@ fn decrypt(ctx: &Context, ciphertext: &[u8], dry_run: bool) -> Result<Vec<u8>> {
     file.write_all(ciphertext)?;
     drop(file);
     ctx.age().decrypt(&path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_strict_date_forms_are_dates() {
+        for date in [
+            "2024-05-01",
+            "2024-05-01 13:30",
+            "2024-05-01T13:30:59",
+            "2.days.ago",
+            "1 day ago",
+            "10.minutes.ago",
+            "3 weeks ago",
+            "1.year.ago",
+            "yesterday",
+        ] {
+            assert!(is_date(date), "{date}");
+        }
+        for typo in [
+            "heaad~2",
+            "mian",
+            "yesterdy",
+            "nonsense-rev",
+            "HEAD~x",
+            "2024-5-1",
+            "2024-13-01",
+            "2024-05-32",
+            "2024-05-01 24:00",
+            "2024-05-01 13:60",
+            "2024-05-01 13",
+            "2024-05-01  13:30",
+            "2.days",
+            "2.dais.ago",
+            "two.days.ago",
+            "2 days  ago",
+            "1234567.days.ago",
+            "last week",
+            "",
+        ] {
+            assert!(!is_date(typo), "{typo}");
+        }
+    }
 }

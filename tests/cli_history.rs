@@ -70,6 +70,24 @@ fn restore_from_a_date_between_commits_picks_the_earlier_one() {
 }
 
 #[test]
+fn restore_refuses_a_mistyped_revision_instead_of_reading_it_as_a_date() {
+    let env = two_commits();
+    let before = env.four_trees();
+    for typo in ["heaad~2", "mian", "yesterdy"] {
+        let err = env.fails(&["restore", ".a", "--from", typo]);
+        assert!(
+            err.contains(&format!("`{typo}` is neither a commit nor a date")),
+            "{err}"
+        );
+    }
+    assert_eq!(env.four_trees(), before);
+    env.ok(&["restore", ".a", "--from", "2020-02-01 08:00"]);
+    assert_eq!(env.read(".a"), b"one\n");
+    let err = env.fails(&["restore", ".a", "--from", "2019-12-31"]);
+    assert!(err.contains("every commit is newer than"), "{err}");
+}
+
+#[test]
 fn a_dry_run_restore_changes_nothing() {
     let env = two_commits();
     let before = env.four_trees();
