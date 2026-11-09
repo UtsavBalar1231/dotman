@@ -980,6 +980,8 @@ fn add_never_destroys_a_held_hand_edit_in_the_repo() {
         assert!(err.contains(remedy), "{remedy}: {err}");
     }
     assert!(!err.contains("dotman add"), "{err}");
+    let status = env.ok(&["status"]);
+    assert!(status.contains("held in the repo"), "{status}");
 
     let repo_copy = env.repo().join(".bashrc").to_string_lossy().into_owned();
     for args in [
@@ -1036,6 +1038,56 @@ fn add_still_replaces_a_repo_copy_that_came_from_home() {
         b"four\n"
     );
     exits(&env, 0, &["sync"]);
+}
+
+/// `dotman edit` leaves the key clean while its uncommitted repo copy holds a credential, which
+/// stops sync before the pull: status says so, in both forms, instead of saying clean. The remedy
+/// for a credential names `--allow-plain`, which then lets the edit through.
+#[test]
+fn status_reports_a_held_repo_edit_that_stops_sync() {
+    let env = first_device(&[(".a", b"a\n", 0o644)]);
+    let editor = env.write_script(
+        "ed.sh",
+        &format!("#!/bin/sh\necho 'GH={}' >> \"$1\"\n", github_token()),
+    );
+    let editor = editor.to_string_lossy().into_owned();
+    env.ok_with(&[("EDITOR", &editor), ("VISUAL", "")], &["edit", ".a"]);
+    let home = env.home().join(".a").to_string_lossy().into_owned();
+
+    let out = env.run(&["status"]);
+    let (stdout, err) = (String::from_utf8_lossy(&out.stdout), stderr(&out));
+    assert!(stdout.contains("held in the repo"), "{stdout}");
+    assert!(
+        stdout.contains("\n  .a: line 2 holds a github-token\n"),
+        "{stdout}"
+    );
+    assert!(err.contains("1 held in the repo"), "{err}");
+    let porcelain = env.porcelain("status");
+    assert!(
+        porcelain.contains(&("held-in-repo".to_owned(), ".a".to_owned())),
+        "{porcelain:?}"
+    );
+
+    let err = exits(&env, 3, &["sync"]);
+    assert!(err.contains("stopped before the pull"), "{err}");
+    let allow = format!("`dotman add --allow-plain {home}` stores it as is");
+    assert!(err.contains(&allow), "{err}");
+    exits(&env, 0, &["add", "--allow-plain", ".a"]);
+    exits(&env, 0, &["sync"]);
+    assert!(!env.ok(&["status"]).contains("held in the repo"));
+}
+
+/// A dotman temp file in the repo worktree is never staged, so it never holds sync back either.
+#[test]
+fn a_temp_file_in_the_repo_holds_nothing_back() {
+    let env = first_device(&[(".a", b"a\n", 0o644)]);
+    env.write_repo(
+        ".dotman-tmp-1-x",
+        format!("GH={}\n", github_token()).as_bytes(),
+    );
+    let err = exits(&env, 0, &["sync", "--dry-run"]);
+    assert!(!err.contains("stopped before the pull"), "{err}");
+    assert!(!env.ok(&["status"]).contains("held in the repo"));
 }
 
 #[test]

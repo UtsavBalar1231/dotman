@@ -341,11 +341,14 @@ fn commit_staged(
 
 /// The changed worktree files the content guard holds, minus what this machine's `[guard] allow`
 /// covers. `dotman edit` and hand edits in the repo reach no capture, so this is their only check.
-fn held_entries<'a>(ctx: &Context, status: &'a [StatusEntry]) -> Vec<(&'a StatusEntry, Finding)> {
+pub(crate) fn held_entries<'a>(
+    ctx: &Context,
+    status: &'a [StatusEntry],
+) -> Vec<(&'a StatusEntry, Finding)> {
     let allow = &ctx.machine.guard.allow;
     status
         .iter()
-        .filter(|entry| entry.kind != StatusKind::Unmerged)
+        .filter(|entry| entry.kind != StatusKind::Unmerged && !is_temp(&entry.path))
         .filter_map(|entry| Some((entry, holds_secret_key(ctx, &entry.path, allow)?)))
         .collect()
 }

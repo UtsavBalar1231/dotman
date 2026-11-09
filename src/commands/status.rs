@@ -3,12 +3,15 @@
 use crate::cli::StatusArgs;
 use crate::commands::add::{self, Hold};
 use crate::commands::apply::{Classified, classify_key};
+use crate::commands::sync;
 use crate::context::{Context, is_under};
 use crate::engine::status::{Row, Variants, Worktree};
+use crate::git::StatusEntry;
 use crate::name;
 use crate::output::{self, escape_line};
 use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
+use crate::secrets::Finding;
 use crate::state::State;
 use crate::system::{self, Verdict};
 use anyhow::{Context as _, Result};
@@ -111,6 +114,9 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         .filter(|(k, _)| in_scope(k))
         .map(|(k, h)| (k, *h))
         .collect();
+    let worktree_status = ctx.git.status()?;
+    let mut in_repo = sync::held_entries(&ctx, &worktree_status);
+    in_repo.retain(|(entry, _)| in_scope(&entry.path.to_string_lossy()));
 
     let mut out = std::io::stdout().lock();
     for (label, key) in &rows {
@@ -130,12 +136,17 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         for (key, _) in &held {
             write!(out, "held\t{key}\0").context("cannot write to stdout")?;
         }
+        for (entry, _) in &in_repo {
+            write!(out, "held-in-repo\t{}\0", entry.path.to_string_lossy())
+                .context("cannot write to stdout")?;
+        }
     } else {
         list_new(&mut out, &new, &held).context("cannot write to stdout")?;
+        list_held_in_repo(&mut out, &ctx, &in_repo).context("cannot write to stdout")?;
         for note in &scan.notes {
             output::warning(note);
         }
-        summarize(&rows, unrecorded);
+        summarize(&rows, unrecorded, in_repo.len());
     }
     Ok(())
 }
@@ -172,10 +183,15 @@ fn home_label(
     })
 }
 
-fn summarize(rows: &[(&str, String)], unrecorded: usize) {
+fn summarize(rows: &[(&str, String)], unrecorded: usize, held_in_repo: usize) {
     let dirty = rows.iter().filter(|(label, _)| *label != "clean").count();
+    let held = if held_in_repo > 0 {
+        format!(", {held_in_repo} held in the repo")
+    } else {
+        String::new()
+    };
     output::info(&format!(
-        "{} managed, {} clean, {dirty} to look at",
+        "{} managed, {} clean, {dirty} to look at{held}",
         rows.len(),
         rows.len().saturating_sub(dirty)
     ));
@@ -209,6 +225,32 @@ fn list_new(
         for (key, hold) in held {
             writeln!(out, "  {} ({})", escape_line(key), hold.reason())?;
         }
+    }
+    Ok(())
+}
+
+/// The repo edits that sync holds, which a clean row cannot show: `dotman edit` leaves the key
+/// clean while its uncommitted copy holds a credential.
+fn list_held_in_repo(
+    out: &mut impl Write,
+    ctx: &Context,
+    held: &[(&StatusEntry, Finding)],
+) -> std::io::Result<()> {
+    if held.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "\nheld in the repo; `{} sync` commits none of it, and with a remote stops before the pull:",
+        name::bin()
+    )?;
+    for (entry, found) in held {
+        writeln!(
+            out,
+            "  {}: {found}\n    {}",
+            escape_line(&entry.path.to_string_lossy()),
+            escape_line(&sync::held_remedy(ctx, entry, *found))
+        )?;
     }
     Ok(())
 }
