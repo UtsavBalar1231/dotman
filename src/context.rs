@@ -391,8 +391,8 @@ impl Context {
         Ok(found)
     }
 
-    /// Removes the temp files and directories that killed runs left in the worktree and in the
-    /// `$HOME` directories of managed keys. Only names whose embedded PID is no live process go,
+    /// Removes the temp files and directories that killed runs left in the worktree, in dotman's
+    /// state and config directories and in the `$HOME` directories of managed keys. Only names whose embedded PID is no live process go,
     /// so a live run that writes without the lock keeps its own. The caller holds the lock.
     pub(crate) fn sweep_temp_files(&self) -> Result<()> {
         let repo = &self.paths.repo;
@@ -416,7 +416,10 @@ impl Context {
             }
         }
         let home = &self.paths.home;
-        let mut dirs = BTreeSet::new();
+        // dotman's own directories hold the state and the age identity, both written atomically.
+        let mut dirs: BTreeSet<PathBuf> = std::iter::once(self.paths.state_dir.clone())
+            .chain(self.paths.config_file.parent().map(Path::to_path_buf))
+            .collect();
         for key in self.sources()?.keys() {
             // Only real directories, so the sweep never reaches through a symlinked parent.
             let parents: Vec<&str> = crate::engine::parents(key).collect();

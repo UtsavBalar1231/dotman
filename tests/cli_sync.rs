@@ -586,7 +586,8 @@ fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
         .repo()
         .join(format!(".config/app/.dotman-tmp-{live}-MnOpQr"));
     let old_style = env.repo().join(".config/app/.dotman-tmp-StUvWx");
-    for path in [&repo_temp, &home_temp, &live_temp, &old_style] {
+    let state_temp = env.state_dir().join(format!(".dotman-tmp-{dead}-EfGhIj"));
+    for path in [&repo_temp, &home_temp, &live_temp, &old_style, &state_temp] {
         fs::write(path, b"partial\n").expect("leave a temp file");
     }
     // An earlier version committed one; the next sync untracks it.
@@ -597,8 +598,8 @@ fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
     env.git(&["-C", &repo, "commit", "-q", "-m", "old"]);
 
     let err = exits(&env, 0, &["sync"]);
-    assert!(err.contains("removed 3 temp files"), "{err}");
-    assert!(!repo_temp.exists() && !home_temp.exists());
+    assert!(err.contains("removed 4 temp files"), "{err}");
+    assert!(!repo_temp.exists() && !home_temp.exists() && !state_temp.exists());
     assert!(!env.repo().join(&tracked).exists());
     assert!(
         live_temp.exists() && old_style.exists(),
