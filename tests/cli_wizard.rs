@@ -190,6 +190,48 @@ fn the_global_flag_writes_the_global_git_config() {
     assert_no_local_identity(&env);
 }
 
+/// The calls that need no repo, writing the global git config and asking whether the remote
+/// answers without credentials, work from a working directory that holds a `.git` gitfile whose
+/// target is gone, as a removed submodule leaves.
+#[test]
+fn a_broken_gitfile_in_the_working_directory_does_not_stop_the_repoless_calls() {
+    let env = TestEnv::new();
+    env.clear_git_identity();
+    let stray = env.root().join("stray");
+    fs::create_dir_all(&stray).expect("mkdir");
+    fs::write(stray.join(".git"), "gitdir: /nonexistent/.git/modules/x\n").expect("a gitfile");
+    let out = env
+        .dot()
+        .current_dir(&stray)
+        .args([
+            "init",
+            "--git-name",
+            "Ann Lee",
+            "--git-email",
+            "ann@example.org",
+            "--git-global",
+        ])
+        .output()
+        .expect("run dotman");
+    exits(&out, 0);
+    let global = fs::read_to_string(env.home().join(".gitconfig")).expect("read .gitconfig");
+    assert!(
+        global.contains("Ann Lee") && global.contains("ann@example.org"),
+        "{global}"
+    );
+
+    let out = env
+        .dot()
+        .current_dir(&stray)
+        .envs(public_remote_vars(&env))
+        .args(["init", "--remote", "git@example.org:me/dots.git"])
+        .output()
+        .expect("run dotman");
+    let err = exits(&out, 0);
+    assert!(err.contains("is public"), "{err}");
+    assert_eq!(state(&env).remote_public, Some(RemotePublic::True));
+}
+
 #[test]
 fn an_existing_identity_is_left_alone() {
     let env = TestEnv::new();

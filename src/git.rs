@@ -323,6 +323,16 @@ impl Git {
         cmd
     }
 
+    /// For a call that needs no repo, such as `config --global` or `ls-remote`. Git would still
+    /// look for one from dotman's working directory and fail on a broken `.git` there, as a
+    /// gitfile whose target is gone; a `--git-dir` that is no repo makes it run with none, on git
+    /// 2.25 as on later ones.
+    fn repoless(&self) -> Command {
+        let mut cmd = self.base();
+        cmd.arg("--git-dir=/dev/null");
+        cmd
+    }
+
     fn base(&self) -> Command {
         let mut cmd = crate::proc::command("git");
         for var in LOCAL_REPO_ENV {
@@ -1175,7 +1185,7 @@ impl Git {
             OsStr::new("--get-all"),
             OsStr::new(key),
         ];
-        let out = self.probe_bounded(self.base(), &args)?;
+        let out = self.probe_bounded(self.repoless(), &args)?;
         match out.status.code() {
             Some(0) => Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -1223,15 +1233,15 @@ impl Git {
     }
 
     /// The email in `git var GIT_AUTHOR_IDENT`; `None` when git has no configured identity. A repo
-    /// that does not exist yet has only the global config, so git then runs from `/`.
+    /// that does not exist yet has only the global config, so git then runs with no repo.
     pub fn author_email(&self) -> Result<Option<String>> {
         let args = ["-c", "user.useConfigOnly=true", "var", "GIT_AUTHOR_IDENT"];
-        let dir = if self.repo.is_dir() {
-            self.repo.as_path()
+        let cmd = if self.repo.is_dir() {
+            self.command_in(&self.repo)
         } else {
-            Path::new("/")
+            self.repoless()
         };
-        let out = self.probe_bounded(self.command_in(dir), &args)?;
+        let out = self.probe_bounded(cmd, &args)?;
         match out.status.code() {
             Some(0) => Ok(parse_ident_email(&text(&out))),
             Some(128) => Ok(None),
@@ -1243,7 +1253,7 @@ impl Git {
     /// A timeout counts as no answer.
     pub fn ls_remote_anonymous(&self, url: &str, timeout: Duration) -> Result<bool> {
         self.check_version()?;
-        let mut cmd = self.base();
+        let mut cmd = self.repoless();
         cmd.args(["-c", "credential.helper=", "ls-remote", url, "HEAD"]);
         cmd.env("GIT_TERMINAL_PROMPT", "0");
         cmd.env("GIT_ASKPASS", "").env("SSH_ASKPASS", "");
@@ -1254,7 +1264,11 @@ impl Git {
     /// Sets `key` in the repo's config, or in the user's global config.
     pub fn set_config(&self, key: &str, value: &str, global: bool) -> Result<()> {
         let scope = if global { "--global" } else { "--local" };
-        let cmd = if global { self.base() } else { self.command() };
+        let cmd = if global {
+            self.repoless()
+        } else {
+            self.command()
+        };
         self.run_with(cmd, &["config", scope, "--", key, value])
             .map(drop)
     }
