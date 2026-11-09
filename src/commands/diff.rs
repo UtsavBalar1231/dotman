@@ -1,4 +1,5 @@
-//! `dotman diff`: how `$HOME` differs from the repo, shown by `git diff --no-index`.
+//! `dotman diff`: how `$HOME` differs from the repo, shown by `git diff --no-index` from the repo
+//! to `$HOME`, so an edit made in `$HOME` shows as added lines.
 //!
 //! The comparison runs on copies in a private temp tree, so the user's pager, colours and external
 //! diff tool never see a path inside `$HOME` or the repo.
@@ -18,6 +19,7 @@ use anyhow::{Context as _, Result, bail};
 use libc::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use std::collections::BTreeSet;
 use std::fs::{self, Permissions};
+use std::io::IsTerminal;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -91,8 +93,8 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     show_all(&ctx, &refs, &system_refs, no_pager)
 }
 
-/// One `git diff`, without a pager, from `a/<key>` (H) to `b/<key>` (R) over the keys whose H
-/// differs from R; system keys are read through the system scope.
+/// One `git diff`, without a pager, from `repo/<key>` (R) to `home/<key>` (H) over the keys whose
+/// H differs from R; system keys are read through the system scope.
 pub(crate) fn show(
     ctx: &Context,
     entries: &[(&str, &SourceEntry)],
@@ -111,7 +113,7 @@ fn show_all(
     ctx.git.check_version()?;
     // Decrypted content goes here, so it is removed on every return, a failed git diff included.
     let tmp = private_temp_dir("dotman-diff-", &private_base(ctx)?)?;
-    let (home_side, repo_side) = (tmp.path().join("a"), tmp.path().join("b"));
+    let (home_side, repo_side) = (tmp.path().join("home"), tmp.path().join("repo"));
     let (home, home_real) = (&ctx.paths.home, ctx.paths.home_real.as_deref());
     let mut differs = false;
     for (key, r) in entries {
@@ -147,7 +149,7 @@ fn show_all(
     if !differs {
         return Ok(());
     }
-    for side in [&home_side, &repo_side] {
+    for side in [&repo_side, &home_side] {
         fs::create_dir_all(side).with_context(|| format!("cannot create {}", side.display()))?;
     }
 
@@ -155,15 +157,16 @@ fn show_all(
     if no_pager {
         cmd.arg("--no-pager");
     }
-    // `--no-prefix` with sides named `a` and `b` gives the usual `a/<key>` and `b/<key>` headers.
+    // `--no-index` keeps each side's directory in the path, so `--no-prefix` with sides named
+    // `repo` and `home` gives `repo/<key>` and `home/<key>`; `--src-prefix=repo/` would double it.
     cmd.args([
         "diff",
         "--no-index",
-        "--color=auto",
+        color(),
         "--no-prefix",
         "--",
-        "a",
-        "b",
+        "repo",
+        "home",
     ]);
     let mut child = cmd.spawn().context("failed to run git diff")?;
     // Ctrl-C reaches the whole foreground group. Ignored here only after the spawn, so git and the
@@ -178,6 +181,16 @@ fn show_all(
         Some(0 | 1) => Ok(()),
         None if status.signal() == Some(libc::SIGPIPE) => Ok(()),
         _ => bail!("git diff --no-index failed ({status})"),
+    }
+}
+
+// git ignores NO_COLOR, and an inherited GIT_PAGER_IN_USE makes its `auto` colour a pipe.
+fn color() -> &'static str {
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    if no_color || !std::io::stdout().is_terminal() {
+        "--color=never"
+    } else {
+        "--color=auto"
     }
 }
 

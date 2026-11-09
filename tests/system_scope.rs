@@ -424,7 +424,7 @@ fn diff_includes_system_entries() {
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("system/etc/keyd/default.conf"), "{text}");
-    assert!(text.contains("-old") && text.contains("+new"), "{text}");
+    assert!(text.contains("-new") && text.contains("+old"), "{text}");
 }
 
 #[test]

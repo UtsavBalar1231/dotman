@@ -52,7 +52,7 @@ pub enum Commands {
     Status(StatusArgs),
     /// Write the repo's files into $HOME
     Apply(ApplyArgs),
-    /// Show how $HOME differs from the repo
+    /// Show how $HOME differs from the repo, as a diff from repo/ to home/
     Diff(DiffArgs),
     /// Open a managed file's source in $VISUAL or $EDITOR, then apply it
     Edit(EditArgs),

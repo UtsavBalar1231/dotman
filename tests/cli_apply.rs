@@ -646,13 +646,13 @@ fn diff_prints_a_unified_diff_from_home_to_repo() {
 
     let all = diff(&[]);
     for expected in [
-        "diff --git a/.bashrc b/.bashrc",
-        "--- a/.bashrc",
-        "+++ b/.bashrc",
+        "diff --git repo/.bashrc home/.bashrc",
+        "--- repo/.bashrc",
+        "+++ home/.bashrc",
         "@@ ",
-        "-TWO",
-        "+two",
-        "+++ b/.config/new.conf",
+        "-two",
+        "+TWO",
+        "--- repo/.config/new.conf",
     ] {
         assert!(all.contains(expected), "missing `{expected}` in:\n{all}");
     }
@@ -660,7 +660,7 @@ fn diff_prints_a_unified_diff_from_home_to_repo() {
     assert!(!all.contains('\u{1b}'), "no colour into a pipe:\n{all}");
 
     let one = diff(&["--no-pager", ".bashrc"]);
-    assert!(one.contains("+two") && !one.contains("new.conf"), "{one}");
+    assert!(one.contains("+TWO") && !one.contains("new.conf"), "{one}");
     assert_eq!(diff(&[".zshrc"]), "");
     assert_eq!(env.four_trees(), before);
     assert_eq!(

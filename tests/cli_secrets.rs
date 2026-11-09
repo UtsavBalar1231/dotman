@@ -851,8 +851,8 @@ fn diff_compares_the_plaintext_and_removes_its_temp_dir() {
     let out = a.run_with(&[("XDG_RUNTIME_DIR", runtime.to_str().unwrap())], &["diff"]);
     exits(&out, 0);
     let shown = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(shown.contains("-  oauth_token: gho_local"), "{shown}");
-    assert!(shown.contains("+  oauth_token: gho_hunter2"), "{shown}");
+    assert!(shown.contains("+  oauth_token: gho_local"), "{shown}");
+    assert!(shown.contains("-  oauth_token: gho_hunter2"), "{shown}");
     assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
 
     exits(&a.run(&["diff"]), 0);
