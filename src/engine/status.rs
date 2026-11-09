@@ -41,7 +41,8 @@ pub enum Row {
     TemplateDrift,
     /// R is a file or symlink and something dotman never removes is in the way.
     Blocked,
-    /// R is a regular file and H is a symlink, which is never written through.
+    /// R is a regular file and H is a symlink that S does not record, which is never written
+    /// through.
     SymlinkAtTarget,
 }
 
@@ -152,7 +153,8 @@ pub fn classify(r: Option<&Tuple>, h: &Home, s: Option<&Tuple>) -> Option<Row> {
         }
         Home::Present(h) => h,
     };
-    if h.kind == Kind::Symlink && r.kind == Kind::File {
+    // A link that still equals S is dotman's own, so R replaces it as row 10 does.
+    if h.kind == Kind::Symlink && r.kind == Kind::File && s != Some(h) {
         return Some(Row::SymlinkAtTarget);
     }
     Some(match s {
@@ -528,11 +530,17 @@ mod tests {
         let h = observe(&home, ".bashrc").unwrap();
         let link = Tuple::of_link(&tmp.path().join("elsewhere"));
         assert_eq!(h, present(&link));
-        for s in [None, Some(&r), Some(&link), Some(&file("other"))] {
+        let other_link = Tuple::of_link(Path::new("other"));
+        for s in [None, Some(&r), Some(&other_link), Some(&file("other"))] {
             let row = classify(Some(&r), &h, s);
             assert_eq!(row, Some(Row::SymlinkAtTarget));
             assert_eq!(row.and_then(Row::category), Some(Category::Conflicts));
         }
+        // The link dotman applied, unchanged since: replaced like any other row 10.
+        assert_eq!(
+            classify(Some(&r), &h, Some(&link)),
+            Some(Row::ChangedInRepo)
+        );
     }
 
     #[test]

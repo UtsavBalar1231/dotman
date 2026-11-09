@@ -9,6 +9,7 @@ use crate::context::Context;
 use crate::engine::status::{Content, Row, Source, SourceEntry, Variants, Worktree, classify};
 use crate::engine::write::{
     Skip, WriteOptions, WriteOutcome, back_up_bytes, backup_run_dir, safe_symlink, safe_write,
+    safe_write_over_link,
 };
 use crate::engine::{Home, Node, Tuple, hash_hex, observe, observe_portable};
 use crate::hooks::{self, Policy};
@@ -1233,6 +1234,10 @@ impl Run<'_> {
         let home = &self.ctx.paths.home;
         let mode = self.kept_mode(item, r);
         let outcome = match &r.content {
+            // Row 10 found H equal to S, so a link there is the one dotman applied.
+            Content::Bytes(bytes) if item.row == Row::ChangedInRepo => {
+                safe_write_over_link(home, key, bytes, mode, &opts)
+            }
             Content::Bytes(bytes) => safe_write(home, key, bytes, mode, &opts),
             Content::Link(target) => safe_symlink(home, key, target, &opts),
         };

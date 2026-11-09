@@ -250,6 +250,47 @@ fn an_absolute_link_into_home_is_replaced_when_the_repo_changes_it() {
 }
 
 #[test]
+fn an_unmodified_managed_link_is_replaced_when_upstream_makes_it_a_file() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write("dots/real.conf", b"real\n", 0o644);
+    env.symlink("cfg.link", "dots/real.conf");
+    env.symlink("other.link", "dots/real.conf");
+    env.ok(&["add", "cfg.link", "other.link"]);
+    for key in ["cfg.link", "other.link"] {
+        fs::remove_file(env.repo().join(key)).unwrap();
+        env.write_repo(key, b"now a file\n");
+    }
+    // Re-pointed here, so it is no longer the link dotman applied.
+    fs::remove_file(env.home().join("other.link")).unwrap();
+    env.symlink("other.link", "dots/elsewhere");
+    assert_eq!(token(&env, "cfg.link").as_deref(), Some("changed-in-repo"));
+    assert_eq!(
+        token(&env, "other.link").as_deref(),
+        Some("symlink-at-target")
+    );
+
+    let err = attention(&env, &["apply", "--take-repo"]);
+    assert!(err.contains("other.link: is a symlink"), "{err}");
+    assert_eq!(env.read("cfg.link"), b"now a file\n");
+    assert!(
+        !fs::symlink_metadata(env.home().join("cfg.link"))
+            .unwrap()
+            .is_symlink()
+    );
+    assert_eq!(env.read("dots/real.conf"), b"real\n");
+    assert_eq!(
+        env.backups(".dotman/links.txt"),
+        [(b"cfg.link\tdots/real.conf\n".to_vec(), 0o600)]
+    );
+    assert_eq!(token(&env, "cfg.link").as_deref(), Some("clean"));
+    assert_eq!(
+        fs::read_link(env.home().join("other.link")).unwrap(),
+        Path::new("dots/elsewhere")
+    );
+}
+
+#[test]
 fn row_11_both_changed_is_a_conflict() {
     let env = added(&[(".bashrc", b"one\n", 0o644)]);
     env.write_repo(".bashrc", b"repo\n");

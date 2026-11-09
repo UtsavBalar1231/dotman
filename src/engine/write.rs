@@ -114,7 +114,20 @@ pub fn safe_write(
     opts: &WriteOptions<'_>,
 ) -> Result<WriteOutcome> {
     let mode = safe_mode(mode);
-    write_node(home, key, New::File { bytes, mode }, opts)
+    write_node(home, key, New::File { bytes, mode }, opts, false)
+}
+
+/// Like [`safe_write`], and also replaces a symlink at `key` that `opts.expected` names. The
+/// rename lands on the link itself, so its target is never written.
+pub fn safe_write_over_link(
+    home: &Path,
+    key: &str,
+    bytes: &[u8],
+    mode: u32,
+    opts: &WriteOptions<'_>,
+) -> Result<WriteOutcome> {
+    let mode = safe_mode(mode);
+    write_node(home, key, New::File { bytes, mode }, opts, true)
 }
 
 /// Points `key` below `home` at `target`, stored verbatim, replacing a file or symlink there.
@@ -124,7 +137,7 @@ pub fn safe_symlink(
     target: &Path,
     opts: &WriteOptions<'_>,
 ) -> Result<WriteOutcome> {
-    write_node(home, key, New::Link(target), opts)
+    write_node(home, key, New::Link(target), opts, false)
 }
 
 /// `<backups>/<UTC timestamp>-<pid>`, the directory for one run's backups, created on first use.
@@ -408,13 +421,14 @@ fn write_node(
     key: &str,
     new: New<'_>,
     opts: &WriteOptions<'_>,
+    over_link: bool,
 ) -> Result<WriteOutcome> {
     let current = read_node(home, key)?;
     let refusal = match &current {
         Node::BadParent(parent) => Some(Skip::Blocked(Obstacle::Parent(parent.clone()))),
         Node::Dir => Some(Skip::Blocked(Obstacle::Directory)),
         Node::Special => Some(Skip::Blocked(Obstacle::Special)),
-        Node::Symlink(_) if matches!(new, New::File { .. }) => Some(Skip::Symlink),
+        Node::Symlink(_) if matches!(new, New::File { .. }) && !over_link => Some(Skip::Symlink),
         Node::Missing | Node::Symlink(_) | Node::File { .. } => None,
     };
     if let Some(skip) = refusal {
@@ -921,6 +935,44 @@ mod tests {
             outside.display()
         );
         assert_eq!(fs::read_to_string(&links).unwrap(), records);
+    }
+
+    #[test]
+    fn an_expected_link_is_replaced_by_a_file_and_its_target_is_never_written() {
+        let f = fixture();
+        let outside = f.tmp.path().join("outside");
+        fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, f.home.join(".rc")).unwrap();
+        let call = Call {
+            backup: Some(&f.run_dir),
+            ..PLAIN
+        };
+        let stale = Home::Present(Tuple::of_link(Path::new("elsewhere")));
+        assert_eq!(
+            safe_write_over_link(&f.home, ".rc", b"x", 0o644, &options(&PLAIN, &stale)).unwrap(),
+            WriteOutcome::Skipped(Skip::Changed)
+        );
+        assert!(
+            fs::symlink_metadata(f.home.join(".rc"))
+                .unwrap()
+                .is_symlink()
+        );
+
+        let expected = observe(&f.home, ".rc").unwrap();
+        let links = f.run_dir.join(".dotman/links.txt");
+        assert_eq!(
+            safe_write_over_link(&f.home, ".rc", b"new", 0o644, &options(&call, &expected))
+                .unwrap(),
+            written(Some(links.clone()))
+        );
+        assert_eq!(fs::read(f.home.join(".rc")).unwrap(), b"new");
+        assert_eq!(mode_of(&f.home.join(".rc")), 0o644);
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        assert_eq!(
+            fs::read_to_string(&links).unwrap(),
+            format!(".rc\t{}\n", outside.display())
+        );
+        assert_eq!(names(&f.home), [".rc"]);
     }
 
     #[test]
