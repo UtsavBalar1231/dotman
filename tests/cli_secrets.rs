@@ -1253,3 +1253,28 @@ fn a_plain_variant_of_an_encrypted_file_is_refused_naming_encrypt() {
     assert!(remote_tree(&b).contains(BOX_VARIANT));
     assert_eq!(remote_objects_holding(&b, b"box-only"), 0);
 }
+
+/// A plain `add` of a file whose only source is another machine's `{age}` variant stores it
+/// encrypted, so no machine's plain text reaches the remote.
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+#[test]
+fn a_plain_add_over_another_machines_encrypted_variant_stays_encrypted() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    a.write(HOSTS, b"github.com:\n  oauth_token: from-a\n", 0o600);
+    a.ok(&["add", "--encrypt", "--for", "host=a", HOSTS]);
+    a.ok(&["sync"]);
+    let b = a.second_device();
+    b.write_machine_config("[identity]\nhost = \"box\"\n");
+    fs::copy(identity_path(&a), identity_path(&b)).expect("copy the key");
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    b.write(HOSTS, BOX_ONLY, 0o600);
+    let err = exits(&b.run(&["add", HOSTS]), 0);
+    assert!(err.contains("as .config/gh/hosts{age}.yml"), "{err}");
+    exits(&b.run(&["sync"]), 0);
+    assert!(remote_tree(&b).contains(".config/gh/hosts{age}.yml"));
+    assert_eq!(remote_objects_holding(&b, b"box-only"), 0);
+}
