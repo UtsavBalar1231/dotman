@@ -508,6 +508,89 @@ fn a_git_init_that_dies_leaves_no_skeleton_and_a_rerun_works() {
     other.ok(&["status"]);
 }
 
+/// Sets the modification time of `path` to an hour ago, past the sweeps' 10-minute cutoff.
+fn age(path: &Path) -> std::io::Result<()> {
+    let hour = std::time::Duration::from_secs(3600);
+    let then = std::time::SystemTime::now()
+        .checked_sub(hour)
+        .unwrap_or(std::time::UNIX_EPOCH);
+    fs::File::open(path)?.set_modified(then)
+}
+
+/// `init <url>` clones into the directory a symlinked repo path points at, keeps the mode of an
+/// empty directory already at the repo path, and refuses one that holds files before anything is
+/// cloned, in a dry run too. A staging directory a killed run left goes once its PID is dead and
+/// it is old.
+#[test]
+fn init_url_fills_a_symlinked_or_empty_repo_path_and_refuses_a_full_one() {
+    let first = TestEnv::new();
+    first.ok(&["init", "--remote", &first.remote_url()]);
+    first.write(".bashrc", b"x\n", 0o644);
+    first.ok(&["add", ".bashrc"]);
+    first.ok(&["sync"]);
+    let remote = first.remote_path().to_string_lossy().into_owned();
+    first.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let url = first.remote_url();
+
+    let linked = first.second_device();
+    let elsewhere = linked.root().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::create_dir_all(linked.xdg_data()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, linked.repo()).unwrap();
+    linked.ok(&["init", &url]);
+    assert!(elsewhere.join(".git/dotman-id").is_file());
+    assert!(linked.repo().is_symlink());
+    assert_eq!(linked.read(".bashrc"), b"x\n");
+    let staged = |dir: &Path| {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with(".dotman-init-"))
+    };
+    assert!(!staged(linked.root()) && !staged(&linked.xdg_data()));
+
+    let private = first.second_device();
+    fs::create_dir_all(private.repo()).unwrap();
+    fs::set_permissions(private.repo(), fs::Permissions::from_mode(0o700)).unwrap();
+    private.ok(&["init", &url]);
+    assert_eq!(mode_of(&private.repo()), 0o700);
+    assert_eq!(private.read(".bashrc"), b"x\n");
+
+    let full = first.second_device();
+    full.write_repo("notes.txt", b"mine\n");
+    for args in [&["init", "--dry-run", &url][..], &["init", &url]] {
+        let err = full.fails(args);
+        assert!(err.contains("exists and is not empty"), "{args:?}: {err}");
+    }
+    assert_eq!(fs::read(full.repo().join("notes.txt")).unwrap(), b"mine\n");
+    assert!(!full.repo().join(".git").exists());
+    assert_eq!(beside_repo(&full), ["dotman"]);
+
+    let killed = first.second_device();
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let data = killed.xdg_data();
+    let stale = data.join(format!(".dotman-init-{dead}-AbCdEf"));
+    let young = data.join(format!(".dotman-init-{dead}-GhIjKl"));
+    let old_style = data.join(".dotman-init-MnOpQr");
+    for dir in [&stale, &young, &old_style] {
+        fs::create_dir_all(dir.join("repo")).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    age(&stale).unwrap();
+    age(&old_style).unwrap();
+    killed.ok(&["init", &url]);
+    assert!(!stale.exists());
+    assert!(young.exists() && old_style.exists(), "too new, or no PID");
+}
+
 #[test]
 fn a_corrupt_index_or_head_is_named_with_doctor() {
     let env = TestEnv::new();

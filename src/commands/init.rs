@@ -4,7 +4,7 @@ use crate::bootstrap;
 use crate::cli::{Decisions, ImportArgs, InitArgs};
 use crate::commands::wizard::{self, Ask, Wizard};
 use crate::commands::{Outcome, apply};
-use crate::context::Context;
+use crate::context::{Context, is_real_dir};
 use crate::git::Git;
 use crate::hooks::Policy;
 use crate::import;
@@ -17,6 +17,7 @@ use crate::remote;
 use crate::repo_config::RepoConfig;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use std::fs;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -116,6 +117,8 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
             name::bin()
         );
     }
+    // Before the clone, so a dry run refuses as the real run does and nothing is downloaded first.
+    let place = Place::of(repo)?;
     // Everything a flag can get wrong is refused before the clone, which would be left behind.
     Wizard {
         ctx,
@@ -145,7 +148,7 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
         ..Policy::default()
     };
     if !dry_run {
-        clone_into_place(ctx, source)?;
+        clone_into_place(ctx, &place, source)?;
         output::success(&format!("cloned {source} into {}", repo.display()));
         remote::note_origin(ctx, false);
         let ask = if prompt::interactive() {
@@ -182,23 +185,71 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     apply::finish(&planning, &applied, policy)
 }
 
-/// A repo built in a directory beside the repo path, so that moving it into place is one rename.
-/// Dropping it removes whatever is left; a killed run leaves only this directory, never a half
-/// repo at the repo path.
+const STAGING_PREFIX: &str = ".dotman-init-";
+
+/// Where a clone goes: the repo path, or the directory a symlink there points at, which a rename
+/// cannot replace through the link.
+struct Place {
+    target: PathBuf,
+    /// Mode, owner and group of an empty directory already at `target`, which the repo keeps.
+    existing: Option<(u32, u32, u32)>,
+}
+
+impl Place {
+    /// Fails when something other than an empty directory is at the target.
+    fn of(repo: &Path) -> Result<Self> {
+        let target = match fs::symlink_metadata(repo) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                fs::canonicalize(repo).with_context(|| {
+                    format!(
+                        "{} is a symlink to a directory that does not exist; create it first",
+                        repo.display()
+                    )
+                })?
+            }
+            _ => repo.to_path_buf(),
+        };
+        let existing = match fs::symlink_metadata(&target) {
+            Ok(meta) if !meta.is_dir() => {
+                bail!("{} exists and is not a directory", target.display())
+            }
+            Ok(meta) => {
+                let mut entries = fs::read_dir(&target)
+                    .with_context(|| format!("cannot read {}", target.display()))?;
+                if entries.next().is_some() {
+                    bail!(
+                        "{} exists and is not empty, so nothing was cloned; move it aside, or set another repo path in the machine config",
+                        target.display()
+                    );
+                }
+                Some((meta.mode() & 0o7777, meta.uid(), meta.gid()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("cannot stat {}", target.display())),
+        };
+        Ok(Self { target, existing })
+    }
+}
+
+/// A repo built in a directory beside where it goes, on the same filesystem, so that moving it into
+/// place is one rename. Dropping it removes whatever is left; a killed run leaves only this
+/// directory, never a half repo at the repo path, and a later init removes it.
 struct Staging {
     _dir: TempDir,
     git: Git,
 }
 
 impl Staging {
-    fn new(ctx: &Context) -> Result<Self> {
-        let repo = &ctx.paths.repo;
-        let parent = repo
+    fn new(target: &Path) -> Result<Self> {
+        let parent = target
             .parent()
-            .ok_or_else(|| anyhow!("{} has no parent directory", repo.display()))?;
+            .ok_or_else(|| anyhow!("{} has no parent directory", target.display()))?;
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
-        let dir = private_temp_dir(".dotman-init-", parent)?;
+        sweep_staging(parent);
+        // The PID tells a killed run's directory from a live one's.
+        let prefix = format!("{STAGING_PREFIX}{}-", std::process::id());
+        let dir = private_temp_dir(&prefix, parent)?;
         let git = Git::new(dir.path().join("repo"), "init");
         Ok(Self { _dir: dir, git })
     }
@@ -208,9 +259,24 @@ impl Staging {
     }
 }
 
+/// Removes the staging directories that killed runs left in `parent`.
+fn sweep_staging(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if crate::context::is_leftover(&path, STAGING_PREFIX)
+            && is_real_dir(&path)
+            && let Err(e) = fs::remove_dir_all(&path)
+        {
+            output::warning(&format!("cannot remove {}: {e}", path.display()));
+        }
+    }
+}
+
 /// Clones `source` and moves the clone into place only once its checkout is complete.
-fn clone_into_place(ctx: &Context, source: &str) -> Result<()> {
-    let staging = Staging::new(ctx)?;
+fn clone_into_place(ctx: &Context, place: &Place, source: &str) -> Result<()> {
+    let staging = Staging::new(&place.target)?;
     staging.git.clone_from(source)?;
     // An empty remote leaves HEAD unborn, with nothing to check out.
     let complete = staging.git.head()?.is_none() || staging.git.status()?.is_empty();
@@ -219,14 +285,31 @@ fn clone_into_place(ctx: &Context, source: &str) -> Result<()> {
         "the checkout of {source} left files missing or changed; nothing was created at {}",
         ctx.paths.repo.display()
     );
-    let repo = &ctx.paths.repo;
-    fs::rename(staging.path(), repo)
-        .with_context(|| format!("cannot move the clone to {}", repo.display()))
+    let target = &place.target;
+    if let Some((mode, uid, gid)) = place.existing {
+        let staged = staging.path();
+        let meta = fs::symlink_metadata(staged)
+            .with_context(|| format!("cannot stat {}", staged.display()))?;
+        if (meta.uid(), meta.gid()) != (uid, gid) {
+            std::os::unix::fs::chown(staged, Some(uid), Some(gid)).with_context(|| {
+                format!(
+                    "cannot give the clone the owner and group of {}",
+                    target.display()
+                )
+            })?;
+        }
+        fs::set_permissions(staged, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("cannot set the mode of {}", staged.display()))?;
+    }
+    // rename(2) replaces an empty directory in one step.
+    fs::rename(staging.path(), target)
+        .with_context(|| format!("cannot move the clone to {}", target.display()))
 }
 
 /// Creates `.git` with its metadata, then moves it into the repo path, which may already hold files.
 fn init_into_place(ctx: &Context) -> Result<()> {
-    let staging = Staging::new(ctx)?;
+    let target = fs::canonicalize(&ctx.paths.repo).unwrap_or_else(|_| ctx.paths.repo.clone());
+    let staging = Staging::new(&target)?;
     staging.git.init()?;
     let repo = &ctx.paths.repo;
     fs::create_dir_all(repo).with_context(|| format!("cannot create {}", repo.display()))?;
