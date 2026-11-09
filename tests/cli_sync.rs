@@ -757,3 +757,39 @@ fn an_edit_that_does_not_go_back_after_the_pull_stops_before_home_is_written() {
     assert_eq!(b.read(".zshrc"), b"line1\nline2\n", "$HOME untouched");
     assert_eq!(b.remote_refs(), published);
 }
+
+/// `[ignore]` drops only what git does not track: a managed file that a new pattern matches, and
+/// one named to `add` though a default pattern matches it, stay managed on both machines.
+#[test]
+fn ignore_patterns_never_drop_a_tracked_or_added_file() {
+    let (a, b) = pair(&[(".config/app/keep.bak", b"keep\n", 0o644)]);
+    a.write(".config/app/merge.orig", b"orig\n", 0o644);
+    a.ok(&["add", ".config/app/merge.orig"]);
+    let token = |env: &TestEnv, key: &str| env.token_of("status", key);
+    assert_eq!(
+        token(&a, ".config/app/merge.orig").as_deref(),
+        Some("clean")
+    );
+    let mut config = a.repo_config();
+    config.ignore.patterns.push("**/*.bak".to_owned());
+    config
+        .save(&a.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+
+    let err = exits(&a, 0, &["sync"]);
+    assert!(!err.contains("forgotten"), "{err}");
+    assert_eq!(remote_file(&a, ".config/app/merge.orig"), "orig\n");
+    let err = exits(&b, 0, &["sync"]);
+    assert!(!err.contains("forgotten"), "{err}");
+    assert_eq!(b.read(".config/app/merge.orig"), b"orig\n");
+    for env in [&a, &b] {
+        for key in [".config/app/keep.bak", ".config/app/merge.orig"] {
+            assert_eq!(token(env, key).as_deref(), Some("clean"), "{key}");
+        }
+    }
+
+    a.write(".config/app/keep.bak", b"keep, edited\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".config/app/keep.bak"), b"keep, edited\n");
+}

@@ -351,6 +351,7 @@ impl Context {
         let root = &self.paths.repo;
         // An editor's swap file or a merge's `.orig` in the worktree is not a key.
         let ignore = Ignore::compile(&self.repo_config()?.ignore.patterns)?;
+        let kept = self.unignored()?;
         let mut found = BTreeMap::new();
         let mut walk = WalkDir::new(root)
             .follow_links(false)
@@ -366,7 +367,7 @@ impl Context {
                     .strip_prefix(root)
                     .ok()
                     .and_then(Path::to_str)
-                    .is_some_and(|dir| ignore.matches(dir, true));
+                    .is_some_and(|dir| ignore.matches(dir, true) && !holds_any(&kept, dir));
                 if ignored || (entry.depth() == 1 && entry.file_name() == OsStr::new(".git")) {
                     walk.skip_current_dir();
                 }
@@ -385,13 +386,29 @@ impl Context {
             let Some(key) = rel.to_str() else { continue };
             if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
                 || validate_key(key).is_err()
-                || ignore.matches(key, false)
+                || (ignore.matches(key, false) && !kept.contains(key))
             {
                 continue;
             }
             found.insert(key.to_owned(), kind);
         }
         Ok(found)
+    }
+
+    /// Repo paths that `[ignore]` never drops, as git's own ignore rules never drop a tracked
+    /// file: those in the index, and those this machine applied or added, which `add` puts in the
+    /// worktree before any commit. A state that cannot be read is reported by the command that
+    /// loads it.
+    fn unignored(&self) -> Result<BTreeSet<String>> {
+        let mut kept = BTreeSet::new();
+        if !is_real_dir(&self.paths.repo.join(".git")) {
+            return Ok(kept);
+        }
+        kept.extend(self.git.index_paths()?);
+        if let Some(state) = self.repo_id().ok().and_then(|id| self.state(&id).ok()) {
+            kept.extend(state.files.into_values().map(|entry| entry.source));
+        }
+        Ok(kept)
     }
 
     /// Removes the temp files and directories that killed runs left in the worktree, in dotman's
@@ -551,6 +568,15 @@ fn is_stale_temp(name: &OsStr) -> bool {
     };
     pid.parse::<u32>()
         .is_ok_and(|pid| pid != std::process::id() && !sys::pid_alive(pid))
+}
+
+/// Whether any of `paths` lies under `dir`.
+fn holds_any(paths: &BTreeSet<String>, dir: &str) -> bool {
+    let prefix = format!("{dir}/");
+    paths
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|path| path.starts_with(&prefix))
 }
 
 /// Whether `key` is `dir` or lies under it.
