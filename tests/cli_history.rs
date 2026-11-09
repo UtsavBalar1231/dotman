@@ -88,6 +88,27 @@ fn restore_refuses_a_mistyped_revision_instead_of_reading_it_as_a_date() {
 }
 
 #[test]
+fn restore_reads_dates_itself_and_names_a_revision_past_the_history() {
+    let env = two_commits();
+    env.write(".a", b"three\n", 0o644);
+    for future in ["2100-01-01", "3000-01-01"] {
+        env.ok(&["restore", ".a", "--from", future]);
+        assert_eq!(env.read(".a"), b"two\n", "{future} is after every commit");
+        env.write(".a", b"three\n", 0o644);
+    }
+    let err = env.fails(&["restore", ".a", "--from", "2025-09-31"]);
+    assert!(err.contains("neither a commit nor a date"), "{err}");
+    let err = env.fails(&["restore", ".a", "--from", "99999.years.ago"]);
+    assert!(err.contains("every commit is newer than"), "{err}");
+    let err = env.fails(&["restore", ".a", "--from", "HEAD~9"]);
+    assert!(
+        err.contains("the revision `HEAD~9` does not exist"),
+        "{err}"
+    );
+    assert_eq!(env.read(".a"), b"three\n");
+}
+
+#[test]
 fn a_dry_run_restore_changes_nothing() {
     let env = two_commits();
     let before = env.four_trees();

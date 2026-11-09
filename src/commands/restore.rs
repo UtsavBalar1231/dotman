@@ -24,7 +24,7 @@ use std::ops::RangeInclusive;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Runs `dotman restore`.
 ///
@@ -138,59 +138,135 @@ fn resolve(ctx: &Context, from: &str) -> Result<String> {
     if let Some(rev) = ctx.git.resolve_commit(from)? {
         return Ok(rev);
     }
-    if !is_date(from) {
-        bail!(
-            "`{from}` is neither a commit nor a date. Give a revision such as HEAD~2 or a commit hash, or a date such as 2024-05-01, \"2024-05-01 13:30\", 2.days.ago or yesterday"
-        );
-    }
-    ctx.git
-        .rev_before(from)?
-        .ok_or_else(|| anyhow!("every commit is newer than `{from}`"))
-}
-
-/// Whether `--from` names a date: `YYYY-MM-DD`, optionally followed by a space or `T` and `HH:MM`
-/// or `HH:MM:SS`; `N.units.ago` or `N units ago`; or `yesterday`. git reads nearly any text as a
-/// date, so a mistyped revision such as `mian` would otherwise pick some commit.
-fn is_date(text: &str) -> bool {
-    text == "yesterday" || is_calendar_date(text) || is_relative_date(text)
-}
-
-fn digits(part: &str, len: usize, range: RangeInclusive<u32>) -> bool {
-    part.len() == len
-        && part.bytes().all(|b| b.is_ascii_digit())
-        && part.parse().is_ok_and(|n| range.contains(&n))
-}
-
-fn is_calendar_date(text: &str) -> bool {
-    let (day, time) = text
-        .split_once([' ', 'T'])
-        .map_or((text, None), |(day, time)| (day, Some(time)));
-    let day: Vec<&str> = day.split('-').collect();
-    let day_ok = matches!(day.as_slice(), [y, m, d]
-        if digits(y, 4, 1970..=9999) && digits(m, 2, 1..=12) && digits(d, 2, 1..=31));
-    let time_ok = time.is_none_or(|time| {
-        let parts: Vec<&str> = time.split(':').collect();
-        match parts.as_slice() {
-            [h, m] => digits(h, 2, 0..=23) && digits(m, 2, 0..=59),
-            [h, m, s] => digits(h, 2, 0..=23) && digits(m, 2, 0..=59) && digits(s, 2, 0..=59),
-            _ => false,
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    match parse_date(from, now) {
+        Some(When::At(secs)) => ctx
+            .git
+            .rev_before(&format!("@{secs} +0000"))?
+            .ok_or_else(|| anyhow!("every commit is newer than `{from}`")),
+        Some(When::BeforeEpoch) => bail!("every commit is newer than `{from}`"),
+        None => {
+            let base = from.split(['~', '^']).next().unwrap_or(from);
+            if base != from && !base.is_empty() && ctx.git.resolve_commit(base)?.is_some() {
+                bail!("the revision `{from}` does not exist: {base} has no such ancestor");
+            }
+            bail!(
+                "`{from}` is neither a commit nor a date. Give a revision such as HEAD~2 or a commit hash, or a date such as 2024-05-01, \"2024-05-01 13:30\" (UTC), 2.days.ago or yesterday"
+            )
         }
-    });
-    day_ok && time_ok
+    }
 }
 
-fn is_relative_date(text: &str) -> bool {
-    let words: Vec<&str> = text.split(['.', ' ']).collect();
-    let [count, unit, "ago"] = words.as_slice() else {
-        return false;
+/// The time a `--from` date names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum When {
+    /// Unix seconds.
+    At(u64),
+    /// A span that reaches back past 1970, before any commit.
+    BeforeEpoch,
+}
+
+/// `text` as a date: `YYYY-MM-DD` in UTC, optionally followed by a space or `T` and `HH:MM` or
+/// `HH:MM:SS`; `N.units.ago` or `N units ago`, where a month is 30 days and a year 365; or
+/// `yesterday`. `None` for anything else. git gets the result as seconds, never the text: its
+/// approxidate reads nearly any text as some date, and misreads some of these forms.
+fn parse_date(text: &str, now: u64) -> Option<When> {
+    calendar(text).map(When::At).or_else(|| ago(text, now))
+}
+
+fn number(part: &str, len: usize, range: RangeInclusive<u32>) -> Option<u32> {
+    if part.len() != len || !part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    part.parse().ok().filter(|n| range.contains(n))
+}
+
+const fn leap(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+const fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        2 if leap(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn calendar(text: &str) -> Option<u64> {
+    let (date, time) = text
+        .split_once([' ', 'T'])
+        .map_or((text, None), |(date, time)| (date, Some(time)));
+    let date: Vec<&str> = date.split('-').collect();
+    let [year, month, day] = date.as_slice() else {
+        return None;
     };
-    let unit = unit.strip_suffix('s').unwrap_or(unit);
-    (1..=6).contains(&count.len())
-        && count.bytes().all(|b| b.is_ascii_digit())
-        && matches!(
-            unit,
-            "second" | "minute" | "hour" | "day" | "week" | "month" | "year"
-        )
+    let year = number(year, 4, 1970..=9999)?;
+    let month = number(month, 2, 1..=12)?;
+    let day = number(day, 2, 1..=days_in_month(year, month))?;
+    let (hour, minute, second) = match time {
+        None => (0, 0, 0),
+        Some(time) => {
+            let parts: Vec<&str> = time.split(':').collect();
+            let (hour, minute, second) = match parts.as_slice() {
+                [hour, minute] => (hour, minute, &"00"),
+                [hour, minute, second] => (hour, minute, second),
+                _ => return None,
+            };
+            (
+                number(hour, 2, 0..=23)?,
+                number(minute, 2, 0..=59)?,
+                number(second, 2, 0..=59)?,
+            )
+        }
+    };
+    let mut days: u64 = 0;
+    for earlier in 1970..year {
+        days = days.checked_add(if leap(earlier) { 366 } else { 365 })?;
+    }
+    for earlier in 1..month {
+        days = days.checked_add(u64::from(days_in_month(year, earlier)))?;
+    }
+    days = days.checked_add(u64::from(day.checked_sub(1)?))?;
+    let seconds = u64::from(hour)
+        .checked_mul(3_600)?
+        .checked_add(u64::from(minute).checked_mul(60)?)?
+        .checked_add(u64::from(second))?;
+    days.checked_mul(86_400)?.checked_add(seconds)
+}
+
+fn ago(text: &str, now: u64) -> Option<When> {
+    let (count, unit) = if text == "yesterday" {
+        ("1", "day")
+    } else {
+        let words: Vec<&str> = text.split(['.', ' ']).collect();
+        let [count, unit, "ago"] = words.as_slice() else {
+            return None;
+        };
+        (*count, unit.strip_suffix('s').unwrap_or(unit))
+    };
+    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let unit: u64 = match unit {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3_600,
+        "day" => 86_400,
+        "week" => 604_800,
+        "month" => 2_592_000,
+        "year" => 31_536_000,
+        _ => return None,
+    };
+    // A count too large for u64 still names a time before 1970.
+    let span = count.parse::<u64>().ok().and_then(|n| n.checked_mul(unit));
+    Some(
+        span.and_then(|span| now.checked_sub(span))
+            .map_or(When::BeforeEpoch, When::At),
+    )
 }
 
 /// What `$HOME` receives for `blob`, the source in revision `short`; `None` when that is `blob`.
@@ -251,43 +327,81 @@ fn decrypt(ctx: &Context, ciphertext: &[u8], dry_run: bool) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    const NOW: u64 = 1_800_000_000;
+
     #[test]
-    fn only_strict_date_forms_are_dates() {
-        for date in [
-            "2024-05-01",
-            "2024-05-01 13:30",
-            "2024-05-01T13:30:59",
-            "2.days.ago",
-            "1 day ago",
-            "10.minutes.ago",
-            "3 weeks ago",
-            "1.year.ago",
-            "yesterday",
+    fn calendar_dates_are_utc_seconds_with_real_month_lengths() {
+        for (date, secs) in [
+            ("1970-01-01", 0),
+            ("2024-05-01", 1_714_521_600),
+            ("2024-05-01 13:30", 1_714_570_200),
+            ("2024-05-01T13:30:59", 1_714_570_259),
+            ("2024-02-29", 1_709_164_800),
+            ("2000-02-29", 951_782_400),
+            ("2100-01-01", 4_102_444_800),
+            ("3000-01-01", 32_503_680_000),
+            ("9999-12-31T23:59:59", 253_402_300_799),
         ] {
-            assert!(is_date(date), "{date}");
+            assert_eq!(parse_date(date, NOW), Some(When::At(secs)), "{date}");
         }
+        for bad in [
+            "2025-09-31",
+            "2023-02-29",
+            "2100-02-29",
+            "1969-12-31",
+            "2024-5-1",
+            "2024-13-01",
+            "2024-05-32",
+            "2024-05-00",
+            "2024-05-01 24:00",
+            "2024-05-01 13:60",
+            "2024-05-01 13",
+            "2024-05-01  13:30",
+        ] {
+            assert_eq!(parse_date(bad, NOW), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_relative_span_counts_back_from_now_and_past_1970_is_before_any_commit() {
+        for (date, back) in [
+            ("2.days.ago", 172_800),
+            ("1 day ago", 86_400),
+            ("yesterday", 86_400),
+            ("10.minutes.ago", 600),
+            ("3 weeks ago", 1_814_400),
+            ("1.month.ago", 2_592_000),
+            ("1.year.ago", 31_536_000),
+        ] {
+            let at = NOW.checked_sub(back).map(When::At);
+            assert_eq!(parse_date(date, NOW), at, "{date}");
+        }
+        for far in [
+            "58.years.ago",
+            "1234567.days.ago",
+            "99999999999999999999.days.ago",
+        ] {
+            assert_eq!(parse_date(far, NOW), Some(When::BeforeEpoch), "{far}");
+        }
+    }
+
+    #[test]
+    fn typos_are_not_dates() {
         for typo in [
             "heaad~2",
             "mian",
             "yesterdy",
             "nonsense-rev",
             "HEAD~x",
-            "2024-5-1",
-            "2024-13-01",
-            "2024-05-32",
-            "2024-05-01 24:00",
-            "2024-05-01 13:60",
-            "2024-05-01 13",
-            "2024-05-01  13:30",
             "2.days",
             "2.dais.ago",
             "two.days.ago",
             "2 days  ago",
-            "1234567.days.ago",
+            "-2.days.ago",
             "last week",
             "",
         ] {
-            assert!(!is_date(typo), "{typo}");
+            assert_eq!(parse_date(typo, NOW), None, "{typo}");
         }
     }
 }
