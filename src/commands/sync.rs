@@ -19,7 +19,7 @@ use crate::remote;
 use crate::secrets;
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -317,9 +317,11 @@ fn report_held(ctx: &Context, held: &[PathBuf], dry_run: bool) {
 /// Refuses a commit that deletes at least [`MASS_DELETE`] tracked files and at least half of
 /// them, unless an interactive answer allows it.
 fn refuse_mass_delete(ctx: &Context, status: &[StatusEntry], dry_run: bool) -> Result<()> {
+    // Only files gone from the worktree: a lost index also lists every file as deleted.
     let deleted = status
         .iter()
         .filter(|entry| entry.kind == StatusKind::Ordinary && entry.xy.contains('D'))
+        .filter(|entry| fs::symlink_metadata(ctx.paths.repo.join(&entry.path)).is_err())
         .count();
     if deleted < MASS_DELETE || ctx.git.head()?.is_none() {
         return Ok(());

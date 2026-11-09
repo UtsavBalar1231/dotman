@@ -201,6 +201,11 @@ impl Git {
         for var in LOCAL_REPO_ENV {
             cmd.env_remove(var);
         }
+        // With a broken `.git`, git would look for a repo in the parent directories and could
+        // find the user's own, such as a `~/.git` dotfiles repo, and commit there.
+        if let Some(parent) = self.repo.parent().filter(|p| p.is_absolute()) {
+            cmd.env("GIT_CEILING_DIRECTORIES", parent);
+        }
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
@@ -270,16 +275,21 @@ impl Git {
         let err = failure(args, out);
         let stderr = String::from_utf8_lossy(&out.stderr);
         let git_dir = self.repo.join(".git");
+        let index = git_dir.join("index");
         let broken = if stderr.contains("index file") || stderr.contains("bad index") {
-            "index"
+            format!("{} is corrupt", index.display())
         } else if stderr.contains("not a git repository") && git_dir.is_dir() {
-            "HEAD"
+            format!("{} is missing or corrupt", git_dir.join("HEAD").display())
+        } else if stderr.contains("unable to read") {
+            format!(
+                "an object that {} or HEAD names cannot be read",
+                index.display()
+            )
         } else {
             return err;
         };
         err.context(format!(
-            "{} is missing or corrupt; `{} doctor` checks the repo",
-            git_dir.join(broken).display(),
+            "{broken}; `{} doctor` checks the repo",
             crate::name::bin()
         ))
     }

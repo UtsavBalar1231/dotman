@@ -512,24 +512,33 @@ fn a_corrupt_index_or_head_is_named_with_doctor() {
     fs::write(&index, b"DIRC garbage").unwrap();
     let err = env.fails(&["sync"]);
     assert!(
-        err.contains(&format!("{} is missing or corrupt", index.display())),
+        err.contains(&format!("{} is corrupt", index.display())),
         "{err}"
     );
     assert!(err.contains("`dotman doctor` checks the repo"), "{err}");
 
+    // A lost index is rebuilt by the next commit, not read as every file deleted.
+    fs::remove_file(&index).unwrap();
+    env.ok(&["sync"]);
+
     let other = TestEnv::new();
     other.ok(&["init"]);
+    // The repo's parent looks like a git repo, as a `~/.git` dotfiles repo would be.
+    let parent = other.xdg_data().to_string_lossy().into_owned();
+    other.git(&["init", "-q", "--bare", &parent]);
     let head = other.repo().join(".git/HEAD");
     fs::remove_file(&head).unwrap();
-    let err = other.fails(&["status"]);
-    assert!(
-        err.contains(&format!("{} is missing or corrupt", head.display())),
-        "{err}"
-    );
-    assert!(
-        !err.contains("is incomplete"),
-        "a repo with its id finished init: {err}"
-    );
+    for args in [&["status"][..], &["apply"], &["sync"]] {
+        let err = other.fails(args);
+        assert!(
+            err.contains(&format!("{} is missing or corrupt", head.display())),
+            "{args:?}: {err}"
+        );
+        assert!(
+            !err.contains("is incomplete"),
+            "a repo with its id finished init: {err}"
+        );
+    }
 }
 
 #[test]
