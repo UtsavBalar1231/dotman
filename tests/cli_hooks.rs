@@ -662,14 +662,8 @@ fn a_table_swapped_while_hooks_wait_is_shown_before_the_printed_approval_runs_it
         err.contains("`dotman apply --approve-hooks` approves it and runs it once:"),
         "{err}"
     );
-    let below = err
-        .split_once("the new [hooks] table:")
-        .map(|(_, rest)| rest);
     let entry = format!("  ** -> echo second >> '{mark}'");
-    assert!(
-        below.is_some_and(|rest| rest.lines().any(|line| line == entry)),
-        "{err}"
-    );
+    assert!(err.lines().any(|line| line == entry), "{err}");
     assert!(!marker(&a).exists(), "{err}");
     let again = exits(&b, 0, &["sync"]);
     assert!(!again.contains("not run"), "said once: {again}");
@@ -735,7 +729,7 @@ fn saving_an_approval_prints_the_table_even_with_quiet() {
     let env = hooked();
     set_hooks(&env, &append(&env));
     let err = exits(&env, 0, &["-q", "apply", "--approve-hooks"]);
-    assert!(err.contains("approved this [hooks] table"), "{err}");
+    assert!(err.contains("approving this [hooks] table"), "{err}");
     assert!(
         err.contains(&format!(".config/app/** -> {}", append(&env))),
         "{err}"
@@ -743,10 +737,77 @@ fn saving_an_approval_prints_the_table_even_with_quiet() {
     env.write_repo(A, b"a2\n");
     let err = exits(&env, 0, &["-q", "apply"]);
     assert!(
-        !err.contains("approved this"),
+        !err.contains("approving this"),
         "an approval already saved is not shown: {err}"
     );
     assert_eq!(runs(&env), 2);
+}
+
+/// The warning shows every entry of the table, not only the commands due, because the whole
+/// table is what it records as shown and what the printed command approves.
+#[test]
+fn the_hooks_not_run_warning_prints_the_whole_table_it_records() {
+    let env = hooked();
+    let mark = marker(&env).display().to_string();
+    env.write_repo(
+        ".dotman.toml",
+        format!(
+            "[hooks]\n\".config/app/a*\" = \"echo a >> '{mark}'\"\n\"zz*\" = \"echo z >> '{mark}'\"\n"
+        )
+        .as_bytes(),
+    );
+    let err = exits(&env, 0, &["apply"]);
+    for entry in [
+        format!("  .config/app/a* -> echo a >> '{mark}'"),
+        format!("  zz* -> echo z >> '{mark}'"),
+    ] {
+        assert!(err.lines().any(|line| line == entry), "{entry}: {err}");
+    }
+    let state = State::read(&env.state_dir().join("state.toml"))
+        .expect("state")
+        .expect("a state");
+    assert_eq!(
+        state.hooks.pending_table,
+        Some(format!(
+            r#"{{".config/app/a*":"echo a >> '{mark}'","zz*":"echo z >> '{mark}'"}}"#
+        ))
+    );
+    let out = common::run_hint(&env, &err, "apply --approve-hooks");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(fs::read_to_string(marker(&env)).unwrap_or_default(), "a\n");
+    assert!(approved_line(&env).is_some());
+}
+
+/// With no table recorded as shown, the flag approves the current one, which no warning showed,
+/// so it prints it before it approves it or runs a hook.
+#[test]
+fn approving_a_table_no_warning_showed_prints_it_first() {
+    let a = first_device();
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    let mark = marker(&a).display().to_string();
+    set_hooks(&a, &format!("echo first >> '{mark}'"));
+    exits(&a, 0, &["sync", "--no-hooks"]);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(!err.contains("not run"), "nothing hooked changed: {err}");
+    a.write_repo(A, b"a1\n");
+    exits(&a, 0, &["sync", "--no-hooks"]);
+    exits(&b, 0, &["git", "pull", "-q"]);
+
+    let err = exits(&b, 0, &["apply", "--approve-hooks"]);
+    let lines: Vec<&str> = err.lines().collect();
+    let at = |wanted: &str| lines.iter().position(|line| *line == wanted);
+    let header = at("approving this [hooks] table on this machine:");
+    let entry = at(&format!("  .config/app/** -> echo first >> '{mark}'"));
+    let ran = lines
+        .iter()
+        .position(|line| line.starts_with("hook echo first"));
+    assert!(
+        matches!((header, entry, ran), (Some(shown), Some(listed), Some(hook))
+            if shown < listed && listed < hook),
+        "{err}"
+    );
+    assert_eq!(runs(&a), 1, "{err}");
 }
 
 #[test]

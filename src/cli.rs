@@ -14,7 +14,9 @@ Exit status:
   1  An error. `doctor` also exits 1 when one of its checks fails.
   2  The command line could not be parsed.
   3  The run finished, but left paths for you: undecided, held back,
-     blocked, or reported for action.
+     blocked, or reported for action; or hooks were not approved,
+     because the [hooks] table changed since a warning showed it, so
+     --approve-hooks showed the new table and approved nothing.
   4  `sync` hit a rebase conflict, aborted the pull and printed the
      steps to resolve it; or a git operation or conflict is unfinished
      in the repo.
@@ -88,10 +90,12 @@ With --porcelain, each record is `<token>\\t<key>\\0`. The tokens:
 
 const SYNC_HELP: &str = "\
 Exit status:
-  3  Paths were left undecided or held back. Everything else is still
-     committed, pulled, applied and pushed, except when an uncommitted
-     repo edit holds a credential or an age key: then sync stops before
-     the pull.
+  3  Paths were left undecided or held back, or hooks were not approved:
+     the [hooks] table changed since a warning showed it, so
+     --approve-hooks showed the new table and approved nothing.
+     Everything else is still committed, pulled, applied and pushed,
+     except when an uncommitted repo edit holds a credential or an age
+     key: then sync stops before the pull.
   4  The pull hit a conflict. Sync aborted it, so nothing it brought
      reached $HOME, and printed the steps to resolve it.
   1  An error. Among them: the remote shares no commit with the repo, or
@@ -320,7 +324,7 @@ pub struct Decisions {
     /// Accept a changed machine identity and use the variants it selects
     #[arg(long, help_heading = "Decisions")]
     pub accept_identity: bool,
-    /// Approve the current `[hooks]` table on this machine and run its hooks
+    /// Approve the current `[hooks]` table on this machine, printing it first, and run its hooks. When the table changed since a warning here showed it, show the new table and approve nothing; the same command again approves it
     #[arg(long, help_heading = "Decisions")]
     pub approve_hooks: bool,
 }

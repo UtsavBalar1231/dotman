@@ -89,7 +89,9 @@ The command line could not be parsed.
 .TP
 \fB3\fR
 The run finished, but left paths for you: undecided, held back,
-blocked, or reported for action.
+blocked, or reported for action; or hooks were not approved,
+because the [hooks] table changed since a warning showed it, so
+\-\-approve\-hooks showed the new table and approved nothing.
 .TP
 \fB4\fR
 \fBsync\fR hit a rebase conflict, aborted the pull and printed the

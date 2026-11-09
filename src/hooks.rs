@@ -46,7 +46,7 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     let standing = approval(&json, &state);
     let recorded = standing == Standing::Approved;
     // The flag approves the table last shown here, never one that has changed since: the user
-    // read the shown one. With none shown yet, it approves the table and prints it.
+    // read the shown one. With none shown yet, it prints the current table and approves it.
     let unshown = policy.approve
         && !recorded
         && state
@@ -78,12 +78,13 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     }
     let file = ctx.paths.state_file();
     if approved && !recorded {
+        if !asked {
+            show_table("approving this [hooks] table on this machine:", &table);
+        }
         state.hooks.approved = Some(json.clone());
         state.save(&file, false)?;
         if asked {
             output::context("approved the [hooks] table above on this machine");
-        } else {
-            show_table("approved this [hooks] table on this machine:", &table);
         }
     }
     if !approved {
@@ -110,6 +111,8 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         } else {
             "the [hooks] table in .dotman.toml is not approved on this machine. Read it; then"
         };
+        // The whole table, not only the commands due: it is what `pending_table` records, and so
+        // what the printed command approves.
         output::warning(&format!(
             "{} not run: {why} `{} apply --approve-hooks` approves it and runs {} once:",
             count(with_pending.len()),
@@ -120,12 +123,7 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
                 "them"
             }
         ));
-        for command in &with_pending {
-            output::warning(&format!("  {}", output::escape_line(command)));
-        }
-        if swapped {
-            show_table("the new [hooks] table:", &table);
-        }
+        show_entries(&table);
         return Ok(Outcome::Done);
     }
 
@@ -346,6 +344,10 @@ fn approval(json: &str, state: &State) -> Standing {
 
 fn show_table(header: &str, table: &BTreeMap<String, String>) {
     output::context(header);
+    show_entries(table);
+}
+
+fn show_entries(table: &BTreeMap<String, String>) {
     for (glob, command) in table {
         output::context(&format!(
             "  {} -> {}",

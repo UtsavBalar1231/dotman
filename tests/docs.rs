@@ -63,6 +63,27 @@ fn every_readme_command_exists() -> R {
     Ok(())
 }
 
+/// `--approve-hooks` exits 3 when the table changed since a warning showed it, so the exit 3 entry
+/// of each man page whose command takes the flag says so.
+#[test]
+fn the_man_pages_name_unapproved_hooks_under_exit_3() -> R {
+    for page in ["man/dotman.1", "man/dotman-sync.1"] {
+        let text = read(page)?;
+        let three = text
+            .split_once(".SH \"EXIT STATUS\"")
+            .and_then(|(_, status)| status.split_once("\\fB3\\fR"))
+            .map(|(_, rest)| rest.split(".TP").next().unwrap_or_default())
+            .ok_or_else(|| format!("{page} has no exit status 3"))?
+            .replace('\n', " ");
+        assert!(three.contains("hooks were not approved"), "{page}: {three}");
+        assert!(
+            three.contains("\\-\\-approve\\-hooks showed the new table and approved nothing"),
+            "{page}: {three}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn every_structure_path_in_agents_exists() -> R {
     let text = read("AGENTS.md")?;

@@ -137,7 +137,7 @@ _arguments "${_arguments_options[@]}" : \
 '(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \
 '--restore-deleted[Write files deleted locally back from the repo]' \
 '--accept-identity[Accept a changed machine identity and use the variants it selects]' \
-'--approve-hooks[Approve the current \`\[hooks\]\` table on this machine and run its hooks]' \
+'--approve-hooks[Approve the current \`\[hooks\]\` table on this machine, printing it first, and run its hooks. When the table changed since a warning here showed it, show the new table and approve nothing; the same command again approves it]' \
 '--in-place[Rewrite files in place when a rename cannot replace them, as on a bind mount]' \
 '(--approve-hooks)--no-hooks[Run no hooks]' \
 '--dry-run[Show what would be written and change nothing]' \
@@ -189,7 +189,7 @@ _arguments "${_arguments_options[@]}" : \
 '(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \
 '--restore-deleted[Write files deleted locally back from the repo]' \
 '--accept-identity[Accept a changed machine identity and use the variants it selects]' \
-'--approve-hooks[Approve the current \`\[hooks\]\` table on this machine and run its hooks]' \
+'--approve-hooks[Approve the current \`\[hooks\]\` table on this machine, printing it first, and run its hooks. When the table changed since a warning here showed it, show the new table and approve nothing; the same command again approves it]' \
 '(--approve-hooks)--no-hooks[Run no hooks]' \
 '--dry-run[Show what would be captured, committed, pulled, applied and pushed; change nothing]' \
 '--system[After the pull, also write the system files outside \$HOME, through one sudo, doas or run0 call]' \

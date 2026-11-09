@@ -47,7 +47,7 @@ Write files deleted locally back from the repo
 Accept a changed machine identity and use the variants it selects
 .TP
 \fB\-\-approve\-hooks\fR
-Approve the current `[hooks]` table on this machine and run its hooks
+Approve the current `[hooks]` table on this machine, printing it first, and run its hooks. When the table changed since a warning here showed it, show the new table and approve nothing; the same command again approves it
 .SH "GLOBAL OPTIONS"
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
@@ -64,10 +64,12 @@ Allow running as root
 .SH "EXIT STATUS"
 .TP
 \fB3\fR
-Paths were left undecided or held back. Everything else is still
-committed, pulled, applied and pushed, except when an uncommitted
-repo edit holds a credential or an age key: then sync stops before
-the pull.
+Paths were left undecided or held back, or hooks were not approved:
+the [hooks] table changed since a warning showed it, so
+\-\-approve\-hooks showed the new table and approved nothing.
+Everything else is still committed, pulled, applied and pushed,
+except when an uncommitted repo edit holds a credential or an age
+key: then sync stops before the pull.
 .TP
 \fB4\fR
 The pull hit a conflict. Sync aborted it, so nothing it brought
