@@ -348,6 +348,22 @@ fn commands_need_an_initialised_repo() {
 }
 
 #[test]
+fn git_before_init_names_init_and_the_printed_init_lets_it_run() {
+    let env = TestEnv::new();
+    let err = env.fails(&["git", "status"]);
+    let expected = format!(
+        "no repo at {} yet; run `dotman init` first",
+        env.repo().display()
+    );
+    assert!(err.contains(&expected), "{err}");
+    assert!(!env.repo().exists());
+    let out = common::run_hint(&env, &err, "init");
+    assert!(out.status.success(), "{}", common::text(&out));
+    let out = env.run(&["git", "status", "--short"]);
+    assert!(out.status.success(), "{}", common::text(&out));
+}
+
+#[test]
 fn the_status_summary_counts_new_and_held_files_and_adds_up() {
     let env = TestEnv::new();
     env.ok(&["init"]);
