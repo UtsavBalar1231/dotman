@@ -185,14 +185,44 @@ fn row_9_changed_locally_is_reported_and_never_overwritten() {
 }
 
 #[test]
-fn row_10_changed_in_repo_is_written_without_a_backup() {
+fn row_10_changed_in_repo_is_backed_up_before_it_is_written() {
     let env = added(&[(".bashrc", b"one\n", 0o644)]);
     env.write_repo(".bashrc", b"two\n");
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("changed-in-repo"));
-    env.ok(&["apply"]);
+    let err = env.ok(&["apply"]);
+    assert!(err.contains("backed up to"), "{err}");
     assert_eq!(env.read(".bashrc"), b"two\n");
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("clean"));
+    assert_eq!(env.backups(".bashrc"), [(b"one\n".to_vec(), 0o600)]);
+    assert_eq!(
+        env.backups(".dotman/modes.txt"),
+        [(b".bashrc\t0644\n".to_vec(), 0o600)]
+    );
+}
+
+#[test]
+fn a_mode_only_change_is_written_without_a_backup_unless_in_place() {
+    let env = added(&[(".bashrc", b"one\n", 0o644)]);
+    let mut config = env.repo_config();
+    config.modes.insert(".bashrc".to_owned(), "0600".to_owned());
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .unwrap();
+    env.ok(&["apply"]);
+    assert_eq!(mode_of(&env.home().join(".bashrc")), 0o600);
     assert!(!env.state_dir().join("backups").exists());
+
+    config.modes.insert(".bashrc".to_owned(), "0640".to_owned());
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .unwrap();
+    env.ok(&["apply", "--in-place"]);
+    assert_eq!(mode_of(&env.home().join(".bashrc")), 0o640);
+    assert_eq!(env.backups(".bashrc"), [(b"one\n".to_vec(), 0o600)]);
+    assert_eq!(
+        env.backups(".dotman/modes.txt"),
+        [(b".bashrc\t0600\n".to_vec(), 0o600)]
+    );
 }
 
 #[test]

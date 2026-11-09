@@ -1,5 +1,5 @@
-//! The only path that writes into `$HOME`: no write through a symlink, a backup before local
-//! changes are replaced, and a temp file renamed into place after re-reading the target.
+//! The only path that writes into `$HOME`: no write through a symlink, a backup before anything is
+//! replaced, and a temp file renamed into place after re-reading the target.
 
 use super::{Home, Node, Obstacle, Tuple, parents, read_node, recorded_mode, safe_mode};
 use crate::paths::create_private_dir;
@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 const TEMP_PREFIX: &str = ".dotman-tmp-";
 // Under `.dotman/`, a reserved root name, so no key's backup can land on the record.
 const LINKS_FILE: &str = ".dotman/links.txt";
+const MODES_FILE: &str = ".dotman/modes.txt";
 
 /// How one write behaves.
 #[derive(Debug, Clone, Copy)]
@@ -518,58 +519,69 @@ fn create_dir(dir: &Path, mode: u32) -> io::Result<()> {
 /// Copies `bytes` to `<dir>/<rel>` at 0600, creating 0700 directories, and never replaces a file
 /// already there.
 pub fn back_up_bytes(dir: &Path, rel: &str, bytes: &[u8]) -> Result<PathBuf> {
-    let node = Node::File {
-        bytes: bytes.to_vec(),
-        mode: 0o600,
-        nlink: 1,
-        uid: 0,
-        gid: 0,
-    };
-    back_up(dir, rel, &node, false)?.ok_or_else(|| anyhow!("nothing to back up at {rel}"))
+    let dest = dir.join(rel);
+    write_backup(&dest, bytes, false)?;
+    Ok(dest)
 }
 
-/// Copies a file at the target to `<dir>/<key>`, or records a symlink in `<dir>/.dotman/links.txt`.
-/// Returns where the copy went; a dry run only reports it.
+/// Copies a file at the target to `<dir>/<key>` and records its mode in `<dir>/.dotman/modes.txt`,
+/// or records a symlink in `<dir>/.dotman/links.txt`. Returns where the copy or record went; a dry
+/// run only reports it.
 fn back_up(dir: &Path, key: &str, current: &Node, dry_run: bool) -> Result<Option<PathBuf>> {
-    let (dest, record) = match current {
-        Node::File { bytes, .. } => (dir.join(key), bytes.clone()),
-        // One `key<TAB>target` line per link. `escape_ascii` keeps tabs, newlines and
-        // non-UTF-8 targets from breaking a line, and is lossless.
-        Node::Symlink(target) => (
-            dir.join(LINKS_FILE),
-            format!(
-                "{}\t{}\n",
-                key.as_bytes().escape_ascii(),
-                target.as_os_str().as_bytes().escape_ascii()
-            )
-            .into_bytes(),
-        ),
-        Node::Missing | Node::BadParent(_) | Node::Dir | Node::Special => return Ok(None),
+    // One `key<TAB>value` line per entry. `escape_ascii` keeps tabs, newlines and non-UTF-8 text
+    // from breaking a line, and is lossless.
+    let line = |value: &[u8]| {
+        format!(
+            "{}\t{}\n",
+            key.as_bytes().escape_ascii(),
+            value.escape_ascii()
+        )
+        .into_bytes()
     };
-    if dry_run {
-        return Ok(Some(dest));
+    match current {
+        Node::File { bytes, mode, .. } => {
+            let dest = dir.join(key);
+            if !dry_run {
+                write_backup(&dest, bytes, false)?;
+                write_backup(
+                    &dir.join(MODES_FILE),
+                    &line(format!("{mode:04o}").as_bytes()),
+                    true,
+                )?;
+            }
+            Ok(Some(dest))
+        }
+        Node::Symlink(target) => {
+            let dest = dir.join(LINKS_FILE);
+            if !dry_run {
+                write_backup(&dest, &line(target.as_os_str().as_bytes()), true)?;
+            }
+            Ok(Some(dest))
+        }
+        Node::Missing | Node::BadParent(_) | Node::Dir | Node::Special => Ok(None),
     }
-    let parent = dest
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent", dest.display()))?;
+}
+
+/// Writes `bytes` to `dest` at 0600 under 0700 directories. `append` adds to a record file; a copy
+/// is created new, so a second backup of the same key in one run never overwrites the first, which
+/// holds the user's original.
+fn write_backup(dest: &Path, bytes: &[u8], append: bool) -> Result<()> {
+    let parent = parent_of(dest)?;
     create_private_dir(parent, false)
         .with_context(|| format!("cannot create {}", parent.display()))?;
     let mut open = OpenOptions::new();
     open.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    // A second backup of the same key in one run must never overwrite the first, which holds
-    // the user's original.
-    if matches!(current, Node::File { .. }) {
-        open.write(true).create_new(true);
-    } else {
+    if append {
         open.append(true).create(true);
+    } else {
+        open.write(true).create_new(true);
     }
     let mut file = open
-        .open(&dest)
+        .open(dest)
         .with_context(|| format!("cannot create backup {}", dest.display()))?;
-    file.write_all(&record)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
-    sync_dir(parent)?;
-    Ok(Some(dest))
+    sync_dir(parent)
 }
 
 fn make_temp(dir: &Path, new: New<'_>) -> Result<TempPath> {
@@ -1015,7 +1027,13 @@ mod tests {
         );
         assert_eq!(fs::read(&dest).unwrap(), b"original");
         assert_eq!(mode_of(&dest), 0o600);
-        for dir in ["", ".config", ".config/nvim"] {
+        let modes = f.run_dir.join(".dotman/modes.txt");
+        assert_eq!(
+            fs::read_to_string(&modes).unwrap(),
+            format!("{key}\t0640\n")
+        );
+        assert_eq!(mode_of(&modes), 0o600);
+        for dir in ["", ".config", ".config/nvim", ".dotman"] {
             assert_eq!(mode_of(&f.run_dir.join(dir)), 0o700, "{dir}");
         }
         assert_eq!(fs::read(f.home.join(key)).unwrap(), b"repo");

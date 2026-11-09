@@ -147,8 +147,11 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
         "--continue",
     ]);
 
-    exits(&b, 0, &["sync"]);
+    // S still equals B's edit, so only the always-back-up rule keeps those bytes outside history.
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("backed up to"), "{err}");
     assert_eq!(b.read(".a"), b"resolved\n");
+    assert_eq!(b.backups(".a"), [(b"from b\n".to_vec(), 0o600)]);
     exits(&a, 0, &["sync"]);
     assert_eq!(a.read(".a"), b"resolved\n");
     assert_converged(&a, &b);

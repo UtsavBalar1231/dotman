@@ -183,7 +183,16 @@ fn restore_brings_back_the_template_and_renders_it() {
         b"font_size {{ vars.font }}\n"
     );
     assert_eq!(env.read(KEY), b"font_size 14\n");
-    assert_eq!(env.backups(KEY).len(), 1);
+    // The sync that applied the edited template backed up the old rendering; restore the new one.
+    let mut backups = env.backups(KEY);
+    backups.sort();
+    assert_eq!(
+        backups,
+        [
+            (b"font_size 14\n".to_vec(), 0o600),
+            (b"font_size 14\nbold yes\n".to_vec(), 0o600)
+        ]
+    );
     assert_eq!(
         fs::read(env.state_dir().join("state.toml")).unwrap(),
         state,

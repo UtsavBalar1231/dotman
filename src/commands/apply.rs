@@ -235,8 +235,6 @@ pub(crate) struct Item {
     /// H as the write path reads it again before renaming. It differs from the classified H only
     /// for an absolute link into `$HOME`, which classification compares in its relative form.
     raw: Home,
-    /// H differs from S, so replacing it needs a backup first.
-    local_changes: bool,
     /// The identity change since the snapshot moved this key to another source. Until the change
     /// is accepted, the key is left alone.
     identity: bool,
@@ -835,14 +833,11 @@ impl Run<'_> {
                     ));
                 }
                 Verdict::Row { row, r, h } => {
-                    let s = state.system.get(&key).map(Tuple::from_entry).transpose()?;
-                    let local_changes = matches!(&h, Home::Present(h) if s.as_ref() != Some(h));
                     items.push(Item {
                         key,
                         row,
                         r,
                         raw: h,
-                        local_changes,
                         identity: false,
                         system: true,
                     });
@@ -1224,10 +1219,14 @@ impl Run<'_> {
     /// Whether R reached `$HOME`. A skipped or failed write is reported here.
     fn write(&mut self, item: &Item, r: &SourceEntry) -> bool {
         let key = &item.key;
+        // Whatever S says: after a rebase that dropped the local commit, H can equal S and still
+        // be the only copy of the user's bytes.
+        let replaces = matches!(&item.raw, Home::Present(h)
+            if self.opts.in_place || h.kind != r.tuple.kind || h.hash != r.tuple.hash);
         let opts = WriteOptions {
             dry_run: self.opts.dry_run,
             in_place: self.opts.in_place,
-            backup: item.local_changes.then_some(self.backups.as_path()),
+            backup: replaces.then_some(self.backups.as_path()),
             expected: &item.raw,
             modes: &self.modes,
         };
@@ -1324,11 +1323,6 @@ pub(crate) fn classify_key(
     } else {
         row
     };
-    let local_changes = match (&h, &s) {
-        (Home::Present(h), Some(s)) => h != s,
-        (Home::Present(_), None) => true,
-        _ => false,
-    };
     let raw = match &h {
         Home::Present(tuple) if tuple.kind == Kind::Symlink => observe(home, key)?,
         _ => h,
@@ -1338,7 +1332,6 @@ pub(crate) fn classify_key(
         row,
         r,
         raw,
-        local_changes,
         identity,
         system: false,
     }))
