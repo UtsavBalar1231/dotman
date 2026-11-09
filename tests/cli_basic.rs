@@ -475,6 +475,8 @@ fn list_help_explains_the_porcelain_records_and_every_kind() {
     }
 }
 
+/// A new file under `[dirs]` counts as managed, since sync captures it; a held one does not, as in
+/// `list`, but both count as to look at.
 #[test]
 fn the_status_summary_counts_new_and_held_files_and_adds_up() {
     let env = TestEnv::new();
@@ -487,9 +489,10 @@ fn the_status_summary_counts_new_and_held_files_and_adds_up() {
     env.write(".config/app/.env", b"X=1\n", 0o600);
     let err = env.ok(&["status"]);
     assert!(
-        err.contains("4 managed, 1 clean, 3 to look at (1 new, 1 held back)"),
+        err.contains("3 managed, 1 clean, 3 to look at (1 new, 1 held back)"),
         "{err}"
     );
+    assert_eq!(env.porcelain("list").len(), 2);
     env.write(".bashrc", b"b\n", 0o644);
     std::fs::remove_file(env.home().join(".config/app/new.conf")).unwrap();
     std::fs::remove_file(env.home().join(".config/app/.env")).unwrap();

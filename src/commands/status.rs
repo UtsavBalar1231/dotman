@@ -284,10 +284,11 @@ fn home_label(
     })
 }
 
-/// New and held files are under `[dirs]`, so they count as managed and as to look at.
+/// New files are under `[dirs]`, which sync captures, so they count as managed. Held files are
+/// not managed, as `list` shows, but they count as to look at.
 fn summarize(rows: &[(&str, String)], unrecorded: usize, [new, held, held_in_repo]: [usize; 3]) {
     let clean = rows.iter().filter(|(label, _)| *label == "clean").count();
-    let managed = rows.len().saturating_add(new).saturating_add(held);
+    let managed = rows.len().saturating_add(new);
     let breakdown = if new > 0 || held > 0 {
         format!(" ({new} new, {held} held back)")
     } else {
@@ -300,7 +301,7 @@ fn summarize(rows: &[(&str, String)], unrecorded: usize, [new, held, held_in_rep
     };
     output::info(&format!(
         "{managed} managed, {clean} clean, {} to look at{breakdown}{in_repo}",
-        managed.saturating_sub(clean)
+        managed.saturating_sub(clean).saturating_add(held)
     ));
     if unrecorded > 0 {
         output::info(&format!(
