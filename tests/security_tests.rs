@@ -1674,6 +1674,27 @@ fn the_user_s_git_config_and_template_dir_never_shape_the_checkout() {
     assert!(!d.repo().join(".git/info/sparse-checkout").exists());
 }
 
+/// A tracked `.gitattributes` with `* merge=union` never joins two machines' edits of one file
+/// in silence: the second sync stops on a conflict, exit 4, and keeps its own edit.
+#[test]
+fn a_tracked_merge_driver_never_joins_a_conflict() {
+    let a = device_with_a_symlink();
+    a.write(".conf", b"line1\n", 0o644);
+    a.write(".gitattributes", b"* merge=union\n", 0o644);
+    a.ok(&["add", ".conf", ".gitattributes"]);
+    a.ok(&["sync"]);
+    let b = a.second_device();
+    exits(&b.run(&["init", &a.remote_url()]), 0);
+
+    a.write(".conf", b"from-one\n", 0o644);
+    a.ok(&["sync"]);
+    b.write(".conf", b"from-two\n", 0o644);
+    let err = exits(&b.run(&["sync"]), 4);
+    assert!(err.contains("conflicting paths:\n  .conf"), "{err}");
+    assert_eq!(b.read(".conf"), b"from-two\n");
+    assert_eq!(fs::read(b.repo().join(".conf")).unwrap(), b"from-two\n");
+}
+
 /// `DOTMAN_AGE_KEY` is in no hook's environment and no editor's: both write their `env` to a
 /// file that lacks the variable and has `HOME`.
 #[test]

@@ -14,7 +14,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use xxhash_rust::xxh3::xxh3_128;
 
-const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding\n";
+/// `merge=text` beats a tracked `merge=union`, which would join both sides of a conflict without a
+/// word. Not `-merge`: unset means binary, which keeps one side.
+const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding merge=text\n";
 
 const MIN_VERSION: (u32, u32) = (2, 25);
 
