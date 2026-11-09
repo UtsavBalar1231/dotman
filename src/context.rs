@@ -393,7 +393,7 @@ impl Context {
 
     /// Removes the temp files and directories that killed runs left in the worktree and in the
     /// `$HOME` directories of managed keys. Only names whose embedded PID is no live process go,
-    /// so a run that holds no lock, such as a dry run, keeps its own. The caller holds the lock.
+    /// so a live run that writes without the lock keeps its own. The caller holds the lock.
     pub(crate) fn sweep_temp_files(&self) -> Result<()> {
         let repo = &self.paths.repo;
         if !is_real_dir(&repo.join(".git")) {
