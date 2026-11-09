@@ -1252,24 +1252,25 @@ pub(crate) fn preview(dir: &DirPlan) {
         .fold(0u64, |sum, (size, _)| sum.saturating_add(*size));
     sized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
 
-    output::info(&format!("{}/", dir.key));
-    output::info(&format!("  files: {}", dir.items.len()));
-    output::info(&format!("  total size: {total} bytes"));
-    output::info("  largest:");
+    // What the "add N files?" question approves, so `-q` does not hide it.
+    output::context(&format!("{}/", dir.key));
+    output::context(&format!("  files: {}", dir.items.len()));
+    output::context(&format!("  total size: {total} bytes"));
+    output::context("  largest:");
     for (size, key) in sized.iter().take(LARGEST_SHOWN) {
-        output::info(&format!("    {size} bytes  {key}"));
+        output::context(&format!("    {size} bytes  {key}"));
     }
-    output::info(&format!("  binary files: {binary}"));
-    output::info(&format!("  files at mode 0600: {private}"));
-    output::info(&format!("  skipped: {}", dir.skipped.len()));
+    output::context(&format!("  binary files: {binary}"));
+    output::context(&format!("  files at mode 0600: {private}"));
+    output::context(&format!("  skipped: {}", dir.skipped.len()));
     for line in &dir.skipped {
-        output::info(&format!("    {line}"));
+        output::context(&format!("    {line}"));
     }
 }
 
 /// Copies H of `key` into the repo at `source`, which is `key` or one of its variants, and records
 /// the mode under `source`, so each variant keeps its own. An `encrypted` source gets ciphertext,
-/// and a plain one holding an age identity is refused with [`HoldsKey`]. `expected` is the kind
+/// and a plain one that the content guard holds is refused with [`Held`]. `expected` is the kind
 /// the caller saw, and a different kind now is an error. The caller records S and saves
 /// `repo_config`.
 pub(crate) fn commit_one(

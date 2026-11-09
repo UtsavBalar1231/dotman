@@ -387,3 +387,13 @@ fn an_unknown_visibility_an_hour_old_is_checked_again_before_the_guard() {
     assert!(err.contains("the remote is public"), "{err}");
     assert_eq!(managed(&env), Vec::<String>::new());
 }
+
+/// The directory preview is what the confirmation approves, so `-q` does not hide it.
+#[test]
+fn quiet_still_shows_the_directory_preview() {
+    let env = TestEnv::new();
+    zsh(&env);
+    let err = exits(&env, 3, &["-q", "add", "--yes", ".config/zsh"]);
+    assert!(err.contains(".config/zsh/\n  files: 1\n"), "{err}");
+    assert!(err.contains("  files at mode 0600: 0"), "{err}");
+}
