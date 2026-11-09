@@ -91,8 +91,8 @@ Exit status:
      committed, pulled, applied and pushed, except when an uncommitted
      repo edit holds a credential or an age key: then sync stops before
      the pull.
-  4  The pull hit a conflict. Sync aborted it before anything reached
-     $HOME and printed the steps to resolve it.
+  4  The pull hit a conflict. Sync aborted it, so nothing it brought
+     reached $HOME, and printed the steps to resolve it.
   1  An error. Among them: the remote shares no commit with the repo, or
      the commit would delete at least 10 tracked files and at least half
      of them, which needs a yes at the prompt or --allow-mass-delete.";
