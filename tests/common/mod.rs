@@ -988,12 +988,21 @@ fn check(cmd: &mut StdCommand) -> R {
     }
 }
 
-/// The release asset `install.sh` fetches for this machine.
+/// The release asset `install.sh` fetches under [`Setup::shell`], whose `uname` answers as
+/// `x86_64` Linux on every host.
 pub fn archive_name() -> String {
-    format!(
-        "dotman-v{VERSION}-{}-unknown-linux-musl.tar.gz",
-        std::env::consts::ARCH
-    )
+    format!("dotman-v{VERSION}-x86_64-unknown-linux-musl.tar.gz")
+}
+
+/// A directory holding only a `uname` that answers `-s` with `Linux` and `-m` with `x86_64`, and
+/// passes anything else to the real one, so `install.sh` takes its Linux download path on macOS
+/// and on other architectures too.
+fn linux_uname(dir: &Path) -> R<PathBuf> {
+    write_exe(
+        &dir.join("uname"),
+        "#!/bin/sh\ncase \"$*\" in\n  -s) echo Linux ;;\n  -m) echo x86_64 ;;\n  *) exec /usr/bin/uname \"$@\" ;;\nesac\n",
+    )?;
+    Ok(dir.to_path_buf())
 }
 
 fn sha256_line(dir: &Path, name: &str) -> R<String> {
@@ -1069,6 +1078,8 @@ pub struct Setup {
     _author: TestEnv,
     pub machine: TestEnv,
     pub dotfiles: PathBuf,
+    /// The directory of the `uname` stub that [`Setup::shell`] puts on `PATH`.
+    pub uname: PathBuf,
 }
 
 impl Setup {
@@ -1093,10 +1104,12 @@ impl Setup {
             dotfiles.join(".git/shallow").is_file(),
             "not a depth-1 clone"
         );
+        let uname = linux_uname(&machine.root().join("linux-uname"))?;
         Ok(Self {
             _author: author,
             machine,
             dotfiles: fs::canonicalize(dotfiles)?,
+            uname,
         })
     }
 
@@ -1114,11 +1127,13 @@ impl Setup {
         fs::read(self.home().join(".bashrc")).is_ok_and(|bytes| bytes == BOOTSTRAP_BASHRC)
     }
 
-    /// `sh` with `stubs` in front of the system directories, and no script yet.
+    /// `sh` with `stubs`, then the `uname` stub, in front of the system directories, and no
+    /// script yet.
     pub fn shell(&self, base: &Path, stubs: &[&Path]) -> StdCommand {
         let dirs: Vec<PathBuf> = stubs
             .iter()
             .map(|dir| dir.to_path_buf())
+            .chain(std::iter::once(self.uname.clone()))
             .chain(SYSTEM_DIRS.iter().map(PathBuf::from))
             .collect();
         self.shell_on(base, &dirs)

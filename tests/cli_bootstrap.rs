@@ -148,7 +148,7 @@ fn a_dot_on_path_is_never_shadowed() -> R {
 fn run_without_dot(setup: &Setup) -> R<Output> {
     let tools = toolbox(&setup.machine.root().join("tools"), INSTALLER_TOOLS)?;
     Ok(setup
-        .shell_on(&release()?, &[tools])
+        .shell_on(&release()?, &[setup.uname.clone(), tools])
         .arg(setup.dotfiles.join("install.sh"))
         .output()?)
 }
@@ -245,6 +245,22 @@ fn a_rerun_applies_without_downloading_and_keeps_a_local_edit() -> R {
     let out = setup.command(&setup.empty_base()?, &[]).output()?;
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert_eq!(fs::read(setup.home().join(".bashrc"))?, b"local edit\n");
+    Ok(())
+}
+
+#[test]
+fn the_script_sees_x86_64_linux_on_every_host() -> R {
+    let setup = Setup::new()?;
+    let out = setup
+        .shell(&setup.empty_base()?, &[])
+        .args(["-c", "uname -s; uname -m; uname -n"])
+        .output()?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let host = String::from_utf8(Command::new("uname").arg("-n").output()?.stdout)?;
+    assert_eq!(
+        String::from_utf8(out.stdout)?,
+        format!("Linux\nx86_64\n{host}")
+    );
     Ok(())
 }
 
