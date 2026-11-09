@@ -8,54 +8,59 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/UtsavBalar1231/dotman"
 license=('MIT')
 depends=('gcc-libs' 'glibc')
-makedepends=('rust' 'cargo' 'help2man')
+makedepends=('cargo')
+# Only the tests run git; the build does not.
+checkdepends=('git')
+# makepkg's lto puts -flto in CFLAGS, so zstd-sys's C objects hold only GCC's IR, and the link
+# rustc runs cannot resolve the ZSTD_ symbols in them. The release profile strips the binary, so
+# a debug package would be empty.
+options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/UtsavBalar1231/dotman/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # Updated by CI/release workflow
+# SKIP while v$pkgver has no release tarball. `just release-prepare` sets pkgver only; once the tag
+# is pushed, run `updpkgsums` here to put the tarball's checksum in.
+sha256sums=('SKIP')
 
 prepare() {
-    cd "$pkgname-$pkgver"
+    cd "dotman-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-    cd "$pkgname-$pkgver"
+    cd "dotman-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo build --release --locked --all-features
+    cargo build --release --locked --offline
 }
 
 check() {
-    cd "$pkgname-$pkgver"
+    cd "dotman-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
-    cargo test --release --locked --all-features
+    export CARGO_TARGET_DIR=target
+    # makepkg sets GIT_CONFIG_GLOBAL=/dev/null, which hides the git identity each test writes into
+    # the HOME it sets. check() gets a HOME of its own as well, so the builder's git config stays
+    # out; cargo and rustup keep the homes prepare() used.
+    unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+    export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+    export HOME="$srcdir/check-home"
+    mkdir -p "$HOME"
+    printf '[user]\n\tname = makepkg\n\temail = makepkg@localhost\n' >"$HOME/.gitconfig"
+    cargo test --locked --offline
 }
 
 package() {
-    cd "$pkgname-$pkgver"
+    cd "dotman-$pkgver"
 
     # Only dotman: /usr/bin/dot belongs to Graphviz, so no dot alias is packaged
     install -Dm755 target/release/dotman "$pkgdir/usr/bin/dotman"
 
-    # Install documentation
+    install -Dm644 man/*.1 -t "$pkgdir/usr/share/man/man1/"
+
+    # Elvish and PowerShell have no system-wide completion directory.
+    install -Dm644 completions/dotman.bash "$pkgdir/usr/share/bash-completion/completions/dotman"
+    install -Dm644 completions/_dotman "$pkgdir/usr/share/zsh/site-functions/_dotman"
+    install -Dm644 completions/dotman.fish "$pkgdir/usr/share/fish/vendor_completions.d/dotman.fish"
+
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-
-    # Install license
-    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || \
-        echo "MIT" > "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-
-    # Generate and install shell completions
-    mkdir -p "$pkgdir/usr/share/bash-completion/completions"
-    ./target/release/dotman completion bash > "$pkgdir/usr/share/bash-completion/completions/dotman"
-
-    mkdir -p "$pkgdir/usr/share/zsh/site-functions"
-    ./target/release/dotman completion zsh > "$pkgdir/usr/share/zsh/site-functions/_dotman"
-
-    mkdir -p "$pkgdir/usr/share/fish/vendor_completions.d"
-    ./target/release/dotman completion fish > "$pkgdir/usr/share/fish/vendor_completions.d/dotman.fish"
-
-    # Generate and install man page
-    mkdir -p "$pkgdir/usr/share/man/man1"
-    help2man --no-info --name="dotfiles manager" \
-        --version-string="$pkgver" ./target/release/dotman > "$pkgdir/usr/share/man/man1/dotman.1"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

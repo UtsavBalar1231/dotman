@@ -86,7 +86,11 @@ fn the_package_installs_dotman_and_never_usr_bin_dot() -> R {
     has(&pkgbuild, "completions/dotman\"", "PKGBUILD");
     has(&pkgbuild, "site-functions/_dotman\"", "PKGBUILD");
     has(&pkgbuild, "vendor_completions.d/dotman.fish\"", "PKGBUILD");
-    has(&pkgbuild, "man1/dotman.1\"", "PKGBUILD");
+    has(
+        &pkgbuild,
+        "man/*.1 -t \"$pkgdir/usr/share/man/man1/\"",
+        "PKGBUILD",
+    );
     assert!(
         !pkgbuild.contains("/usr/bin/dot\""),
         "PKGBUILD installs /usr/bin/dot"
