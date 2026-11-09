@@ -157,6 +157,36 @@ fn every_subcommand_but_log_refuses_a_lost_dotman_toml() {
     }
 }
 
+/// A last commit whose `.dotman.toml` is empty too has no settings to lose: every command runs on
+/// the defaults with a note, and the restore hint, which would only bring back an empty file, is
+/// never printed.
+#[test]
+fn a_committed_empty_dotman_toml_reads_as_the_defaults() {
+    let env = committed();
+    let repo = env.repo().to_string_lossy().into_owned();
+    fs::write(env.repo().join(".dotman.toml"), b"").expect("empty the config");
+    env.git(&["-C", &repo, "commit", "-q", "-am", "empty config"]);
+    for deleted in [false, true] {
+        if deleted {
+            fs::remove_file(env.repo().join(".dotman.toml")).expect("delete the config");
+        }
+        for args in [&["status"][..], &["apply"], &["list"], &["diff"]] {
+            let (code, err) = stderr_of(&env, args);
+            assert_eq!(code, Some(0), "{args:?}: {err}");
+            assert!(
+                err.contains("as in the last commit, so the defaults apply"),
+                "{err}"
+            );
+            assert!(!err.contains("git checkout -- .dotman.toml"), "{err}");
+        }
+    }
+    env.write(".bashrc", b"edited\n", 0o644);
+    let (code, err) = stderr_of(&env, &["sync"]);
+    assert_eq!(code, Some(0), "{err}");
+    let shown = env.git(&["-C", &repo, "show", "HEAD:.bashrc"]);
+    assert_eq!(shown, "edited\n");
+}
+
 #[test]
 fn cherry_pick_revert_sequencer_and_bisect_markers_are_refused_with_their_hints() {
     let env = committed();

@@ -215,7 +215,7 @@ impl Context {
     }
 
     /// Fails when the repo is incomplete, with [`InProgress`] while a git operation or a conflict
-    /// is unfinished in it, and when HEAD tracks a `.dotman.toml` that is gone or empty. Every
+    /// is unfinished in it, and when HEAD has a non-empty `.dotman.toml` that is gone or empty. Every
     /// command except `doctor` and `git` calls it, after taking its lock; `log` skips the last
     /// check, so the history stays readable.
     pub(crate) fn guard(&self) -> Result<()> {
@@ -280,7 +280,8 @@ impl Context {
     }
 
     /// An empty or missing `.dotman.toml` would read as the defaults, losing `[dirs]`, `[modes]`
-    /// and `[age]`, and the next sync would commit that.
+    /// and `[age]`, and the next sync would commit that. When the last commit's copy is empty too,
+    /// there is nothing to lose, and restoring it would only bring back an empty file.
     fn refuse_lost_config(&self) -> Result<()> {
         let file = self.repo_config_file();
         let how = match fs::symlink_metadata(&file) {
@@ -291,7 +292,12 @@ impl Context {
         };
         let tracked =
             self.git.head()?.is_some() && self.git.tree_mode("HEAD", ".dotman.toml")?.is_some();
-        if tracked {
+        if tracked && self.git.show_blob("HEAD", ".dotman.toml")?.is_empty() {
+            crate::output::info(&format!(
+                "{} is {how}, as in the last commit, so the defaults apply",
+                file.display()
+            ));
+        } else if tracked {
             bail!(
                 "{} is {how}, but the last commit has it, so its [dirs], [modes] and [age] would be lost; restore it with `{} git checkout -- .dotman.toml`",
                 file.display(),
