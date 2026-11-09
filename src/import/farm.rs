@@ -433,6 +433,8 @@ pub(super) fn candidates(ctx: &Context) -> Vec<PathBuf> {
     let stores = nix_stores();
     let home_real = real_home(ctx);
     let mut groups: BTreeMap<PathBuf, Vec<(PathBuf, PathBuf)>> = BTreeMap::new();
+    // Groups that hold a link other than a tool launcher; a hand-made farm renames its bin links.
+    let mut farm_like: BTreeSet<PathBuf> = BTreeSet::new();
     let (links, capped) = home_links(ctx);
     if capped {
         output::warning(&capped_note());
@@ -441,19 +443,20 @@ pub(super) fn candidates(ctx: &Context) -> Vec<PathBuf> {
         let Ok(target) = fs::canonicalize(&link.real) else {
             continue;
         };
-        if in_stores(&target, &stores)
-            || in_stores(&link.first_hop(), &stores)
-            || is_tool_shim(&link, &target)
-        {
+        if in_stores(&target, &stores) || in_stores(&link.first_hop(), &stores) {
             continue;
         }
-        groups
-            .entry(anchor(&target, &home_real))
-            .or_default()
-            .push((link.real, target));
+        let group = anchor(&target, &home_real);
+        if !is_tool_shim(&link, &target) {
+            farm_like.insert(group.clone());
+        }
+        groups.entry(group).or_default().push((link.real, target));
     }
     let mut roots = Vec::new();
-    for members in groups.into_values() {
+    for (group, members) in groups {
+        if !farm_like.contains(&group) {
+            continue;
+        }
         let targets: Vec<&Path> = members.iter().map(|(_, target)| target.as_path()).collect();
         let root = common_dir(&targets);
         if !is_real_dir(&root) || refusal(ctx, &root, &stores, false).is_some() {

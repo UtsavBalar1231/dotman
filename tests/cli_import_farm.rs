@@ -691,6 +691,37 @@ fn tool_launchers_in_a_bin_directory_are_no_farm_and_a_stow_farm_still_is() {
 }
 
 #[test]
+fn a_hand_made_farm_keeps_its_renamed_bin_links_and_its_root() {
+    let env = TestEnv::new();
+    for (name, text) in [("bashrc", "b\n"), ("zshrc", "z\n")] {
+        env.write(format!("dotfiles/shell/{name}"), text.as_bytes(), 0o644);
+        env.symlink(format!(".{name}"), format!("dotfiles/shell/{name}"));
+    }
+    for script in ["a", "b", "c"] {
+        env.write(
+            format!("dotfiles/scripts/{script}.sh"),
+            b"#!/bin/sh\n",
+            0o755,
+        );
+        env.symlink(
+            format!(".local/bin/{script}"),
+            format!("../../dotfiles/scripts/{script}.sh"),
+        );
+    }
+    let (out, err) = run_import(&env, &["--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(accounting(&err), (5, 5, 0), "{err}");
+    let root = env.home().join("dotfiles");
+    assert!(
+        err.contains(&format!(
+            "imported from the symlink farm {};",
+            root.display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_root_under_dev_is_a_system_directory() {
     let env = TestEnv::new();
     env.symlink(".null", "/dev/null");
