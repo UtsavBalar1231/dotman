@@ -192,6 +192,33 @@ fn nested_git_dirs_are_never_listed_and_an_ignore_pattern_hides_a_file() {
     );
 }
 
+/// As in git, `**/node_modules/` still drops what is new under a `node_modules` that holds a
+/// tracked file: junk a tool leaves in the repo copy is never a key, committed or applied, while
+/// the tracked file stays managed.
+#[test]
+fn an_ignored_directory_that_holds_a_tracked_file_still_drops_new_files() {
+    let a = device();
+    let keep = ".config/nvim/node_modules/keep.js";
+    a.write(keep, b"keep\n", 0o644);
+    a.ok(&["add", keep]);
+    exits(&a, 0, &["sync"]);
+    a.write_repo(".config/nvim/node_modules/junk.js", b"junk\n");
+    a.write_repo(".config/nvim/node_modules/sub/deep.js", b"deep\n");
+
+    assert_eq!(tokens(&a), []);
+    exits(&a, 0, &["sync"]);
+    let tree = remote_tree(&a);
+    assert!(tree.contains(&keep.to_owned()), "{tree:?}");
+    assert!(
+        !tree
+            .iter()
+            .any(|k| k.contains("junk") || k.contains("deep")),
+        "{tree:?}"
+    );
+    assert!(!a.home().join(".config/nvim/node_modules/junk.js").exists());
+    assert!(!a.home().join(".config/nvim/node_modules/sub").exists());
+}
+
 /// Ignored junk beside a managed file in the repo copy is left out of the commit path by path.
 /// Those paths reach git on stdin: as arguments, 6500 of these 1 KiB ones come to over 6 MiB,
 /// the kernel's ceiling whatever the stack limit, and staging failed with E2BIG.

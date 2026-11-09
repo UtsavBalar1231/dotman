@@ -616,13 +616,21 @@ impl Dropped {
         Ok(Self { ignore, kept })
     }
 
+    /// A directory that holds a kept path stays, but as in git, what lies under a directory a
+    /// pattern matches is still dropped unless it is kept or holds a kept path.
     fn drops(&self, path: &str, is_dir: bool) -> bool {
-        self.ignore.matches(path, is_dir)
-            && if is_dir {
-                !holds_any(&self.kept, path)
-            } else {
-                !self.kept.contains(path)
-            }
+        let under_matched_dir = || {
+            path.match_indices('/')
+                .filter_map(|(at, _)| path.get(..at))
+                .any(|dir| self.ignore.matches(dir, true))
+        };
+        // The set lookups first: they are cheap, and most directories hold a kept path.
+        let kept = if is_dir {
+            holds_any(&self.kept, path)
+        } else {
+            self.kept.contains(path)
+        };
+        !kept && (self.ignore.matches(path, is_dir) || under_matched_dir())
     }
 }
 
