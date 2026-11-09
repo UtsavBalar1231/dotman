@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Universal installation script for dotman
-# Detects platform and installs using the most appropriate method
+# Installs the dotman release binary for this platform, after checking it against checksums.txt
 
 set -euo pipefail
 
@@ -190,30 +189,38 @@ add_dot_alias() {
 	fi
 }
 
-# Add to PATH
+# Adds INSTALL_DIR to PATH in the startup file of the user's login shell. This script itself runs
+# under bash even for a zsh user, so $SHELL names the shell, not $BASH_VERSION.
 add_to_path() {
 	local shell_rc
 
-	# Detect shell and add to PATH
-	if [[ -n "${BASH_VERSION:-}" ]]; then
-		shell_rc="$HOME/.bashrc"
-	elif [[ -n "${ZSH_VERSION:-}" ]]; then
-		shell_rc="$HOME/.zshrc"
-	elif [[ -n "${FISH_VERSION:-}" ]]; then
-		shell_rc="$HOME/.config/fish/config.fish"
-	else
-		# Default to bashrc
-		shell_rc="$HOME/.bashrc"
-	fi
-
-	# Check if already in PATH
-	if echo "$PATH" | grep -q "$INSTALL_DIR"; then
+	case ":$PATH:" in
+	*":$INSTALL_DIR:"*)
 		log_info "Install directory already in PATH"
 		return 0
-	fi
+		;;
+	esac
 
-	# Add to PATH in shell configuration
-	if [[ "$shell_rc" == *"fish"* ]]; then
+	# The directory is written into shell code, so only characters that need no quoting go there.
+	case "$INSTALL_DIR" in
+	"" | *[!A-Za-z0-9_./+-]*)
+		log_warning "$INSTALL_DIR holds characters other than letters, digits and _./+-, so it is not written into a shell startup file; add it to PATH yourself"
+		return 0
+		;;
+	esac
+
+	case "${SHELL:-}" in
+	*/bash) shell_rc="$HOME/.bashrc" ;;
+	*/zsh) shell_rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+	*/fish) shell_rc="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish" ;;
+	*)
+		log_warning "Add $INSTALL_DIR to PATH in your shell's startup file"
+		return 0
+		;;
+	esac
+
+	if [[ "$shell_rc" == *.fish ]]; then
+		mkdir -p "${shell_rc%/*}"
 		echo "set -gx PATH $INSTALL_DIR \$PATH" >>"$shell_rc"
 	else
 		echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >>"$shell_rc"
@@ -249,46 +256,23 @@ verify_installation() {
 	fi
 }
 
-# Show completion setup instructions
+# Where each shell loads the script from is kept in one place, completions/README.md.
 show_completion_setup() {
-	cat <<EOF
-
-${BOLD}SHELL COMPLETION SETUP:${NC}
-
-Enable shell completions for better usability:
-
-${YELLOW}Bash:${NC}
-  echo 'eval "\$(dotman completion bash)"' >> ~/.bashrc
-
-${YELLOW}Zsh:${NC}
-  echo 'eval "\$(dotman completion zsh)"' >> ~/.zshrc
-
-${YELLOW}Fish:${NC}
-  dotman completion fish | source
-  # Or permanently:
-  dotman completion fish > ~/.config/fish/completions/dotman.fish
-
-${YELLOW}PowerShell:${NC}
-  Add to your profile:
-  Invoke-Expression (& dotman completion powershell)
-
-EOF
+	log_info "Shell completions: \`$BINARY_NAME completion <bash|zsh|fish|elvish|powershell>\` prints the script; completions/README.md in the repo says where each shell loads it from"
 }
 
-# Main installation function
 main() {
 	log_bold "dotman Installation Script"
-	log_info "Detected platform: $(detect_platform)"
 
 	local platform
 	platform=$(detect_platform)
+	log_info "Detected platform: $platform"
 
 	if install_from_github "$platform"; then
-		log_success "Installed from GitHub releases"
 		add_dot_alias
 		add_to_path
 	else
-		log_error "All installation methods failed"
+		log_error "Installation failed"
 		exit 1
 	fi
 
@@ -315,8 +299,6 @@ USAGE:
 
 OPTIONS:
     --help, -h          Show this help message
-    --version, -v       Show version information
-    --force-github      Force installation from GitHub releases
     --install-dir DIR   Custom installation directory (default: ~/.local/bin)
 
 ENVIRONMENT VARIABLES:
@@ -324,24 +306,11 @@ ENVIRONMENT VARIABLES:
     DOTMAN_INSTALL_BASE_URL  Download tarball and checksums.txt from here instead of GitHub
 
 EXAMPLES:
-    $0                                      # Auto-detect and install
-    $0 --force-github                       # Force GitHub release installation
+    $0                                      # Install into ~/.local/bin
     DOTMAN_INSTALL_DIR=/usr/local/bin $0    # Install system-wide
 
 EOF
 	exit 0
-	;;
---version | -v)
-	echo "dotman installer v1.0"
-	exit 0
-	;;
---force-github)
-	platform=$(detect_platform)
-	install_from_github "$platform"
-	add_dot_alias
-	add_to_path
-	verify_installation
-	show_completion_setup
 	;;
 --install-dir)
 	if [[ -z "${2:-}" ]]; then

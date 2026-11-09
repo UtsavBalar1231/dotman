@@ -77,6 +77,17 @@ fn run_installer(
     release: &Path,
     path: Option<OsString>,
 ) -> Result<Output, Box<dyn Error>> {
+    run_installer_in(root, release, path, &root.join("bin"), "/bin/bash")
+}
+
+/// [`run_installer`] into `dir`, as a user whose login shell is `shell`.
+fn run_installer_in(
+    root: &Path,
+    release: &Path,
+    path: Option<OsString>,
+    dir: &Path,
+    shell: &str,
+) -> Result<Output, Box<dyn Error>> {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("install/install.sh");
     let mut cmd = Command::new("bash");
     if let Some(path) = path {
@@ -85,7 +96,10 @@ fn run_installer(
     Ok(cmd
         .arg(script)
         .env("HOME", root)
-        .env("DOTMAN_INSTALL_DIR", root.join("bin"))
+        .env("SHELL", shell)
+        .env_remove("ZDOTDIR")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("DOTMAN_INSTALL_DIR", dir)
         .env(
             "DOTMAN_INSTALL_BASE_URL",
             format!("file://{}", release.display()),
@@ -188,5 +202,78 @@ fn a_dot_on_path_is_never_shadowed() -> R {
         fs::symlink_metadata(tmp.path().join("bin/dot")).is_err(),
         "a dot alias was created"
     );
+    Ok(())
+}
+
+const STARTUP_FILES: [&str; 3] = [".bashrc", ".zshrc", ".config/fish/config.fish"];
+
+fn startup_files(root: &Path) -> Vec<&'static str> {
+    STARTUP_FILES
+        .into_iter()
+        .filter(|file| root.join(file).exists())
+        .collect()
+}
+
+#[test]
+fn the_path_line_goes_to_the_startup_file_of_the_login_shell() -> R {
+    for (shell, file, line) in [
+        ("/bin/zsh", ".zshrc", "export PATH=\"@DIR@:$PATH\""),
+        ("/usr/bin/bash", ".bashrc", "export PATH=\"@DIR@:$PATH\""),
+        (
+            "/usr/bin/fish",
+            ".config/fish/config.fish",
+            "set -gx PATH @DIR@ $PATH",
+        ),
+        ("/bin/tcsh", "", ""),
+    ] {
+        let tmp = tempfile::tempdir()?;
+        let release = tmp.path().join("release");
+        if !fake_release(tmp.path(), &release, None)? {
+            return Ok(());
+        }
+        // An entry that only starts with the install dir does not put it on PATH.
+        let dir = tmp.path().join("bin");
+        let path = std::env::join_paths([
+            tmp.path().join("bin2"),
+            path_without_dot(tmp.path())?.into(),
+        ])?;
+        let out = run_installer_in(tmp.path(), &release, Some(path), &dir, shell)?;
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{shell}: {err}");
+        if file.is_empty() {
+            assert_eq!(startup_files(tmp.path()), Vec::<&str>::new(), "{shell}");
+            assert!(
+                err.contains("to PATH in your shell's startup file"),
+                "{err}"
+            );
+            continue;
+        }
+        assert_eq!(startup_files(tmp.path()), [file], "{shell}");
+        let text = fs::read_to_string(tmp.path().join(file))?;
+        let line = line.replace("@DIR@", &dir.to_string_lossy());
+        assert_eq!(text, format!("{line}\n"), "{shell}");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_install_dir_that_needs_quoting_is_never_written_into_a_startup_file() -> R {
+    let tmp = tempfile::tempdir()?;
+    let release = tmp.path().join("release");
+    if !fake_release(tmp.path(), &release, None)? {
+        return Ok(());
+    }
+    let marker = tmp.path().join("ran");
+    let dir = tmp
+        .path()
+        .join(format!("bin\"$(touch {})\"", marker.display()));
+    let path = path_without_dot(tmp.path())?;
+    let out = run_installer_in(tmp.path(), &release, Some(path), &dir, "/bin/bash")?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(dir.join("dotman").is_file(), "{err}");
+    assert_eq!(startup_files(tmp.path()), Vec::<&str>::new());
+    assert!(err.contains("add it to PATH yourself"), "{err}");
+    assert!(!marker.exists());
     Ok(())
 }
