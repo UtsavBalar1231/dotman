@@ -1,6 +1,7 @@
 mod common;
 
 use common::{TestEnv, tree_checksum};
+use dotman::state::State;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -238,10 +239,21 @@ fn an_unapproved_or_changed_hook_table_warns() {
         "{out}"
     );
 
+    let file = env.state_dir().join("state.toml");
+    let mut state = State::read(&file).expect("state").expect("a state");
+    state.hooks.approved = Some("55c7a64d8992c4767b4d28afab1811bd".to_owned());
+    state.save(&file, false).expect("save state");
+    let (_, out) = doctor(&env, &[]);
+    let warned = line(&out, "warn", "hooks: the approval format changed").unwrap_or_default();
+    assert!(warned.contains("--approve-hooks"), "{out}");
+
     env.write_repo(".dotman.toml", b"[hooks]\n\"a\" = \"x\\ry\"\n");
     let (code, out) = doctor(&env, &[]);
     assert_eq!(code, Some(1), "{out}");
-    assert!(line(&out, "fail", "control character").is_some(), "{out}");
+    assert!(
+        line(&out, "fail", "holds U+000D carriage return").is_some(),
+        "{out}"
+    );
 }
 
 #[test]

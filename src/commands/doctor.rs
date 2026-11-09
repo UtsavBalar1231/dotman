@@ -260,10 +260,14 @@ fn hook_table(ctx: &Context) -> Option<Check> {
             "hooks",
             &format!("not approved on this machine, so none runs; {approve}"),
         )),
-        Ok(Standing::Changed) => Some(warn(
+        Ok(Standing::Changed { old_format: false }) => Some(warn(
+            "hooks",
+            &format!("the table changed since this machine approved it, so none runs; {approve}"),
+        )),
+        Ok(Standing::Changed { old_format: true }) => Some(warn(
             "hooks",
             &format!(
-                "the table changed since this machine approved it, or an older dotman approved it, so none runs; {approve}"
+                "the approval format changed, so the approval an older dotman saved no longer counts and none runs; {approve}"
             ),
         )),
         Err(e) => Some(Check {

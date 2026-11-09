@@ -69,7 +69,8 @@ pub struct IdentitySnapshot {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hooks {
-    /// xxh3 of the `[hooks]` table in `.dotman.toml` that this machine approved.
+    /// The `[hooks]` table in `.dotman.toml` that this machine approved, as compact JSON of the
+    /// ordered table. An older dotman kept an xxh3 hex hash here, which approves nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved: Option<String>,
 }

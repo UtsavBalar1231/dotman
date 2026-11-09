@@ -9,7 +9,6 @@ use crate::prompt;
 use crate::state::State;
 use anyhow::{Context as _, Result, bail};
 use glob::Pattern;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::process::{ExitStatus, Stdio};
@@ -39,13 +38,15 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     }
     validate(&table)?;
     let due = due(&table, changed)?;
-    let hash = table_hash(&table)?;
+    let json = canonical(&table)?;
     let mut state = ctx.state(&ctx.repo_id()?)?;
-    let recorded = state.hooks.approved.as_deref() == Some(hash.as_str());
+    let standing = approval(&json, &state);
+    let recorded = standing == Standing::Approved;
     let mut approved = policy.approve || recorded;
     if policy.dry_run {
         let would_ask = !approved && !policy.never_ask && prompt::interactive();
         for command in due {
+            let command = output::escape_line(command);
             output::info(&if approved {
                 format!("would run hook: {command}")
             } else if would_ask {
@@ -62,7 +63,7 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         approved = ask(&table)?;
     }
     if approved && !recorded {
-        state.hooks.approved = Some(hash);
+        state.hooks.approved = Some(json);
         state.save(&ctx.paths.state_file(), false)?;
         if asked {
             output::context("approved the [hooks] table above on this machine");
@@ -74,12 +75,14 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         return Ok(());
     }
     if !approved {
-        output::warning(&format!(
-            "{} not run: the [hooks] table in .dotman.toml is not approved on this machine. Read it, then run again with --approve-hooks:",
-            count(due.len())
-        ));
+        let why = if standing == (Standing::Changed { old_format: true }) {
+            "the approval format changed, so the approval an older dotman saved for the [hooks] table in .dotman.toml no longer counts. Read the table, then run again with --approve-hooks to approve it again:"
+        } else {
+            "the [hooks] table in .dotman.toml is not approved on this machine. Read it, then run again with --approve-hooks:"
+        };
+        output::warning(&format!("{} not run: {why}", count(due.len())));
         for command in due {
-            output::warning(&format!("  {command}"));
+            output::warning(&format!("  {}", output::escape_line(command)));
         }
         return Ok(());
     }
@@ -87,15 +90,16 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     let mut failed = 0_usize;
     for command in due {
         output::action("hook", command);
+        let shown = output::escape_line(command);
         match spawn(ctx, command) {
             Ok(status) if status.success() => {}
             Ok(status) => {
                 failed = failed.saturating_add(1);
-                output::warning(&format!("hook `{command}` failed: {status}"));
+                output::warning(&format!("hook `{shown}` failed: {status}"));
             }
             Err(e) => {
                 failed = failed.saturating_add(1);
-                output::warning(&format!("hook `{command}` could not start: {e}"));
+                output::warning(&format!("hook `{shown}` could not start: {e}"));
             }
         }
     }
@@ -127,29 +131,57 @@ fn due<'a>(
     Ok(commands)
 }
 
-/// Fails, naming the entry, when a glob or command holds a control character other than tab. A
-/// carriage return or an escape sequence could make the table read as other commands than the
-/// ones that run.
+/// Fails, naming the entry and the character, when a glob holds a control character other than
+/// tab, or a command one other than tab and newline. A carriage return or an escape sequence could
+/// make the table read as other commands than the ones that run; `sh` runs a multi-line command,
+/// and the table shows its newlines escaped.
 pub fn validate(table: &BTreeMap<String, String>) -> Result<()> {
-    let control = |text: &str| text.chars().any(|c| c.is_control() && c != '\t');
-    if let Some((glob, command)) = table
-        .iter()
-        .find(|(glob, command)| control(glob) || control(command))
-    {
-        bail!(
-            "the [hooks] entry `{}` = `{}` in .dotman.toml holds a control character, so no hook runs and none is approved; write the command on one line, or move it into a script",
-            output::escape(glob),
-            output::escape(command)
-        );
+    for (glob, command) in table {
+        let refused = glob
+            .chars()
+            .find(|c| c.is_control() && *c != '\t')
+            .or_else(|| {
+                command
+                    .chars()
+                    .find(|c| c.is_control() && !matches!(c, '\t' | '\n'))
+            });
+        if let Some(c) = refused {
+            bail!(
+                "the [hooks] entry `{}` = `{}` in .dotman.toml holds {}, so no hook runs and none is approved; remove it, or move the command into a script",
+                output::escape_line(glob),
+                output::escape_line(command),
+                char_name(c)
+            );
+        }
     }
     Ok(())
 }
 
-/// SHA-256 of the table as JSON. The parsed map is hashed, so TOML spacing and entry order do not
-/// change it; JSON quotes every glob and command, so no two tables share their bytes.
-fn table_hash(table: &BTreeMap<String, String>) -> Result<String> {
-    let bytes = serde_json::to_vec(table).context("cannot encode the [hooks] table")?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
+/// Such as `U+000D carriage return`.
+fn char_name(c: char) -> String {
+    let name = match c {
+        '\0' => "null",
+        '\u{7}' => "bell",
+        '\u{8}' => "backspace",
+        '\t' => "tab",
+        '\n' => "line feed",
+        '\u{b}' => "vertical tab",
+        '\u{c}' => "form feed",
+        '\r' => "carriage return",
+        '\u{1b}' => "escape",
+        '\u{7f}' => "delete",
+        '\u{85}' => "next line",
+        '\u{9b}' => "control sequence introducer",
+        _ => "control character",
+    };
+    format!("U+{:04X} {name}", u32::from(c))
+}
+
+/// The table as compact JSON of the ordered map, which `state.toml` keeps as the approval and
+/// compares byte for byte. TOML spacing and entry order do not change it, and JSON quotes every
+/// glob and command, so two tables never share it.
+fn canonical(table: &BTreeMap<String, String>) -> Result<String> {
+    serde_json::to_string(table).context("cannot encode the [hooks] table")
 }
 
 /// Where this machine stands on the repo's `[hooks]` table.
@@ -158,8 +190,11 @@ pub enum Standing {
     Empty,
     Approved,
     Unapproved,
-    /// This machine approved another table, or this one under the hash an older dotman used.
-    Changed,
+    /// This machine approved another table; `old_format` when the approval is a hash, the form an
+    /// older dotman saved.
+    Changed {
+        old_format: bool,
+    },
 }
 
 /// Compares `table` with the approval that `state` holds; fails as [`validate`] does.
@@ -168,18 +203,28 @@ pub fn standing(table: &BTreeMap<String, String>, state: &State) -> Result<Stand
         return Ok(Standing::Empty);
     }
     validate(table)?;
-    let hash = table_hash(table)?;
-    Ok(match state.hooks.approved.as_deref() {
-        Some(approved) if approved == hash => Standing::Approved,
-        Some(_) => Standing::Changed,
+    Ok(approval(&canonical(table)?, state))
+}
+
+fn approval(json: &str, state: &State) -> Standing {
+    match state.hooks.approved.as_deref() {
+        Some(approved) if approved == json => Standing::Approved,
+        // A canonical table is a JSON object, and an older dotman saved a hex hash.
+        Some(approved) => Standing::Changed {
+            old_format: !approved.starts_with('{'),
+        },
         None => Standing::Unapproved,
-    })
+    }
 }
 
 fn show_table(header: &str, table: &BTreeMap<String, String>) {
     output::context(header);
     for (glob, command) in table {
-        output::context(&format!("  {glob} -> {command}"));
+        output::context(&format!(
+            "  {} -> {}",
+            output::escape_line(glob),
+            output::escape_line(command)
+        ));
     }
 }
 
@@ -240,20 +285,20 @@ mod tests {
         assert!(err.contains("`a[`"), "{err}");
     }
 
-    fn hash(entries: &[(&str, &str)]) -> String {
-        table_hash(&table(entries)).unwrap_or_default()
+    fn json(entries: &[(&str, &str)]) -> String {
+        canonical(&table(entries)).unwrap_or_default()
     }
 
     #[test]
-    fn the_hash_follows_the_entries_and_nothing_else() {
-        let one = hash(&[("a", "x"), ("b", "y")]);
-        assert_eq!(one.len(), 64, "{one}");
-        assert_eq!(one, hash(&[("b", "y"), ("a", "x")]));
-        assert_ne!(one, hash(&[("a", "x"), ("b", "z")]));
+    fn the_approval_is_the_ordered_table_and_nothing_else() {
+        let one = json(&[("a", "x"), ("b", "y")]);
+        assert_eq!(one, r#"{"a":"x","b":"y"}"#);
+        assert_eq!(one, json(&[("b", "y"), ("a", "x")]));
+        assert_ne!(one, json(&[("a", "x"), ("b", "z")]));
     }
 
     #[test]
-    fn tables_that_shared_the_old_nul_joined_bytes_hash_apart() {
+    fn tables_that_shared_the_old_nul_joined_bytes_are_told_apart() {
         let one = [(".config/app/**", "true\0z*\0touch /tmp/PWNED")];
         let two = [(".config/app/**", "true"), ("z*", "touch /tmp/PWNED")];
         let joined = |entries: &[(&str, &str)]| {
@@ -263,31 +308,42 @@ mod tests {
                 .fold(String::new(), |all, part| all + part + "\0")
         };
         assert_eq!(joined(&one), joined(&two), "the pair the old hash confused");
-        assert_ne!(hash(&one), hash(&two));
+        assert_ne!(json(&one), json(&two));
     }
 
     #[test]
-    fn control_characters_are_refused_and_tabs_are_not() {
-        assert!(validate(&table(&[("a/*", "make\t-C x")])).is_ok());
-        for (glob, command) in [
-            ("a", "true\0touch x"),
-            ("a", "touch x #\r\u{1b}[2K  a -> echo ok"),
-            ("a", "one\ntwo"),
-            ("a\u{1b}]0;t\u{7}", "true"),
-            ("a", "x\u{9b}2K"),
+    fn control_characters_are_refused_by_name_and_tabs_and_command_newlines_are_not() {
+        assert!(validate(&table(&[("a/*", "make\t-C x\nmake install")])).is_ok());
+        for (glob, command, named) in [
+            ("a", "true\0touch x", "U+0000 null"),
+            (
+                "a",
+                "touch x #\r\u{1b}[2K  a -> echo ok",
+                "U+000D carriage return",
+            ),
+            ("a\nb", "true", "U+000A line feed"),
+            ("a\u{1b}]0;t\u{7}", "true", "U+001B escape"),
+            ("a", "x\u{9b}2K", "U+009B control sequence introducer"),
+            ("a", "x\u{7f}", "U+007F delete"),
+            ("a", "x\u{1}", "U+0001 control character"),
         ] {
             let err = validate(&table(&[("b", "true"), (glob, command)]))
                 .err()
                 .map(|e| format!("{e:#}"))
                 .unwrap_or_default();
-            assert!(err.contains("control character"), "{glob:?}: {err}");
-            let named = format!("`{}` = `{}`", output::escape(glob), output::escape(command));
-            assert!(err.contains(&named), "the entry is named: {err}");
+            assert!(err.contains(&format!("holds {named},")), "{glob:?}: {err}");
+            let entry = format!(
+                "`{}` = `{}`",
+                output::escape_line(glob),
+                output::escape_line(command)
+            );
+            assert!(err.contains(&entry), "the entry is named: {err}");
+            assert!(!err.contains('\n'), "on one line: {err:?}");
         }
     }
 
     #[test]
-    fn the_standing_tells_an_old_or_other_approval_from_none() {
+    fn only_the_exact_table_is_approved_and_an_old_hash_reads_as_changed() {
         let entries = table(&[("a", "x")]);
         let mut state = State::default();
         assert_eq!(
@@ -297,8 +353,12 @@ mod tests {
         assert_eq!(standing(&entries, &state).ok(), Some(Standing::Unapproved));
         // The xxh3-128 hex that the NUL-joined hash gave.
         state.hooks.approved = Some("55c7a64d8992c4767b4d28afab1811bd".to_owned());
-        assert_eq!(standing(&entries, &state).ok(), Some(Standing::Changed));
-        state.hooks.approved = Some(hash(&[("a", "x")]));
+        let old = Standing::Changed { old_format: true };
+        assert_eq!(standing(&entries, &state).ok(), Some(old));
+        state.hooks.approved = Some(json(&[("a", "x "), ("b", "y")]));
+        let other = Standing::Changed { old_format: false };
+        assert_eq!(standing(&entries, &state).ok(), Some(other));
+        state.hooks.approved = Some(json(&[("a", "x")]));
         assert_eq!(standing(&entries, &state).ok(), Some(Standing::Approved));
         assert!(standing(&table(&[("a", "x\ry")]), &state).is_err());
     }

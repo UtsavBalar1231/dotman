@@ -373,13 +373,49 @@ fn a_nul_in_a_command_is_refused_and_nothing_is_approved() {
             .as_bytes(),
     );
     let err = exits(&env, 1, &["apply", "--approve-hooks"]);
-    assert!(err.contains("control character"), "{err}");
+    assert!(err.contains("holds U+0000 null"), "{err}");
     assert!(
         err.contains("`.config/app/**` = `true\\0z*\\0echo ran"),
         "{err}"
     );
     assert!(!marker(&env).exists());
     assert_eq!(approved_line(&env), None, "{err}");
+}
+
+#[test]
+fn a_multi_line_command_runs_and_is_shown_on_one_line() {
+    let env = hooked();
+    let mark = marker(&env).display().to_string();
+    env.write_repo(
+        ".dotman.toml",
+        format!(
+            "[hooks]\n\".config/app/**\" = \"\"\"\necho one >> '{mark}'\necho two >> '{mark}'\"\"\"\n"
+        )
+        .as_bytes(),
+    );
+    let err = exits(&env, 0, &["apply", "--approve-hooks"]);
+    let ran = fs::read_to_string(marker(&env)).unwrap_or_default();
+    assert_eq!(ran, "one\ntwo\n", "{err}");
+    let shown = format!(".config/app/** -> echo one >> '{mark}'\\necho two >> '{mark}'");
+    assert!(err.lines().any(|line| line.contains(&shown)), "{err}");
+    assert!(
+        err.lines().any(|line| line.starts_with("hook echo one")
+            && line.ends_with(&format!("\\necho two >> '{mark}'"))),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_approval_is_the_table_itself() {
+    let env = hooked();
+    set_hooks(&env, "true");
+    exits(&env, 0, &["apply", "--approve-hooks"]);
+    let file = env.state_dir().join("state.toml");
+    let state = State::read(&file).expect("state").expect("a state");
+    assert_eq!(
+        state.hooks.approved.as_deref(),
+        Some(r#"{".config/app/**":"true"}"#)
+    );
 }
 
 #[test]
@@ -405,7 +441,8 @@ fn a_table_swapped_after_approval_never_runs_unattended() {
     env.write_repo(A, b"a2\n");
     env.write_repo("zfile", b"z\n");
     let err = exits(&env, 0, &["apply"]);
-    assert!(err.contains("not approved"), "{err}");
+    assert!(err.contains("the approval format changed"), "{err}");
+    assert!(err.contains("--approve-hooks to approve it again"), "{err}");
     assert!(!marker(&env).exists(), "{err}");
     exits(&env, 0, &["apply", "--approve-hooks"]);
     assert!(!marker(&env).exists(), "nothing changed, so nothing is due");
