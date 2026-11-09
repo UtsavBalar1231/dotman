@@ -246,6 +246,13 @@ const CLAIMS: &[(&str, &[&str])] = &[
         &["a_file_backed_up_by_both_passes_of_a_sync_keeps_both_copies"],
     ),
     (
+        "Backups are never pruned",
+        &[
+            "backups_are_never_pruned_by_later_syncs_and_applies",
+            "nothing_in_src_deletes_from_the_backups_dir",
+        ],
+    ),
+    (
         "which is meant for every machine, or when the repo's mode changed",
         &[
             "a_looser_mode_written_into_modes_by_hand_is_honored",
@@ -511,8 +518,6 @@ const CLAIMS: &[(&str, &[&str])] = &[
 
 /// Claims that no test proves yet. Each one is a test to write, not a sentence to soften.
 const GAPS: &[&str] = &[
-    // Nothing prunes backups, but no test runs many syncs and counts what is left.
-    "Backups are never pruned",
     // Each prompt in the table has a test for its flag; none checks that the table lists them all.
     "Every prompt has a flag, so unattended runs never guess",
     // Only the git layer's missing-git error is tested, not each command without git.
@@ -670,6 +675,137 @@ fn every_claim_in_the_docs_names_the_tests_that_prove_it() -> R {
             );
         }
     }
+    Ok(())
+}
+
+/// A file under `src/` by its path from the crate root, with its lines.
+type Source = (String, Vec<String>);
+
+/// Each `.rs` file under `src/` with the lines before its `#[cfg(test)]` module, comments left out.
+fn source_lines() -> Result<Vec<Source>, Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for entry in WalkDir::new(root.join("src")).sort_by_file_name() {
+        let entry = entry?;
+        if entry.path().extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let name = entry
+            .path()
+            .strip_prefix(root)?
+            .to_string_lossy()
+            .into_owned();
+        let lines = fs::read_to_string(entry.path())?
+            .lines()
+            .map(str::trim)
+            .take_while(|line| *line != "#[cfg(test)]")
+            .filter(|line| !line.starts_with("//"))
+            .map(str::to_owned)
+            .collect();
+        files.push((name, lines));
+    }
+    Ok(files)
+}
+
+/// Every call under `src/` that deletes a file or a directory, by file, with what it deletes;
+/// tempfile's own cleanup removes only what it created. None reaches the backups directory, so
+/// nothing prunes it. A new deletion needs a row that says what it deletes.
+const DELETIONS: &[(&str, usize, &str)] = &[
+    (
+        "src/commands/add.rs",
+        2,
+        "the plain repo source that `add --encrypt` replaces, and add's own temp link in the repo",
+    ),
+    (
+        "src/commands/forget.rs",
+        2,
+        "a forgotten source in the repo, and the repo directories that leaves empty",
+    ),
+    (
+        "src/commands/init.rs",
+        1,
+        "the staging directories a killed init left beside the repo",
+    ),
+    (
+        "src/context.rs",
+        2,
+        "leftover `.dotman-tmp-` entries, a name no key and so no backup copy can have",
+    ),
+    (
+        "src/engine/write.rs",
+        3,
+        "the directory `import --swap` staged, and the link or tree it set aside",
+    ),
+    (
+        "src/import/gittree.rs",
+        6,
+        "the import's scratch history, files it leaves out or renames, and the repo it replaces",
+    ),
+    (
+        "src/sys.rs",
+        2,
+        "the `unlinkat` wrapper that the helper calls",
+    ),
+    (
+        "src/system/escalate.rs",
+        1,
+        "the plan directory under `system-plan/`",
+    ),
+    (
+        "src/system/helper.rs",
+        1,
+        "the helper's own temp file beside a system target",
+    ),
+];
+
+#[test]
+fn nothing_in_src_deletes_from_the_backups_dir() -> R {
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for (name, lines) in source_lines()? {
+        let deletions = lines
+            .iter()
+            .filter(|line| {
+                [
+                    "remove_file(",
+                    "remove_dir(",
+                    "remove_dir_all(",
+                    "unlinkat(",
+                ]
+                .iter()
+                .any(|call| line.contains(call))
+            })
+            .count();
+        if deletions > 0 {
+            found.push((name, deletions));
+        }
+    }
+    let listed: Vec<(String, usize)> = DELETIONS
+        .iter()
+        .map(|(name, count, _)| ((*name).to_owned(), *count))
+        .collect();
+    assert_eq!(
+        found, listed,
+        "a deletion was added or removed; say in DELETIONS what it deletes, after checking that it cannot reach the backups"
+    );
+    Ok(())
+}
+
+/// The lock is taken to write only by `Context::lock`, which rewrites a stale
+/// `.git/info/attributes`; every other `Lock::acquire` is a dry-run probe, which writes nothing.
+#[test]
+fn only_context_lock_takes_the_lock_to_write() -> R {
+    let mut writing = Vec::new();
+    for (name, lines) in source_lines()? {
+        for line in lines.iter().filter(|line| line.contains("Lock::acquire(")) {
+            if !line.contains(", true)") {
+                writing.push(format!("{name}: {line}"));
+            }
+        }
+    }
+    assert_eq!(
+        writing,
+        ["src/context.rs: let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;"]
+    );
     Ok(())
 }
 

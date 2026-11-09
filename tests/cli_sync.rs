@@ -1,6 +1,6 @@
 mod common;
 
-use common::{TestEnv, assert_converged, mode_of};
+use common::{TestEnv, assert_converged, mode_of, tree_checksum};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -1880,6 +1880,45 @@ fn a_file_backed_up_by_both_passes_of_a_sync_keeps_both_copies() {
         .collect();
     copies.sort();
     assert_eq!(copies, [b"B local edit\n".to_vec(), b"v2\n".to_vec()]);
+}
+
+/// Backups are never pruned: while syncs and applies replace one file again and again, every
+/// backup run directory and every copy in it stays as it was written, and each replaced version
+/// is there at the end.
+#[test]
+fn backups_are_never_pruned_by_later_syncs_and_applies() {
+    let (a, b) = pair(&[(".bashrc", b"v0\n", 0o644)]);
+    let backups = b.state_dir().join("backups");
+    let mut seen = std::collections::BTreeMap::new();
+    for round in 0..3_u32 {
+        a.write(".bashrc", format!("s{round}\n").as_bytes(), 0o644);
+        exits(&a, 0, &["sync"]);
+        exits(&b, 0, &["sync"]);
+        a.write(".bashrc", format!("p{round}\n").as_bytes(), 0o644);
+        exits(&a, 0, &["sync"]);
+        b.ok(&["git", "pull", "-q", "--rebase", "origin", "main"]);
+        exits(&b, 0, &["apply"]);
+        assert_eq!(b.read(".bashrc"), format!("p{round}\n").into_bytes());
+
+        let now = tree_checksum(&backups);
+        for (path, entry) in &seen {
+            assert_eq!(now.get(path), Some(entry), "{path} in round {round}");
+        }
+        assert!(now.len() > seen.len(), "round {round} backed nothing up");
+        seen = now;
+    }
+    let runs = seen.keys().filter(|path| !path.contains('/')).count();
+    assert_eq!(runs, 6, "{seen:?}");
+    let mut copies: Vec<Vec<u8>> = b
+        .backups(".bashrc")
+        .into_iter()
+        .map(|(bytes, _)| bytes)
+        .collect();
+    copies.sort();
+    assert_eq!(
+        copies,
+        ["p0\n", "p1\n", "s0\n", "s1\n", "s2\n", "v0\n"].map(|text| text.as_bytes().to_vec())
+    );
 }
 
 /// Two machines that each ran a fresh `init --remote` share no history. The printed recipe, run
