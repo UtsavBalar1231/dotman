@@ -364,6 +364,25 @@ fn a_managed_file_that_the_global_excludes_ignore_still_reaches_the_remote() {
     assert!(tree.lines().any(|line| line == key), "{tree}");
 }
 
+/// What a git hook or a shell exports never redirects dotman's git: with `GIT_NAMESPACE` set, sync
+/// still moves `main` and writes no `refs/namespaces/`, and with `GIT_LITERAL_PATHSPECS` set the
+/// temp and held exclusions still read as pathspec magic.
+#[test]
+fn inherited_git_variables_never_redirect_sync() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    a.write(".a", b"namespaced\n", 0o644);
+    exits_with(&a, &[("GIT_NAMESPACE", "evil")], 0, &["sync"]);
+    let refs = a.remote_refs();
+    assert!(!refs.contains("refs/namespaces/"), "{refs}");
+    assert_eq!(remote_file(&a, ".a"), "namespaced\n");
+
+    a.write(".a", b"literal\n", 0o644);
+    exits_with(&a, &[("GIT_LITERAL_PATHSPECS", "1")], 0, &["sync"]);
+    assert_eq!(remote_file(&a, ".a"), "literal\n");
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".a"), b"literal\n");
+}
+
 #[test]
 fn a_skipped_path_exits_3_and_everything_else_is_still_pushed() {
     let (a, _b) = pair(&[(".a", b"a\n", 0o644), (".d", b"d\n", 0o644)]);

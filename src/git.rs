@@ -46,8 +46,11 @@ const ISOLATION: [&str; 16] = [
 /// How long a short local probe, such as `git --version`, may take before it counts as hung.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Variables that make git ignore `-C`, as when `dotman` runs inside a git hook.
-const LOCAL_REPO_ENV: [&str; 7] = [
+/// Variables that make git ignore `-C`, as when `dotman` runs inside a git hook, or that point it
+/// at other refs, objects or history: `GIT_NAMESPACE` pushes to `refs/namespaces/<ns>/` while
+/// `main` stays behind. The pathspec ones would change how the held and temp exclusions read.
+/// `GIT_CEILING_DIRECTORIES` is set again by [`Git::base`].
+const LOCAL_REPO_ENV: [&str; 18] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -55,6 +58,17 @@ const LOCAL_REPO_ENV: [&str; 7] = [
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_QUARANTINE_PATH",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
 ];
 
 /// A git repository driven through the `git` binary with config isolation.
