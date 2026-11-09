@@ -484,7 +484,10 @@ fn the_push_line_counts_the_commits_sent() {
     let b = clone_to_new_device(&a);
     a.write(".a", b"a2\n", 0o644);
     exits(&a, 0, &["sync"]);
-    b.ok(&["git", "commit", "-q", "--allow-empty", "-m", "by hand"]);
+    // Not empty: git before 2.26 drops a commit that starts empty when it rebases.
+    b.write_repo(".c", b"c\n");
+    b.ok(&["git", "add", "--", ".c"]);
+    b.ok(&["git", "commit", "-q", "-m", "by hand"]);
     b.write(".b", b"b\n", 0o644);
     b.ok(&["add", ".b"]);
     let err = exits(&b, 0, &["sync"]);
@@ -814,7 +817,10 @@ fn status_never_counts_what_origin_has_before_the_first_fetch() {
     env.ok(&["sync"]);
     let repo = repo_path(&env);
     env.git(&["-C", &repo, "update-ref", "-d", "refs/remotes/origin/main"]);
-    env.git(&["-C", &repo, "commit", "-q", "--allow-empty", "-m", "local"]);
+    // Not empty: git before 2.26 drops a commit that starts empty when it rebases.
+    env.write_repo(".c", b"c\n");
+    env.git(&["-C", &repo, "add", "--", ".c"]);
+    env.git(&["-C", &repo, "commit", "-q", "-m", "local"]);
 
     let err = exits(&env, 0, &["status"]);
     let line = "origin has not been fetched yet; `dotman sync` fetches and pushes";
