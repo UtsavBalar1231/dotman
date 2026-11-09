@@ -985,3 +985,62 @@ fn a_shallow_repo_is_deepened_before_it_is_called_unrelated() {
     assert_eq!(d.read(".bashrc"), b"v2 amended\n");
     assert_eq!(remote_file(&a, ".profile"), "p1, edited on d\n");
 }
+
+/// An editor holds `.bashrc` in a buffer while a sync pulls a new version of it, then writes the
+/// buffer back over it. `edit` saves the edit aside, puts the pulled version back and says so, and
+/// the next sync reverts nothing.
+#[test]
+fn an_edit_made_while_a_sync_pulled_the_same_file_reverts_nothing() {
+    let (a, b) = pair(&[(".bashrc", b"line1\nline2\n", 0o644)]);
+    a.write(".bashrc", b"line1\nline2\nA fix\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    let started = b.root().join("editor-started");
+    let resume = b.root().join("editor-resume");
+    let editor = b.write_script(
+        "bufed.sh",
+        &format!(
+            "#!/bin/sh\nbuf=$(cat \"$1\")\n: > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nprintf '%s\\nB added\\n' \"$buf\" > \"$1\"\n",
+            started.display(),
+            resume.display()
+        ),
+    );
+    let child = b
+        .dot_process()
+        .args(["edit", ".bashrc"])
+        .env("EDITOR", &editor)
+        .env("VISUAL", "")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start dotman edit");
+    let waiting = std::time::Instant::now();
+    while !started.exists() {
+        assert!(waiting.elapsed() < std::time::Duration::from_secs(60));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    exits(&b, 0, &["sync"]);
+    fs::write(&resume, b"").expect("let the editor finish");
+    let out = child.wait_with_output().expect("wait for dotman edit");
+
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(".bashrc changed while the editor was open"),
+        "{err}"
+    );
+    assert!(err.contains("moved HEAD from"), "{err}");
+    assert!(err.contains("diff -u"), "{err}");
+    assert!(err.contains("dotman edit .bashrc"), "{err}");
+    assert!(!err.contains("dotman sync"), "{err}");
+    assert_eq!(
+        b.backups(".dotman/edit/.bashrc"),
+        [(b"line1\nline2\nB added\n".to_vec(), 0o600)]
+    );
+    assert_eq!(
+        fs::read(b.repo().join(".bashrc")).expect("repo copy"),
+        b"line1\nline2\nA fix\n"
+    );
+    exits(&b, 0, &["sync"]);
+    assert_eq!(remote_file(&a, ".bashrc"), "line1\nline2\nA fix\n");
+}

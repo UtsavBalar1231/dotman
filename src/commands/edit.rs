@@ -4,16 +4,18 @@ use crate::cli::EditArgs;
 use crate::commands::Outcome;
 use crate::commands::apply::{self, Options};
 use crate::context::Context;
+use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::hooks::Policy;
 use crate::lock::Lock;
 use crate::name;
 use crate::paths::derive_key;
 use crate::proc;
 use crate::variant::Flag;
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::SystemTime;
 
 /// Runs `dotman edit`. The lock is taken only after the editor exits, so a long edit blocks nothing;
 /// a run that changed the state meanwhile makes it apply nothing.
@@ -53,6 +55,7 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
     let before = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
     let state_file = ctx.paths.state_file();
     let state_before = read_state(&state_file)?;
+    let head_before = ctx.git.head()?;
     let (program, rest) = editor_command()?;
     if proc::find_program(&program).is_none() {
         bail!(
@@ -70,24 +73,79 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
 
     let _lock = Lock::acquire(&ctx.paths.lock_file(), false)?;
     ctx.guard()?;
+    let after = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
     // A sync or apply that ran meanwhile may have written this key with H matching what it saw;
     // applying on top would compare against a state the edit never saw.
     if read_state(&state_file)? != state_before {
-        bail!(
-            "another {bin} run changed the state while the editor was open, so nothing was applied; your edit is in {}; run `{bin} status` to see where {key} stands",
-            path.display(),
-            bin = name::bin()
-        );
+        return Err(changed_meanwhile(
+            &ctx,
+            &key,
+            source,
+            &after,
+            head_before.as_deref(),
+        )?);
     }
     // Opening the editor to look must never replace a locally edited file, so drift is answered
     // only when the source changed.
-    let after = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
     let opts = Options {
         take_drift: before != after,
         ..Options::default()
     };
     let applied = apply::apply(&ctx, std::slice::from_ref(&args.path), &opts)?;
     apply::finish(&ctx, &applied, Policy::default())
+}
+
+/// Why nothing was applied after another run changed the state while the editor was open. The
+/// edit is saved under the backups first. When HEAD moved and brought another version of
+/// `source`, an editor that wrote back what it had loaded has reverted that version, and the
+/// next sync would commit the revert, so the repo copy is put back to HEAD's.
+fn changed_meanwhile(
+    ctx: &Context,
+    key: &str,
+    source: &str,
+    edited: &[u8],
+    head_before: Option<&str>,
+) -> Result<anyhow::Error> {
+    let bin = name::bin();
+    let path = ctx.paths.repo.join(source);
+    let run = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
+    let saved = back_up_bytes(&run, &format!(".dotman/edit/{source}"), edited)?;
+    let shown = |p: &Path| shell_words::quote(&p.to_string_lossy()).into_owned();
+    let head = ctx.git.head()?;
+    let at = |rev: Option<&str>| -> Result<Option<Vec<u8>>> {
+        match rev {
+            Some(rev) if ctx.git.tree_mode(rev, source)?.is_some() => {
+                Ok(Some(ctx.git.show_blob(rev, source)?))
+            }
+            _ => Ok(None),
+        }
+    };
+    let short = |rev: Option<&str>| {
+        rev.map_or("no commit", |rev| rev.get(..12).unwrap_or(rev))
+            .to_owned()
+    };
+    if head.as_deref() != head_before && at(head_before)? != at(head.as_deref())? {
+        let restored = match head.as_deref() {
+            Some(rev) if at(Some(rev))?.is_some() => {
+                ctx.git.checkout_path(rev, Path::new(source))?;
+                format!("{} holds the new version again", shown(&path))
+            }
+            _ => format!("the new HEAD has no {source}"),
+        };
+        return Ok(anyhow!(
+            "{source} changed while the editor was open: another {bin} run moved HEAD from {} to {} and brought a new version of it, so nothing was applied. Your edit is saved in {}, and {restored}. Compare them with `diff -u {} {}`, then make your change again with `{bin} edit {key}`",
+            short(head_before),
+            short(head.as_deref()),
+            shown(&saved),
+            shown(&path),
+            shown(&saved)
+        ));
+    }
+    Ok(anyhow!(
+        "another {bin} run changed the state while the editor was open, so nothing was applied. HEAD did not bring another version of {source}, so your edit is still in {}, and a copy is in {}; run `{bin} status` to see where {key} stands, then `{bin} apply {key}` applies it",
+        shown(&path),
+        shown(&saved)
+    ))
 }
 
 /// The state file's bytes; `None` when there is none.

@@ -403,6 +403,20 @@ impl Git {
         self.run(&["checkout", "-q", "-f", "HEAD"]).map(drop)
     }
 
+    /// Puts `path`, repo-relative and taken literally, back in the index and the worktree as
+    /// `rev` has it.
+    pub fn checkout_path(&self, rev: &str, path: &Path) -> Result<()> {
+        let spec = pathspec(":(literal)", path);
+        let args = [
+            OsStr::new("checkout"),
+            OsStr::new("-q"),
+            OsStr::new(rev),
+            OsStr::new("--"),
+            &spec,
+        ];
+        self.run(&args).map(drop)
+    }
+
     /// Feeds a `git fast-import` stream that ends in `done` to git. Git moves the refs the stream
     /// names only after it has read the whole stream. A file, not a pipe: if git exits early, a
     /// write to a closed pipe would kill `dotman` with SIGPIPE.
