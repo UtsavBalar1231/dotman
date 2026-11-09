@@ -72,6 +72,15 @@ const IGNORED: &str =
 const SOURCE_LINK: &str = "symlinks inside the source, which chezmoi reads through and dotman does not follow; add the file they point to with `{bin} add`";
 const ODD: &str = "entries that are not regular files or symlinks, or whose names are not UTF-8";
 const NO_TARGET: &str = "entries chezmoi produced no file for";
+const MISORDERED: &str = "entries whose attributes are out of chezmoi's order";
+/// The attributes of a regular file, in the order chezmoi reads them.
+const FILE_ATTRS: [&str; 5] = [
+    "encrypted_",
+    "private_",
+    "readonly_",
+    "empty_",
+    "executable_",
+];
 const UNMANAGEABLE: &str = "paths dotman cannot manage";
 const CLASH: &str = "paths that clash with another path of the import";
 
@@ -190,16 +199,7 @@ fn decode_file(name: &str) -> Decoded {
     }
     attrs.symlink = class == Class::Symlink;
     let mut encrypted = false;
-    while let Some((prefix, after)) = take_prefix(
-        rest,
-        &[
-            "encrypted_",
-            "private_",
-            "readonly_",
-            "empty_",
-            "executable_",
-        ],
-    ) {
+    while let Some((prefix, after)) = take_prefix(rest, &FILE_ATTRS) {
         match prefix {
             "encrypted_" => encrypted = true,
             "private_" => attrs.private = true,
@@ -911,6 +911,52 @@ impl Session<'_> {
     }
 }
 
+/// Why chezmoi produced nothing for `entry`. A name with its attributes out of order is the
+/// likely cause, since chezmoi then reads the rest as part of the name and targets another file.
+fn no_target(entry: &Entry, why: &str) -> Item {
+    let name = entry.rel.rsplit('/').next().unwrap_or(&entry.rel);
+    in_chezmoi_order(name).map_or_else(
+        || Item {
+            reason: NO_TARGET,
+            detail: format!("{}: {why}", entry.detail()),
+        },
+        |fixed| Item {
+            reason: MISORDERED,
+            detail: format!(
+                "{}: chezmoi reads {} only in that order and takes the rest as part of the name; rename it to {fixed}",
+                entry.detail(),
+                FILE_ATTRS.join(", ")
+            ),
+        },
+    )
+}
+
+/// `name` with its file attributes in chezmoi's order, when they are in another order.
+fn in_chezmoi_order(name: &str) -> Option<String> {
+    if ["remove_", "run_", "symlink_"]
+        .iter()
+        .any(|class| name.starts_with(class))
+    {
+        return None;
+    }
+    let (class, mut rest) = take_prefix(name, &["create_", "modify_"]).unwrap_or(("", name));
+    let mut seen: Vec<usize> = Vec::new();
+    while let Some((prefix, after)) = take_prefix(rest, &FILE_ATTRS) {
+        seen.extend(FILE_ATTRS.iter().position(|attr| *attr == prefix));
+        rest = after;
+    }
+    if seen.is_sorted_by(|a, b| a < b) {
+        return None;
+    }
+    seen.sort_unstable();
+    seen.dedup();
+    let attrs: String = seen
+        .iter()
+        .filter_map(|at| FILE_ATTRS.get(*at).copied())
+        .collect();
+    Some(format!("{class}{attrs}{rest}"))
+}
+
 /// An entry the repo gets.
 struct Write {
     key: String,
@@ -928,10 +974,7 @@ fn settle(
     let mut writes = Vec::new();
     for entry in wanted {
         if let Some(why) = fetched.failed.remove(&entry.target) {
-            items.push(Item {
-                reason: NO_TARGET,
-                detail: format!("{}: {why}", entry.detail()),
-            });
+            items.push(no_target(entry, &why));
             continue;
         }
         let Some((content, perm)) = fetched.items.remove(&entry.target) else {
@@ -1365,13 +1408,10 @@ fn fetch(
         wanted.retain(|entry| {
             let kept = listed.contains(&entry.target);
             if !kept {
-                items.push(Item {
-                    reason: NO_TARGET,
-                    detail: format!(
-                        "{}: chezmoi does not manage it on this host (.chezmoiignore, or an empty file)",
-                        entry.detail()
-                    ),
-                });
+                items.push(no_target(
+                    entry,
+                    "chezmoi does not manage it on this host (.chezmoiignore, or an empty file)",
+                ));
             }
             kept
         });
@@ -1526,6 +1566,44 @@ mod tests {
     fn decoded(name: &str) -> (Class, String) {
         let d = decode_file(name);
         (d.class, d.name)
+    }
+
+    #[test]
+    fn attributes_out_of_chezmoi_s_order_are_named_with_the_fix() {
+        assert_eq!(
+            in_chezmoi_order("executable_private_x").as_deref(),
+            Some("private_executable_x")
+        );
+        assert_eq!(
+            in_chezmoi_order("create_executable_encrypted_dot_k").as_deref(),
+            Some("create_encrypted_executable_dot_k")
+        );
+        assert_eq!(
+            in_chezmoi_order("private_private_x").as_deref(),
+            Some("private_x")
+        );
+        for fine in [
+            "private_executable_x",
+            "dot_bashrc",
+            "encrypted_private_readonly_empty_executable_x",
+            "symlink_dot_x",
+            "run_once_x.sh",
+        ] {
+            assert_eq!(in_chezmoi_order(fine), None, "{fine}");
+        }
+        let entry = Entry {
+            rel: "dot_config/executable_private_x".to_owned(),
+            target: ".config/x".to_owned(),
+            class: Class::File,
+            attrs: Attrs::default(),
+        };
+        let item = no_target(&entry, "chezmoi has no file for it here");
+        assert_eq!(item.reason, MISORDERED);
+        assert!(
+            item.detail.contains("rename it to private_executable_x"),
+            "{}",
+            item.detail
+        );
     }
 
     #[test]

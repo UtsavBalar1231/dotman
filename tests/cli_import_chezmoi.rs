@@ -641,3 +641,30 @@ fn two_chezmoi_sources_are_listed_and_nothing_is_picked() {
     assert_eq!(tree_checksum(&env.home()), home);
     assert!(!env.repo().exists());
 }
+
+#[test]
+fn attributes_out_of_chezmoi_s_order_are_reported_as_such() {
+    if !have_chezmoi() {
+        return;
+    }
+    let env = TestEnv::new();
+    let source = source(
+        &env,
+        "cz",
+        &[
+            ("dot_bashrc", "export A=1\n"),
+            ("executable_private_x", "#!/bin/sh\n"),
+        ],
+    );
+    let out = env.run(&["import", &source.to_string_lossy()]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(accounting(&err), (2, 1, 1), "{err}");
+    assert!(
+        err.contains("entries whose attributes are out of chezmoi's order (1):")
+            && err.contains("executable_private_x (target x): chezmoi reads encrypted_, private_")
+            && err.contains("rename it to private_executable_x"),
+        "{err}"
+    );
+    assert!(!err.contains("chezmoi has no file for it"), "{err}");
+}
