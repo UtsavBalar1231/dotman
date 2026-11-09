@@ -13,8 +13,8 @@ use super::chezmoi;
 use super::farm;
 use super::yadm::{self, Alternate, Machine};
 use super::{
-    EditedConfig, Item, Report, Source, author_email, count, find_legacy, homes, legacy, proceed,
-    require_clean, require_fresh,
+    EditedConfig, Item, Report, Source, author_email, count, find_legacy, held, homes, legacy,
+    proceed, require_clean, require_fresh,
 };
 use crate::bootstrap;
 use crate::cli::ImportArgs;
@@ -30,7 +30,7 @@ use crate::output;
 use crate::paths::{
     create_private_dir, is_reserved_root_name, private_temp_dir, validate_key, write_atomic,
 };
-use crate::repo_config::RepoConfig;
+use crate::repo_config::{Allow, RepoConfig};
 use crate::state::IdentitySnapshot;
 use crate::template::{self, Vars};
 use crate::variant::{Selection, Sources};
@@ -688,6 +688,39 @@ fn tally(found: &Analysis, recover: bool) -> Report {
     report
 }
 
+/// Takes each file the content guard holds out of the conversion, so the conversion commit removes
+/// it from the tree; the history the source brings still has it. Root files dotman never applies
+/// are not dotfiles and stay.
+fn guard_content(repo: &Path, found: &mut Analysis, allow: &[Allow]) {
+    let mut left = Vec::new();
+    found.kept.retain(|kept| {
+        if kept.reserved || kept.mode == "120000" {
+            return true;
+        }
+        let item = kept.body.as_ref().map_or_else(
+            || match read_node(repo, &kept.from) {
+                Ok(Node::File { bytes, .. }) => held(&bytes, &kept.to, allow),
+                _ => None,
+            },
+            |body| held(body.as_bytes(), &kept.to, allow),
+        );
+        let Some(item) = item else {
+            return true;
+        };
+        left.push(Left {
+            reason: item.reason,
+            detail: format!("{}; the source's history still has it", item.detail),
+            path: kept.from.clone(),
+            remove: true,
+        });
+        false
+    });
+    if !left.is_empty() {
+        found.left.extend(left);
+        found.left.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+}
+
 /// Modes git cannot carry: a file in `$HOME` with the same bytes as its blob and no group or other
 /// access, which the import would otherwise widen to git's 0644 or 0755 on the next apply.
 fn home_modes(ctx: &Context, git: &Git, found: &Analysis) -> BTreeMap<String, u32> {
@@ -800,6 +833,8 @@ fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u3
         "import: convert yadm alternates"
     } else if !has_config {
         "import: add .dotman.toml"
+    } else if found.left.iter().any(|left| left.remove) {
+        "import: leave out files that hold a credential"
     } else {
         return Ok(());
     };
@@ -1184,10 +1219,16 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
 
     let setup = yadm_setup(ctx, source, &tree)?;
     let identity = identity::current(setup.machine.as_ref().unwrap_or(&ctx.machine));
-    let found = analyze(&staging.git, &tree, &identity);
-    let mut modes = home_modes(ctx, &staging.git, &found);
+    let mut found = analyze(&staging.git, &tree, &identity);
     let has_own = found.kept.iter().any(|kept| kept.to == ".dotman.toml");
-    let config = match has_own.then(|| RepoConfig::load(&staging.repo.join(".dotman.toml"))) {
+    let own = has_own.then(|| RepoConfig::load(&staging.repo.join(".dotman.toml")));
+    let allow = match &own {
+        Some(Ok(own)) => own.guard.allow.as_slice(),
+        _ => &[],
+    };
+    guard_content(&staging.repo, &mut found, allow);
+    let mut modes = home_modes(ctx, &staging.git, &found);
+    let config = match own {
         None => SourceConfig::None,
         Some(Ok(own)) => {
             modes.retain(|key, _| !own.modes.contains_key(key));
@@ -1278,6 +1319,7 @@ fn content(git: &Git, kept: &Kept) -> Result<Vec<u8>> {
 
 /// Compares the converted source with the repo worktree. Nothing in the repo is changed.
 fn compare(ctx: &Context, git: &Git, found: &Analysis, include_missing: bool) -> Result<Overlay> {
+    let allow = ctx.repo_config()?.guard.allow;
     let mut overlay = Overlay {
         report: tally(
             &Analysis {
@@ -1315,11 +1357,16 @@ fn compare(ctx: &Context, git: &Git, found: &Analysis, include_missing: bool) ->
         };
         match read_node(&ctx.paths.repo, key)? {
             Node::Missing if include_missing => {
+                let bytes = content(git, kept)?;
+                if !symlink && let Some(item) = held(&bytes, key, &allow) {
+                    needs(item.reason, item.detail);
+                    continue;
+                }
                 overlay.files.push(Addition {
                     path: kept.to.clone(),
                     symlink,
                     executable,
-                    bytes: content(git, kept)?,
+                    bytes,
                 });
                 converted = converted.saturating_add(1);
             }

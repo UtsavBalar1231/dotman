@@ -1078,6 +1078,67 @@ fn the_staging_guard_keeps_a_credential_out_of_the_commit() {
     assert!(!remote_history(&env).contains(&token));
 }
 
+/// Every importer leaves out a file that holds a credential, reports it as needing action and
+/// exits 3: a git tree's conversion commit removes it, and chezmoi and farm imports never write it.
+#[test]
+fn imports_leave_out_files_that_hold_a_credential() {
+    let token = github_token();
+    let text = format!("export GH={token}\n");
+
+    let env = TestEnv::new();
+    let source = source_tree(&env, "dots", &[(".bashrc", "# rc\n"), (".zlocal", &text)]);
+    common::git_in(&env, &source, &["init", "-q"]);
+    common::git_in(&env, &source, &["add", "-A"]);
+    common::git_in(&env, &source, &["commit", "-q", "-m", "dots"]);
+    source.seal();
+    let err = exits(&env.run(&["import", &source.to_string_lossy()]), 3);
+    assert!(
+        err.contains(".zlocal: line 1 holds a github-token"),
+        "{err}"
+    );
+    assert!(!err.contains(&token), "{err}");
+    let repo = env.repo().to_string_lossy().into_owned();
+    let tree = env.git(&["-C", &repo, "ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(
+        tree.contains(".bashrc") && !tree.contains(".zlocal"),
+        "{tree}"
+    );
+    assert!(!env.repo().join(".zlocal").exists());
+
+    if have_chezmoi() {
+        let env = TestEnv::new();
+        let source = source_tree(
+            &env,
+            "cz",
+            &[("dot_bashrc", "# rc\n"), ("dot_zlocal", &text)],
+        );
+        let err = exits(&env.run(&["import", &source.to_string_lossy()]), 3);
+        assert!(
+            err.contains(".zlocal: line 1 holds a github-token"),
+            "{err}"
+        );
+        assert!(!env.repo().join(".zlocal").exists());
+        assert_eq!(
+            files_containing(&env.repo(), token.as_bytes()),
+            Vec::<String>::new()
+        );
+    }
+
+    let env = TestEnv::new();
+    stow(&env);
+    env.write("dotfiles/zsh/.zlocal", text.as_bytes(), 0o600);
+    env.symlink(".zlocal", "dotfiles/zsh/.zlocal");
+    let err = exits(&env.run(&["import", "--yes"]), 3);
+    assert!(
+        err.contains(".zlocal: line 1 holds a github-token"),
+        "{err}"
+    );
+    assert_eq!(
+        files_containing(&env.repo(), token.as_bytes()),
+        Vec::<String>::new()
+    );
+}
+
 /// The age identity file named by `[age] identity`, and the file named by `DOTMAN_AGE_KEY_FILE`,
 /// are refused by `add`, plain or encrypted, and a directory add skips the identity: nothing is
 /// copied.

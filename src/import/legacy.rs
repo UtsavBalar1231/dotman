@@ -10,7 +10,8 @@
 
 use super::gittree::shown;
 use super::{
-    EditedConfig, Item, Report, author_email, count, homes, proceed, require_clean, require_fresh,
+    EditedConfig, Item, Report, author_email, count, held, held_item, homes, proceed,
+    require_clean, require_fresh,
 };
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
@@ -24,6 +25,7 @@ use crate::output;
 use crate::paths::{validate_key, write_atomic};
 use crate::prompt;
 use crate::repo_config::RepoConfig;
+use crate::secrets::{self, Finding};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -518,7 +520,13 @@ struct Selection {
 /// Splits a snapshot into the files that can be imported and the keys that cannot. Two keys that
 /// reach one path keep the one stored relative, which is what `dotman add` wrote. A file that is also
 /// a directory in the same snapshot is dropped, because fast-import would silently replace it.
-fn select(snapshot: &Snapshot, homes: &[&Path], has_object: &dyn Fn(&str) -> bool) -> Selection {
+/// `held` gets the key and the content hash, and drops a file whose content the guard holds.
+fn select(
+    snapshot: &Snapshot,
+    homes: &[&Path],
+    has_object: &dyn Fn(&str) -> bool,
+    held: &dyn Fn(&str, &str) -> Option<Refusal>,
+) -> Selection {
     let mut dropped = Vec::new();
     let mut by_key: BTreeMap<String, Vec<(&str, &SnapshotFile)>> = BTreeMap::new();
     for (path, file) in &snapshot.files {
@@ -530,7 +538,9 @@ fn select(snapshot: &Snapshot, homes: &[&Path], has_object: &dyn Fn(&str) -> boo
         };
         match target_key(source, homes) {
             Err(refusal) => dropped.push((source.to_owned(), refusal)),
-            Ok(key) => match object_problem(source, file, has_object) {
+            Ok(key) => match object_problem(source, file, has_object)
+                .or_else(|| held(&key, &file.content_hash))
+            {
                 Some(refusal) => dropped.push((source.to_owned(), refusal)),
                 None => by_key.entry(key).or_default().push((source, file)),
             },
@@ -631,12 +641,13 @@ fn plan(
     history: &[(String, Snapshot)],
     homes: &[&Path],
     has_object: &dyn Fn(&str) -> bool,
+    held: &dyn Fn(&str, &str) -> Option<Refusal>,
 ) -> Result<Plan> {
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
     let mut position: BTreeMap<&str, usize> = BTreeMap::new();
     let mut commits = Vec::with_capacity(history.len());
     for (id, snapshot) in history {
-        let Selection { chosen, dropped } = select(snapshot, homes, has_object);
+        let Selection { chosen, dropped } = select(snapshot, homes, has_object, held);
         let mut modes = BTreeMap::new();
         for file in &chosen {
             let tally = tallies.entry(file.source.clone()).or_default();
@@ -813,13 +824,46 @@ fn write_stream(
     Ok(())
 }
 
+/// The content guard's first finding in each object the history holds. Each object is read once;
+/// one that cannot be read stops the import later, when the stream is built.
+fn guard_objects(root: &Path, history: &[(String, Snapshot)]) -> BTreeMap<String, Finding> {
+    let hashes: BTreeSet<&str> = history
+        .iter()
+        .flat_map(|(_, snapshot)| snapshot.files.values())
+        .map(|file| file.content_hash.as_str())
+        .filter(|hash| !is_null(hash) && check_id(hash, "object id").is_ok())
+        .collect();
+    hashes
+        .into_iter()
+        .filter_map(|hash| {
+            let bytes = read_object(root, hash).ok()?;
+            let found = secrets::findings(&bytes).next()?;
+            Some((hash.to_owned(), found))
+        })
+        .collect()
+}
+
+/// The `held` argument of [`plan`] for what [`guard_objects`] found.
+fn held_by(guarded: &BTreeMap<String, Finding>) -> impl Fn(&str, &str) -> Option<Refusal> + '_ {
+    |key, hash| {
+        let item = held_item(key, *guarded.get(hash)?);
+        Some((item.reason, item.detail))
+    }
+}
+
 /// Converts the legacy history at `root` into the repo's `main` branch.
 pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Outcome> {
     require_fresh(ctx)?;
     let email = author_email(ctx)?;
     let history = load_history(root, &head(root)?)?;
     let homes = homes(ctx);
-    let mut plan = plan(&history, &homes, &|hash| object_path(root, hash).is_file())?;
+    let guarded = guard_objects(root, &history);
+    let mut plan = plan(
+        &history,
+        &homes,
+        &|hash| object_path(root, hash).is_file(),
+        &held_by(&guarded),
+    )?;
     let home = &ctx.paths.home;
     plan.report
         .notes
@@ -941,8 +985,9 @@ fn compare(ctx: &Context, root: &Path, include_missing: bool) -> Result<Overlay>
     let head = head(root)?;
     let snapshot = load_snapshot(root, &head)?;
     let homes = homes(ctx);
-    let Selection { chosen, dropped } =
-        select(&snapshot, &homes, &|hash| object_path(root, hash).is_file());
+    // Only the files the overlay adds are written, so only those meet the content guard.
+    let has_object = |hash: &str| object_path(root, hash).is_file();
+    let Selection { chosen, dropped } = select(&snapshot, &homes, &has_object, &|_, _| None);
     let repo = &ctx.paths.repo;
     let config = ctx.repo_config()?;
     let sources = ctx.sources()?;
@@ -969,10 +1014,15 @@ fn compare(ctx: &Context, root: &Path, include_missing: bool) -> Result<Overlay>
                 ),
             ),
             Node::Missing if include_missing => {
+                let bytes = read_object(root, &entry.object)?;
+                if let Some(item) = held(&bytes, key, &config.guard.allow) {
+                    needs(item.reason, item.detail);
+                    continue;
+                }
                 overlay.files.push(Addition {
                     key: entry.key.clone(),
                     mode: entry.mode,
-                    bytes: read_object(root, &entry.object)?,
+                    bytes,
                 });
                 converted = converted.saturating_add(1);
             }
@@ -1165,7 +1215,13 @@ mod tests {
 
     fn planned(history: &[(String, Snapshot)], missing: &'static [&str]) -> Plan {
         let home = Path::new("/h/me");
-        plan(history, &[home], &|hash| !missing.contains(&hash)).unwrap()
+        plan(
+            history,
+            &[home],
+            &|hash| !missing.contains(&hash),
+            &|_, _| None,
+        )
+        .unwrap()
     }
 
     fn kept_keys(plan: &Plan) -> Vec<&str> {
@@ -1260,6 +1316,45 @@ mod tests {
         let reasons: Vec<_> = plan.report.needs_action.iter().map(|i| i.reason).collect();
         assert_eq!(reasons, [COLLISION, COLLISION]);
         assert_eq!(plan.report.total(), 4);
+    }
+
+    #[test]
+    fn an_object_the_content_guard_holds_is_left_out_of_every_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let objects = tmp.path().join("objects");
+        fs::create_dir(&objects).unwrap();
+        let token = format!("export GH=ghp_{}\n", "a1B2".repeat(9));
+        for (hash, text) in [("aa", "# rc\n"), ("bb", token.as_str())] {
+            let packed = zstd::encode_all(text.as_bytes(), 1).unwrap();
+            fs::write(object_path(tmp.path(), hash), packed).unwrap();
+        }
+        let (first, mut one) = snapshot("c1", &[], &[(".bashrc", 0o644)]);
+        one.files
+            .insert(PathBuf::from(".tokens"), file(0o600, "bb"));
+        let (second, mut two) = snapshot("c2", &["c1"], &[(".bashrc", 0o644)]);
+        two.files
+            .insert(PathBuf::from(".tokens"), file(0o600, "bb"));
+        let history = [(first, one), (second, two)];
+
+        let guarded = guard_objects(tmp.path(), &history);
+        assert_eq!(guarded.keys().collect::<Vec<_>>(), ["bb"]);
+        let home = Path::new("/h/me");
+        let plan = plan(&history, &[home], &|_| true, &held_by(&guarded)).unwrap();
+        for commit in &plan.commits {
+            let keys: Vec<&str> = commit.files.iter().map(|f| f.key.as_str()).collect();
+            assert_eq!(keys, [".bashrc"]);
+        }
+        assert_eq!((plan.report.total(), plan.report.converted), (2, 1));
+        let item = plan.report.needs_action.first().unwrap();
+        assert_eq!(
+            item.detail,
+            ".tokens: line 1 holds a github-token (in 2 of 2 commits)"
+        );
+        assert!(
+            item.reason.contains("left out of the repo"),
+            "{}",
+            item.reason
+        );
     }
 
     #[test]
@@ -1504,9 +1599,12 @@ mod tests {
                 "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d"
             ]
         );
-        let plan = plan(&history, &[Path::new("/h/me")], &|h| {
-            object_path(&root, h).is_file()
-        })
+        let plan = plan(
+            &history,
+            &[Path::new("/h/me")],
+            &|h| object_path(&root, h).is_file(),
+            &|_, _| None,
+        )
         .unwrap();
         assert_eq!((plan.report.total(), plan.report.converted), (6, 6));
         assert_eq!(

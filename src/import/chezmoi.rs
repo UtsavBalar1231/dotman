@@ -15,7 +15,7 @@
 //! each other (`managed --include=templates` omits a `symlink_*.tmpl`).
 
 use super::gittree::{Staging, check_target, install_keeping_origin, shown};
-use super::{EditedConfig, Item, Report, author_email, count, proceed, require_fresh};
+use super::{EditedConfig, Item, Report, author_email, count, held, proceed, require_fresh};
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::add::{MATCH, ensure_worktree_parents, record_mode};
@@ -1000,6 +1000,18 @@ fn settle(
             ),
             other => other,
         };
+        // A read that fails here fails again when the file is written, and is reported there.
+        let found = match &content {
+            Content::Bytes(bytes) => held(bytes, &entry.target, &[]),
+            Content::Path(path) => fs::read(path)
+                .ok()
+                .and_then(|bytes| held(&bytes, &entry.target, &[])),
+            Content::Link(_) => None,
+        };
+        if let Some(item) = found {
+            items.push(item);
+            continue;
+        }
         writes.push(Write {
             key: entry.target.clone(),
             content,

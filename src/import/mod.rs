@@ -20,7 +20,8 @@ use crate::git::redact_credentials;
 use crate::name;
 use crate::output;
 use crate::prompt;
-use crate::repo_config::RepoConfig;
+use crate::repo_config::{Allow, RepoConfig};
+use crate::secrets::{self, Finding};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -101,6 +102,23 @@ impl Report {
                 output::warning(&format!("  {detail}"));
             }
         }
+    }
+}
+
+/// What the content guard holds is left out of every commit the import makes.
+const CREDENTIAL: &str = "files that hold an age secret key or a credential, left out of the repo; `{bin} add --encrypt` stores one encrypted, `{bin} add --allow-plain` stores a credential as it is";
+
+/// The first finding in `bytes` that `allow` does not cover for `key`, as an entry that needs
+/// action.
+pub fn held(bytes: &[u8], key: &str, allow: &[Allow]) -> Option<Item> {
+    secrets::held(bytes, key, allow).map(|found| held_item(key, found))
+}
+
+/// `found` in `key` as an entry that needs action.
+pub fn held_item(key: &str, found: Finding) -> Item {
+    Item {
+        reason: CREDENTIAL,
+        detail: format!("{key}: {found}"),
     }
 }
 
