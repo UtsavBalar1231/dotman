@@ -1060,3 +1060,30 @@ fn a_hung_version_probe_is_bounded() {
     exits(&b.run_with(&[("DOTMAN_AGE_KEY", &key)], &["apply"]), 0);
     assert_eq!(b.read(HOSTS), PLAIN);
 }
+
+/// `--encrypt` resolves a content hold: the file goes in as ciphertext, sync pushes it, and no
+/// plaintext copy of the credential reaches the repo or the remote.
+#[test]
+fn encrypt_stores_a_file_the_content_guard_holds() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.ok(&["key", "init"]);
+    let token = format!("ghp_{}", "a1B2".repeat(9));
+    env.write(
+        ".config/zsh/local.zsh",
+        format!("export GH={token}\n").as_bytes(),
+        0o600,
+    );
+    exits(&env.run(&["add", ".config/zsh/local.zsh"]), 1);
+    exits(&env.run(&["add", "--encrypt", ".config/zsh/local.zsh"]), 0);
+    exits(&env.run(&["sync"]), 0);
+    assert!(remote_tree(&env).contains(".config/zsh/local{age}.zsh"));
+    assert!(!remote_history(&env).contains(&token));
+    assert_eq!(
+        files_containing(&env.repo(), token.as_bytes()),
+        Vec::<String>::new()
+    );
+}
