@@ -88,7 +88,8 @@ fn a_changed_host_waits_for_accept_identity_then_applies_its_variant() {
     assert_eq!(token(&env, &b, key).as_deref(), Some("identity-changed"));
     let err = exits(&dot(&env, &b, &["apply"]), 3);
     assert!(err.contains("host a -> b"), "{err}");
-    assert!(err.contains("--accept-identity"), "{err}");
+    let answer = common::hint(&err, "apply --accept-identity");
+    assert_eq!(answer, ["apply", "--accept-identity"], "{err}");
     assert_eq!(env.read(key), b"a\n");
     let before = env.four_trees();
     exits(
@@ -98,7 +99,8 @@ fn a_changed_host_waits_for_accept_identity_then_applies_its_variant() {
     assert_eq!(env.four_trees(), before);
     assert_eq!(snapshot_host(&env).as_deref(), Some("a"));
 
-    exits(&dot(&env, &b, &["apply", "--accept-identity"]), 0);
+    let answer: Vec<&str> = answer.iter().map(String::as_str).collect();
+    exits(&dot(&env, &b, &answer), 0);
     assert_eq!(env.read(key), b"b\n");
     assert_eq!(snapshot_host(&env).as_deref(), Some("b"));
     assert_eq!(token(&env, &b, key).as_deref(), Some("clean"));
