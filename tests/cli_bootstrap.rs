@@ -8,6 +8,7 @@ use common::{
     release, text, toolbox, write_exe,
 };
 use dotman::VERSION;
+use dotman::state::State;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -230,6 +231,103 @@ fn dotman_gets_the_directory_and_the_environment_and_exit_3_is_success() -> R {
     fake_dotman(&bin, VERSION, 7, &log)?;
     let out = setup.command(&setup.empty_base()?, &[&bin]).output()?;
     assert_eq!(out.status.code(), Some(7), "{}", text(&out));
+    Ok(())
+}
+
+/// A `dotman` whose first `refusals` runs, other than `--version` and `status`, say that
+/// `--approve-hooks` approved nothing and exit 3; every such run appends its arguments to `log`.
+fn refusing_dotman(dir: &Path, refusals: usize, log: &Path) -> R {
+    write_exe(
+        &dir.join("dotman"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'dotman {VERSION}';;\n  status) exit 1;;\n  *) echo \"$*\" >> '{log}'\n     if [ \"$(wc -l < '{log}')\" -le {refusals} ]; then\n       echo '--approve-hooks approved nothing: the [hooks] table in .dotman.toml changed since it was last shown on this machine' >&2\n       exit 3\n     fi;;\nesac\n",
+            log = log.display()
+        ),
+    )
+}
+
+#[test]
+fn approving_hooks_runs_the_approval_once_more_when_it_approved_nothing_and_never_loops() -> R {
+    for (approve, refusals, code) in [(true, 1, 0), (true, 2, 1), (true, 9, 1), (false, 9, 0)] {
+        let setup = Setup::new()?;
+        let log = setup.machine.root().join("fake.log");
+        let bin = setup.stubs("bin");
+        refusing_dotman(&bin, refusals, &log)?;
+        let mut cmd = setup.command(&setup.empty_base()?, &[&bin]);
+        if approve {
+            cmd.env("DOTMAN_APPROVE_HOOKS", "1");
+        }
+        let out = cmd.output()?;
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(code), "{refusals}: {said}");
+        let init = format!("init {} --take-repo", setup.dotfiles.display());
+        let runs = if approve {
+            format!("{init} --approve-hooks\napply --approve-hooks\n")
+        } else {
+            format!("{init}\n")
+        };
+        assert_eq!(fs::read_to_string(&log)?, runs, "{refusals}: {said}");
+        assert_eq!(
+            said.contains("install.sh: the repo's hooks are not approved"),
+            code != 0,
+            "{refusals}: {said}"
+        );
+        assert!(said.contains("--approve-hooks approved nothing"), "{said}");
+    }
+    Ok(())
+}
+
+/// A container whose first run held hooks back reruns `install.sh` with `DOTMAN_APPROVE_HOOKS=1`
+/// after the table changed upstream without touching a hooked path: the rerun approves the table
+/// it shows, instead of approving nothing and reporting success.
+#[test]
+fn a_rerun_with_approve_hooks_approves_a_table_that_changed_since_it_was_shown() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let author = &setup.author;
+    let config = author.repo().join(".dotman.toml");
+    let base = fs::read_to_string(&config)?;
+    assert!(base.contains("[hooks]\n"), "{base}");
+    let marker = setup.machine.root().join("hooklog");
+    let entry =
+        |glob: &str, word: &str| format!("\"{glob}\" = \"echo {word} >> '{}'\"", marker.display());
+    let dotfiles = setup.dotfiles.to_string_lossy().into_owned();
+    let publish = |entry: &str| {
+        author.write_repo(
+            ".dotman.toml",
+            base.replacen("[hooks]\n", &format!("[hooks]\n{entry}\n"), 1)
+                .as_bytes(),
+        );
+        author.ok(&["sync"]);
+        setup.machine.git(&["-C", &dotfiles, "pull", "-q"]);
+    };
+
+    publish(&entry(".bashrc", "first"));
+    let out = setup.run(&[])?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(text(&out).contains("1 hook not run"), "{}", text(&out));
+    assert!(!marker.exists());
+
+    publish(&entry(".profile", "second"));
+    let out = setup.machine.run(&["git", "pull", "-q"]);
+    assert!(out.status.success(), "{}", text(&out));
+
+    let out = setup
+        .command(&setup.empty_base()?, &[])
+        .env("DOTMAN_APPROVE_HOOKS", "1")
+        .output()?;
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(said.contains("--approve-hooks approved nothing"), "{said}");
+    let state = State::read(&setup.machine.state_dir().join("state.toml"))?.ok_or("no state")?;
+    let approved = format!(r#"{{".profile":"echo second >> '{}'"}}"#, marker.display());
+    assert_eq!(
+        state.hooks.approved.as_deref(),
+        Some(approved.as_str()),
+        "{said}"
+    );
     Ok(())
 }
 

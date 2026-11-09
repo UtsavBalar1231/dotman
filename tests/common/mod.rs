@@ -1084,7 +1084,7 @@ fn build_release() -> R<PathBuf> {
 
 /// A machine that runs `install.sh`, and the depth-1 clone of a dotman repo it runs it from.
 pub struct Setup {
-    _author: TestEnv,
+    pub author: TestEnv,
     pub machine: TestEnv,
     pub dotfiles: PathBuf,
     /// The directory of the `uname` stub that [`Setup::shell`] puts on `PATH`.
@@ -1115,7 +1115,7 @@ impl Setup {
         );
         let uname = linux_uname(&machine.root().join("linux-uname"))?;
         Ok(Self {
-            _author: author,
+            author,
             machine,
             dotfiles: fs::canonicalize(dotfiles)?,
             uname,

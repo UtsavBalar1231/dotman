@@ -167,12 +167,47 @@ if "$dotman" status >/dev/null 2>&1; then
 else
     set -- init "$dir" --take-repo
 fi
-if [ "${DOTMAN_APPROVE_HOOKS:-}" = 1 ]; then
-    set -- "$@" --approve-hooks
-fi
 
-code=0
-"$dotman" "$@" || code=$?
+# Sets code. With DOTMAN_APPROVE_HOOKS=1 it adds --approve-hooks and holds dotman's stderr in said
+# until dotman exits, so the script can read whether the approval approved nothing.
+run_dotman() {
+    code=0
+    said=
+    if [ "${DOTMAN_APPROVE_HOOKS:-}" = 1 ]; then
+        said=$("$dotman" "$@" --approve-hooks 2>&1 >&3) || code=$?
+        [ -z "$said" ] || printf '%s\n' "$said" >&2
+    else
+        "$dotman" "$@" || code=$?
+    fi
+}
+
+approved_nothing() {
+    [ "$code" = 3 ] || return 1
+    case $said in
+        *"--approve-hooks approved nothing"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+exec 3>&1
+run_dotman "$@"
+# DOTMAN_APPROVE_HOOKS=1 trusts the repo's hooks. When the table changed since this machine last
+# showed one, the first run only shows and records the current table, and a second approves it.
+# There is no third: a table that changes again is not approved.
+if approved_nothing; then
+    echo "install.sh: DOTMAN_APPROVE_HOOKS=1, so the [hooks] table shown above is approved now" >&2
+    run_dotman apply
+    if approved_nothing; then
+        die "the repo's hooks are not approved: the [hooks] table changed again; read it, then run: dotman apply --approve-hooks"
+    fi
+    case $code in
+        0 | 3) ;;
+        *)
+            echo "install.sh: dotman apply --approve-hooks failed (exit $code), so the repo's hooks may not be approved" >&2
+            exit "$code"
+            ;;
+    esac
+fi
 # Exit 3 means some paths need attention after a successful init. A nonzero exit would make
 # DevPod run the next candidate script on top of this one.
 case $code in

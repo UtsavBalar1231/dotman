@@ -185,7 +185,7 @@ The guards miss credentials without a known prefix, such as a password or a gene
 
 For encrypted files, add a `DOTMAN_AGE_KEY` Codespaces secret holding the identity text. Whether the secret reaches `install.sh` is not documented by GitHub. If it did not, the encrypted files show as `locked`: open a terminal that has the key and run `dotman apply`.
 
-Containers that run as root are handled by the script. Set `DOTMAN_APPROVE_HOOKS=1` in the environment to let it approve the repo's hooks. Refresh an old script with `dotman init --refresh-bootstrap`; `dotman doctor` warns when it is stale.
+Containers that run as root are handled by the script. Set `DOTMAN_APPROVE_HOOKS=1` in the environment to let it approve the repo's hooks. When the table changed since this machine last showed one, the first approval only shows it, so the script runs `dotman apply --approve-hooks` once more, and exits 1 if that approves nothing either. Refresh an old script with `dotman init --refresh-bootstrap`; `dotman doctor` warns when it is stale.
 
 ## Prompt-answer flags
 
