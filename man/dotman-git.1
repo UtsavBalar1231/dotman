@@ -7,6 +7,10 @@ dotman\-git \- Run git in the repo
 \fBdotman git\fR [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fIARGS\fR]
 .SH DESCRIPTION
 Run git in the repo
+.PP
+Runs git in the repo with the isolation flags every git call of dotman
+carries, and exits with git\*(Aqs own status. It takes no lock and runs while
+a rebase is unfinished, which is how one gets resolved.
 .SH OPTIONS
 .TP
 [\fIARGS\fR]
@@ -24,7 +28,3 @@ Disable pager output
 .TP
 \fB\-\-allow\-root\fR
 Allow running as root
-.SH EXTRA
-Runs git in the repo with the isolation flags every git call of dotman
-carries, and exits with git\*(Aqs own status. It takes no lock and runs while
-a rebase is unfinished, which is how one gets resolved.

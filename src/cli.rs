@@ -5,8 +5,9 @@ use clap_complete::Shell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-// clap_mangen prints each line as roff text: a line that starts with a space breaks, and an empty
-// line separates paragraphs, so the man page keeps this layout.
+// xtask reads this layout to write the man page: each `Exit status:` or `Environment:` block
+// becomes that section, a line indented two spaces starts an entry, and a line indented further
+// continues it. The after_long_help of a subcommand follows the same rules.
 const EXIT_AND_ENVIRONMENT: &str = "\
 Exit status:
   0  Success. `status` exits 0 even when it lists paths to look at.

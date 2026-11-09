@@ -59,7 +59,7 @@ scripts/                release helper scripts
 | An importer | `src/import/` | `import::run` routes by detection order |
 | System files, the helper | `src/system.rs`, `src/system/helper.rs`, `src/system/escalate.rs` | The helper runs as root and trusts nothing from the caller |
 | Hook approval | `src/hooks.rs` | The state stores the approved `[hooks]` table as canonical JSON |
-| Exit codes and environment in the help | `src/cli.rs` (`EXIT_AND_ENVIRONMENT`) | It becomes the man page's EXTRA section |
+| Exit codes and environment in the help | `src/cli.rs` (`EXIT_AND_ENVIRONMENT`) | `xtask` turns its blocks into the man page's EXIT STATUS and ENVIRONMENT sections, so keep the indentation |
 | A never, always or every claim in the docs | `tests/docs.rs` (`CLAIMS`, `GAPS`) | Each one names the tests that prove it, or is a gap |
 | Invoked name in hints | `src/name.rs` | Never hard-code `dot` or `dotman` in a hint |
 | Running a child process | `src/proc.rs` | It strips `DOTMAN_AGE_KEY` |

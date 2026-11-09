@@ -7,6 +7,26 @@ dotman\-status \- Compare $HOME, the repo and the last applied state
 \fBdotman status\fR [\fB\-\-porcelain\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
 .SH DESCRIPTION
 Compare $HOME, the repo and the last applied state
+.PP
+With \-\-porcelain, each record is \fB<token>\et<key>\e0\fR. The tokens:
+.TP
+\fBclean, not\-applied, existing, changed\-locally, changed\-in\-repo, both\-changed, deleted\-locally, deleted\-changed\-upstream, forgotten, forgotten\-edited, gone, template\-drift, blocked, symlink\-at\-target\fR
+the paths compared in $HOME, the repo and the last applied state
+.TP
+\fBambiguous, invalid, locked, template\-error, unreadable\fR
+paths that could not be chosen, read, decrypted or rendered
+.TP
+\fBsystem\-off\fR
+a system file on a machine whose [system] roots do not cover it
+.TP
+\fBcollision\fR
+two keys that differ only in case or Unicode normalization
+.TP
+\fBnew, held\fR
+files under a managed directory that sync would capture, or holds
+.TP
+\fBheld\-in\-repo\fR
+an uncommitted repo edit that sync holds; its key is the repo path
 .SH OPTIONS
 .TP
 \fB\-\-porcelain\fR
@@ -30,22 +50,6 @@ Disable pager output
 .TP
 \fB\-\-allow\-root\fR
 Allow running as root
-.SH EXTRA
-Exit status: 0 whenever the repo can be read, whatever the paths show; 4
+.SH "EXIT STATUS"
+0 whenever the repo can be read, whatever the paths show; 4
 while a git operation is unfinished in the repo.
-
-With \-\-porcelain, each record is `<token>\\t<key>\\0`. The tokens:
-  clean, not\-applied, existing, changed\-locally, changed\-in\-repo,
-  both\-changed, deleted\-locally, deleted\-changed\-upstream, forgotten,
-  forgotten\-edited, gone, template\-drift, blocked, symlink\-at\-target
-      the paths compared in $HOME, the repo and the last applied state
-  ambiguous, invalid, locked, template\-error, unreadable
-      paths that could not be chosen, read, decrypted or rendered
-  system\-off
-      a system file on a machine whose [system] roots do not cover it
-  collision
-      two keys that differ only in case or Unicode normalization
-  new, held
-      files under a managed directory that sync would capture, or holds
-  held\-in\-repo
-      an uncommitted repo edit that sync holds; its key is the repo path

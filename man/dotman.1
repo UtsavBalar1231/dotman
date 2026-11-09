@@ -76,62 +76,87 @@ Create or import the age identity that decrypts encrypted files
 .TP
 dotman\-completion(1)
 Generate shell completion scripts
-.SH EXTRA
-Exit status:
-  0  Success. `status` exits 0 even when it lists paths to look at.
-  1  An error. `doctor` also exits 1 when one of its checks fails.
-  2  The command line could not be parsed.
-  3  The run finished, but left paths for you: undecided, held back,
-     blocked, or reported for action.
-  4  `sync` hit a rebase conflict, aborted the pull and printed the
-     steps to resolve it; or a git operation or conflict is unfinished
-     in the repo.
-  The `git` subcommand exits with git\*(Aqs own status.
-
-Environment:
-  DOTMAN_REPO_PATH
-      The repo, as an absolute path. It wins over `repo` in the machine
-      config. Default: $XDG_DATA_HOME/dotman.
-  DOTMAN_CONFIG_PATH
-      The machine config, as an absolute path.
-      Default: $XDG_CONFIG_HOME/dotman/config.toml.
-  DOTMAN_NON_INTERACTIVE
-      Any non\-empty value asks nothing, as when stdin is not a terminal.
-      Paths a prompt would decide are skipped and listed, and the run
-      exits 3.
-  DOTMAN_ALLOW_ROOT
-      1 lets dotman run as root, as \-\-allow\-root does.
-  DOTMAN_AGE_KEY
-      The text of an age identity. It reaches age only on its stdin, and
-      every other child process starts without it.
-  DOTMAN_AGE_KEY_FILE
-      An age identity file, as an absolute path, tried before the
-      identity file in $XDG_CONFIG_HOME/dotman.
-  DOTMAN_HOST
-      Replaces the host name, detected or set under [identity] in the
-      machine config, for variants and templates.
-  DOTMAN_PROFILES
-      Comma\-separated profiles that replace the machine config\*(Aqs.
-  DOTMAN_APPROVE_HOOKS, DOTMAN_BOOTSTRAP_BASE_URL
-      Read by the install.sh that `init` writes, not by dotman: 1
-      approves the repo\*(Aqs hooks, and the URL replaces the release
-      download base.
-  DOTMAN_SYSTEM_ROOT, DOTMAN_NIX_STORE
-      For tests only; `doctor` warns when either is set. The system\-write
-      helper refuses DOTMAN_SYSTEM_ROOT when it runs as root.
-  NO_COLOR
-      Turns colour off.
-  NO_PAGER
-      Any non\-empty value makes `diff` skip the pager, as \-\-no\-pager does.
-  VISUAL, EDITOR
-      The editor `edit` starts; VISUAL wins.
-  XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME
-      Where the machine config, the repo and the state with its backups
-      live. Each defaults under $HOME.
-  XDG_RUNTIME_DIR
-      Where `diff` puts its private temporary copies; the state
-      directory when it is unset.
-  RUST_LOG
-      A tracing filter for debug output on stderr. Default: warn.
+.SH "EXIT STATUS"
+.TP
+\fB0\fR
+Success. \fBstatus\fR exits 0 even when it lists paths to look at.
+.TP
+\fB1\fR
+An error. \fBdoctor\fR also exits 1 when one of its checks fails.
+.TP
+\fB2\fR
+The command line could not be parsed.
+.TP
+\fB3\fR
+The run finished, but left paths for you: undecided, held back,
+blocked, or reported for action.
+.TP
+\fB4\fR
+\fBsync\fR hit a rebase conflict, aborted the pull and printed the
+steps to resolve it; or a git operation or conflict is unfinished
+in the repo.
+.PP
+The \fBgit\fR subcommand exits with git\*(Aqs own status.
+.SH ENVIRONMENT
+.TP
+\fBDOTMAN_REPO_PATH\fR
+The repo, as an absolute path. It wins over \fBrepo\fR in the machine
+config. Default: $XDG_DATA_HOME/dotman.
+.TP
+\fBDOTMAN_CONFIG_PATH\fR
+The machine config, as an absolute path.
+Default: $XDG_CONFIG_HOME/dotman/config.toml.
+.TP
+\fBDOTMAN_NON_INTERACTIVE\fR
+Any non\-empty value asks nothing, as when stdin is not a terminal.
+Paths a prompt would decide are skipped and listed, and the run
+exits 3.
+.TP
+\fBDOTMAN_ALLOW_ROOT\fR
+1 lets dotman run as root, as \-\-allow\-root does.
+.TP
+\fBDOTMAN_AGE_KEY\fR
+The text of an age identity. It reaches age only on its stdin, and
+every other child process starts without it.
+.TP
+\fBDOTMAN_AGE_KEY_FILE\fR
+An age identity file, as an absolute path, tried before the
+identity file in $XDG_CONFIG_HOME/dotman.
+.TP
+\fBDOTMAN_HOST\fR
+Replaces the host name, detected or set under [identity] in the
+machine config, for variants and templates.
+.TP
+\fBDOTMAN_PROFILES\fR
+Comma\-separated profiles that replace the machine config\*(Aqs.
+.TP
+\fBDOTMAN_APPROVE_HOOKS, DOTMAN_BOOTSTRAP_BASE_URL\fR
+Read by the install.sh that \fBinit\fR writes, not by dotman: 1
+approves the repo\*(Aqs hooks, and the URL replaces the release
+download base.
+.TP
+\fBDOTMAN_SYSTEM_ROOT, DOTMAN_NIX_STORE\fR
+For tests only; \fBdoctor\fR warns when either is set. The system\-write
+helper refuses DOTMAN_SYSTEM_ROOT when it runs as root.
+.TP
+\fBNO_COLOR\fR
+Turns colour off.
+.TP
+\fBNO_PAGER\fR
+Any non\-empty value makes \fBdiff\fR skip the pager, as \-\-no\-pager does.
+.TP
+\fBVISUAL, EDITOR\fR
+The editor \fBedit\fR starts; VISUAL wins.
+.TP
+\fBXDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME\fR
+Where the machine config, the repo and the state with its backups
+live. Each defaults under $HOME.
+.TP
+\fBXDG_RUNTIME_DIR\fR
+Where \fBdiff\fR puts its private temporary copies; the state
+directory when it is unset.
+.TP
+\fBRUST_LOG\fR
+A tracing filter for debug output on stderr. Default: warn.
 .SH VERSION
 v0.1.0
