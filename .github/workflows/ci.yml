@@ -7,6 +7,7 @@ on:
     branches: [ main, develop ]
   schedule:
     - cron: '0 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,17 +26,18 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Install just
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: just
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -81,10 +83,12 @@ jobs:
         run: brew install age shellcheck
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Run tests
         run: cargo test --workspace --all-targets
@@ -108,12 +112,12 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install the MSRV toolchain
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Build
         run: cargo +${{ steps.msrv.outputs.version }} build --locked --workspace
@@ -136,7 +140,11 @@ jobs:
         run: |
           docker exec -i floor bash -euo pipefail <<'EOF'
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
+          # Once focal leaves archive.ubuntu.com, its packages are on old-releases.ubuntu.com.
+          if ! apt-get update -qq; then
+            sed -i -e 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|' -e 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|' /etc/apt/sources.list
+            apt-get update -qq
+          fi
           apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git
           git --version
           case "$(git --version)" in
@@ -226,7 +234,7 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: Start the container
-        run: docker run -d --name alpine -v "$PWD:/src:ro" alpine:latest sleep infinity
+        run: docker run -d --name alpine -v "$PWD:/src:ro" alpine:3.24 sleep infinity
 
       - name: Install tools
         run: |
@@ -411,10 +419,12 @@ jobs:
           git config --global user.name "${{ github.actor }}"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Run the secrets tests
         run: cargo test --test cli_secrets
@@ -444,10 +454,12 @@ jobs:
           git config --global user.name "${{ github.actor }}"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Run the chezmoi tests
         run: cargo test --test cli_import_chezmoi --test security_tests
@@ -461,10 +473,12 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Regenerate man pages and completions
         run: cargo run -p xtask -- generate
@@ -491,18 +505,19 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cross
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           key: cross-${{ matrix.target }}
 

@@ -38,8 +38,6 @@ updates:
       # Ignore specific packages that require manual review
       - dependency-name: "serde*"
         update-types: ["version-update:semver-major"]
-      - dependency-name: "tokio*"
-        update-types: ["version-update:semver-major"]
 
   # GitHub Actions dependencies
   - package-ecosystem: "github-actions"

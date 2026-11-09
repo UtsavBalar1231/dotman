@@ -91,6 +91,45 @@ fn agents_has_no_private_item_doc_rule() -> R {
     Ok(())
 }
 
+/// Every `uses:` in the workflows names a full commit SHA, so a moved tag cannot change what CI
+/// and the release run, and a comment says which version that commit is.
+#[test]
+fn every_workflow_action_is_pinned_to_a_commit() -> R {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let mut checked = 0_usize;
+    for file in fs::read_dir(&dir)? {
+        let path = file?.path();
+        let text = fs::read_to_string(&path)?;
+        let name = path.display();
+        for line in text.lines() {
+            let Some(used) = line
+                .trim_start()
+                .trim_start_matches("- ")
+                .strip_prefix("uses:")
+            else {
+                continue;
+            };
+            let (action, comment) = used.split_once('#').unwrap_or((used, ""));
+            let action = action.trim().trim_matches(['"', '\'']);
+            if action.starts_with("./") {
+                continue;
+            }
+            let sha = action.rsplit_once('@').map_or("", |(_, sha)| sha);
+            assert!(
+                sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{name}: `{action}` is not pinned to a commit SHA"
+            );
+            assert!(
+                !comment.trim().is_empty(),
+                "{name}: `{action}` has no version comment"
+            );
+            checked = checked.saturating_add(1);
+        }
+    }
+    assert!(checked > 20, "only {checked} uses: lines were checked");
+    Ok(())
+}
+
 #[test]
 fn readme_installs_only_this_project() -> R {
     let readme = read("README.md")?;
