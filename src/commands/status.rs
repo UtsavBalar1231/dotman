@@ -41,6 +41,8 @@ pub const fn token(row: Row) -> &'static str {
 
 const UNREADABLE: &str = "unreadable";
 
+const UNNAMED_SHOWN: usize = 3;
+
 /// Runs `dotman status`. Takes no lock, writes nothing and always exits 0 when it can read the repo.
 ///
 /// # Errors
@@ -154,16 +156,33 @@ pub fn run(args: &StatusArgs) -> Result<()> {
 }
 
 /// The untracked repo files that sync never commits because their names are not UTF-8, and that
-/// no `[ignore]` pattern silences.
+/// no `[ignore]` pattern silences. Past one, a single warning counts them and names the first
+/// [`UNNAMED_SHOWN`], so thousands of them do not bury the rest of the output.
 fn report_unnamed(ctx: &Context, in_scope: impl Fn(&str) -> bool) -> Result<()> {
-    for path in context::unnamed_untracked(ctx)? {
-        let shown = path.to_string_lossy();
-        if in_scope(&shown) {
+    let names: Vec<String> = context::unnamed_untracked(ctx)?
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|shown| in_scope(shown))
+        .collect();
+    let repo = ctx.paths.repo.display();
+    match names.as_slice() {
+        [] => {}
+        [one] => output::warning(&format!(
+            "{}: in the repo, never committed: its name is not valid UTF-8, which no key can have; rename or remove it in {repo}, or keep it out with an [ignore] pattern",
+            escape_line(one)
+        )),
+        many => {
             output::warning(&format!(
-                "{}: in the repo, never committed: its name is not valid UTF-8, which no key can have; rename or remove it in {}, or keep it out with an [ignore] pattern",
-                escape_line(&shown),
-                ctx.paths.repo.display()
+                "{} files in the repo are never committed: their names are not valid UTF-8, which no key can have; rename or remove them in {repo}, or keep them out with an [ignore] pattern:",
+                many.len()
             ));
+            for name in many.iter().take(UNNAMED_SHOWN) {
+                output::warning(&format!("  {}", escape_line(name)));
+            }
+            let more = many.len().saturating_sub(UNNAMED_SHOWN);
+            if more > 0 {
+                output::warning(&format!("  and {more} more"));
+            }
         }
     }
     Ok(())

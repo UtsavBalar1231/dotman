@@ -1659,6 +1659,43 @@ fn a_repo_name_that_is_not_utf8_is_never_committed_and_status_names_it() {
     assert!(!err.contains("never committed"), "{err}");
 }
 
+/// Many repo names that are not UTF-8 give one warning with their count, the first three names
+/// and one remedy, not a line each.
+#[test]
+fn many_repo_names_that_are_not_utf8_are_counted_in_one_warning() {
+    let env = first_device(&[(".a", b"a\n", 0o644)]);
+    for n in 0..7_u8 {
+        let name = [b'n', b'0'.saturating_add(n), 0xff];
+        fs::write(env.repo().join(OsStr::from_bytes(&name)), b"junk\n").expect("write the file");
+    }
+    let err = exits(&env, 0, &["status"]);
+    let lines: Vec<&str> = err.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("7 files in the repo are never committed"))
+        .expect("one warning counts them");
+    assert!(
+        lines
+            .get(at)
+            .is_some_and(|line| line.contains("[ignore] pattern")),
+        "{err}"
+    );
+    assert_eq!(
+        lines.get(at.saturating_add(1)..at.saturating_add(5)),
+        Some(
+            &[
+                "  n0\u{fffd}",
+                "  n1\u{fffd}",
+                "  n2\u{fffd}",
+                "  and 4 more"
+            ][..]
+        ),
+        "{err}"
+    );
+    assert_eq!(err.matches("not valid UTF-8").count(), 1, "{err}");
+    assert!(!err.contains("n3"), "{err}");
+}
+
 #[test]
 fn an_unreadable_file_is_reported_as_not_captured() {
     let env = first_device(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
