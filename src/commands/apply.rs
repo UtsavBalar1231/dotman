@@ -208,6 +208,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         system_writes: Vec::new(),
         forget_system: BTreeSet::new(),
         announced: 0,
+        kept: Vec::new(),
     };
     let mut items = run.classify(&sources, &state, &keys);
     if opts.system && (inputs.is_empty() || !system_filters.is_empty()) {
@@ -229,6 +230,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     }
     run.write_system(&mut state, &repo_config);
     run.capture_new(&scan, &mut state, &mut repo_config);
+    run.report_kept();
 
     let unchanged =
         run.forget.is_empty() && run.forget_system.is_empty() && run.captured.is_empty();
@@ -463,6 +465,8 @@ struct Run<'a> {
     system_writes: Vec<SystemWrite>,
     forget_system: BTreeSet<String>,
     announced: usize,
+    /// Keys kept local this run, other than templates.
+    kept: Vec<String>,
 }
 
 impl Run<'_> {
@@ -803,7 +807,18 @@ impl Run<'_> {
                 let source = item.r.as_ref().map_or(key.as_str(), |r| r.source.as_str());
                 let encrypted = item.r.as_ref().is_some_and(|r| r.encrypted);
                 let before = repo_config.modes.get(source).cloned();
-                self.capture(key, source, h.kind, encrypted, state, repo_config);
+                if self.capture(key, source, h.kind, encrypted, state, repo_config) {
+                    // Row 9 is an edit made here; any other row got here by keep-local.
+                    if item.row == Row::ChangedLocally {
+                        self.announce("capture", key);
+                    } else {
+                        self.announce(
+                            "capture",
+                            &format!("{key} (replaces the repo version for every machine)"),
+                        );
+                        self.kept.push(key.clone());
+                    }
+                }
                 // An edit to a file whose stricter mode is kept here travels as content only, so
                 // other machines keep the repo's mode.
                 let kept = item.kept().filter(|(mode, _)| *mode == h.mode);
@@ -833,7 +848,7 @@ impl Run<'_> {
                     (Action::KeepLocal, _) => {
                         self.announce("keep local", key);
                         if !r.template {
-                            self.kept(key);
+                            self.kept.push(key.clone());
                         }
                         Some(r.tuple.mode)
                     }
@@ -1249,7 +1264,9 @@ impl Run<'_> {
     /// Captures the new files and lists the held ones, which keep the run at exit 3.
     fn capture_new(&mut self, scan: &Scan, state: &mut State, repo_config: &mut RepoConfig) {
         for (key, kind) in &scan.new {
-            self.capture(key, key, *kind, false, state, repo_config);
+            if self.capture(key, key, *kind, false, state, repo_config) {
+                self.announce("capture", key);
+            }
         }
         for note in &scan.notes {
             output::warning(note);
@@ -1266,6 +1283,7 @@ impl Run<'_> {
         }
     }
 
+    /// True when `key` was captured, or in a dry run would be; the caller announces it.
     fn capture(
         &mut self,
         key: &str,
@@ -1274,7 +1292,7 @@ impl Run<'_> {
         encrypted: bool,
         state: &mut State,
         repo_config: &mut RepoConfig,
-    ) {
+    ) -> bool {
         if is_real_dir(&self.ctx.paths.repo.join(source)) {
             self.attention = true;
             self.undecided.insert(key.to_owned());
@@ -1282,7 +1300,7 @@ impl Run<'_> {
                 "{key}: a file here, but a directory of managed files in the repo; skipped. To manage the file instead: `{bin} forget {key}`, then `{bin} add {key}`",
                 bin = name::bin()
             ));
-            return;
+            return false;
         }
         if self.opts.dry_run {
             // Only a dry run reads H here; a real capture checks what it is about to store.
@@ -1291,11 +1309,10 @@ impl Run<'_> {
                     add::holds_key(&self.ctx.paths.home, key, &self.ctx.machine.guard.allow)
             {
                 self.held_key(key, found);
-                return;
+                return false;
             }
-            self.announce("capture", key);
             self.captured.insert(key.to_owned());
-            return;
+            return true;
         }
         let done = add::commit_one(
             self.ctx,
@@ -1308,11 +1325,11 @@ impl Run<'_> {
         );
         match done {
             Ok(entry) => {
-                self.announce("capture", key);
                 state
                     .files
                     .insert(key.to_owned(), entry.tuple.entry(&entry.source));
                 self.captured.insert(key.to_owned());
+                return true;
             }
             Err(e) => match e.downcast::<Held>() {
                 Ok(Held(found)) => self.held_key(key, found),
@@ -1323,6 +1340,7 @@ impl Run<'_> {
                 }
             },
         }
+        false
     }
 
     /// Never staged or committed; the pass after the pull leaves it alone too.
@@ -1393,26 +1411,39 @@ impl Run<'_> {
         }
     }
 
-    /// Says where a kept H goes next, and how to keep it to this machine instead.
-    fn kept(&self, key: &str) {
+    /// Says once per run where the files kept local go, and how to keep them to this machine.
+    fn report_kept(&self) {
+        if self.kept.is_empty() {
+            return;
+        }
         let bin = name::bin();
+        let them = if self.kept.len() == 1 { "it" } else { "them" };
+        let mut said = Vec::new();
+        if self.opts.pass == Pass::Apply {
+            said.push(format!(
+                "kept; the next `{bin} sync` captures {them} into the repo for every machine"
+            ));
+        }
         let host = &self.ctx.identity().host;
         // A variant condition takes only these characters.
         let named = !host.is_empty()
             && host
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        let instead = if named {
-            format!(
-                "; `{bin} add --for host={host} {}` keeps it to this machine",
-                add::pasteable(&self.ctx.paths.home, key)
-            )
-        } else {
-            String::new()
-        };
-        output::info(&format!(
-            "  kept; the next `{bin} sync` captures it into the repo for every machine{instead}"
-        ));
+        if named {
+            let paths: Vec<String> = self
+                .kept
+                .iter()
+                .map(|key| add::pasteable(&self.ctx.paths.home, key))
+                .collect();
+            said.push(format!(
+                "`{bin} add --for host={host} {}` keeps {them} to this machine",
+                paths.join(" ")
+            ));
+        }
+        if !said.is_empty() {
+            output::info(&said.join("; "));
+        }
     }
 
     /// The mode R reached `$HOME` with; `None` when it did not. A skipped or failed write is

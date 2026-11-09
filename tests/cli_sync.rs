@@ -837,6 +837,49 @@ fn keep_local_saves_an_uncommitted_hand_edit_in_the_repo_before_capturing_over_i
 }
 
 #[test]
+fn keep_local_in_sync_says_it_replaces_the_repo_version_and_once_how_to_keep_it_here() {
+    let env = TestEnv::new();
+    env.write_machine_config("[identity]\nhost = \"box\"\n");
+    env.ok(&["init"]);
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    for key in [".a", ".b"] {
+        env.write(key, b"base\n", 0o644);
+    }
+    env.ok(&["add", ".a", ".b"]);
+    env.ok(&["sync"]);
+    for key in [".a", ".b"] {
+        env.write_repo(key, b"theirs\n");
+        env.write(key, b"mine\n", 0o644);
+    }
+    exits(&env, 0, &["git", "commit", "-qam", "theirs"]);
+
+    let err = exits(&env, 0, &["sync", "--keep-local"]);
+    for key in [".a", ".b"] {
+        let line = format!("capture {key} (replaces the repo version for every machine)");
+        assert!(err.lines().any(|l| l == line), "{err}");
+        assert_eq!(remote_file(&env, key), "mine\n");
+    }
+    assert_eq!(
+        err.matches("keeps them to this machine").count(),
+        1,
+        "{err}"
+    );
+    assert_eq!(
+        common::hint(&err, "add --for host=box").len(),
+        5,
+        "both paths in one command: {err}"
+    );
+
+    let out = common::run_hint(&env, &err, "add --for host=box");
+    assert!(out.status.success(), "{}", stderr(&out));
+    for key in [".a", ".b"] {
+        let variant = env.repo().join(format!("{key}{{host=box}}"));
+        assert_eq!(fs::read(variant).expect("the variant"), b"mine\n");
+        assert_eq!(env.token_of("status", key).as_deref(), Some("clean"));
+    }
+}
+
+#[test]
 fn apply_keep_local_saves_an_edit_made_with_dotman_edit_before_sync_replaces_it() {
     let env = first_device(&[(".a", b"base\n", 0o644)]);
     env.write(".a", b"home edit\n", 0o644);
