@@ -33,11 +33,12 @@ pub fn run(args: &LogArgs) -> Result<()> {
     let mut out = std::io::stdout().lock();
     for entry in &entries {
         let short = entry.oid.get(..8).unwrap_or(&entry.oid);
+        // A subject comes from whoever pushed the commit, so it could hold escape sequences.
         writeln!(
             out,
             "{short}  {:<14} {}",
             relative_age(now, entry.time),
-            entry.subject
+            output::escape_line(&entry.subject)
         )
         .context("cannot write to stdout")?;
     }
