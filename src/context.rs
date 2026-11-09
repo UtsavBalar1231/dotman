@@ -19,7 +19,9 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use walkdir::WalkDir;
 
 /// Leftover temp files of the write engine; never managed.
@@ -412,8 +414,8 @@ impl Context {
     }
 
     /// Removes the temp files and directories that killed runs left in the worktree, in dotman's
-    /// state and config directories and in the `$HOME` directories of managed keys. Only names whose embedded PID is no live process go,
-    /// so a live run that writes without the lock keeps its own. The caller holds the lock.
+    /// state and config directories and in the `$HOME` directories of managed keys; see
+    /// [`is_leftover`] for what counts. The caller holds the lock.
     pub(crate) fn sweep_temp_files(&self) -> Result<()> {
         let repo = &self.paths.repo;
         if !is_real_dir(&repo.join(".git")) {
@@ -428,7 +430,7 @@ impl Context {
             let Ok(entry) = entry else { continue };
             if entry.depth() == 1 && entry.file_name() == OsStr::new(".git") {
                 walk.skip_current_dir();
-            } else if is_stale_temp(entry.file_name()) {
+            } else if is_leftover(entry.path(), TEMP_PREFIX) {
                 if entry.file_type().is_dir() {
                     walk.skip_current_dir();
                 }
@@ -458,8 +460,8 @@ impl Context {
             stale.extend(
                 entries
                     .filter_map(Result::ok)
-                    .filter(|entry| is_stale_temp(&entry.file_name()))
-                    .map(|entry| entry.path()),
+                    .map(|entry| entry.path())
+                    .filter(|path| is_leftover(path, TEMP_PREFIX)),
             );
         }
         for path in &stale {
@@ -553,21 +555,49 @@ impl Context {
     }
 }
 
-/// A `.dotman-tmp-<pid>-…` or `.dotman-tmp-link-<pid>-…` name whose process is gone. Names
-/// without a PID, from older versions, are left alone.
-fn is_stale_temp(name: &OsStr) -> bool {
-    let Some(rest) = name
-        .to_str()
-        .and_then(|name| name.strip_prefix(TEMP_PREFIX))
-    else {
+/// How long a leftover must be untouched before a sweep removes it. A live run in another PID
+/// namespace, as in a container that shares `$HOME`, can carry a PID that is dead here.
+const STALE_AFTER: Duration = Duration::from_secs(600);
+
+/// Whether `path` is what a killed dotman run left: named `<prefix><pid>-` and the 6 letters or
+/// digits tempfile adds, or `<prefix>link-<pid>-<attempt>`; a regular file, a symlink, or a 0700
+/// directory of this user, as dotman makes them; untouched for [`STALE_AFTER`]; and its PID no
+/// live process. A user's file of a similar name, and names from older versions, stay.
+pub(crate) fn is_leftover(path: &Path, prefix: &str) -> bool {
+    let Some(pid) = path.file_name().and_then(|name| leftover_pid(name, prefix)) else {
         return false;
     };
-    let rest = rest.strip_prefix("link-").unwrap_or(rest);
-    let Some((pid, _)) = rest.split_once('-') else {
+    let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
-    pid.parse::<u32>()
-        .is_ok_and(|pid| pid != std::process::id() && !sys::pid_alive(pid))
+    let ours = meta.is_file()
+        || meta.file_type().is_symlink()
+        || (meta.is_dir() && meta.mode() & 0o777 == 0o700 && meta.uid() == sys::geteuid());
+    let untouched = meta
+        .modified()
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age >= STALE_AFTER);
+    ours && untouched && pid != std::process::id() && !sys::pid_alive(pid)
+}
+
+fn leftover_pid(name: &OsStr, prefix: &str) -> Option<u32> {
+    let rest = name.to_str()?.strip_prefix(prefix)?;
+    let (rest, link) = rest
+        .strip_prefix("link-")
+        .map_or((rest, false), |rest| (rest, true));
+    let (pid, suffix) = rest.split_once('-')?;
+    let suffix_fits = if link {
+        (1..=2).contains(&suffix.len()) && suffix.bytes().all(|b| b.is_ascii_digit())
+    } else {
+        suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+    };
+    let pid_fits = !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit());
+    if suffix_fits && pid_fits {
+        pid.parse().ok()
+    } else {
+        None
+    }
 }
 
 /// Whether any of `paths` lies under `dir`.
@@ -597,6 +627,7 @@ pub fn is_real_dir(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     fn dead_pid() -> u32 {
         let mut child = crate::proc::command("true").spawn().unwrap();
@@ -606,20 +637,77 @@ mod tests {
     }
 
     #[test]
-    fn only_temp_names_of_dead_processes_are_stale() {
+    fn only_dotman_temp_names_carry_a_pid() {
+        let pid = |name: &str| leftover_pid(OsStr::new(name), TEMP_PREFIX);
+        assert_eq!(pid(&format!("{TEMP_PREFIX}42-a1B2c3")), Some(42));
+        assert_eq!(pid(&format!("{TEMP_PREFIX}link-42-0")), Some(42));
+        assert_eq!(pid(&format!("{TEMP_PREFIX}link-42-15")), Some(42));
+        for other in [
+            "a1B2c3",
+            "42",
+            "42-notes.txt",
+            "42-mydir",
+            "42-a1B2c3d",
+            "42-a1B2-3",
+            "link-42-abc",
+            "x-a1B2c3",
+        ] {
+            assert_eq!(pid(&format!("{TEMP_PREFIX}{other}")), None, "{other}");
+        }
+        assert_eq!(pid("x.dotman-tmp-42-a1B2c3"), None);
+    }
+
+    #[test]
+    fn only_old_leftovers_of_dead_processes_are_stale() {
+        let tmp = tempfile::TempDir::new().unwrap();
         let dead = dead_pid();
         let me = std::process::id();
-        let stale = |name: String| is_stale_temp(OsStr::new(&name));
-        assert!(stale(format!("{TEMP_PREFIX}{dead}-a1B2c3")));
-        assert!(stale(format!("{TEMP_PREFIX}link-{dead}-0")));
-        assert!(!stale(format!("{TEMP_PREFIX}{me}-a1B2c3")));
-        assert!(!stale(format!("{TEMP_PREFIX}1-a1B2c3")), "pid 1 is alive");
+        let old = std::time::SystemTime::now()
+            .checked_sub(STALE_AFTER)
+            .and_then(|at| at.checked_sub(Duration::from_secs(60)))
+            .unwrap();
+        let make = |name: String, dir: Option<u32>| {
+            let path = tmp.path().join(name);
+            match dir {
+                Some(mode) => fs::DirBuilder::new()
+                    .mode(mode)
+                    .create(&path)
+                    .and_then(|()| fs::set_permissions(&path, fs::Permissions::from_mode(mode)))
+                    .unwrap(),
+                None => fs::write(&path, b"x").unwrap(),
+            }
+            fs::File::open(&path).unwrap().set_modified(old).unwrap();
+            path
+        };
+        assert!(is_leftover(
+            &make(format!("{TEMP_PREFIX}{dead}-a1B2c3"), None),
+            TEMP_PREFIX
+        ));
+        assert!(is_leftover(
+            &make(format!("{TEMP_PREFIX}{dead}-d1B2c3"), Some(0o700)),
+            TEMP_PREFIX
+        ));
         assert!(
-            !stale(format!("{TEMP_PREFIX}a1B2c3")),
-            "no PID: an older version's"
+            !is_leftover(
+                &make(format!("{TEMP_PREFIX}{dead}-u1B2c3"), Some(0o755)),
+                TEMP_PREFIX
+            ),
+            "a user's directory"
         );
-        assert!(!stale(format!("{TEMP_PREFIX}{dead}")));
-        assert!(!stale(format!("x{TEMP_PREFIX}{dead}-a")));
+        assert!(!is_leftover(
+            &make(format!("{TEMP_PREFIX}{me}-a1B2c3"), None),
+            TEMP_PREFIX
+        ));
+        assert!(
+            !is_leftover(&make(format!("{TEMP_PREFIX}1-a1B2c3"), None), TEMP_PREFIX),
+            "pid 1 is alive"
+        );
+        let young = tmp.path().join(format!("{TEMP_PREFIX}{dead}-y1B2c3"));
+        fs::write(&young, b"x").unwrap();
+        assert!(
+            !is_leftover(&young, TEMP_PREFIX),
+            "touched within {STALE_AFTER:?}"
+        );
         assert!(sys::pid_alive(me));
         assert!(!sys::pid_alive(dead));
     }

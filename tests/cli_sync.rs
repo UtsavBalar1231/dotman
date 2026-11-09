@@ -576,6 +576,15 @@ fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
     assert_eq!(show(".a"), "a, key removed\n");
 }
 
+/// Sets the modification time of `path` to an hour ago, well before the sweep's 10-minute cutoff.
+fn age(path: &std::path::Path) -> std::io::Result<()> {
+    let hour = std::time::Duration::from_secs(3600);
+    let then = std::time::SystemTime::now()
+        .checked_sub(hour)
+        .unwrap_or(std::time::UNIX_EPOCH);
+    fs::File::open(path)?.set_modified(then)
+}
+
 #[test]
 fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
     let env = first_device(&[(".config/app/a.conf", b"a\n", 0o644)]);
@@ -594,7 +603,33 @@ fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
         .join(format!(".config/app/.dotman-tmp-{live}-MnOpQr"));
     let old_style = env.repo().join(".config/app/.dotman-tmp-StUvWx");
     let state_temp = env.state_dir().join(format!(".dotman-tmp-{dead}-EfGhIj"));
-    for path in [&repo_temp, &home_temp, &live_temp, &old_style, &state_temp] {
+    // The user's own files with names like these, and a run's file still being written.
+    let notes = env
+        .home()
+        .join(format!(".config/app/.dotman-tmp-{dead}-notes.txt"));
+    let young = env
+        .home()
+        .join(format!(".config/app/.dotman-tmp-{dead}-YoUnGx"));
+    let user_dir = env
+        .home()
+        .join(format!(".config/app/.dotman-tmp-{dead}-UsErDr"));
+    let stale_dir = env
+        .home()
+        .join(format!(".config/app/.dotman-tmp-{dead}-StAlEd"));
+    for (dir, mode) in [(&user_dir, 0o755), (&stale_dir, 0o700)] {
+        fs::create_dir(dir).expect("mkdir");
+        fs::write(dir.join("keep"), b"precious\n").expect("write");
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+    for path in [
+        &repo_temp,
+        &home_temp,
+        &live_temp,
+        &old_style,
+        &state_temp,
+        &notes,
+        &young,
+    ] {
         fs::write(path, b"partial\n").expect("leave a temp file");
     }
     // An earlier version committed one; the next sync untracks it.
@@ -603,15 +638,30 @@ fn leftover_temp_files_of_dead_runs_are_swept_and_never_committed() {
     let repo = repo_path(&env);
     env.git(&["-C", &repo, "add", "-f", &tracked]);
     env.git(&["-C", &repo, "commit", "-q", "-m", "old"]);
+    for path in [
+        &repo_temp,
+        &home_temp,
+        &live_temp,
+        &old_style,
+        &state_temp,
+        &notes,
+    ] {
+        age(path).expect("age the file");
+    }
+    for path in [&user_dir, &stale_dir, &env.repo().join(&tracked)] {
+        age(path).expect("age the file");
+    }
 
     let err = exits(&env, 0, &["sync"]);
-    assert!(err.contains("removed 4 temp files"), "{err}");
+    assert!(err.contains("removed 5 temp files"), "{err}");
     assert!(!repo_temp.exists() && !home_temp.exists() && !state_temp.exists());
+    assert!(!stale_dir.exists());
     assert!(!env.repo().join(&tracked).exists());
     assert!(
         live_temp.exists() && old_style.exists(),
         "kept: no dead PID"
     );
+    assert!(notes.exists() && young.exists() && user_dir.join("keep").exists());
     let remote = env.remote_path().to_string_lossy().into_owned();
     let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
     assert!(!tree.contains(".dotman-tmp-"), "{tree}");
