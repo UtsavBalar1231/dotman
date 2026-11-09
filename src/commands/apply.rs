@@ -368,7 +368,8 @@ struct Question {
     local_action: Action,
     repo: Answer,
     diffs: bool,
-    flags: &'static str,
+    /// The flags that answer `local` and `repo`.
+    flags: [&'static str; 2],
 }
 
 const KEEP: Answer = Answer {
@@ -393,7 +394,7 @@ const QUESTIONS: [Question; 3] = [
         local_action: Action::KeepLocal,
         repo: TAKE,
         diffs: true,
-        flags: "--keep-local or --take-repo",
+        flags: ["--keep-local", "--take-repo"],
     },
     Question {
         what: "existing files",
@@ -403,7 +404,7 @@ const QUESTIONS: [Question; 3] = [
         local_action: Action::KeepLocal,
         repo: TAKE,
         diffs: true,
-        flags: "--keep-local or --take-repo",
+        flags: ["--keep-local", "--take-repo"],
     },
     Question {
         what: "local deletions",
@@ -423,7 +424,7 @@ const QUESTIONS: [Question; 3] = [
             one: "restore",
         },
         diffs: false,
-        flags: "--forget-deleted or --restore-deleted",
+        flags: ["--forget-deleted", "--restore-deleted"],
     },
 ];
 
@@ -561,8 +562,10 @@ impl Run<'_> {
         }
         self.attention = true;
         output::warning(&format!(
-            "identity changed ({change}): {} paths left undecided; answer with --accept-identity:",
-            pending.len()
+            "identity changed ({change}): {} paths left undecided; answer with `{} {} --accept-identity`:",
+            pending.len(),
+            name::bin(),
+            self.command()
         ));
         for key in pending {
             output::warning(&format!("  {key}"));
@@ -606,11 +609,13 @@ impl Run<'_> {
             }
             if !undecided.is_empty() {
                 self.attention = true;
+                let [local, repo] = question.flags;
                 output::warning(&format!(
-                    "{} left undecided ({}); answer with {}:",
+                    "{} left undecided ({}); answer with `{bin} {command} {local}` or `{bin} {command} {repo}`:",
                     question.what,
                     undecided.len(),
-                    question.flags
+                    bin = name::bin(),
+                    command = self.command(),
                 ));
                 for key in undecided {
                     output::warning(&format!("  {key}"));
@@ -618,6 +623,15 @@ impl Run<'_> {
             }
         }
         Ok(actions)
+    }
+
+    /// The command whose flags answer what this pass leaves undecided.
+    fn command(&self) -> &'static str {
+        if self.opts.pass == Pass::Capture {
+            "sync"
+        } else {
+            "apply"
+        }
     }
 
     /// Keeping H means different things per pass: `sync` captures it.
@@ -660,8 +674,9 @@ impl Run<'_> {
             Row::ForgottenEdited => {
                 self.attention = true;
                 output::warning(&format!(
-                    "{key}: forgotten upstream but edited here; `{bin} add` keeps it, `{bin} forget` accepts the removal",
-                    bin = name::bin()
+                    "{key}: forgotten upstream but edited here; `{bin} add {path}` keeps it, `{bin} forget {path}` accepts the removal",
+                    bin = name::bin(),
+                    path = add::pasteable(&self.ctx.paths.home, key)
                 ));
                 None
             }
@@ -677,13 +692,12 @@ impl Run<'_> {
             Row::Blocked => {
                 self.attention = true;
                 if let Home::Blocked(obstacle) = &item.raw {
-                    output::warning(&format!("{key}: {}", Skip::Blocked(obstacle.clone())));
+                    self.skipped(key, &Skip::Blocked(obstacle.clone()));
                 }
                 None
             }
             Row::SymlinkAtTarget => {
-                self.attention = true;
-                output::warning(&format!("{key}: {}", Skip::Symlink));
+                self.skipped(key, &Skip::Symlink);
                 None
             }
             Row::DeletedLocally
@@ -1141,8 +1155,9 @@ impl Run<'_> {
     fn unconfirmed(&mut self, ready: &[Ready]) {
         self.attention = true;
         output::warning(&format!(
-            "{} left unwritten; answer with --yes:",
-            system_files(ready.len())
+            "{} left unwritten; answer with `{} apply --system --yes`:",
+            system_files(ready.len()),
+            name::bin()
         ));
         for item in ready {
             output::warning(&format!("  {}", item.key));
@@ -1362,8 +1377,7 @@ impl Run<'_> {
                 Some(mode)
             }
             Ok(WriteOutcome::Skipped(skip)) => {
-                self.attention = true;
-                output::warning(&format!("{key}: {skip}"));
+                self.skipped(key, &skip);
                 None
             }
             Err(e) => {
@@ -1396,6 +1410,22 @@ impl Run<'_> {
         } else {
             never_widen(repo, h.mode)
         }
+    }
+
+    /// Reports a write left undone. What stays in the way of one is the user's, so forgetting the
+    /// key is named as a way out.
+    fn skipped(&mut self, key: &str, skip: &Skip) {
+        self.attention = true;
+        let way_out = if matches!(skip, Skip::Blocked(_) | Skip::Symlink) {
+            format!(
+                ". `{} forget {}` stops managing it",
+                name::bin(),
+                add::pasteable(&self.ctx.paths.home, key)
+            )
+        } else {
+            String::new()
+        };
+        output::warning(&format!("{key}: {skip}{way_out}"));
     }
 
     fn announce(&self, verb: &str, key: &str) {

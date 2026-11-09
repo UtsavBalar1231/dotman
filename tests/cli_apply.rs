@@ -59,14 +59,27 @@ fn row_2_forgotten_upstream_keeps_the_file_and_drops_the_state() {
 
 #[test]
 fn row_3_forgotten_with_local_edits_is_reported_and_kept() {
-    let env = added(&[(".bashrc", b"one\n", 0o644)]);
-    fs::remove_file(env.repo().join(".bashrc")).unwrap();
-    env.write(".bashrc", b"edited\n", 0o644);
-    assert_eq!(token(&env, ".bashrc").as_deref(), Some("forgotten-edited"));
-    let err = attention(&env, &["apply", "--take-repo"]);
-    assert!(err.contains("`dotman add` keeps it"), "{err}");
-    assert_eq!(env.read(".bashrc"), b"edited\n");
-    assert_eq!(token(&env, ".bashrc").as_deref(), Some("forgotten-edited"));
+    for answer in ["add", "forget"] {
+        let env = added(&[(".bashrc", b"one\n", 0o644)]);
+        fs::remove_file(env.repo().join(".bashrc")).unwrap();
+        env.write(".bashrc", b"edited\n", 0o644);
+        assert_eq!(token(&env, ".bashrc").as_deref(), Some("forgotten-edited"));
+        let err = attention(&env, &["apply", "--take-repo"]);
+        assert!(err.contains("forgotten upstream but edited here"), "{err}");
+        assert_eq!(env.read(".bashrc"), b"edited\n");
+        assert_eq!(token(&env, ".bashrc").as_deref(), Some("forgotten-edited"));
+
+        let out = common::run_hint(&env, &err, answer);
+        assert!(out.status.success(), "{answer}: {}", stderr(&out));
+        assert_eq!(env.read(".bashrc"), b"edited\n");
+        if answer == "add" {
+            assert_eq!(token(&env, ".bashrc").as_deref(), Some("clean"));
+            assert_eq!(fs::read(env.repo().join(".bashrc")).unwrap(), b"edited\n");
+        } else {
+            assert_eq!(token(&env, ".bashrc"), None);
+        }
+        env.ok(&["apply"]);
+    }
 }
 
 #[test]
@@ -118,7 +131,9 @@ fn row_6_deleted_locally_waits_for_restore_or_forget() {
     let err = attention(&env, &["apply"]);
     assert!(err.contains("local deletions left undecided (2)"), "{err}");
     assert!(
-        err.contains("--forget-deleted or --restore-deleted"),
+        err.contains(
+            "answer with `dotman apply --forget-deleted` or `dotman apply --restore-deleted`"
+        ),
         "{err}"
     );
     assert!(!env.home().join(".bashrc").exists());
@@ -147,12 +162,16 @@ fn row_7_deleted_here_and_changed_upstream_is_a_local_deletion() {
             Some("deleted-changed-upstream")
         );
     }
+    // --take-repo answers conflicts only, so the hint never names it for a deletion.
     let err = attention(&env, &["apply", "--take-repo"]);
     assert!(err.contains("local deletions left undecided (2)"), "{err}");
     assert!(
-        err.contains("--forget-deleted or --restore-deleted"),
+        err.contains(
+            "answer with `dotman apply --forget-deleted` or `dotman apply --restore-deleted`"
+        ),
         "{err}"
     );
+    assert!(!err.contains("--take-repo`"), "{err}");
 
     env.ok(&["apply", "--restore-deleted", ".bashrc"]);
     assert_eq!(env.read(".bashrc"), b"two\n");
@@ -162,6 +181,27 @@ fn row_7_deleted_here_and_changed_upstream_is_a_local_deletion() {
     assert!(!env.home().join(".zshrc").exists());
     assert!(!env.repo().join(".zshrc").exists());
     assert_eq!(token(&env, ".zshrc"), None);
+}
+
+#[test]
+fn the_printed_answer_to_each_deletion_does_what_it_says() {
+    for (answer, kept) in [
+        ("apply --restore-deleted", true),
+        ("apply --forget-deleted", false),
+    ] {
+        let env = added(&[(".bashrc", b"one\n", 0o644)]);
+        fs::remove_file(env.home().join(".bashrc")).unwrap();
+        env.write_repo(".bashrc", b"two\n");
+        let err = attention(&env, &["apply"]);
+        let out = common::run_hint(&env, &err, answer);
+        assert!(out.status.success(), "{answer}: {}", stderr(&out));
+        assert_eq!(env.home().join(".bashrc").exists(), kept, "{answer}");
+        assert_eq!(env.repo().join(".bashrc").exists(), kept, "{answer}");
+        if kept {
+            assert_eq!(env.read(".bashrc"), b"two\n");
+        }
+        env.ok(&["apply"]);
+    }
 }
 
 #[test]
@@ -320,10 +360,14 @@ fn row_11_both_changed_is_a_conflict() {
 
     let err = attention(&env, &["apply"]);
     assert!(err.contains("conflicts left undecided (1)"), "{err}");
-    assert!(err.contains("--keep-local or --take-repo"), "{err}");
+    assert!(
+        err.contains("answer with `dotman apply --keep-local` or `dotman apply --take-repo`"),
+        "{err}"
+    );
     assert_eq!(env.read(".bashrc"), b"mine\n");
 
-    env.ok(&["apply", "--take-repo"]);
+    let out = common::run_hint(&env, &err, "apply --take-repo");
+    assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(env.read(".bashrc"), b"repo\n");
     assert_eq!(env.backups(".bashrc"), [(b"mine\n".to_vec(), 0o600)]);
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("clean"));
@@ -341,6 +385,64 @@ fn blocked_directory_is_reported_and_left_alone() {
     assert!(err.contains("a directory is in the way"), "{err}");
     assert_eq!(tree_checksum(&env.home()), before);
     assert_eq!(token(&env, ".config/app.conf").as_deref(), Some("blocked"));
+
+    let out = common::run_hint(&env, &err, "forget");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(tree_checksum(&env.home()), before);
+    assert_eq!(token(&env, ".config/app.conf"), None);
+    env.ok(&["apply"]);
+}
+
+#[test]
+fn every_skip_the_user_must_clear_names_forget_as_a_way_out() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_repo(".link-here", b"x\n");
+    env.write_repo(".config/app/a.conf", b"a\n");
+    env.write_repo(".fifo", b"f\n");
+    env.symlink(".link-here", "elsewhere");
+    fs::create_dir_all(env.root().join("outside")).unwrap();
+    env.symlink(".config", env.root().join("outside"));
+    let fifo = env.home().join(".fifo");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.is_ok_and(|status| status.success()));
+    // A checksum would block reading the FIFO, so the obstacles are checked one by one.
+    let obstacles = || {
+        let kind = |key: &str| {
+            fs::symlink_metadata(env.home().join(key))
+                .unwrap()
+                .file_type()
+        };
+        (
+            fs::read_link(env.home().join(".link-here")).unwrap(),
+            kind(".config").is_symlink(),
+            std::os::unix::fs::FileTypeExt::is_fifo(&kind(".fifo")),
+            fs::read_dir(env.root().join("outside")).unwrap().count(),
+        )
+    };
+    let before = obstacles();
+
+    let err = attention(&env, &["apply"]);
+    for (key, why) in [
+        (".link-here", "is a symlink, which is never written through"),
+        (
+            ".config/app/a.conf",
+            "`.config` is a symlink or not a directory",
+        ),
+        (".fifo", "a socket, FIFO or device is in the way"),
+    ] {
+        let line = err
+            .lines()
+            .find(|line| line.starts_with(&format!("{key}: ")));
+        let line = line.unwrap_or_default();
+        assert!(line.contains(why), "{line}");
+        let out = common::run_hint(&env, line, "forget");
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(token(&env, key), None, "{key}");
+    }
+    assert_eq!(obstacles(), before);
+    assert!(before.1 && before.2);
+    env.ok(&["apply"]);
 }
 
 #[test]

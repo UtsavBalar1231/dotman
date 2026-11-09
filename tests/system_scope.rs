@@ -1036,9 +1036,16 @@ fn apply_system_without_yes_exits_3_when_it_cannot_ask_and_writes_nothing() {
     one_pending_write(&env);
     let before = snapshot(&env);
     let err = exits(&env, 3, &["apply", "--system"]);
-    assert!(err.contains("--yes"), "{err}");
+    assert!(
+        err.contains("answer with `dotman apply --system --yes`"),
+        "{err}"
+    );
     assert_eq!(snapshot(&env), before);
     assert_eq!(fs::read(env.system_path(KEYD)).expect("read"), b"old\n");
+
+    let out = common::run_hint(&env, &err, "apply --system --yes");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(fs::read(env.system_path(KEYD)).expect("read"), b"new\n");
 }
 
 #[test]

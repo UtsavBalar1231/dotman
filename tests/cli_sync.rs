@@ -687,11 +687,40 @@ fn a_skipped_path_exits_3_and_everything_else_is_still_pushed() {
     let err = exits(&a, 3, &["sync"]);
     assert!(err.contains("local deletions left undecided (1)"), "{err}");
     assert!(
-        err.contains("--forget-deleted or --restore-deleted"),
+        err.contains(
+            "answer with `dotman sync --forget-deleted` or `dotman sync --restore-deleted`"
+        ),
         "{err}"
     );
     assert_eq!(remote_file(&a, ".a"), "edited\n");
     assert_eq!(remote_file(&a, ".d"), "d\n");
+
+    let out = common::run_hint(&a, &err, "sync --restore-deleted");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(a.read(".d"), b"d\n");
+    assert_eq!(a.token_of("status", ".d").as_deref(), Some("clean"));
+}
+
+#[test]
+fn the_printed_answer_to_a_conflict_in_sync_does_what_it_says() {
+    for (answer, home) in [
+        ("sync --keep-local", "mine\n"),
+        ("sync --take-repo", "theirs\n"),
+    ] {
+        let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+        a.write(".a", b"theirs\n", 0o644);
+        exits(&a, 0, &["sync"]);
+        b.write(".a", b"mine\n", 0o644);
+        exits(&b, 0, &["git", "fetch", "-q", "origin"]);
+        exits(&b, 0, &["git", "merge", "-q", "--ff-only", "origin/main"]);
+        let err = exits(&b, 3, &["sync"]);
+        assert!(err.contains("conflicts left undecided (1)"), "{err}");
+        let out = common::run_hint(&b, &err, answer);
+        assert!(out.status.success(), "{answer}: {}", stderr(&out));
+        assert_eq!(b.read(".a"), home.as_bytes(), "{answer}");
+        assert_eq!(remote_file(&b, ".a"), home, "{answer}");
+        assert_eq!(b.token_of("status", ".a").as_deref(), Some("clean"));
+    }
 }
 
 #[test]
