@@ -359,6 +359,9 @@ pub(super) fn winner(alternates: &[&Alternate], machine: &Machine) -> Option<usi
 pub(super) struct Rewritten {
     pub(super) text: String,
     pub(super) env: BTreeSet<String>,
+    /// The printed yadm variables whose dotman value is lowercase where yadm's is not, such as
+    /// `os`, which yadm prints as `Linux` and dotman as `linux`.
+    pub(super) cased: BTreeSet<&'static str>,
 }
 
 enum Line<'a> {
@@ -374,6 +377,7 @@ enum Line<'a> {
 pub(super) fn rewrite_template(text: &str) -> Result<Rewritten, String> {
     let mut out = String::with_capacity(text.len());
     let mut env = BTreeSet::new();
+    let mut cased = BTreeSet::new();
     let mut open: Vec<bool> = Vec::new();
     for raw in text.split_inclusive('\n') {
         let (line, newline) = raw
@@ -409,7 +413,7 @@ pub(super) fn rewrite_template(text: &str) -> Result<Rewritten, String> {
             }
             Line::Include => return Err("uses {% include %}".to_owned()),
             Line::Text => {
-                out.push_str(&convert_text(line, &mut env)?);
+                out.push_str(&convert_text(line, &mut env, &mut cased)?);
                 out.push_str(newline);
             }
         }
@@ -417,7 +421,11 @@ pub(super) fn rewrite_template(text: &str) -> Result<Rewritten, String> {
     if !open.is_empty() {
         return Err("has an {% if %} with no {% endif %}".to_owned());
     }
-    Ok(Rewritten { text: out, env })
+    Ok(Rewritten {
+        text: out,
+        env,
+        cased,
+    })
 }
 
 /// The text between `{%` and `%}` of a line that is one tag.
@@ -521,7 +529,11 @@ fn convert_if<'a>(
 
 /// Replaces yadm variables, and writes every other `{{`, `{%` and `{#` as a string so that
 /// minijinja prints it as yadm does.
-fn convert_text(line: &str, env: &mut BTreeSet<String>) -> Result<String, String> {
+fn convert_text(
+    line: &str,
+    env: &mut BTreeSet<String>,
+    cased: &mut BTreeSet<&'static str>,
+) -> Result<String, String> {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(at) = rest.find('{') {
@@ -535,7 +547,7 @@ fn convert_text(line: &str, env: &mut BTreeSet<String>) -> Result<String, String
             continue;
         };
         if delimiter == "{{"
-            && let Some((expression, after)) = variable(tail, env)?
+            && let Some((expression, after)) = variable(tail, env, cased)?
         {
             let _ = write!(out, "{{{{ {expression} }}}}");
             rest = after;
@@ -553,6 +565,7 @@ fn convert_text(line: &str, env: &mut BTreeSet<String>) -> Result<String, String
 fn variable<'a>(
     text: &'a str,
     env: &mut BTreeSet<String>,
+    cased: &mut BTreeSet<&'static str>,
 ) -> Result<Option<(String, &'a str)>, String> {
     let Some(inner) = text.strip_prefix("{{") else {
         return Ok(None);
@@ -582,9 +595,16 @@ fn variable<'a>(
         format!("env.{name}")
     } else {
         match name {
-            "os" => "os".to_owned(),
+            "os" => {
+                cased.insert("os");
+                "os".to_owned()
+            }
+            "distro" => {
+                cased.insert("distro");
+                "distro".to_owned()
+            }
             "hostname" => "host".to_owned(),
-            "user" | "distro" | "arch" => name.to_owned(),
+            "user" | "arch" => name.to_owned(),
             "distro_family" => "like | join(\" \")".to_owned(),
             "classes" => "profiles | join(\"\\n\")".to_owned(),
             other => {

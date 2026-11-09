@@ -125,11 +125,17 @@ pub(super) fn candidates(ctx: &Context) -> Result<Vec<Candidate>> {
     Ok(found)
 }
 
-/// yadm's repo in `$XDG_DATA_HOME`, which is where yadm keeps it, and in `~/.local/share`.
+/// yadm's repo in `$XDG_DATA_HOME`, which is where yadm keeps it, in `~/.local/share`, and where
+/// yadm before 3.0 kept it: `~/.yadm` and `$XDG_CONFIG_HOME/yadm`.
 fn yadm_repos(ctx: &Context) -> Vec<PathBuf> {
     let mut repos: Vec<PathBuf> = Vec::new();
-    for base in [&ctx.paths.data_home, &ctx.paths.home.join(".local/share")] {
-        let dir = base.join("yadm/repo.git");
+    let home = &ctx.paths.home;
+    for dir in [
+        ctx.paths.data_home.join("yadm/repo.git"),
+        home.join(".local/share/yadm/repo.git"),
+        home.join(".yadm/repo.git"),
+        ctx.paths.config_home.join("yadm/repo.git"),
+    ] {
         let real = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         if is_git_dir(&dir)
             && !repos
@@ -301,6 +307,8 @@ struct Analysis {
     /// Targets of the converted alternates.
     targets: BTreeSet<String>,
     env: BTreeSet<String>,
+    /// Converted templates that print a yadm variable whose case changes, and those variables.
+    cased: BTreeMap<String, BTreeSet<&'static str>>,
     /// The source path of the entry that carries a precedence report, and the report.
     precedence: BTreeMap<String, String>,
 }
@@ -505,6 +513,9 @@ fn analyze(git: &Git, tree: &[TreeEntry], identity: &IdentitySnapshot) -> Analys
             let rewritten = yadm::rewrite_template(&text)?;
             renders(&kept.from, &rewritten)?;
             found.env.extend(rewritten.env);
+            if !rewritten.cased.is_empty() {
+                found.cased.insert(kept.to.clone(), rewritten.cased);
+            }
             Ok(rewritten.text)
         })();
         match outcome {
@@ -1048,6 +1059,15 @@ impl YadmSetup {
                 "converted templates read the environment variables {}; add them to `[template] env` in {}",
                 found.env.iter().cloned().collect::<Vec<_>>().join(", "),
                 ctx.paths.config_file.display()
+            ));
+        }
+        if !found.cased.is_empty() {
+            let printed: BTreeSet<&str> = found.cased.values().flatten().copied().collect();
+            let files: Vec<String> = found.cased.keys().cloned().collect();
+            notes.push(format!(
+                "converted templates print yadm.{}, which dotman spells in lowercase (yadm prints Linux, dotman linux), so their rendered text changes case: {}",
+                printed.into_iter().collect::<Vec<_>>().join(" and yadm."),
+                shown(&files)
             ));
         }
         if self.is_yadm {

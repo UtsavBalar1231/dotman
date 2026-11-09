@@ -666,6 +666,43 @@ fn a_directory_that_is_no_source_is_refused() {
 }
 
 #[test]
+fn a_yadm_repo_in_the_places_older_yadm_used_is_found() {
+    let homes: [fn(&TestEnv) -> PathBuf; 2] = [
+        |env| env.home().join(".yadm/repo.git"),
+        |env| env.xdg_config().join("yadm/repo.git"),
+    ];
+    for place in homes {
+        let env = TestEnv::new();
+        let work = work_tree(&env, "old", &[(".vimrc##o.Linux", "v\n", false)], None);
+        let repo = place(&env);
+        let _source = bare(&env, &work, &repo, Some(&env.home()));
+        let out = env.run(&["import"]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(0), "{}: {err}", repo.display());
+        assert_eq!(
+            tree_names(&env, &env.repo()),
+            [".dotman.toml", ".vimrc{os=linux}"],
+            "{}",
+            repo.display()
+        );
+    }
+}
+
+#[test]
+fn a_converted_template_that_prints_the_os_warns_that_its_case_changes() {
+    let env = TestEnv::new();
+    let files: [File; 1] = [(".profile##template", "export OS={{ yadm.os }}\n", false)];
+    let work = work_tree(&env, "case", &files, None);
+    let _source = bare(&env, &work, &yadm_repo(&env), Some(&env.home()));
+    let err = env.ok(&["import", "--dry-run"]);
+    assert!(
+        err.contains("converted templates print yadm.os, which dotman spells in lowercase")
+            && err.contains("rendered text changes case: .profile{tmpl}"),
+        "{err}"
+    );
+}
+
+#[test]
 fn an_import_of_a_repo_without_commits_is_refused() {
     let env = TestEnv::new();
     let empty = env.root().join("empty.git");
