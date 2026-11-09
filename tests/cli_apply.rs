@@ -374,6 +374,43 @@ fn row_11_both_changed_is_a_conflict() {
 }
 
 #[test]
+fn keep_local_says_the_next_sync_shares_it_and_the_printed_variant_keeps_it_here() {
+    let env = TestEnv::new();
+    env.write_machine_config("[identity]\nhost = \"box\"\n");
+    env.ok(&["init"]);
+    env.write(".bashrc", b"one\n", 0o644);
+    env.ok(&["add", ".bashrc"]);
+    env.write_repo(".bashrc", b"repo\n");
+    env.write(".bashrc", b"mine\n", 0o644);
+    let err = attention(&env, &["apply"]);
+    let out = common::run_hint(&env, &err, "apply --keep-local");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("kept; the next `dotman sync` captures it into the repo for every machine"),
+        "{err}"
+    );
+    assert_eq!(env.read(".bashrc"), b"mine\n");
+
+    assert_eq!(
+        common::hint(&err, "add --for").get(2).map(String::as_str),
+        Some("host=box"),
+        "{err}"
+    );
+    let out = common::run_hint(&env, &err, "add --for");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        fs::read(env.repo().join(".bashrc{host=box}")).unwrap(),
+        b"mine\n"
+    );
+    assert_eq!(fs::read(env.repo().join(".bashrc")).unwrap(), b"repo\n");
+    assert_eq!(
+        env.porcelain("status"),
+        [("clean".to_owned(), ".bashrc".to_owned())]
+    );
+}
+
+#[test]
 fn blocked_directory_is_reported_and_left_alone() {
     let env = TestEnv::new();
     env.ok(&["init"]);

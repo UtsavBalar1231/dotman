@@ -758,6 +758,84 @@ fn keep_local_captures_a_path_changed_on_both_sides_and_take_repo_backs_it_up() 
     assert_eq!(b.backups(".a"), [(b"mine again\n".to_vec(), 0o600)]);
 }
 
+/// Where the message in `err` says the repo copy's uncommitted edit was saved.
+fn saved_at(err: &str) -> std::path::PathBuf {
+    let marker = "the repo copy's uncommitted edit is saved at ";
+    let path = err
+        .lines()
+        .find_map(|line| line.split_once(marker).map(|(_, path)| path.to_owned()));
+    assert!(path.is_some(), "{err}");
+    path.unwrap_or_default().into()
+}
+
+#[test]
+fn keep_local_saves_an_uncommitted_hand_edit_in_the_repo_before_capturing_over_it() {
+    let env = first_device(&[(".a", b"base\n", 0o644)]);
+    env.write_repo(".a", b"hand edit in the repo\n");
+    env.write(".a", b"home edit\n", 0o644);
+    assert_eq!(
+        env.token_of("status", ".a").as_deref(),
+        Some("both-changed")
+    );
+
+    let err = exits(&env, 0, &["sync", "--keep-local", "--dry-run"]);
+    assert!(
+        err.contains(".a: would save the repo copy's uncommitted edit at "),
+        "{err}"
+    );
+    assert!(!env.state_dir().join("backups").exists(), "{err}");
+
+    let err = exits(&env, 0, &["sync", "--keep-local"]);
+    let saved = saved_at(&err);
+    assert!(saved.starts_with(env.state_dir().join("backups")), "{err}");
+    assert_eq!(
+        fs::read(&saved).expect("the saved edit"),
+        b"hand edit in the repo\n"
+    );
+    assert_eq!(env.read(".a"), b"home edit\n");
+    assert_eq!(remote_file(&env, ".a"), "home edit\n");
+    assert!(
+        env.backups(".a").is_empty(),
+        "never where a home backup goes"
+    );
+}
+
+#[test]
+fn apply_keep_local_saves_an_edit_made_with_dotman_edit_before_sync_replaces_it() {
+    let env = first_device(&[(".a", b"base\n", 0o644)]);
+    env.write(".a", b"home edit\n", 0o644);
+    let editor = env.write_script(
+        "editor.sh",
+        "#!/bin/sh\nfor f; do :; done\nprintf 'made with edit\\n' > \"$f\"\n",
+    );
+    let editor = editor.to_string_lossy().into_owned();
+    let out = env.run_with(&[("EDITOR", &editor)], &["edit", ".a"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+
+    let err = exits(&env, 0, &["apply", "--keep-local"]);
+    let saved = saved_at(&err);
+    assert_eq!(
+        fs::read(&saved).expect("the saved edit"),
+        b"made with edit\n"
+    );
+    assert!(
+        err.contains(".a: the repo copy's uncommitted edit is saved at "),
+        "{err}"
+    );
+    assert!(
+        err.contains("kept; the next `dotman sync` captures it into the repo for every machine"),
+        "{err}"
+    );
+
+    let err = exits(&env, 0, &["sync"]);
+    assert!(!err.contains("uncommitted edit"), "saved once: {err}");
+    assert_eq!(remote_file(&env, ".a"), "home edit\n");
+    assert_eq!(
+        fs::read(&saved).expect("the saved edit"),
+        b"made with edit\n"
+    );
+}
+
 const BROKEN: &str = ".config/app/t{tmpl}.conf";
 const RENDERED: &str = ".config/app/t.conf";
 

@@ -12,7 +12,7 @@ use crate::engine::write::{
     safe_write, safe_write_over_link,
 };
 use crate::engine::{
-    Home, Node, Tuple, hash_hex, never_widen, observe, observe_portable, parse_mode,
+    Home, Node, Tuple, hash_hex, never_widen, observe, observe_portable, parse_mode, read_node,
 };
 use crate::hooks::{self, Policy};
 use crate::identity;
@@ -374,8 +374,8 @@ struct Question {
 
 const KEEP: Answer = Answer {
     letter: "k",
-    all: "keep all local",
-    one: "keep local",
+    all: "keep all local (capture them into the repo for every machine)",
+    one: "keep local (capture it into the repo for every machine)",
 };
 const TAKE: Answer = Answer {
     letter: "t",
@@ -788,6 +788,10 @@ impl Run<'_> {
             }
             Action::Capture => {
                 let Home::Present(h) = &item.raw else { return };
+                if !self.save_repo_edit(item, h, state.files.get(key)) {
+                    self.uncaptured = self.uncaptured.saturating_add(1);
+                    return;
+                }
                 let source = item.r.as_ref().map_or(key.as_str(), |r| r.source.as_str());
                 let encrypted = item.r.as_ref().is_some_and(|r| r.encrypted);
                 let before = repo_config.modes.get(source).cloned();
@@ -809,10 +813,20 @@ impl Run<'_> {
             }
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };
-                let written = match action {
-                    Action::Write => self.write(item, r),
-                    Action::KeepLocal => {
+                let written = match (action, &item.raw) {
+                    (Action::Write, _) => self.write(item, r),
+                    // S takes R's bytes, so the next sync captures H over the repo copy without
+                    // seeing them as unsaved.
+                    (Action::KeepLocal, Home::Present(h))
+                        if !self.save_repo_edit(item, h, state.files.get(key)) =>
+                    {
+                        None
+                    }
+                    (Action::KeepLocal, _) => {
                         self.announce("keep local", key);
+                        if !r.template {
+                            self.kept(key);
+                        }
                         Some(r.tuple.mode)
                     }
                     _ => Some(r.tuple.mode),
@@ -1314,6 +1328,85 @@ impl Run<'_> {
         ));
     }
 
+    /// Copies the repo copy of `item` into the run's backups, as `.dotman/repo/<source>` so it can
+    /// never land on a home key's backup, before keeping H means replacing it. Needed when its
+    /// bytes are nowhere else: not in HEAD, not H's and not what S records, the copy `add`
+    /// refuses to overwrite. A hand edit in the repo or a `dotman edit` leaves one. False, with
+    /// the failure counted, when such a copy could not be saved.
+    fn save_repo_edit(&mut self, item: &Item, h: &Tuple, recorded: Option<&Entry>) -> bool {
+        let Some(r) = item.r.as_ref().filter(|r| !r.template) else {
+            return true;
+        };
+        let applied = recorded.is_some_and(|s| s.source == r.source && s.hash == r.tuple.hash);
+        if r.tuple.hash == h.hash || applied {
+            return true;
+        }
+        let Ok(Node::File { bytes, .. }) = read_node(&self.ctx.paths.repo, &r.source) else {
+            return true;
+        };
+        let key = &item.key;
+        let git = &self.ctx.git;
+        let committed = git.head().and_then(|head| {
+            if head.is_none() || git.tree_mode("HEAD", &r.source)?.is_none() {
+                return Ok(false);
+            }
+            Ok(git.show_blob("HEAD", &r.source)? == bytes)
+        });
+        let saved = match committed {
+            Ok(true) => return true,
+            Ok(false) if self.opts.dry_run => {
+                let path = self.backups.join(".dotman/repo").join(&r.source);
+                output::warning(&format!(
+                    "{key}: would save the repo copy's uncommitted edit at {}",
+                    path.display()
+                ));
+                return true;
+            }
+            Ok(false) => {
+                back_up_bytes(&self.backups, &format!(".dotman/repo/{}", r.source), &bytes)
+            }
+            Err(e) => Err(e),
+        };
+        match saved {
+            Ok(path) => {
+                output::warning(&format!(
+                    "{key}: the repo copy's uncommitted edit is saved at {}",
+                    path.display()
+                ));
+                true
+            }
+            Err(e) => {
+                self.failed = self.failed.saturating_add(1);
+                output::warning(&format!(
+                    "{key}: left as it is, because the repo copy's uncommitted edit could not be saved: {e:#}"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Says where a kept H goes next, and how to keep it to this machine instead.
+    fn kept(&self, key: &str) {
+        let bin = name::bin();
+        let host = &self.ctx.identity().host;
+        // A variant condition takes only these characters.
+        let named = !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        let instead = if named {
+            format!(
+                "; `{bin} add --for host={host} {}` keeps it to this machine",
+                add::pasteable(&self.ctx.paths.home, key)
+            )
+        } else {
+            String::new()
+        };
+        output::info(&format!(
+            "  kept; the next `{bin} sync` captures it into the repo for every machine{instead}"
+        ));
+    }
+
     /// The mode R reached `$HOME` with; `None` when it did not. A skipped or failed write is
     /// reported here.
     fn write(&mut self, item: &Item, r: &SourceEntry) -> Option<u32> {
@@ -1711,7 +1804,11 @@ mod tests {
         }
         assert_eq!(
             menu(conflicts, true),
-            "[k] keep all local  [t] take all from repo  [d] show diffs  [p] decide per file  [s] skip:"
+            "[k] keep all local (capture them into the repo for every machine)  [t] take all from repo  [d] show diffs  [p] decide per file  [s] skip:"
+        );
+        assert_eq!(
+            menu(conflicts, false),
+            "[k] keep local (capture it into the repo for every machine)  [t] take from repo  [d] show diff  [s] skip:"
         );
         assert_eq!(menu(deletions, false), "[f] forget  [r] restore  [s] skip:");
     }
