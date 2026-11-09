@@ -100,6 +100,11 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
 
 impl Config {
     /// Parses config text, returning the config and the dotted names of keys it does not know.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the text is not valid TOML or does not fit the schema, or `[template] env` lists
+    /// the age key variable.
     pub fn parse(text: &str) -> Result<(Self, Vec<String>)> {
         let table: toml::Table = toml::from_str(text)?;
         let unknown = unknown_keys(&table);
@@ -111,6 +116,10 @@ impl Config {
     }
 
     /// Loads the config; a missing file gives the defaults. Each unknown key is warned about once.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file exists but cannot be read or parsed. A missing file is not an error.
     pub fn load(path: &Path) -> Result<Self> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -126,6 +135,10 @@ impl Config {
     }
 
     /// Writes the config atomically with mode 0600, creating its directory at 0700. A dry run writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory cannot be created or the file cannot be written.
     pub fn save(&self, path: &Path, dry_run: bool) -> Result<()> {
         if dry_run {
             return Ok(());

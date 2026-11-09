@@ -16,7 +16,7 @@ use std::process::{ExitStatus, Stdio};
 // reason: independent switches, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct Policy {
+pub struct Policy {
     pub approve: bool,
     pub no_hooks: bool,
     pub dry_run: bool,
@@ -28,7 +28,7 @@ const RISK: &str = "Approval covers these command lines, not the scripts they ca
 
 /// Runs the hooks whose glob matches a key in `changed`, if this machine approves them.
 /// Fails after running every hook when any of them failed.
-pub(crate) fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<()> {
+pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<()> {
     if policy.no_hooks {
         return Ok(());
     }

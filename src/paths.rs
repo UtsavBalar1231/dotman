@@ -55,6 +55,10 @@ impl Env {
 }
 
 /// Fails when running as root without `--allow-root` or `DOTMAN_ALLOW_ROOT=1`.
+///
+/// # Errors
+///
+/// Fails when `euid` is 0 and neither `allow_flag` nor an `allow_env` of `1` permits it.
 pub fn ensure_not_root(euid: u32, allow_flag: bool, allow_env: Option<&OsStr>) -> Result<()> {
     if euid == 0 && !allow_flag && allow_env != Some(OsStr::new("1")) {
         bail!("dotman does not run as root; use --allow-root inside containers");
@@ -91,6 +95,11 @@ pub struct Paths {
 
 impl Paths {
     /// Validates `$HOME` and resolves every location. Creates nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `$HOME` is unset, relative or not owned by the user, an override variable is
+    /// relative, or `DOTMAN_SYSTEM_ROOT` cannot be resolved.
     pub fn resolve(env: &Env, euid: u32) -> Result<Self> {
         let home = match env.home.as_deref() {
             Some(h) if !h.is_empty() => PathBuf::from(h),
@@ -144,7 +153,7 @@ impl Paths {
     }
 
     /// Applies the machine config. `DOTMAN_REPO_PATH` still beats its `repo`.
-    pub fn apply_config(mut self, config: &Config) -> Result<Self> {
+    pub(crate) fn apply_config(mut self, config: &Config) -> Result<Self> {
         if let Some(repo) = config.repo.as_ref().filter(|_| !self.repo_from_env) {
             ensure!(
                 repo.is_absolute(),
@@ -178,7 +187,7 @@ impl Paths {
 
     /// Fails for `path` if it is, or lies inside, the repo, the state dir, the machine config
     /// file or an age identity file. `path` must be absolute.
-    pub fn refuse_protected(&self, path: &Path) -> Result<()> {
+    pub(crate) fn refuse_protected(&self, path: &Path) -> Result<()> {
         ensure!(
             !path.components().any(|c| c == Component::ParentDir),
             "{} contains `..`",
@@ -268,7 +277,7 @@ fn absolute_override(name: &str, value: Option<&OsStr>) -> Result<Option<PathBuf
 }
 
 /// Creates `path` and any missing ancestors at mode 0700. A dry run creates nothing.
-pub fn create_private_dir(path: &Path, dry_run: bool) -> io::Result<()> {
+pub(crate) fn create_private_dir(path: &Path, dry_run: bool) -> io::Result<()> {
     if dry_run {
         return Ok(());
     }
@@ -277,7 +286,7 @@ pub fn create_private_dir(path: &Path, dry_run: bool) -> io::Result<()> {
 
 /// A 0700 directory under `base`, removed when the value is dropped. tempfile's default mode would
 /// follow the umask and could leave rendered or decrypted content readable by others.
-pub fn private_temp_dir(prefix: &str, base: &Path) -> Result<tempfile::TempDir> {
+pub(crate) fn private_temp_dir(prefix: &str, base: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(prefix)
         .permissions(Permissions::from_mode(0o700))
@@ -287,7 +296,7 @@ pub fn private_temp_dir(prefix: &str, base: &Path) -> Result<tempfile::TempDir> 
 
 /// Writes `bytes` to a temp file beside `path`, fsyncs it, renames it over `path` and fsyncs the
 /// directory. The final mode is exactly `mode`, whatever the umask. `path`'s directory must exist.
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
@@ -324,7 +333,7 @@ pub fn absolute_input(input: &Path, cwd: &Path, home: &Path) -> PathBuf {
 ///
 /// The derivation is lexical: the target is never resolved, so a symlink at the target stays a
 /// symlink. Input under `home_real` is accepted as well as input under `home`.
-pub fn derive_key(
+pub(crate) fn derive_key(
     input: &Path,
     cwd: &Path,
     home: &Path,
@@ -364,7 +373,7 @@ pub fn derive_key(
 
 /// Checks a key as stored in the repo: relative, NFC, no `.`/`..`/empty components, no `.git`
 /// component at any depth, not a reserved name.
-pub fn validate_key(key: &str) -> Result<()> {
+pub(crate) fn validate_key(key: &str) -> Result<()> {
     ensure!(!key.is_empty(), "empty key");
     ensure!(!key.starts_with('/'), "key `{key}` is absolute");
     ensure!(!key.contains('\0'), "key `{key}` contains a NUL byte");
@@ -425,7 +434,7 @@ pub fn find_collisions<'a>(keys: impl IntoIterator<Item = &'a str>) -> Vec<(Stri
 
 /// Refuses a path with a component that is not NFC, naming the NFC form. On ext4 the NFD and NFC
 /// spellings are different files, so an NFD file could not be found again at its NFC key.
-pub fn refuse_non_nfc(path: &Path) -> Result<()> {
+pub(crate) fn refuse_non_nfc(path: &Path) -> Result<()> {
     for component in path.components() {
         let Component::Normal(name) = component else {
             continue;

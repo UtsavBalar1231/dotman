@@ -74,7 +74,7 @@ pub fn geteuid() -> u32 {
 
 /// Opens the directory `name` inside `dir`. A symlink is never followed: it fails with ELOOP, or
 /// ENOTDIR on some systems.
-pub fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
+pub(crate) fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: `dir` is an open descriptor and `name` is NUL-terminated; both outlive the call.
     owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) })
@@ -82,7 +82,7 @@ pub fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
 
 /// Creates `name` inside `dir` for writing at `mode`. Fails if anything is there, a symlink
 /// included.
-pub fn create_excl(dir: BorrowedFd<'_>, name: &CStr, mode: u32) -> io::Result<File> {
+pub(crate) fn create_excl(dir: BorrowedFd<'_>, name: &CStr, mode: u32) -> io::Result<File> {
     let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: as in `openat_dir`; with O_CREAT, openat reads one more variadic argument, the mode,
     // which is passed as an unsigned int as C's default promotion of mode_t expects.
@@ -140,25 +140,25 @@ pub(crate) fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Option<Ent
 }
 
 /// Changes the owner and group of an open file.
-pub fn fchown(file: BorrowedFd<'_>, uid: u32, gid: u32) -> io::Result<()> {
+pub(crate) fn fchown(file: BorrowedFd<'_>, uid: u32, gid: u32) -> io::Result<()> {
     std::os::unix::fs::fchown(file, Some(uid), Some(gid))
 }
 
 /// Renames `from` to `to`, both inside `dir`, replacing `to` atomically.
-pub fn renameat(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> io::Result<()> {
+pub(crate) fn renameat(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> io::Result<()> {
     let fd = dir.as_raw_fd();
     // SAFETY: `dir` is open and both names are NUL-terminated; all outlive the call.
     check(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) })
 }
 
 /// Removes the file `name` inside `dir`.
-pub fn unlinkat(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+pub(crate) fn unlinkat(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
     // SAFETY: `dir` is open and `name` is NUL-terminated; both outlive the call.
     check(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) })
 }
 
 /// Flushes a directory, so that a rename inside it survives a crash.
-pub fn fsync_dir(dir: BorrowedFd<'_>) -> io::Result<()> {
+pub(crate) fn fsync_dir(dir: BorrowedFd<'_>) -> io::Result<()> {
     // SAFETY: `fsync` only takes the open descriptor `dir`.
     check(unsafe { libc::fsync(dir.as_raw_fd()) })
 }

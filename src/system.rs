@@ -98,7 +98,7 @@ fn canonical_form(key: &str, macos: bool) -> String {
 }
 
 /// The part of a key below `/`, validated as a relative key.
-pub fn rel(key: &str) -> Result<&str> {
+pub(crate) fn rel(key: &str) -> Result<&str> {
     let rel = key
         .strip_prefix('/')
         .ok_or_else(|| anyhow!("{key} is not an absolute path"))?;
@@ -249,7 +249,7 @@ impl Scope {
     }
 
     /// H for a key. Setuid, setgid and sticky bits are masked off, as they are in R.
-    pub fn observe(&self, key: &str) -> Result<Home> {
+    pub(crate) fn observe(&self, key: &str) -> Result<Home> {
         Ok(match self.node(key)?.home() {
             Home::Present(mut tuple) if tuple.kind == crate::state::Kind::File => {
                 tuple.mode &= 0o777;
@@ -433,7 +433,11 @@ fn select(
 
 /// Evaluates every system key that has a source or a state entry. Reads the system as the user
 /// and writes nothing.
-pub fn evaluate(ctx: &Context, repo_config: &RepoConfig, state: &State) -> Result<Vec<Evaluated>> {
+pub(crate) fn evaluate(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    state: &State,
+) -> Result<Vec<Evaluated>> {
     let scope = ctx.system_scope();
     let sources = ctx.system_sources()?;
     let modes = source_modes(&sources, repo_config);
@@ -515,7 +519,7 @@ pub const fn stored_mode(mode: u32) -> u32 {
 
 /// Records owner and group by name, and the mode without setuid, setgid and sticky, for `key`.
 /// `package_owned` stays as it was.
-pub fn record(
+pub(crate) fn record(
     repo_config: &mut RepoConfig,
     key: &str,
     uid: u32,
@@ -548,7 +552,7 @@ pub fn record(
 ///
 /// Updates the `[system]` record and fails with [`HoldsKey`] for a file holding an age identity.
 /// A dry run reads and checks but writes nothing. The caller records S and saves `repo_config`.
-pub fn capture(
+pub(crate) fn capture(
     ctx: &Context,
     key: &str,
     source: &str,
@@ -598,7 +602,7 @@ pub enum Ownership {
 }
 
 /// Asks the first available of `pacman -Qo`, `dpkg -S` and `rpm -qf` about `path`.
-pub fn package_owner(path: &Path) -> Result<Ownership> {
+pub(crate) fn package_owner(path: &Path) -> Result<Ownership> {
     let checkers: [(&str, &[&str]); 3] =
         [("pacman", &["-Qo"]), ("dpkg", &["-S"]), ("rpm", &["-qf"])];
     for (name, args) in checkers {
@@ -625,7 +629,10 @@ pub fn package_owner(path: &Path) -> Result<Ownership> {
 }
 
 /// The inputs that are not under `$HOME`, as system filters, and the rest, which stay paths.
-pub fn split_inputs(paths: &Paths, inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<String>)> {
+pub(crate) fn split_inputs(
+    paths: &Paths,
+    inputs: &[PathBuf],
+) -> Result<(Vec<PathBuf>, Vec<String>)> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let (mut home, mut system) = (Vec::new(), Vec::new());
     for input in inputs {
@@ -648,7 +655,7 @@ pub fn split_inputs(paths: &Paths, inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, 
 
 /// The keys under the system `filters`, or all of them when there are no filters. A filter that
 /// matches nothing is an error.
-pub fn select_keys(filters: &[String], keys: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+pub(crate) fn select_keys(filters: &[String], keys: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     if filters.is_empty() {
         return Ok(keys.clone());
     }

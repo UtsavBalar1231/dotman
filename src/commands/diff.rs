@@ -23,6 +23,11 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
 /// Runs `dotman diff`. Takes no lock and writes nothing outside its temp tree; differences are not an error.
+///
+/// # Errors
+///
+/// Fails when the repo is not initialised or has a rebase or merge in progress, an input cannot be
+/// resolved to a key, or a file cannot be rendered for comparison.
 pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     let ctx = Context::resolve("diff")?;
     ctx.guard()?;

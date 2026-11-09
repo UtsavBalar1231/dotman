@@ -104,13 +104,13 @@ impl Report {
     }
 }
 
-pub(crate) fn print_next_steps() {
+pub fn print_next_steps() {
     let bin = name::bin();
     output::info(&format!("next: run `{bin} status`, then `{bin} apply`"));
 }
 
 /// `1 file`, `2 files`.
-pub(crate) fn count(n: usize, noun: &str) -> String {
+pub fn count(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -131,7 +131,7 @@ pub fn detect(ctx: &Context) -> Result<Vec<(&'static str, PathBuf)>> {
 
 /// What `dotman import` reads: a path, or a URL that git clones.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Source {
+pub enum Source {
     /// A directory, made absolute.
     Path(PathBuf),
     /// `scheme://...` or scp-like `user@host:path`.
@@ -301,7 +301,7 @@ pub fn is_fresh(ctx: &Context) -> Result<bool> {
 
 /// An overlay needs a clean worktree, except for the `install.sh` an import just wrote, which
 /// goes into the overlay commit.
-pub(crate) fn require_clean(ctx: &Context) -> Result<()> {
+pub fn require_clean(ctx: &Context) -> Result<()> {
     let generated = matches!(
         bootstrap::inspect(&ctx.paths.repo)?,
         bootstrap::Found::Unedited { .. }
@@ -320,7 +320,7 @@ pub(crate) fn require_clean(ctx: &Context) -> Result<()> {
 }
 
 /// The error names `--overlay`, the way to add to a repo that already has content.
-pub(crate) fn require_fresh(ctx: &Context) -> Result<()> {
+pub fn require_fresh(ctx: &Context) -> Result<()> {
     if !is_fresh(ctx)? {
         let repo = &ctx.paths.repo;
         bail!(
@@ -333,27 +333,27 @@ pub(crate) fn require_fresh(ctx: &Context) -> Result<()> {
 }
 
 /// Read from the global config while the repo does not exist yet.
-pub(crate) fn author_email(ctx: &Context) -> Result<String> {
+pub fn author_email(ctx: &Context) -> Result<String> {
     ctx.git
         .author_email()?
         .ok_or_else(|| anyhow!(identity_fix()))
 }
 
 /// `$HOME` as given and as resolved: the prefixes stripped from absolute keys.
-pub(crate) fn homes(ctx: &Context) -> Vec<&Path> {
+pub fn homes(ctx: &Context) -> Vec<&Path> {
     std::iter::once(ctx.paths.home.as_path())
         .chain(ctx.paths.home_real.as_deref())
         .collect()
 }
 
 /// A non-interactive run never asks.
-pub(crate) fn proceed(args: &ImportArgs, question: &str) -> Result<bool> {
+pub fn proceed(args: &ImportArgs, question: &str) -> Result<bool> {
     Ok(args.yes || !prompt::interactive() || prompt::confirm(question)?)
 }
 
 /// A `.dotman.toml` in the worktree that is not what `dotman init` writes: an import copies it
 /// before the imported one replaces it.
-pub(crate) struct EditedConfig {
+pub struct EditedConfig {
     bytes: Vec<u8>,
     backup_dir: PathBuf,
 }

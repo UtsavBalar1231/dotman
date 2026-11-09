@@ -18,6 +18,11 @@ use anyhow::{Result, anyhow, bail};
 use std::path::PathBuf;
 
 /// Runs `dotman init`.
+///
+/// # Errors
+///
+/// Fails when `--remote` or the source is not a usable URL, the lock is held, git or age fails, a
+/// repo file cannot be written, or `--source` cannot be cloned or applied.
 pub fn run(args: &InitArgs) -> Result<Outcome> {
     let ctx = Context::resolve("init")?;
     if let Some(source) = &args.source {

@@ -138,6 +138,12 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Runs `dotman system-write --plan <file>`.
+///
+/// # Errors
+///
+/// Fails when the caller may not run a plan, the plan or config is unreadable or not owned by the
+/// invoking user, its roots differ from `[system] roots`, an entry is rejected (nothing is
+/// written), or a write fails (later entries are skipped).
 pub fn run(plan_path: &Path) -> Result<()> {
     let euid = sys::geteuid();
     let invoking = invoking_user(

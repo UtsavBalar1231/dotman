@@ -10,6 +10,11 @@ use std::io::Write;
 
 /// Runs `dotman list`. Takes no lock and writes nothing. A key is listed with the source this machine
 /// applies; one with none, or with ambiguous or invalid variants, is left to `dotman status`.
+///
+/// # Errors
+///
+/// Fails when the repo is not initialised, has a rebase or merge in progress, or stdout cannot be
+/// written.
 pub fn run(args: &ListArgs) -> Result<()> {
     let ctx = Context::resolve("list")?;
     ctx.guard()?;

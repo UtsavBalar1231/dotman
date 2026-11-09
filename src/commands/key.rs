@@ -21,6 +21,11 @@ use std::path::Path;
 use std::time::SystemTime;
 
 /// Runs `dotman key`.
+///
+/// # Errors
+///
+/// Fails when the repo is not initialised, the lock is held, `init` finds an age identity already
+/// there, or `import` cannot read the key file or finds it invalid.
 pub fn run(args: &KeyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("key")?;
     match &args.command {

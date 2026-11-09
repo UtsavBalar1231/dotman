@@ -60,7 +60,7 @@ pub struct Context {
 
 impl Context {
     /// Resolves paths from the process environment. Creates nothing.
-    pub fn resolve(dot_command: &'static str) -> Result<Self> {
+    pub(crate) fn resolve(dot_command: &'static str) -> Result<Self> {
         let paths = Paths::resolve(&Env::from_process(), sys::geteuid())?;
         let machine = Config::load(&paths.config_file)?;
         let paths = paths.apply_config(&machine)?;
@@ -102,13 +102,13 @@ impl Context {
     }
 
     /// [`Context::managed`] grouped by target key, so variants of one file share a key.
-    pub fn sources(&self) -> Result<Sources> {
+    pub(crate) fn sources(&self) -> Result<Sources> {
         Ok(Sources::group(self.managed()?.keys().map(String::as_str)))
     }
 
     /// System sources: regular files and symlinks under `.dotman/system`, keyed by their path
     /// relative to it. [`Context::managed`] leaves them out, because `.dotman` is a reserved name.
-    pub fn managed_system(&self) -> Result<BTreeMap<String, Kind>> {
+    pub(crate) fn managed_system(&self) -> Result<BTreeMap<String, Kind>> {
         let root = self.paths.repo.join(system::DIR);
         let real = is_real_dir(&self.paths.repo.join(".dotman")) && is_real_dir(&root);
         let mut found = BTreeMap::new();
@@ -138,7 +138,7 @@ impl Context {
     }
 
     /// [`Context::managed_system`] grouped by the key each source targets, without the leading `/`.
-    pub fn system_sources(&self) -> Result<Sources> {
+    pub(crate) fn system_sources(&self) -> Result<Sources> {
         Ok(Sources::group(
             self.managed_system()?.keys().map(String::as_str),
         ))
@@ -152,7 +152,7 @@ impl Context {
 
     /// Fails with [`InProgress`] while a rebase or merge is unfinished in the repo. Every command
     /// except `doctor` and `git` calls it, after taking its lock.
-    pub fn guard(&self) -> Result<()> {
+    pub(crate) fn guard(&self) -> Result<()> {
         self.git.operation().map_or(Ok(()), |operation| {
             Err(InProgress {
                 operation,
@@ -169,7 +169,7 @@ impl Context {
     }
 
     /// The repo's `.git/dotman-id`, trimmed. Fails when `dotman init` has not run.
-    pub fn repo_id(&self) -> Result<String> {
+    pub(crate) fn repo_id(&self) -> Result<String> {
         match fs::read_to_string(self.paths.repo.join(".git/dotman-id")) {
             Ok(id) => Ok(id.trim().to_owned()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => bail!(
@@ -182,19 +182,19 @@ impl Context {
     }
 
     /// Loads `.dotman.toml`.
-    pub fn repo_config(&self) -> Result<RepoConfig> {
+    pub(crate) fn repo_config(&self) -> Result<RepoConfig> {
         RepoConfig::load(&self.repo_config_file())
     }
 
     /// Loads `state.toml` for the repo identified by `repo_id`.
-    pub fn state(&self, repo_id: &str) -> Result<State> {
+    pub(crate) fn state(&self, repo_id: &str) -> Result<State> {
         State::load(&self.paths.state_file(), repo_id)
     }
 
     /// Every regular file and symlink in the worktree outside `.git` and the reserved root
     /// names, with its kind. A symlink to a directory is one entry, never followed. Keyed by repo
     /// path, which for a variant is not the key it targets.
-    pub fn managed(&self) -> Result<BTreeMap<String, Kind>> {
+    pub(crate) fn managed(&self) -> Result<BTreeMap<String, Kind>> {
         let root = &self.paths.repo;
         let mut found = BTreeMap::new();
         let mut walk = WalkDir::new(root)
@@ -234,7 +234,7 @@ impl Context {
 
     /// Pairs of keys in the git index, home and system alike, that differ only in case or Unicode
     /// normalization. A variant counts as the key it targets.
-    pub fn index_collisions(&self) -> Result<Vec<(String, String)>> {
+    pub(crate) fn index_collisions(&self) -> Result<Vec<(String, String)>> {
         // Unlike `managed`, this keeps names that are not NFC: they are what twins look like.
         let reserved = |p: &str| is_reserved_root_name(p.split('/').next().unwrap_or(p));
         let paths = self.git.index_paths()?;
@@ -261,7 +261,7 @@ impl Context {
 
     /// Fails when the index holds two keys that differ only in case or Unicode normalization,
     /// because a case-insensitive filesystem cannot hold both.
-    pub fn refuse_collisions(&self) -> Result<()> {
+    pub(crate) fn refuse_collisions(&self) -> Result<()> {
         let pairs = self.index_collisions()?;
         if pairs.is_empty() {
             return Ok(());
@@ -280,7 +280,11 @@ impl Context {
 
     /// The `keys` under the user-supplied `inputs`, or all of them when there are no inputs. An
     /// input that matches no key is an error, so a mistyped path is never a silent no-op.
-    pub fn select(&self, inputs: &[PathBuf], keys: BTreeSet<String>) -> Result<BTreeSet<String>> {
+    pub(crate) fn select(
+        &self,
+        inputs: &[PathBuf],
+        keys: BTreeSet<String>,
+    ) -> Result<BTreeSet<String>> {
         if inputs.is_empty() {
             return Ok(keys);
         }

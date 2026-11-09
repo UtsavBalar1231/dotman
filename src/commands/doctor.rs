@@ -61,6 +61,11 @@ fn info(what: &str, detail: &str) -> Check {
 }
 
 /// Runs `dotman doctor`. Returns false when any check failed. Takes no lock and skips the in-progress guard.
+///
+/// # Errors
+///
+/// Fails only when a result line cannot be written to stdout; failed checks are reported through
+/// the returned `false`.
 pub fn run(args: &DoctorArgs) -> Result<bool> {
     let checks = collect(args.online);
     let mut out = std::io::stdout().lock();

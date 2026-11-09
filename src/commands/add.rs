@@ -121,6 +121,12 @@ impl Ignore {
 }
 
 /// Runs `dotman add`.
+///
+/// # Errors
+///
+/// Fails when the repo is not initialised or has a rebase or merge in progress, another process
+/// holds the lock, an input is outside `$HOME`, ignored, protected or collides with a managed key,
+/// or a file cannot be read or stored.
 pub fn run(args: &AddArgs) -> Result<Outcome> {
     let ctx = Context::resolve("add")?;
     let dry_run = args.dry_run;

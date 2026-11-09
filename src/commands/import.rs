@@ -9,6 +9,11 @@ use crate::remote;
 use anyhow::Result;
 
 /// Runs `dotman import`.
+///
+/// # Errors
+///
+/// Fails when a rebase or merge is in progress, the lock is held, or the importer rejects the
+/// source.
 pub fn run(args: &ImportArgs) -> Result<Outcome> {
     let ctx = Context::resolve("import")?;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;

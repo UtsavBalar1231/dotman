@@ -39,6 +39,11 @@ pub const fn token(row: Row) -> &'static str {
 const UNREADABLE: &str = "unreadable";
 
 /// Runs `dotman status`. Takes no lock, writes nothing and always exits 0 when it can read the repo.
+///
+/// # Errors
+///
+/// Fails when the repo is not initialised or has a rebase or merge in progress, or the repo, the
+/// state or an input cannot be read.
 pub fn run(args: &StatusArgs) -> Result<()> {
     let ctx = Context::resolve("status")?;
     ctx.guard()?;

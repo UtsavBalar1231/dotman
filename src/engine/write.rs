@@ -139,14 +139,14 @@ pub fn backup_run_dir(backups: &Path, now: SystemTime) -> Result<PathBuf> {
 
 /// Appends `key<TAB>target` to `<dir>/.dotman/links.txt`, the record a restore reads, and returns
 /// the file.
-pub(crate) fn record_link(dir: &Path, key: &str, target: &Path) -> Result<PathBuf> {
+pub fn record_link(dir: &Path, key: &str, target: &Path) -> Result<PathBuf> {
     back_up(dir, key, &Node::Symlink(target.to_path_buf()), false)?
         .ok_or_else(|| anyhow!("nothing to record for {key}"))
 }
 
 /// One entry of a tree that takes the place of a link to a directory, keyed by its path below it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Member {
+pub enum Member {
     /// A regular file.
     File {
         /// Its content.
@@ -160,7 +160,7 @@ pub(crate) enum Member {
 
 /// What a restore found at the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Restored {
+pub enum Restored {
     /// The link is back.
     Back,
     /// The link was never replaced.
@@ -183,7 +183,7 @@ fn parent_of(path: &Path) -> Result<&Path> {
 
 /// Replaces the symlink at `key` that has the target text `expected` with a regular file. The
 /// rename deliberately lands on the link itself: it replaces the link and never writes through it.
-pub(crate) fn replace_link_with_file(
+pub fn replace_link_with_file(
     home: &Path,
     key: &str,
     expected: &Path,
@@ -209,7 +209,7 @@ pub(crate) fn replace_link_with_file(
 
 /// Replaces the symlink at `key` that has the target text `expected` with a directory holding
 /// `members`. `modes` gives the modes of the directories, which are 0755 where it is silent.
-pub(crate) fn replace_link_with_dir(
+pub fn replace_link_with_dir(
     home: &Path,
     key: &str,
     expected: &Path,
@@ -305,7 +305,7 @@ fn populate(
 
 /// Puts the symlink `target` back at `key`, over the file the swap wrote there. A file that is
 /// not exactly what the swap wrote is left alone.
-pub(crate) fn restore_file_link(
+pub fn restore_file_link(
     home: &Path,
     key: &str,
     target: &Path,
@@ -334,7 +334,7 @@ pub(crate) fn restore_file_link(
 
 /// Puts the symlink `target` back at `key`, over the directory the swap wrote there. A directory
 /// that holds anything other than `members` is left alone.
-pub(crate) fn restore_dir_link(
+pub fn restore_dir_link(
     home: &Path,
     key: &str,
     target: &Path,
@@ -368,7 +368,7 @@ pub(crate) fn restore_dir_link(
 }
 
 /// Whether the tree at `dir` holds the files and links of `members` and nothing else.
-pub(crate) fn holds_exactly(dir: &Path, members: &BTreeMap<String, Member>) -> bool {
+pub fn holds_exactly(dir: &Path, members: &BTreeMap<String, Member>) -> bool {
     let mut seen = 0usize;
     for entry in WalkDir::new(dir).follow_links(false).min_depth(1) {
         let Ok(entry) = entry else { return false };
@@ -517,7 +517,7 @@ fn create_dir(dir: &Path, mode: u32) -> io::Result<()> {
 
 /// Copies `bytes` to `<dir>/<rel>` at 0600, creating 0700 directories, and never replaces a file
 /// already there.
-pub(crate) fn back_up_bytes(dir: &Path, rel: &str, bytes: &[u8]) -> Result<PathBuf> {
+pub fn back_up_bytes(dir: &Path, rel: &str, bytes: &[u8]) -> Result<PathBuf> {
     let node = Node::File {
         bytes: bytes.to_vec(),
         mode: 0o600,

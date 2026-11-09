@@ -77,7 +77,7 @@ pub struct Wizard<'a> {
 
 impl Wizard<'_> {
     /// The questions for a repo that is being created.
-    pub fn new_repo(&self, origin: Option<&str>) -> Result<Answers> {
+    pub(crate) fn new_repo(&self, origin: Option<&str>) -> Result<Answers> {
         let mut answers = Answers {
             identity: self.identity()?,
             remote: self.remote(origin)?,
@@ -90,7 +90,7 @@ impl Wizard<'_> {
     }
 
     /// The questions for a cloned repo, asking only what this machine needs.
-    pub fn existing_repo(&self, age_key: Option<Incoming>) -> Result<Answers> {
+    pub(crate) fn existing_repo(&self, age_key: Option<Incoming>) -> Result<Answers> {
         let mut answers = Answers {
             identity: self.identity()?,
             age_key,
@@ -109,7 +109,7 @@ impl Wizard<'_> {
     }
 
     /// Fails for a flag value that cannot be used, before anything is created or cloned.
-    pub fn check_flags(&self) -> Result<()> {
+    pub(crate) fn check_flags(&self) -> Result<()> {
         let args = self.args;
         args.git_name.as_deref().map(check_name).transpose()?;
         args.git_email.as_deref().map(check_email).transpose()?;
@@ -365,7 +365,12 @@ impl Wizard<'_> {
 
     /// Fails for an answer that cannot be applied, before anything is created. `origin` is the
     /// current `origin`. A dry run does not run `gh` or the age CLI.
-    pub fn check(&self, answers: &Answers, origin: Option<&str>, dry_run: bool) -> Result<()> {
+    pub(crate) fn check(
+        &self,
+        answers: &Answers,
+        origin: Option<&str>,
+        dry_run: bool,
+    ) -> Result<()> {
         if let Remote::Create(slug) = &answers.remote {
             if let Some(url) = origin {
                 bail!("origin is already {url}; --create-github would not replace it");
@@ -474,7 +479,7 @@ impl Wizard<'_> {
     /// Writes the answers: the git identity, `origin`, the machine config, then the age
     /// identity. Returns a context that sees the new machine config, when it changed. The caller
     /// holds the lock and has created the repo.
-    pub fn apply(&self, answers: &Answers) -> Result<Option<Context>> {
+    pub(crate) fn apply(&self, answers: &Answers) -> Result<Option<Context>> {
         let base = self.ctx;
         if let Some(identity) = &answers.identity {
             self.store_identity(identity)?;
@@ -559,7 +564,7 @@ impl GitIdentity {
     }
 }
 
-pub(crate) fn set_origin(ctx: &Context, url: &str) -> Result<()> {
+pub fn set_origin(ctx: &Context, url: &str) -> Result<()> {
     if ctx.git.remote_url("origin")?.as_deref() != Some(url) {
         ctx.git.set_remote_url("origin", url)?;
         output::success(&format!(

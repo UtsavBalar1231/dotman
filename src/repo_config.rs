@@ -128,6 +128,11 @@ pub struct SystemFile {
 impl RepoConfig {
     /// Parses `.dotman.toml` text. Unknown keys are an error, because saving would drop them from a tracked file.
     /// A malformed `[modes]` value fails here rather than at write time, so dry runs catch it too.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the text is not valid TOML, has an unknown key, or has a `[modes]` value that is
+    /// not octal.
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text)?;
         for key in config.modes.keys() {
@@ -137,6 +142,10 @@ impl RepoConfig {
     }
 
     /// Loads the file; a missing file gives the defaults.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file exists but cannot be read or parsed. A missing file is not an error.
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
             Ok(text) => {
@@ -148,6 +157,10 @@ impl RepoConfig {
     }
 
     /// Writes the file atomically with mode 0644. A dry run writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be written.
     pub fn save(&self, path: &Path, dry_run: bool) -> Result<()> {
         if dry_run {
             return Ok(());

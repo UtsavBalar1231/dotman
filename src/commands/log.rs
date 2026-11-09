@@ -10,6 +10,11 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Runs `dotman log`. Takes no lock and writes nothing.
+///
+/// # Errors
+///
+/// Fails when the repo is not initialised or has a rebase or merge in progress, git is too old or
+/// exits non-zero, or stdout cannot be written.
 pub fn run(args: &LogArgs) -> Result<()> {
     let ctx = Context::resolve("log")?;
     ctx.guard()?;

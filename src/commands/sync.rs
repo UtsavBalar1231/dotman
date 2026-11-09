@@ -33,6 +33,11 @@ pub(crate) fn identity_fix() -> String {
 }
 
 /// Runs `dotman sync`.
+///
+/// # Errors
+///
+/// Fails when the message is empty, the lock is held, keys collide, HEAD is detached, a hook fails,
+/// or git cannot commit, pull or push.
 pub fn run(args: &SyncArgs) -> Result<Outcome> {
     if args.message.as_deref().is_some_and(|m| m.trim().is_empty()) {
         bail!("the commit message is empty");

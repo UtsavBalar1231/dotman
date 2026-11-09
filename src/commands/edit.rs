@@ -13,6 +13,11 @@ use anyhow::{Context as _, Result, bail};
 use std::fs;
 
 /// Runs `dotman edit`. The lock is taken only after the editor exits, so a long edit blocks nothing.
+///
+/// # Errors
+///
+/// Fails when the path is not managed, is age-encrypted, or is not a regular file, when no editor
+/// can be started or it exits non-zero, or when the lock is held after the editor exits.
 pub fn run(args: &EditArgs) -> Result<Outcome> {
     let ctx = Context::resolve("edit")?;
     ctx.guard()?;

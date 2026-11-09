@@ -7,6 +7,11 @@ use anyhow::{Context as _, Result};
 use std::os::unix::process::ExitStatusExt;
 
 /// Runs git with `args` and returns its exit code, 128 plus the signal number if it was killed.
+///
+/// # Errors
+///
+/// Fails when `$HOME` or the machine config cannot be resolved or git cannot be started. A git
+/// failure comes back as its exit code.
 pub fn run(args: &GitArgs) -> Result<i32> {
     let ctx = Context::resolve("git")?;
     let status = ctx

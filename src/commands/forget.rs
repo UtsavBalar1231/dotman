@@ -16,6 +16,11 @@ use std::fs;
 use std::path::Path;
 
 /// Runs `dotman forget`.
+///
+/// # Errors
+///
+/// Fails when an input is not managed, the lock is held, the repo is not initialised or has a
+/// rebase or merge in progress, or a repo file cannot be removed.
 pub fn run(args: &ForgetArgs) -> Result<()> {
     let ctx = Context::resolve("forget")?;
     let dry_run = args.dry_run;

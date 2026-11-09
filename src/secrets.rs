@@ -41,7 +41,7 @@ pub fn key_hint() -> String {
     )
 }
 
-pub(crate) fn no_recipients() -> String {
+pub fn no_recipients() -> String {
     format!(
         "[age] recipients in .dotman.toml is empty; `{} key init` creates a key and adds its recipient",
         name::bin()
@@ -480,7 +480,7 @@ pub fn recipient_set(list: &[String]) -> Vec<String> {
 }
 
 /// The recorded recipient set; `None` when there is no record, or it is not a regular file.
-pub(crate) fn read_record(repo: &Path) -> Result<Option<Vec<String>>> {
+pub fn read_record(repo: &Path) -> Result<Option<Vec<String>>> {
     if !fs::symlink_metadata(repo.join(".dotman")).is_ok_and(|meta| meta.is_dir()) {
         return Ok(None);
     }
@@ -507,7 +507,7 @@ pub(crate) fn read_record(repo: &Path) -> Result<Option<Vec<String>>> {
 }
 
 /// Writes the record, never through a symlinked `.dotman` in the worktree.
-pub(crate) fn write_record(repo: &Path, recipients: &[String]) -> Result<()> {
+pub fn write_record(repo: &Path, recipients: &[String]) -> Result<()> {
     crate::commands::add::ensure_worktree_parents(repo, RECORD)?;
     let mut text = recipient_set(recipients).join("\n");
     text.push('\n');
@@ -515,7 +515,7 @@ pub(crate) fn write_record(repo: &Path, recipients: &[String]) -> Result<()> {
 }
 
 /// Replaces the ciphertext at `source` in the repo through the safe write path.
-pub(crate) fn write_ciphertext(repo: &Path, source: &str, ciphertext: &[u8]) -> Result<()> {
+pub fn write_ciphertext(repo: &Path, source: &str, ciphertext: &[u8]) -> Result<()> {
     let expected = observe(repo, source)?;
     let modes = BTreeMap::new();
     let opts = WriteOptions {
@@ -532,7 +532,7 @@ pub(crate) fn write_ciphertext(repo: &Path, source: &str, ciphertext: &[u8]) -> 
 }
 
 /// Every `{age}` regular file in the worktree, whichever machine it is for.
-pub(crate) fn encrypted_sources(ctx: &Context) -> Result<Vec<String>> {
+pub fn encrypted_sources(ctx: &Context) -> Result<Vec<String>> {
     let managed = ctx.managed()?;
     let sources = ctx.sources()?;
     let mut found = Vec::new();
@@ -553,7 +553,7 @@ pub(crate) fn encrypted_sources(ctx: &Context) -> Result<Vec<String>> {
 /// When the record differs from `[age] recipients`, re-encrypts every `{age}` source to the
 /// current set and rewrites the record. All or nothing: if one source cannot be decrypted here,
 /// nothing changes. Returns how many sources were rewritten.
-pub(crate) fn reencrypt(ctx: &Context, dry_run: bool) -> Result<usize> {
+pub fn reencrypt(ctx: &Context, dry_run: bool) -> Result<usize> {
     let repo = &ctx.paths.repo;
     let recipients = ctx.repo_config()?.age.recipients;
     let current = recipient_set(&recipients);

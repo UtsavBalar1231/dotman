@@ -149,7 +149,7 @@ pub fn portable_link_target(
     relative
 }
 
-pub(crate) enum Node {
+pub enum Node {
     Missing,
     BadParent(String),
     Dir,
@@ -179,7 +179,7 @@ impl Node {
 
 // Every component is lstat'ed, so neither a parent symlink nor one at the key is followed.
 // The key is validated here because joining an absolute key would discard `root`.
-pub(crate) fn read_node(root: &Path, key: &str) -> Result<Node> {
+pub fn read_node(root: &Path, key: &str) -> Result<Node> {
     validate_key(key)?;
     for parent in parents(key) {
         match fs::symlink_metadata(root.join(parent)) {
@@ -229,21 +229,21 @@ fn read_file(path: &Path) -> Result<Node> {
 }
 
 /// Outermost first: `a/b/c` gives `a`, then `a/b`.
-pub(crate) fn parents(key: &str) -> impl Iterator<Item = &str> {
+pub fn parents(key: &str) -> impl Iterator<Item = &str> {
     key.match_indices('/').filter_map(|(at, _)| key.get(..at))
 }
 
-pub(crate) fn hash_hex(bytes: &[u8]) -> String {
+pub fn hash_hex(bytes: &[u8]) -> String {
     format!("{:032x}", xxh3_128(bytes))
 }
 
 // A hostile repo must never get setuid, setgid or sticky bits into `$HOME`.
-pub(crate) const fn safe_mode(mode: u32) -> u32 {
+pub const fn safe_mode(mode: u32) -> u32 {
     mode & 0o777
 }
 
 /// The `.dotman.toml` `[modes]` value for `key`; directory keys end with `/`.
-pub(crate) fn recorded_mode(modes: &BTreeMap<String, String>, key: &str) -> Result<Option<u32>> {
+pub fn recorded_mode(modes: &BTreeMap<String, String>, key: &str) -> Result<Option<u32>> {
     modes
         .get(key)
         .map(|value| parse_mode(value).with_context(|| format!("[modes] entry `{key}`")))
@@ -251,7 +251,7 @@ pub(crate) fn recorded_mode(modes: &BTreeMap<String, String>, key: &str) -> Resu
 }
 
 // `.dotman.toml` is shared, so a malformed mode is an error rather than a default.
-pub(crate) fn parse_mode(text: &str) -> Result<u32> {
+pub fn parse_mode(text: &str) -> Result<u32> {
     if text.is_empty() || !text.bytes().all(|b| matches!(b, b'0'..=b'7')) {
         bail!("`{text}` is not an octal mode");
     }

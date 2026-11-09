@@ -26,6 +26,11 @@ use std::path::Path;
 use std::time::SystemTime;
 
 /// Runs `dotman restore`.
+///
+/// # Errors
+///
+/// Fails when the path is not managed, `--from` is neither a revision nor a date after the first
+/// commit, the file is absent from that commit, the lock is held, or the file cannot be written.
 pub fn run(args: &RestoreArgs) -> Result<()> {
     let ctx = Context::resolve("restore")?;
     let dry_run = args.dry_run;

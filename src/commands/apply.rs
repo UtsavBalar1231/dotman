@@ -31,6 +31,11 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Runs `dotman apply`.
+///
+/// # Errors
+///
+/// Fails when the repo is not initialised, a rebase or merge is in progress, another process holds
+/// the lock, two keys collide by case or normalization, a path cannot be applied, or a hook fails.
 pub fn run(args: &ApplyArgs) -> Result<Outcome> {
     let ctx = Context::resolve("apply")?;
     let _lock = Lock::acquire(&ctx.paths.lock_file(), args.dry_run)?;

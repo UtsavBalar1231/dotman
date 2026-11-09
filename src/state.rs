@@ -119,7 +119,7 @@ impl State {
     /// A missing file gives an empty state. A file that does not parse is an error and is never
     /// treated as empty. A file written for another repo keeps only its identity snapshot, so
     /// every entry counts as absent.
-    pub fn load(path: &Path, repo_id: &str) -> Result<Self> {
+    pub(crate) fn load(path: &Path, repo_id: &str) -> Result<Self> {
         Ok(Self::for_repo(
             Self::read(path)?.unwrap_or_default(),
             repo_id,
@@ -127,6 +127,11 @@ impl State {
     }
 
     /// The file as written, whatever repo it belongs to; `None` when it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file exists but cannot be read, is not valid UTF-8 or TOML, or has an
+    /// unsupported version.
     pub fn read(path: &Path) -> Result<Option<Self>> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -158,6 +163,10 @@ impl State {
     }
 
     /// Writes the state atomically with mode 0600, creating its directory at 0700. A dry run writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory cannot be created or the file cannot be written.
     pub fn save(&self, path: &Path, dry_run: bool) -> Result<()> {
         if dry_run {
             return Ok(());

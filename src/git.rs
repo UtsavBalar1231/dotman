@@ -674,7 +674,7 @@ fn parse_ident_email(ident: &str) -> Option<String> {
 }
 
 /// Hides `user:password@` in URLs so tokens do not reach error messages.
-pub(crate) fn redact_credentials(arg: &str) -> String {
+pub fn redact_credentials(arg: &str) -> String {
     let Some((scheme, rest)) = arg.split_once("://") else {
         return arg.to_owned();
     };

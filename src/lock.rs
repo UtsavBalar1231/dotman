@@ -22,6 +22,11 @@ impl Lock {
     /// A dry run only contends on a lock file that already exists: it creates neither the file
     /// nor its directory. A filesystem that cannot lock (NFS without lockd, for example) warns and
     /// proceeds unlocked.
+    ///
+    /// # Errors
+    ///
+    /// Fails when another process holds the lock, or the lock file or its directory cannot be
+    /// created or opened.
     pub fn acquire(path: &Path, dry_run: bool) -> Result<Self> {
         let open = if dry_run {
             OpenOptions::new().read(true).open(path)
