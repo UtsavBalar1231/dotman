@@ -227,20 +227,30 @@ impl Context {
 
     /// Takes the lock for a command that writes, then runs [`Context::guard`]. Outside a dry run it
     /// also brings `.git/info/attributes` up to date in a repo `init` finished, so a repo an older
-    /// dotman made gets git's built-in text merge before anything is merged or checked out.
+    /// dotman made gets git's built-in text merge before anything is merged or checked out. When it
+    /// cannot write the file, it warns and the command goes on.
     pub(crate) fn lock(&self, dry_run: bool) -> Result<Lock> {
         let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;
         self.guard()?;
         let git_dir = self.paths.repo.join(".git");
-        if !dry_run
-            && is_real_dir(&git_dir)
-            && git_dir.join("dotman-id").is_file()
-            && self.git.refresh_attributes()?
-        {
-            crate::output::info(&format!(
-                "rewrote {} with the attributes dotman pins",
-                git_dir.join("info/attributes").display()
-            ));
+        if dry_run || !is_real_dir(&git_dir) || !git_dir.join("dotman-id").is_file() {
+            return Ok(lock);
+        }
+        let attributes = git_dir.join("info/attributes");
+        match self.git.refresh_attributes() {
+            Ok(true) => crate::output::info(&format!(
+                "rewrote {} to end with the line dotman pins",
+                attributes.display()
+            )),
+            Ok(false) => {}
+            Err(e) => self.warn_once(
+                "attributes",
+                &format!(
+                    "{e:#}; until {} ends with the line dotman pins, a tracked .gitattributes can choose the merge driver. Fix that, then run `{} init`, which writes the line and changes nothing in $HOME",
+                    attributes.display(),
+                    crate::name::bin()
+                ),
+            ),
         }
         Ok(lock)
     }

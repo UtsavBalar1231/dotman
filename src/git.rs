@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -19,8 +20,16 @@ use xxhash_rust::xxh3::xxh3_128;
 /// `merge`, set with no value, is git's built-in text merge whatever a tracked `merge=union`, a
 /// `merge.<name>.driver` or `merge.default` says; either of those could join both sides of a
 /// conflict without a word. Not `merge=text`: git looks a driver named `text` up in the user's
-/// config first. Not `-merge`: unset means binary, which keeps one side.
-const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding merge\n";
+/// config first. Not `-merge`: unset means binary, which keeps one side. It must be the last line
+/// of `.git/info/attributes`, where a later line wins.
+const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding merge";
+
+/// The lines older dotman versions wrote where [`ATTRIBUTES`] goes; a refresh drops them and keeps
+/// every line the user wrote.
+const OLD_ATTRIBUTES: [&str; 2] = [
+    "* -text -filter -ident -working-tree-encoding",
+    "* -text -filter -ident -working-tree-encoding merge=text",
+];
 
 const MIN_VERSION: (u32, u32) = (2, 25);
 
@@ -575,7 +584,7 @@ impl Git {
 
     fn write_metadata(&self) -> Result<()> {
         let git_dir = self.repo.join(".git");
-        self.write_attributes()?;
+        self.refresh_attributes()?;
         let id_path = git_dir.join("dotman-id");
         if !id_path.exists() {
             fs::write(&id_path, self.new_repo_id()?).context("failed to write .git/dotman-id")?;
@@ -587,30 +596,55 @@ impl Git {
         self.repo.join(".git/info/attributes")
     }
 
-    fn write_attributes(&self) -> Result<()> {
+    /// Whether the last line of `.git/info/attributes` that is not blank is the one `init` and
+    /// every clone write, so that it wins over the user's lines above it. An older dotman wrote a
+    /// line without `merge`, or with `merge=text`.
+    #[must_use]
+    pub fn attributes_current(&self) -> bool {
+        fs::read(self.attributes_path()).is_ok_and(|bytes| pinned_last(&bytes))
+    }
+
+    /// Unless [`Git::attributes_current`], writes `.git/info/attributes` again with the user's
+    /// lines in their order, the lines dotman wrote dropped and the pinned line last; returns
+    /// whether it wrote. A file that cannot be read is an error, so its lines are never lost.
+    pub fn refresh_attributes(&self) -> Result<bool> {
         let path = self.attributes_path();
+        let old = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
+        if pinned_last(&old) {
+            return Ok(false);
+        }
         let info = self.repo.join(".git/info");
         fs::create_dir_all(&info)
             .with_context(|| format!("failed to create {}", info.display()))?;
-        write_atomic(&path, ATTRIBUTES.as_bytes(), 0o644)
-            .context("failed to write .git/info/attributes")
-    }
-
-    /// Whether `.git/info/attributes` holds exactly the line `init` and every clone write. One
-    /// that an older dotman wrote lacks `merge`, or has `merge=text`.
-    #[must_use]
-    pub fn attributes_current(&self) -> bool {
-        fs::read(self.attributes_path()).is_ok_and(|bytes| bytes == ATTRIBUTES.as_bytes())
-    }
-
-    /// Writes `.git/info/attributes` again unless [`Git::attributes_current`]; returns whether
-    /// it wrote.
-    pub fn refresh_attributes(&self) -> Result<bool> {
-        if self.attributes_current() {
-            return Ok(false);
-        }
-        self.write_attributes()?;
+        write_atomic(&path, &with_pinned_last(&old), 0o644)
+            .context("failed to write .git/info/attributes")?;
         Ok(true)
+    }
+
+    /// Why [`Git::refresh_attributes`] cannot write, judged without trying, since `doctor` writes
+    /// nothing: the file cannot be read, or `.git/info`, or `.git` while it is missing, is not a
+    /// directory this user may write to. `None` when nothing stands in the way.
+    #[must_use]
+    pub fn attributes_unwritable(&self) -> Option<String> {
+        if let Err(e) = fs::read(self.attributes_path())
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            return Some(format!("it cannot be read: {e}"));
+        }
+        let info = self.repo.join(".git/info");
+        let dir = if fs::symlink_metadata(&info).is_ok() {
+            info
+        } else {
+            self.repo.join(".git")
+        };
+        let writable = fs::metadata(&dir).is_ok_and(|meta| {
+            meta.is_dir() && meta.uid() == crate::sys::geteuid() && meta.mode() & 0o300 == 0o300
+        });
+        (!writable).then(|| format!("{} is not a directory you can write to", dir.display()))
     }
 
     fn new_repo_id(&self) -> Result<String> {
@@ -1194,6 +1228,37 @@ impl Git {
     }
 }
 
+fn pinned_last(attributes: &[u8]) -> bool {
+    attributes
+        .split(|b| *b == b'\n')
+        .rfind(|line| !line.trim_ascii().is_empty())
+        .is_some_and(|line| line.trim_ascii() == ATTRIBUTES.as_bytes())
+}
+
+/// `attributes` without the lines dotman wrote and the blank ones at its end, then [`ATTRIBUTES`].
+fn with_pinned_last(attributes: &[u8]) -> Vec<u8> {
+    let dotmans = |line: &[u8]| {
+        let line = line.trim_ascii();
+        line == ATTRIBUTES.as_bytes() || OLD_ATTRIBUTES.iter().any(|old| line == old.as_bytes())
+    };
+    let mut lines: Vec<&[u8]> = attributes
+        .split(|b| *b == b'\n')
+        .filter(|line| !dotmans(line))
+        .collect();
+    while lines
+        .last()
+        .is_some_and(|line| line.trim_ascii().is_empty())
+    {
+        lines.pop();
+    }
+    let mut out = Vec::new();
+    for line in lines.into_iter().chain([ATTRIBUTES.as_bytes()]) {
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    out
+}
+
 fn pathspec(magic: &str, path: &Path) -> OsString {
     let mut spec = OsString::from(magic);
     spec.push(path);
@@ -1547,7 +1612,7 @@ mod tests {
         let git_dir = git.repo().join(".git");
         assert_eq!(
             fs::read_to_string(git_dir.join("info/attributes")).expect("attributes"),
-            ATTRIBUTES
+            format!("{ATTRIBUTES}\n")
         );
         let id = fs::read_to_string(git_dir.join("dotman-id")).expect("id");
         assert_eq!(id.len(), 32);

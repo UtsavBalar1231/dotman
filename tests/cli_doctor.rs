@@ -131,21 +131,27 @@ fn a_stale_git_lock_fails_with_the_removal_step_that_works() {
     assert_eq!(code, Some(0), "{out}");
 }
 
-/// The attributes lines of older dotman versions, without `merge` or with `merge=text`, are
-/// flagged before any command writes, and the step doctor prints, run as printed, clears them.
+const PINNED: &str = "* -text -filter -ident -working-tree-encoding merge\n";
+
+/// The attributes lines of older dotman versions, without `merge` or with `merge=text`, and a
+/// pinned line that is not last, are flagged before any command writes. The step doctor prints,
+/// run as printed, puts the pinned line last, keeps the user's lines, and leaves a pending change
+/// out of `$HOME`. A user's line above the pinned one passes.
 #[test]
-fn an_attributes_line_an_older_dotman_wrote_warns_with_a_step_that_works() {
+fn an_attributes_file_without_the_pinned_line_last_warns_with_a_step_that_works() {
     let env = committed();
     let attributes = env.repo().join(".git/info/attributes");
     let (code, out) = doctor(&env, &[]);
     assert_eq!(code, Some(0), "{out}");
     assert!(line(&out, "pass", "git attributes").is_some(), "{out}");
+    env.write_repo(".bashrc", b"from upstream\n");
 
     for old in [
-        "* -text -filter -ident -working-tree-encoding\n",
-        "* -text -filter -ident -working-tree-encoding merge=text\n",
+        "* -text -filter -ident -working-tree-encoding\n*.age diff=age\n".to_owned(),
+        "* -text -filter -ident -working-tree-encoding merge=text\n".to_owned(),
+        format!("{PINNED}*.age diff=age\n"),
     ] {
-        fs::write(&attributes, old).expect("age it");
+        fs::write(&attributes, &old).expect("age it");
         let (code, out) = doctor(&env, &[]);
         assert_eq!(code, Some(0), "{out}");
         let warned = line(&out, "warn", "git attributes").unwrap_or_default();
@@ -154,15 +160,58 @@ fn an_attributes_line_an_older_dotman_wrote_warns_with_a_step_that_works() {
             fs::read_to_string(&attributes).expect("doctor writes nothing"),
             old
         );
-        let ran = common::run_hint(&env, warned, "apply");
+        let home = tree_checksum(&env.home());
+        let ran = common::run_hint(&env, warned, "init");
         assert!(
             ran.status.success(),
             "{}",
             String::from_utf8_lossy(&ran.stderr)
         );
+        assert_eq!(tree_checksum(&env.home()), home, "{old}");
+        let user = if old.contains("diff=age") {
+            "*.age diff=age\n"
+        } else {
+            ""
+        };
+        assert_eq!(
+            fs::read_to_string(&attributes).expect("read"),
+            format!("{user}{PINNED}")
+        );
         let (_, out) = doctor(&env, &[]);
         assert!(line(&out, "pass", "git attributes").is_some(), "{out}");
     }
+    assert_eq!(env.read(".bashrc"), b"x\n");
+}
+
+/// When no command can write the attributes file, as with a read-only `.git/info` or a directory
+/// in its place, doctor fails, names the file and why, and writes nothing.
+#[test]
+fn attributes_that_no_command_can_write_fail() {
+    let env = committed();
+    let info = env.repo().join(".git/info");
+    let attributes = info.join("attributes");
+    fs::write(&attributes, "* -text\n").expect("age it");
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o555)).expect("chmod");
+    let (code, out) = doctor(&env, &[]);
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(code, Some(1), "{out}");
+    let failed = line(&out, "fail", "git attributes").unwrap_or_default();
+    assert!(
+        failed.contains(&format!(
+            "{} is not a directory you can write to",
+            info.display()
+        )),
+        "{out}"
+    );
+    assert_eq!(fs::read_to_string(&attributes).expect("read"), "* -text\n");
+
+    fs::remove_file(&attributes).expect("remove it");
+    fs::create_dir(&attributes).expect("a directory in its place");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(1), "{out}");
+    let failed = line(&out, "fail", "git attributes").unwrap_or_default();
+    assert!(failed.contains("it cannot be read"), "{out}");
+    assert!(attributes.is_dir());
 }
 
 #[test]

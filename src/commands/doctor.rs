@@ -455,19 +455,40 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
         )),
         None => checks.push(pass("no git operation in progress")),
     }
-    if ctx.git.attributes_current() {
-        checks.push(pass("git attributes"));
-    } else {
-        checks.push(warn(
-            "git attributes",
-            &format!(
-                "{} is not the line dotman pins, as in a repo an older dotman made, so a tracked .gitattributes or your git config can still choose the merge driver; the next command that writes rewrites it, or run `{} apply` now",
-                ctx.paths.repo.join(".git/info/attributes").display(),
-                name::bin()
-            ),
-        ));
-    }
+    checks.push(attributes(ctx));
     checks
+}
+
+/// Lines the user added to `.git/info/attributes` are theirs; only a pinned line that is missing
+/// or not last is flagged, and it fails when no command could write it.
+fn attributes(ctx: &Context) -> Check {
+    if ctx.git.attributes_current() {
+        return pass("git attributes");
+    }
+    let path = ctx.paths.repo.join(".git/info/attributes");
+    let what = format!(
+        "{} does not end with the line dotman pins, so a tracked .gitattributes or your git config can still choose the merge driver",
+        path.display()
+    );
+    let init = format!(
+        "run `{} init`, which writes the line and changes nothing in $HOME",
+        name::bin()
+    );
+    ctx.git.attributes_unwritable().map_or_else(
+        || {
+            warn(
+                "git attributes",
+                &format!("{what}; the next command that writes puts it last, or now {init}"),
+            )
+        },
+        |why| {
+            fail(
+                "git attributes",
+                &format!("{what}, and no command can write it: {why}"),
+                &format!("fix that, then {init}"),
+            )
+        },
+    )
 }
 
 /// A `.dotman.toml` that is missing or holds no settings reads as the defaults, so `[dirs]`,

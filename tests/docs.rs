@@ -471,7 +471,8 @@ const CLAIMS: &[(&str, &[&str])] = &[
         "writes the line again before it changes anything",
         &[
             "an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write",
-            "an_attributes_line_an_older_dotman_wrote_warns_with_a_step_that_works",
+            "an_attributes_file_without_the_pinned_line_last_warns_with_a_step_that_works",
+            "the_attributes_refresh_keeps_user_lines_and_never_stops_a_command",
             "only_context_lock_takes_the_lock_to_write",
         ],
     ),

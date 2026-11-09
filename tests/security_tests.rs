@@ -1956,6 +1956,57 @@ fn an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write()
     }
 }
 
+/// The refresh keeps the lines a user added to `.git/info/attributes` and moves the pinned line
+/// below them, where it wins. When it cannot write the file, as with a read-only `.git/info` or a
+/// directory in its place, a writing command warns once, naming the file and the risk, and goes
+/// on.
+#[test]
+fn the_attributes_refresh_keeps_user_lines_and_never_stops_a_command() {
+    use std::os::unix::fs::PermissionsExt;
+    const PINNED: &str = "* -text -filter -ident -working-tree-encoding merge\n";
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".conf", b"one\n", 0o644);
+    env.ok(&["add", ".conf"]);
+    env.ok(&["sync"]);
+    let info = env.repo().join(".git/info");
+    let attributes = info.join("attributes");
+
+    fs::write(&attributes, format!("{PINNED}*.age diff=age\n")).unwrap();
+    let err = exits(&env.run(&["apply"]), 0);
+    assert!(err.contains("rewrote "), "{err}");
+    assert_eq!(
+        fs::read_to_string(&attributes).unwrap(),
+        format!("*.age diff=age\n{PINNED}")
+    );
+    let err = exits(&env.run(&["apply"]), 0);
+    assert!(!err.contains("rewrote "), "{err}");
+
+    fs::write(&attributes, "* -text\n").unwrap();
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o555)).unwrap();
+    let warned = |err: &str| {
+        err.matches(&format!(
+            "until {} ends with the line dotman pins, a tracked .gitattributes can choose the merge driver",
+            attributes.display()
+        ))
+        .count()
+    };
+    let err = exits(&env.run(&["apply"]), 0);
+    assert_eq!(warned(&err), 1, "{err}");
+    env.write(".conf", b"two\n", 0o644);
+    let err = exits(&env.run(&["sync"]), 0);
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(warned(&err), 1, "{err}");
+    assert!(err.contains("pushed 1 commit"), "{err}");
+    assert_eq!(fs::read_to_string(&attributes).unwrap(), "* -text\n");
+
+    fs::remove_file(&attributes).unwrap();
+    fs::create_dir(&attributes).unwrap();
+    let err = exits(&env.run(&["apply"]), 0);
+    assert_eq!(warned(&err), 1, "{err}");
+    assert!(attributes.is_dir());
+}
+
 /// Every object in the store at `git_dir`, reachable or not, as one text.
 fn every_object(env: &TestEnv, git_dir: &Path) -> String {
     env.git(&[
