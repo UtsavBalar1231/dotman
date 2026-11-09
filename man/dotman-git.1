@@ -24,3 +24,7 @@ Disable pager output
 .TP
 \fB\-\-allow\-root\fR
 Allow running as root
+.SH EXTRA
+Runs git in the repo with the isolation flags every git call of dotman
+carries, and exits with git\*(Aqs own status. It takes no lock and runs while
+a rebase is unfinished, which is how one gets resolved.

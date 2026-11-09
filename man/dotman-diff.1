@@ -10,7 +10,7 @@ Show how $HOME differs from the repo, as a diff from repo/ to home/
 .SH OPTIONS
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 [\fIPATHS\fR]
 Compare only these files or directories; every managed path when none are given
@@ -27,3 +27,7 @@ Disable pager output
 .TP
 \fB\-\-allow\-root\fR
 Allow running as root
+.SH EXTRA
+The diff runs from repo/<key> to home/<key>, so an edit made in $HOME shows
+as added lines. It goes through git\*(Aqs pager unless \-\-no\-pager or NO_PAGER
+is set, or the pager cannot be found. NO_COLOR turns colour off.

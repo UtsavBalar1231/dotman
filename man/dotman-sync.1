@@ -28,7 +28,7 @@ With \-\-system: write the system files without asking
 Commit even when the repo changes delete at least half of the tracked files (10 or more)
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .SH DECISIONS
 .TP
 \fB\-\-keep\-local\fR
@@ -61,3 +61,14 @@ Disable pager output
 .TP
 \fB\-\-allow\-root\fR
 Allow running as root
+.SH EXTRA
+Exit status:
+  3  Paths were left undecided or held back. Everything else is still
+     committed, pulled, applied and pushed, except when an uncommitted
+     repo edit holds a credential or an age key: then sync stops before
+     the pull.
+  4  The pull hit a conflict. Sync aborted it before anything reached
+     $HOME and printed the steps to resolve it.
+  1  An error. Among them: the remote shares no commit with the repo, or
+     the commit would delete at least 10 tracked files and at least half
+     of them, which needs a yes at the prompt or \-\-allow\-mass\-delete.

@@ -24,8 +24,8 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --quiet 'Suppress informational messages'
             cand --no-pager 'Disable pager output'
             cand --allow-root 'Allow running as root'
-            cand -h 'Print help'
-            cand --help 'Print help'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
             cand -V 'Print version'
             cand --version 'Print version'
             cand init 'Create the dotman repo or set its remote, or clone a repo and apply it'
@@ -125,8 +125,8 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --quiet 'Suppress informational messages'
             cand --no-pager 'Disable pager output'
             cand --allow-root 'Allow running as root'
-            cand -h 'Print help'
-            cand --help 'Print help'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
         &'dotman;apply'= {
             cand --keep-local 'Keep the local version of conflicting and existing files'
@@ -156,8 +156,8 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --quiet 'Suppress informational messages'
             cand --no-pager 'Disable pager output'
             cand --allow-root 'Allow running as root'
-            cand -h 'Print help'
-            cand --help 'Print help'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
         &'dotman;edit'= {
             cand -v 'Show verbose output'
@@ -189,8 +189,8 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --quiet 'Suppress informational messages'
             cand --no-pager 'Disable pager output'
             cand --allow-root 'Allow running as root'
-            cand -h 'Print help'
-            cand --help 'Print help'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
         &'dotman;log'= {
             cand -n 'Show at most this many commits'

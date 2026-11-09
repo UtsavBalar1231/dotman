@@ -21,8 +21,8 @@ _dotman() {
 '--quiet[Suppress informational messages]' \
 '--no-pager[Disable pager output]' \
 '--allow-root[Allow running as root]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
 '--version[Print version]' \
 ":: :_dotman_commands" \
@@ -125,8 +125,8 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress informational messages]' \
 '--no-pager[Disable pager output]' \
 '--allow-root[Allow running as root]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '*::paths -- Limit the report to these paths:_files' \
 && ret=0
 ;;
@@ -162,8 +162,8 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress informational messages]' \
 '--no-pager[Disable pager output]' \
 '--allow-root[Allow running as root]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '*::paths -- Compare only these files or directories; every managed path when none are given:_files' \
 && ret=0
 ;;
@@ -201,8 +201,8 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress informational messages]' \
 '--no-pager[Disable pager output]' \
 '--allow-root[Allow running as root]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (log)

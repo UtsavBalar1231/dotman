@@ -5,12 +5,115 @@ use clap_complete::Shell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+// clap_mangen prints each line as roff text: a line that starts with a space breaks, and an empty
+// line separates paragraphs, so the man page keeps this layout.
+const EXIT_AND_ENVIRONMENT: &str = "\
+Exit status:
+  0  Success. `status` exits 0 even when it lists paths to look at.
+  1  An error. `doctor` also exits 1 when one of its checks fails.
+  2  The command line could not be parsed.
+  3  The run finished, but left paths for you: undecided, held back,
+     blocked, or reported for action.
+  4  `sync` hit a rebase conflict, aborted the pull and printed the
+     steps to resolve it; or a git operation or conflict is unfinished
+     in the repo.
+  The `git` subcommand exits with git's own status.
+
+Environment:
+  DOTMAN_REPO_PATH
+      The repo, as an absolute path. It wins over `repo` in the machine
+      config. Default: $XDG_DATA_HOME/dotman.
+  DOTMAN_CONFIG_PATH
+      The machine config, as an absolute path.
+      Default: $XDG_CONFIG_HOME/dotman/config.toml.
+  DOTMAN_NON_INTERACTIVE
+      Any non-empty value asks nothing, as when stdin is not a terminal.
+      Paths a prompt would decide are skipped and listed, and the run
+      exits 3.
+  DOTMAN_ALLOW_ROOT
+      1 lets dotman run as root, as --allow-root does.
+  DOTMAN_AGE_KEY
+      The text of an age identity. It reaches age only on its stdin, and
+      every other child process starts without it.
+  DOTMAN_AGE_KEY_FILE
+      An age identity file, as an absolute path, tried before the
+      identity file in $XDG_CONFIG_HOME/dotman.
+  DOTMAN_HOST
+      Replaces the host name, detected or set under [identity] in the
+      machine config, for variants and templates.
+  DOTMAN_PROFILES
+      Comma-separated profiles that replace the machine config's.
+  DOTMAN_APPROVE_HOOKS, DOTMAN_BOOTSTRAP_BASE_URL
+      Read by the install.sh that `init` writes, not by dotman: 1
+      approves the repo's hooks, and the URL replaces the release
+      download base.
+  DOTMAN_SYSTEM_ROOT, DOTMAN_NIX_STORE
+      For tests only; `doctor` warns when either is set. The system-write
+      helper refuses DOTMAN_SYSTEM_ROOT when it runs as root.
+  NO_COLOR
+      Turns colour off.
+  NO_PAGER
+      Any non-empty value makes `diff` skip the pager, as --no-pager does.
+  VISUAL, EDITOR
+      The editor `edit` starts; VISUAL wins.
+  XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME
+      Where the machine config, the repo and the state with its backups
+      live. Each defaults under $HOME.
+  XDG_RUNTIME_DIR
+      Where `diff` puts its private temporary copies; the state
+      directory when it is unset.
+  RUST_LOG
+      A tracing filter for debug output on stderr. Default: warn.";
+
+const STATUS_HELP: &str = "\
+Exit status: 0 whenever the repo can be read, whatever the paths show; 4
+while a git operation is unfinished in the repo.
+
+With --porcelain, each record is `<token>\\t<key>\\0`. The tokens:
+  clean, not-applied, existing, changed-locally, changed-in-repo,
+  both-changed, deleted-locally, deleted-changed-upstream, forgotten,
+  forgotten-edited, gone, template-drift, blocked, symlink-at-target
+      the paths compared in $HOME, the repo and the last applied state
+  ambiguous, invalid, locked, template-error, unreadable
+      paths that could not be chosen, read, decrypted or rendered
+  system-off
+      a system file on a machine whose [system] roots do not cover it
+  collision
+      two keys that differ only in case or Unicode normalization
+  new, held
+      files under a managed directory that sync would capture, or holds
+  held-in-repo
+      an uncommitted repo edit that sync holds; its key is the repo path";
+
+const SYNC_HELP: &str = "\
+Exit status:
+  3  Paths were left undecided or held back. Everything else is still
+     committed, pulled, applied and pushed, except when an uncommitted
+     repo edit holds a credential or an age key: then sync stops before
+     the pull.
+  4  The pull hit a conflict. Sync aborted it before anything reached
+     $HOME and printed the steps to resolve it.
+  1  An error. Among them: the remote shares no commit with the repo, or
+     the commit would delete at least 10 tracked files and at least half
+     of them, which needs a yes at the prompt or --allow-mass-delete.";
+
+const DIFF_HELP: &str = "\
+The diff runs from repo/<key> to home/<key>, so an edit made in $HOME shows
+as added lines. It goes through git's pager unless --no-pager or NO_PAGER
+is set, or the pager cannot be found. NO_COLOR turns colour off.";
+
+const GIT_HELP: &str = "\
+Runs git in the repo with the isolation flags every git call of dotman
+carries, and exits with git's own status. It takes no lock and runs while
+a rebase is unfinished, which is how one gets resolved.";
+
 /// Top-level arguments for `dotman`.
 #[derive(Parser)]
 #[command(
     name = "dotman",
     version = crate::VERSION,
-    about = "A dotfiles manager with no learning curve, safe by default"
+    about = "A dotfiles manager with no learning curve, safe by default",
+    after_long_help = EXIT_AND_ENVIRONMENT
 )]
 // reason: independent global flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
@@ -57,14 +160,17 @@ pub enum Commands {
     ))]
     List(ListArgs),
     /// Compare $HOME, the repo and the last applied state
+    #[command(after_long_help = STATUS_HELP)]
     Status(StatusArgs),
     /// Write the repo's files into $HOME
     Apply(ApplyArgs),
     /// Show how $HOME differs from the repo, as a diff from repo/ to home/
+    #[command(after_long_help = DIFF_HELP)]
     Diff(DiffArgs),
     /// Open a managed file's source in $VISUAL or $EDITOR, then apply it
     Edit(EditArgs),
     /// Capture local changes, commit, pull, apply what arrived and push
+    #[command(after_long_help = SYNC_HELP)]
     Sync(SyncArgs),
     /// Show the repo's history
     Log(LogArgs),
@@ -73,6 +179,7 @@ pub enum Commands {
     /// Convert another setup into the repo, or add what the repo lacks from one
     Import(ImportArgs),
     /// Run git in the repo
+    #[command(after_long_help = GIT_HELP)]
     Git(GitArgs),
     /// Check the environment and the repo for problems
     Doctor(DoctorArgs),
