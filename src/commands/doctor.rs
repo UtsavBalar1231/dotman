@@ -397,9 +397,23 @@ fn directories(ctx: &Context, repo_whole: bool) -> Vec<Check> {
 
 fn repo_health(ctx: &Context) -> Vec<Check> {
     let mut checks = Vec::new();
-    match Lock::acquire(&ctx.paths.lock_file(), true) {
-        Ok(_lock) => checks.push(pass("lock free")),
-        Err(e) => checks.push(fail("lock", &format!("{e:#}"), "wait for it to finish")),
+    let lock_free = match Lock::acquire(&ctx.paths.lock_file(), true) {
+        Ok(_lock) => {
+            checks.push(pass("lock free"));
+            true
+        }
+        Err(e) => {
+            checks.push(fail("lock", &format!("{e:#}"), "wait for it to finish"));
+            false
+        }
+    };
+    // While a dotman runs, the git it started may hold one; with none running, sync refuses until
+    // they are removed.
+    if lock_free && let Err(e) = ctx.refuse_git_locks() {
+        checks.push(Check {
+            level: Level::Fail,
+            line: format!("git locks: {e:#}"),
+        });
     }
     let state_file = ctx.paths.state_file();
     match ctx.repo_id() {

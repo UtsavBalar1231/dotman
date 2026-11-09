@@ -108,6 +108,29 @@ fn committed() -> TestEnv {
     env
 }
 
+/// The same check and step as sync's, and the step run as printed clears it.
+#[test]
+fn a_stale_git_lock_fails_with_the_removal_step_that_works() {
+    let env = committed();
+    let lock = env.repo().join(".git/index.lock");
+    fs::write(&lock, b"").expect("leave a lock");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(1), "{out}");
+    let failed = line(&out, "fail", "git's lock files are in the repo").unwrap_or_default();
+    assert!(failed.contains(&lock.display().to_string()), "{out}");
+    let step = failed.split('`').nth(1).unwrap_or_default();
+    assert!(step.starts_with("rm "), "{out}");
+    let ran = env
+        .process_for(std::path::Path::new("sh"))
+        .args(["-c", step])
+        .output()
+        .expect("run the step");
+    assert!(ran.status.success(), "{step}");
+    assert!(!lock.exists());
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(0), "{out}");
+}
+
 #[test]
 fn damaged_objects_fail_the_object_check() {
     let env = committed();
