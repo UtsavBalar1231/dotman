@@ -1001,3 +1001,61 @@ fn edit_without_an_editor_names_visual_and_editor() {
     );
     assert!(err.contains("set $VISUAL or $EDITOR"), "{err}");
 }
+
+/// Under umask 0277 the directories dotman creates to write into are still 0700, so apply backs
+/// up both files it replaces, the second one's mode into the record the first one created, and a
+/// second run opens the lock file and writes into the backups directory the first run made. diff
+/// writes its two sides into a temp directory the same way.
+#[test]
+fn apply_under_umask_0277_backs_up_and_replaces() {
+    let env = added(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    fs::remove_file(env.state_dir().join("lock")).expect("remove the lock file");
+    let under_0277 = |command: &str| {
+        let out = env
+            .process_for(Path::new("/bin/sh"))
+            .args(["-c", "umask 0277; exec \"$0\" \"$@\""])
+            .arg(env!("CARGO_BIN_EXE_dotman"))
+            .arg(command)
+            .output()
+            .expect("run dotman");
+        assert_eq!(out.status.code(), Some(0), "{command}: {}", stderr(&out));
+        out
+    };
+    let apply = || {
+        under_0277("apply");
+    };
+    let saved = |key: &str| -> Vec<Vec<u8>> {
+        env.backups(key)
+            .into_iter()
+            .map(|(bytes, _)| bytes)
+            .collect()
+    };
+    env.write_repo(".a", b"a upstream\n");
+    env.write_repo(".b", b"b upstream\n");
+    apply();
+    assert_eq!(env.read(".a"), b"a upstream\n");
+    assert_eq!(env.read(".b"), b"b upstream\n");
+    assert_eq!(saved(".a"), [b"a\n".to_vec()]);
+    assert_eq!(saved(".b"), [b"b\n".to_vec()]);
+    let backups = env.state_dir().join("backups");
+    assert_eq!(mode_of(&backups), 0o700);
+    let run = fs::read_dir(&backups)
+        .expect("read backups")
+        .next()
+        .expect("a run")
+        .expect("entry")
+        .path();
+    let modes = fs::read_to_string(run.join(".dotman/modes.txt")).expect("modes record");
+    assert_eq!(modes.lines().count(), 2, "{modes}");
+
+    env.write_repo(".a", b"a again\n");
+    apply();
+    assert_eq!(env.read(".a"), b"a again\n");
+    assert_eq!(saved(".a").len(), 2);
+
+    env.write(".config/x/c", b"c\n", 0o644);
+    env.ok(&["add", ".config/x/c"]);
+    env.write(".config/x/c", b"c edited\n", 0o644);
+    let shown = String::from_utf8_lossy(&under_0277("diff").stdout).into_owned();
+    assert!(shown.contains("+c edited"), "{shown}");
+}

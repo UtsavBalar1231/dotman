@@ -185,7 +185,8 @@ fn show_all(
         return Ok(());
     }
     for side in [&repo_side, &home_side] {
-        fs::create_dir_all(side).with_context(|| format!("cannot create {}", side.display()))?;
+        create_private_dir(side, false)
+            .with_context(|| format!("cannot create {}", side.display()))?;
     }
 
     let git = Git::new(tmp.path(), "diff");
@@ -299,7 +300,8 @@ fn private_base(ctx: &Context) -> Result<PathBuf> {
 
 fn place(path: &Path, content: &Content, mode: u32) -> Result<()> {
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        create_private_dir(dir, false)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
     }
     match content {
         Content::Bytes(bytes) => {

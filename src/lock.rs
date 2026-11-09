@@ -4,9 +4,9 @@ use crate::output;
 use crate::paths::create_private_dir;
 use anyhow::{Context, Result, bail};
 use fs4::{FileExt, TryLockError};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, Permissions};
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// Held for as long as the value lives. The lock is an `flock` on the open file, so dropping
@@ -50,6 +50,11 @@ impl Lock {
             }
             Err(e) => return Err(e).with_context(|| format!("cannot open {}", path.display())),
         };
+        // Under umask 0277 a new lock file is 0400, and the next run could not open it.
+        if !dry_run && file.metadata()?.permissions().mode() & 0o777 != 0o600 {
+            file.set_permissions(Permissions::from_mode(0o600))
+                .with_context(|| format!("cannot set the mode of {}", path.display()))?;
+        }
         // Not `file.try_lock()`: on Rust 1.89 and later that resolves to std's inherent method,
         // which returns a different error type.
         match FileExt::try_lock(&file) {

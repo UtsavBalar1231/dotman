@@ -621,6 +621,8 @@ fn write_backup(dest: &Path, bytes: &[u8], append: bool) -> Result<()> {
     let mut file = open
         .open(dest)
         .with_context(|| format!("cannot create backup {}", dest.display()))?;
+    // Under umask 0277 the file would be 0400, and the next append to a record could not open it.
+    file.set_permissions(Permissions::from_mode(0o600))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     sync_dir(parent)

@@ -276,22 +276,50 @@ fn absolute_override(name: &str, value: Option<&OsStr>) -> Result<Option<PathBuf
     }
 }
 
-/// Creates `path` and any missing ancestors at mode 0700. A dry run creates nothing.
+/// Creates `path` and any missing ancestors at mode 0700, whatever the umask. A dry run creates
+/// nothing.
 pub(crate) fn create_private_dir(path: &Path, dry_run: bool) -> io::Result<()> {
     if dry_run {
         return Ok(());
     }
-    DirBuilder::new().recursive(true).mode(0o700).create(path)
+    let missing: Vec<&Path> = path
+        .ancestors()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .take_while(|dir| {
+            fs::symlink_metadata(dir).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+        })
+        .collect();
+    for dir in missing.into_iter().rev() {
+        match DirBuilder::new().mode(0o700).create(dir) {
+            // The umask narrows mkdir's mode, and under 0277 a 0500 directory could not hold the
+            // next one or any file, so each is set to 0700 before anything goes inside it.
+            Ok(()) => fs::set_permissions(dir, Permissions::from_mode(0o700))?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if fs::metadata(path)?.is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a directory", path.display()),
+        ))
+    }
 }
 
 /// A 0700 directory under `base`, removed when the value is dropped. tempfile's default mode would
 /// follow the umask and could leave rendered or decrypted content readable by others.
 pub(crate) fn private_temp_dir(prefix: &str, base: &Path) -> Result<tempfile::TempDir> {
-    tempfile::Builder::new()
+    let dir = tempfile::Builder::new()
         .prefix(prefix)
         .permissions(Permissions::from_mode(0o700))
         .tempdir_in(base)
-        .with_context(|| format!("cannot create a temp dir in {}", base.display()))
+        .with_context(|| format!("cannot create a temp dir in {}", base.display()))?;
+    // The umask narrows the mode tempfile asks for, as it does any mkdir.
+    fs::set_permissions(dir.path(), Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot set the mode of {}", dir.path().display()))?;
+    Ok(dir)
 }
 
 /// Writes `bytes` to a temp file beside `path`, fsyncs it, renames it over `path` and fsyncs the
