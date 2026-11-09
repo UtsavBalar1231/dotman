@@ -31,6 +31,16 @@ const OLD_ATTRIBUTES: [&str; 2] = [
     "* -text -filter -ident -working-tree-encoding merge=text",
 ];
 
+/// What git says about an index it cannot parse. Not a bare "index file": a failed object write
+/// ends in "unable to index file", which says nothing about the index.
+const CORRUPT_INDEX: [&str; 5] = [
+    "index file corrupt",
+    "bad index file",
+    "index file smaller than expected",
+    "bad index version",
+    "bad signature",
+];
+
 const MIN_VERSION: (u32, u32) = (2, 25);
 
 /// For `init` and `clone`: an empty template directory copies nothing, so neither
@@ -424,7 +434,7 @@ impl Git {
         }
         let git_dir = self.repo.join(".git");
         let index = git_dir.join("index");
-        let broken = if stderr.contains("index file") || stderr.contains("bad index") {
+        let broken = if CORRUPT_INDEX.iter().any(|said| stderr.contains(said)) {
             format!("{} is corrupt", index.display())
         } else if stderr.contains("not a git repository") && git_dir.is_dir() {
             format!("{} is missing or corrupt", git_dir.join("HEAD").display())
@@ -1644,6 +1654,38 @@ mod tests {
             "https://***@host/a@b"
         );
         assert_eq!(redact_credentials("git@host:x/y.git"), "git@host:x/y.git");
+    }
+
+    /// git's corrupt-index messages name `.git/index`; a failed object write, which ends in
+    /// "unable to index file", keeps git's own text.
+    #[test]
+    fn only_a_corrupt_index_is_reported_as_one() {
+        use std::os::unix::process::ExitStatusExt;
+        let tmp = TempDir::new().expect("tmp");
+        let git = Git::new(tmp.path().join("repo"), "test");
+        let said = |stderr: &str| {
+            let out = Output {
+                status: std::process::ExitStatus::from_raw(32768),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            };
+            format!("{:#}", git.failure(&["add"], &out))
+        };
+        for corrupt in [
+            "error: bad signature 0x00000000\nfatal: index file corrupt",
+            "error: bad index file sha1 signature\nfatal: index file corrupt",
+            "fatal: index file smaller than expected",
+            "error: bad index version 9\nfatal: index file corrupt",
+        ] {
+            assert!(said(corrupt).contains(".git/index is corrupt"), "{corrupt}");
+        }
+        let denied = "error: insufficient permission for adding an object to repository database .git/objects\nerror: .a: failed to insert into database\nerror: unable to index file '.a'\nfatal: updating files failed";
+        let err = said(denied);
+        assert!(!err.contains("corrupt"), "{err}");
+        assert!(
+            err.contains("insufficient permission for adding an object"),
+            "{err}"
+        );
     }
 
     #[test]
