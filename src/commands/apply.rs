@@ -8,8 +8,8 @@ use crate::commands::{Outcome, diff, forget};
 use crate::context::{Context, is_real_dir};
 use crate::engine::status::{Content, Row, Source, SourceEntry, Variants, Worktree, classify};
 use crate::engine::write::{
-    Skip, WriteOptions, WriteOutcome, back_up_bytes, backup_run_dir, safe_symlink, safe_write,
-    safe_write_over_link,
+    Skip, WriteOptions, WriteOutcome, back_up_bytes, backup_run_dir, record_mode, safe_symlink,
+    safe_write, safe_write_over_link,
 };
 use crate::engine::{
     Home, Node, Tuple, hash_hex, never_widen, observe, observe_portable, parse_mode,
@@ -1291,13 +1291,25 @@ impl Run<'_> {
         let key = &item.key;
         let mode = self.kept_mode(item, r);
         // Whatever S says: after a rebase that dropped the local commit, H can equal S and still
-        // be the only copy of the user's bytes. A change of mode alone replaces the file too, and
-        // its backup records the mode it had.
+        // be the only copy of the user's bytes.
         let replaces = matches!(&item.raw, Home::Present(h)
-            if self.opts.in_place
-                || h.kind != r.tuple.kind
-                || h.hash != r.tuple.hash
-                || (h.kind == Kind::File && h.mode != mode));
+            if self.opts.in_place || h.kind != r.tuple.kind || h.hash != r.tuple.hash);
+        // A change of mode alone keeps the bytes, so only the mode they had is recorded.
+        let mut mode_record = None;
+        if let Home::Present(h) = &item.raw
+            && !replaces
+            && h.kind == Kind::File
+            && h.mode != mode
+        {
+            match record_mode(&self.backups, key, h.mode, self.opts.dry_run) {
+                Ok(path) => mode_record = Some(path),
+                Err(e) => {
+                    self.failed = self.failed.saturating_add(1);
+                    output::warning(&format!("{key}: not written, the backup failed: {e:#}"));
+                    return None;
+                }
+            }
+        }
         let opts = WriteOptions {
             dry_run: self.opts.dry_run,
             in_place: self.opts.in_place,
@@ -1318,7 +1330,7 @@ impl Run<'_> {
             Ok(WriteOutcome::Written(written)) => {
                 self.written.insert(key.clone());
                 self.announce("apply", key);
-                if let Some(backup) = &written.backup {
+                if let Some(backup) = written.backup.as_ref().or(mode_record.as_ref()) {
                     self.backed_up(backup);
                 }
                 let repo = item.repo_mode.unwrap_or(r.tuple.mode);

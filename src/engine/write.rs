@@ -169,6 +169,32 @@ pub fn record_link(dir: &Path, key: &str, target: &Path) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("nothing to record for {key}"))
 }
 
+/// Appends `key<TAB>mode` to `<dir>/.dotman/modes.txt` and returns the file, for a write that
+/// changes only the mode. Its bytes stay as they are, so no copy is made, which for a decrypted
+/// file would be one more plaintext copy.
+pub fn record_mode(dir: &Path, key: &str, mode: u32, dry_run: bool) -> Result<PathBuf> {
+    let dest = dir.join(MODES_FILE);
+    if !dry_run {
+        write_backup(
+            &dest,
+            &record_line(key, format!("{mode:04o}").as_bytes()),
+            true,
+        )?;
+    }
+    Ok(dest)
+}
+
+/// One `key<TAB>value` line of a record file. `escape_ascii` keeps tabs, newlines and non-UTF-8
+/// text from breaking a line, and is lossless.
+fn record_line(key: &str, value: &[u8]) -> Vec<u8> {
+    format!(
+        "{}\t{}\n",
+        key.as_bytes().escape_ascii(),
+        value.escape_ascii()
+    )
+    .into_bytes()
+}
+
 /// One entry of a tree that takes the place of a link to a directory, keyed by its path below it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Member {
@@ -553,16 +579,7 @@ pub fn back_up_bytes(dir: &Path, rel: &str, bytes: &[u8]) -> Result<PathBuf> {
 /// or records a symlink in `<dir>/.dotman/links.txt`. Returns where the copy or record went; a dry
 /// run only reports it.
 fn back_up(dir: &Path, key: &str, current: &Node, dry_run: bool) -> Result<Option<PathBuf>> {
-    // One `key<TAB>value` line per entry. `escape_ascii` keeps tabs, newlines and non-UTF-8 text
-    // from breaking a line, and is lossless.
-    let line = |value: &[u8]| {
-        format!(
-            "{}\t{}\n",
-            key.as_bytes().escape_ascii(),
-            value.escape_ascii()
-        )
-        .into_bytes()
-    };
+    let line = |value: &[u8]| record_line(key, value);
     match current {
         Node::File { bytes, mode, .. } => {
             let dest = dir.join(key);

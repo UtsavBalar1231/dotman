@@ -212,10 +212,10 @@ fn row_10_changed_in_repo_is_backed_up_before_it_is_written() {
     );
 }
 
-/// The bytes are the same, but the file is replaced, so the backup's `modes.txt` keeps the mode it
-/// had.
+/// The bytes are the same, so no copy is made, but the backup's `modes.txt` keeps the mode the
+/// file had. `--in-place` copies it as before.
 #[test]
-fn a_mode_only_change_is_backed_up_with_the_mode_it_replaces() {
+fn a_mode_only_change_records_the_mode_it_replaces() {
     let env = added(&[(".bashrc", b"one\n", 0o644)]);
     let mut config = env.repo_config();
     config.modes.insert(".bashrc".to_owned(), "0600".to_owned());
@@ -225,7 +225,7 @@ fn a_mode_only_change_is_backed_up_with_the_mode_it_replaces() {
     let err = env.ok(&["apply"]);
     assert!(err.contains("backed up to"), "{err}");
     assert_eq!(mode_of(&env.home().join(".bashrc")), 0o600);
-    assert_eq!(env.backups(".bashrc"), [(b"one\n".to_vec(), 0o600)]);
+    assert_eq!(env.backups(".bashrc"), []);
     assert_eq!(
         env.backups(".dotman/modes.txt"),
         [(b".bashrc\t0644\n".to_vec(), 0o600)]
@@ -237,6 +237,7 @@ fn a_mode_only_change_is_backed_up_with_the_mode_it_replaces() {
         .unwrap();
     env.ok(&["apply", "--in-place"]);
     assert_eq!(mode_of(&env.home().join(".bashrc")), 0o640);
+    assert_eq!(env.backups(".bashrc"), [(b"one\n".to_vec(), 0o600)]);
     let mut records: Vec<Vec<u8>> = env
         .backups(".dotman/modes.txt")
         .into_iter()
