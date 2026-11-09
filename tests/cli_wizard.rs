@@ -281,11 +281,15 @@ fn a_flag_that_cannot_be_used_is_refused_before_anything_is_created() {
         &["init", "--system-root", "etc"],
         &["init", "--create-github", "not-a-slug"],
         &["init", "--git-email", "nobody"],
+        &["init", "--profile", "y"],
+        &["init", "--profile", "work", "--profile", "No"],
     ] {
         exits(&env.run(args), 1);
         assert!(!env.repo().exists(), "{args:?}");
     }
     assert!(!env.xdg_config().join("dotman").exists());
+    let err = env.fails(&["init", "--profile", "yes"]);
+    assert!(err.contains("`yes` answers a yes/no question"), "{err}");
 }
 
 #[test]

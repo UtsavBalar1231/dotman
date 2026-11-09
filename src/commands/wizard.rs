@@ -115,7 +115,7 @@ impl Wizard<'_> {
         args.git_email.as_deref().map(check_email).transpose()?;
         args.host.clone().map(check_word).transpose()?;
         for profile in &args.profile {
-            check_word(profile.clone())?;
+            check_profile(profile.clone())?;
         }
         if !args.system_root.is_empty() {
             self.check_roots(&args.system_root)?;
@@ -232,7 +232,7 @@ impl Wizard<'_> {
             answers.profiles = Some(
                 args.profile
                     .iter()
-                    .map(|p| check_word(p.clone()))
+                    .map(|p| check_profile(p.clone()))
                     .collect::<Result<Vec<String>>>()
                     .map(dedup)?,
             );
@@ -622,16 +622,19 @@ fn split_list(answer: &str) -> impl Iterator<Item = &str> {
         .filter(|part| !part.is_empty())
 }
 
+/// A profile name, which is a word that does not answer a yes/no question.
+fn check_profile(word: String) -> Result<String> {
+    if prompt::yes_no(&word).is_ok() {
+        bail!(
+            "`{word}` answers a yes/no question; give profile names such as work,laptop, or leave it empty to keep the profiles"
+        );
+    }
+    check_word(word)
+}
+
 fn parse_profiles(answer: &str) -> Result<Vec<String>, String> {
     split_list(answer)
-        .map(|part| {
-            if prompt::yes_no(part).is_ok() {
-                return Err(format!(
-                    "`{part}` answers a yes/no question; give profile names such as work,laptop, or leave it empty to keep the profiles"
-                ));
-            }
-            check_word(part.to_owned()).map_err(|e| format!("{e}"))
-        })
+        .map(|part| check_profile(part.to_owned()).map_err(|e| format!("{e}")))
         .collect::<Result<Vec<_>, _>>()
         .map(dedup)
 }
