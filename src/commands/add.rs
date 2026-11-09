@@ -1014,9 +1014,15 @@ pub(crate) fn commit_one(
         }
         _ => bail!("it changed while being added"),
     };
+    // Machines differ in umask, so an entry, which may be another machine's, is never replaced or
+    // removed here; otherwise each capture would flip it.
     for parent in parents(key) {
+        let entry = format!("{parent}/");
+        if repo_config.modes.contains_key(&entry) {
+            continue;
+        }
         let mode = dir_mode(dir_modes, home, parent)?;
-        record_mode(repo_config, &format!("{parent}/"), mode, 0o755);
+        record_mode(repo_config, &entry, mode, 0o755);
     }
     if let Some(entry) = plaintext {
         return Ok(entry);

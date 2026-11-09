@@ -5,6 +5,7 @@ mod common;
 
 use common::TestEnv;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 fn exits(env: &TestEnv, code: i32, args: &[&str]) -> String {
@@ -141,6 +142,33 @@ fn a_dry_run_exits_as_the_real_run_would() {
     assert!(err.contains("could not add .config/age.txt"), "{err}");
     exits(&env, 1, &["add", ".config/age.txt"]);
     exits(&env, 0, &["add", "--dry-run", ".config/zsh/.zshrc"]);
+}
+
+#[test]
+fn a_parent_directory_mode_is_recorded_once_and_never_replaced() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/x/a", b"a\n", 0o644);
+    fs::set_permissions(
+        env.home().join(".config/x"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("chmod");
+    env.ok(&["add", ".config/x/a"]);
+    let dir_mode = |key: &str| env.repo_config().modes.get(key).cloned();
+    assert_eq!(dir_mode(".config/x/").as_deref(), Some("0700"));
+
+    // Another machine's umask gives 0755 here; its capture keeps the recorded entry.
+    fs::set_permissions(
+        env.home().join(".config/x"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("chmod");
+    env.write(".config/x/a", b"edited\n", 0o644);
+    env.write(".config/x/b", b"b\n", 0o644);
+    env.ok(&["add", ".config/x/a", ".config/x/b"]);
+    assert_eq!(dir_mode(".config/x/").as_deref(), Some("0700"));
+    assert_eq!(dir_mode(".config/"), None);
 }
 
 #[test]
