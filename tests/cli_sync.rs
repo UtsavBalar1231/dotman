@@ -930,3 +930,32 @@ fn a_file_backed_up_by_both_passes_of_a_sync_keeps_both_copies() {
     copies.sort();
     assert_eq!(copies, [b"B local edit\n".to_vec(), b"v2\n".to_vec()]);
 }
+
+/// Two machines that each ran a fresh `init --remote` share no history. The printed recipe, run
+/// as printed, keeps the file only the refused repo has.
+#[test]
+fn the_unrelated_history_recipe_keeps_the_files_only_this_repo_has() {
+    let a = first_device(&[(".bashrc", b"a\n", 0o644), (".onlyA", b"only a\n", 0o644)]);
+    let b = a.second_device();
+    b.ok(&["init", "--remote", &b.remote_url()]);
+    b.write(".bashrc", b"b\n", 0o644);
+    b.write(".onlyB", b"only b\n", 0o644);
+    b.ok(&["add", ".bashrc", ".onlyB"]);
+    let err = b.fails(&["sync"]);
+    let step = err
+        .lines()
+        .find(|line| line.contains("import --overlay"))
+        .expect("the overlay step");
+    assert!(step.contains("--include-missing"), "{err}");
+
+    let repo = repo_path(&b);
+    let old = format!("{repo}.old");
+    fs::rename(&repo, &old).expect("move the repo aside");
+    b.ok(&["import", &b.remote_url()]);
+    let out = b.run(&["import", "--overlay", &old, "--include-missing"]);
+    assert!(matches!(out.status.code(), Some(0 | 3)), "{}", stderr(&out));
+    assert_eq!(
+        fs::read(b.repo().join(".onlyB")).expect("in the repo"),
+        b"only b\n"
+    );
+}

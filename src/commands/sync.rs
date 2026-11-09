@@ -460,7 +460,7 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
         |url| shell_words::quote(&url).into_owned(),
     );
     bail!(
-        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has:\n  mv {repo} {repo}.old\n  {bin} import {url}\n  {bin} import --overlay {repo}.old\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {branch}`, then `{bin} sync`"
+        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has:\n  mv {repo} {repo}.old\n  {bin} import {url}\n  {bin} import --overlay {repo}.old --include-missing    # --include-missing adds the files only this repo has\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {branch}`, then `{bin} sync`"
     )
 }
 
