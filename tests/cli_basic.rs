@@ -498,3 +498,60 @@ fn a_git_init_that_dies_leaves_no_skeleton_and_a_rerun_works() {
     assert_eq!(fs::read(other.repo().join("notes.txt")).unwrap(), b"mine\n");
     other.ok(&["status"]);
 }
+
+#[test]
+fn a_corrupt_index_or_head_is_named_with_doctor() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".bashrc", b"x\n", 0o644);
+    env.ok(&["add", ".bashrc"]);
+    env.ok(&["sync"]);
+    let index = env.repo().join(".git/index");
+    fs::write(&index, b"DIRC garbage").unwrap();
+    let err = env.fails(&["sync"]);
+    assert!(
+        err.contains(&format!("{} is missing or corrupt", index.display())),
+        "{err}"
+    );
+    assert!(err.contains("`dotman doctor` checks the repo"), "{err}");
+
+    let other = TestEnv::new();
+    other.ok(&["init"]);
+    let head = other.repo().join(".git/HEAD");
+    fs::remove_file(&head).unwrap();
+    let err = other.fails(&["status"]);
+    assert!(
+        err.contains(&format!("{} is missing or corrupt", head.display())),
+        "{err}"
+    );
+    assert!(
+        !err.contains("is incomplete"),
+        "a repo with its id finished init: {err}"
+    );
+}
+
+#[test]
+fn a_git_that_hangs_on_a_short_probe_is_given_up_on() {
+    let mut env = TestEnv::new();
+    env.ok(&["init"]);
+    let stubs = env.root().join("stubs");
+    fs::create_dir(&stubs).unwrap();
+    let stub = stubs.join("git");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *\" --version \"*) exec sleep 60;; esac\nexec \"{}\" \"$@\"\n",
+            real_git().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    env.prepend_path(&stubs);
+    let started = std::time::Instant::now();
+    let err = env.fails(&["status"]);
+    assert!(
+        err.contains("`git --version` did not finish within 5 s"),
+        "{err}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+}

@@ -23,7 +23,8 @@ const TRACKED_TEMP_FILES: &str = ":(glob)**/.dotman-tmp-*";
 
 /// `core.excludesFile=` must stay empty: otherwise the user's global ignore file hides files from `git status`.
 /// `core.hooksPath=/dev/null` makes every hook lookup fail, so no hook runs.
-const ISOLATION: [&str; 14] = [
+/// `core.fsmonitor=false` keeps a configured monitor daemon from answering for the worktree.
+const ISOLATION: [&str; 16] = [
     "-c",
     "core.excludesFile=",
     "-c",
@@ -38,7 +39,12 @@ const ISOLATION: [&str; 14] = [
     "log.showSignature=false",
     "-c",
     "color.ui=false",
+    "-c",
+    "core.fsmonitor=false",
 ];
+
+/// How long a short local probe, such as `git --version`, may take before it counts as hung.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Variables that make git ignore `-C`, as when `dotman` runs inside a git hook.
 const LOCAL_REPO_ENV: [&str; 7] = [
@@ -209,9 +215,9 @@ impl Git {
         }
         let mut cmd = self.base();
         cmd.arg("--version");
-        let out = self.spawn(cmd)?;
+        let out = self.spawn_bounded(cmd, &["--version"])?;
         if !out.status.success() {
-            return Err(failure(&["--version"], &out));
+            return Err(self.failure(&["--version"], &out));
         }
         check_version_text(&String::from_utf8_lossy(&out.stdout))?;
         let _ = self.version_checked.set(());
@@ -224,18 +230,58 @@ impl Git {
 
     fn spawn_with(&self, mut cmd: Command, stdin: Stdio) -> Result<Output> {
         cmd.stdin(stdin);
-        cmd.output().map_err(|err| {
-            if err.kind() == io::ErrorKind::NotFound {
+        cmd.output().map_err(|err| self.spawn_error(err))
+    }
+
+    /// Like [`Git::spawn`], killing git after [`PROBE_TIMEOUT`]. Only for short local commands;
+    /// one that talks to a remote or walks the history may take as long as it needs.
+    fn spawn_bounded<S: AsRef<OsStr>>(&self, mut cmd: Command, args: &[S]) -> Result<Output> {
+        crate::proc::output_within(&mut cmd, PROBE_TIMEOUT)
+            .map_err(|err| self.spawn_error(err))?
+            .ok_or_else(|| {
+                let label: Vec<String> = args
+                    .iter()
+                    .map(|a| a.as_ref().to_string_lossy().into_owned())
+                    .collect();
                 anyhow!(
-                    "`{} {}` needs git, but no `git` executable was found in PATH. Install it with: {}",
-                    crate::name::bin(),
-                    self.dot_command,
-                    install_hint(cfg!(target_os = "macos"), read_os_release().as_deref())
+                    "`git {}` did not finish within {} s; check that git runs at all, for example with `git --version`",
+                    label.join(" "),
+                    PROBE_TIMEOUT.as_secs()
                 )
-            } else {
-                anyhow!(err).context("failed to run git")
-            }
-        })
+            })
+    }
+
+    fn spawn_error(&self, err: io::Error) -> anyhow::Error {
+        if err.kind() == io::ErrorKind::NotFound {
+            anyhow!(
+                "`{} {}` needs git, but no `git` executable was found in PATH. Install it with: {}",
+                crate::name::bin(),
+                self.dot_command,
+                install_hint(cfg!(target_os = "macos"), read_os_release().as_deref())
+            )
+        } else {
+            anyhow!(err).context("failed to run git")
+        }
+    }
+
+    /// [`failure`], with one line in front naming the repo file when git's error says the index
+    /// or `HEAD` is corrupt.
+    fn failure<S: AsRef<OsStr>>(&self, args: &[S], out: &Output) -> anyhow::Error {
+        let err = failure(args, out);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let git_dir = self.repo.join(".git");
+        let broken = if stderr.contains("index file") || stderr.contains("bad index") {
+            "index"
+        } else if stderr.contains("not a git repository") && git_dir.is_dir() {
+            "HEAD"
+        } else {
+            return err;
+        };
+        err.context(format!(
+            "{} is missing or corrupt; `{} doctor` checks the repo",
+            git_dir.join(broken).display(),
+            crate::name::bin()
+        ))
     }
 
     fn output<S: AsRef<OsStr>>(&self, mut cmd: Command, args: &[S]) -> Result<Output> {
@@ -249,8 +295,15 @@ impl Git {
         if out.status.success() {
             Ok(out)
         } else {
-            Err(failure(args, &out))
+            Err(self.failure(args, &out))
         }
+    }
+
+    /// Like [`Git::probe`], bounded by [`PROBE_TIMEOUT`].
+    fn probe_bounded<S: AsRef<OsStr>>(&self, mut cmd: Command, args: &[S]) -> Result<Output> {
+        self.check_version()?;
+        cmd.args(args);
+        self.spawn_bounded(cmd, args)
     }
 
     fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output> {
@@ -261,13 +314,13 @@ impl Git {
         self.output(self.command(), args)
     }
 
-    /// Stdout of a command whose exit status 1 means "no answer".
+    /// Stdout of a short command whose exit status 1 means "no answer".
     fn optional<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
-        let out = self.probe(args)?;
+        let out = self.probe_bounded(self.command(), args)?;
         match out.status.code() {
             Some(0) => Ok(Some(text(&out))),
             Some(1) => Ok(None),
-            _ => Err(failure(args, &out)),
+            _ => Err(self.failure(args, &out)),
         }
     }
 
@@ -334,7 +387,7 @@ impl Git {
         if out.status.success() {
             Ok(())
         } else {
-            Err(failure(&args, &out))
+            Err(self.failure(&args, &out))
         }
     }
 
@@ -408,7 +461,7 @@ impl Git {
         match staged.status.code() {
             Some(0) => return Ok(None),
             Some(1) => {}
-            _ => return Err(failure(&args, &staged)),
+            _ => return Err(self.failure(&args, &staged)),
         }
         self.run(&["commit", "-q", "-m", message])?;
         self.head()
@@ -419,7 +472,13 @@ impl Git {
     pub fn status(&self) -> Result<Vec<StatusEntry>> {
         let mut cmd = self.command();
         cmd.env("GIT_OPTIONAL_LOCKS", "0");
-        let args = ["status", "--porcelain=v2", "-z", "--untracked-files=all"];
+        let args = [
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ];
         parse_status(&self.run_with(cmd, &args)?.stdout)
     }
 
@@ -513,7 +572,7 @@ impl Git {
             return Ok(PullOutcome::Ok);
         }
         if !self.operation_in_progress() {
-            return Err(failure(&args, &out));
+            return Err(self.failure(&args, &out));
         }
         let paths = self
             .status()?
@@ -619,7 +678,13 @@ impl Git {
 
     /// The best common ancestor of `a` and `b`; `None` when their histories are unrelated.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
-        self.optional(&["merge-base", a, b])
+        let args = ["merge-base", a, b];
+        let out = self.probe(&args)?;
+        match out.status.code() {
+            Some(0) => Ok(Some(text(&out))),
+            Some(1) => Ok(None),
+            _ => Err(self.failure(&args, &out)),
+        }
     }
 
     /// Fails if the remote has commits `branch` lacks; pull first.
@@ -641,7 +706,7 @@ impl Git {
         match out.status.code() {
             Some(0) => Ok(true),
             Some(2) => Ok(false),
-            _ => Err(failure(&args, &out)),
+            _ => Err(self.failure(&args, &out)),
         }
     }
 
@@ -684,7 +749,7 @@ impl Git {
             OsStr::new("--get-all"),
             OsStr::new(key),
         ];
-        let out = self.output(self.base(), &args)?;
+        let out = self.probe_bounded(self.base(), &args)?;
         match out.status.code() {
             Some(0) => Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -692,7 +757,7 @@ impl Git {
                 .collect()),
             Some(1) => Ok(Vec::new()),
             _ if !file.exists() => Ok(Vec::new()),
-            _ => Err(failure(&args, &out)),
+            _ => Err(self.failure(&args, &out)),
         }
     }
 
@@ -721,11 +786,11 @@ impl Git {
     pub fn identity_configured(&self) -> Result<bool> {
         for role in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
             let args = ["-c", "user.useConfigOnly=true", "var", role];
-            let out = self.probe(&args)?;
+            let out = self.probe_bounded(self.command(), &args)?;
             match out.status.code() {
                 Some(0) => {}
                 Some(128) => return Ok(false),
-                _ => return Err(failure(&args, &out)),
+                _ => return Err(self.failure(&args, &out)),
             }
         }
         Ok(true)
@@ -740,11 +805,11 @@ impl Git {
         } else {
             Path::new("/")
         };
-        let out = self.output(self.command_in(dir), &args)?;
+        let out = self.probe_bounded(self.command_in(dir), &args)?;
         match out.status.code() {
             Some(0) => Ok(parse_ident_email(&text(&out))),
             Some(128) => Ok(None),
-            _ => Err(failure(&args, &out)),
+            _ => Err(self.failure(&args, &out)),
         }
     }
 
@@ -1500,6 +1565,38 @@ mod tests {
         assert!(git.ls_remote_anonymous(utf8(git.repo()), wait).expect("ls"));
         let missing = sb.dir.path().join("missing");
         assert!(!git.ls_remote_anonymous(utf8(&missing), wait).expect("ls"));
+    }
+
+    #[test]
+    fn status_ignores_an_fsmonitor_hook_and_submodules() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        let oid = commit_file(&git, "a", b"a", "one");
+
+        // A gitlink whose checkout sits at another commit would read as a modified submodule.
+        let gitlink = format!("160000,{oid},sub");
+        sb.raw_ok(
+            git.repo(),
+            &["update-index", "--add", "--cacheinfo", &gitlink],
+        );
+        sb.raw_ok(git.repo(), &["commit", "-q", "-m", "sub"]);
+        let sub = sb.git("repo/sub");
+        sub.init().expect("init sub");
+        commit_file(&sub, "b", b"b", "elsewhere");
+        let plain = sb.raw_ok(
+            git.repo(),
+            &["-c", "core.fsmonitor=false", "status", "--porcelain"],
+        );
+        assert!(plain.contains("sub"), "{plain}");
+
+        let marker = sb.dir.path().join("fsmonitor-ran");
+        let hook = sb.dir.path().join("fsmonitor.sh");
+        fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).expect("hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod");
+        sb.raw_ok(git.repo(), &["config", "core.fsmonitor", utf8(&hook)]);
+        assert_eq!(git.status().expect("status"), Vec::new());
+        assert!(!marker.exists(), "the fsmonitor hook ran");
     }
 
     #[test]

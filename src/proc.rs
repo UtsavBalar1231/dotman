@@ -2,10 +2,11 @@
 //! reaches git, hooks, the editor or any other program; the age CLI gets it on stdin instead.
 
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_millis(20);
@@ -41,6 +42,55 @@ pub fn status_within(cmd: &mut Command, timeout: Duration) -> io::Result<Option<
         }
         std::thread::sleep(POLL.min(left));
     }
+}
+
+/// Runs `cmd` with no stdin and its stdout and stderr captured, and kills it after `timeout`,
+/// giving `None`.
+pub fn output_within(cmd: &mut Command, timeout: Duration) -> io::Result<Option<Output>> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Read while waiting, so a child that fills a pipe cannot stall until the timeout.
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(Output {
+                status,
+                stdout: collect(stdout)?,
+                stderr: collect(stderr)?,
+            }));
+        }
+        let left = timeout.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(POLL.min(left));
+    }
+}
+
+fn drain(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+fn collect(reader: Option<JoinHandle<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    reader.map_or_else(
+        || Ok(Vec::new()),
+        |reader| {
+            reader
+                .join()
+                .map_err(|_| io::Error::other("reading the child's output failed"))
+        },
+    )
 }
 
 /// `name` itself when it contains a `/`, else the first executable `name` in an absolute `PATH`
@@ -112,6 +162,28 @@ mod tests {
         quick.args(["-c", "exit 3"]);
         let status = status_within(&mut quick, Duration::from_secs(30)).unwrap();
         assert_eq!(status.and_then(|s| s.code()), Some(3));
+    }
+
+    #[test]
+    fn output_within_captures_both_streams_and_kills_a_slow_child() {
+        let mut quick = command("sh");
+        quick.args(["-c", "echo out; echo err >&2; exit 2"]);
+        let out = output_within(&mut quick, Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+
+        let started = Instant::now();
+        let mut slow = command("sh");
+        slow.args(["-c", "exec sleep 30"]);
+        assert!(
+            output_within(&mut slow, Duration::from_millis(200))
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
