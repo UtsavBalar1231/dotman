@@ -61,7 +61,11 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
     };
     let applied = apply(&ctx, &args.paths, &opts)?;
     if applied.announced == 0 && applied.failed == 0 && applied.outcome == Outcome::Done {
-        output::info("nothing to apply");
+        output::info(&match applied.left {
+            0 => "nothing to apply".to_owned(),
+            1 => "nothing written; the path above stays as it is".to_owned(),
+            n => format!("nothing written; the {n} paths above stay as they are"),
+        });
     }
     let policy = Policy {
         approve: args.decisions.approve_hooks,
@@ -125,6 +129,9 @@ pub(crate) struct Applied {
     pub uncaptured: usize,
     /// Paths reported as applied, kept, captured or forgotten.
     pub announced: usize,
+    /// Paths reported and left as they are without needing attention: locked, changed here, or
+    /// system files that only `apply --system` writes.
+    pub left: usize,
 }
 
 impl Applied {
@@ -208,6 +215,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         system_writes: Vec::new(),
         forget_system: BTreeSet::new(),
         announced: 0,
+        left: 0,
         kept: Vec::new(),
     };
     let mut items = run.classify(&sources, &state, &keys);
@@ -250,6 +258,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         failed: run.failed,
         uncaptured: run.uncaptured,
         announced: run.announced,
+        left: run.left,
     })
 }
 
@@ -450,6 +459,7 @@ struct Run<'a> {
     system_writes: Vec<SystemWrite>,
     forget_system: BTreeSet<String>,
     announced: usize,
+    left: usize,
     /// Keys kept local this run, other than templates.
     kept: Vec<String>,
 }
@@ -522,11 +532,12 @@ impl Run<'_> {
         items
     }
 
-    fn report_locked(&self) {
+    fn report_locked(&mut self) {
         if self.locked.is_empty() {
             return;
         }
         let n = self.locked.len();
+        self.left = self.left.saturating_add(n);
         output::warning(&format!(
             "{n} encrypted {} locked, left alone until a key here decrypts {}:",
             if n == 1 { "path is" } else { "paths are" },
@@ -705,6 +716,7 @@ impl Run<'_> {
             Row::Clean { update_state } => update_state.then_some(Action::Record),
             Row::NotApplied | Row::ChangedInRepo => Some(Action::Write),
             Row::ChangedLocally => {
+                self.left = self.left.saturating_add(1);
                 output::info(&format!(
                     "{key}: changed locally; `{} sync` captures it",
                     name::bin()
@@ -912,6 +924,7 @@ impl Run<'_> {
             }
         }
         if pending > 0 {
+            self.left = self.left.saturating_add(pending);
             output::info(&format!(
                 "{} {} from the repo; `{} apply --system` writes {}",
                 system_files(pending),

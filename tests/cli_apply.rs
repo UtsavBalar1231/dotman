@@ -183,6 +183,32 @@ fn row_7_deleted_here_and_changed_upstream_is_a_local_deletion() {
     assert_eq!(token(&env, ".zshrc"), None);
 }
 
+#[test]
+fn apply_never_says_nothing_to_apply_after_reporting_a_path_it_left_alone() {
+    let env = added(&[(".a", b"a\n", 0o644)]);
+    env.write(".a", b"changed here\n", 0o644);
+    let err = env.ok(&["apply"]);
+    assert!(err.contains(".a: changed locally"), "{err}");
+    assert!(!err.contains("nothing to apply"), "{err}");
+    assert!(
+        err.contains("nothing written; the path above stays as it is"),
+        "{err}"
+    );
+
+    env.write_machine_config("[age]\ncommand = \"/nonexistent/age\"\n");
+    env.write_repo(
+        ".s{age}",
+        b"-----BEGIN AGE ENCRYPTED FILE-----\nx\n-----END AGE ENCRYPTED FILE-----\n",
+    );
+    let err = env.ok(&["apply"]);
+    assert!(err.contains("locked"), "{err}");
+    assert!(!err.contains("nothing to apply"), "{err}");
+    assert!(
+        err.contains("nothing written; the 2 paths above stay as they are"),
+        "{err}"
+    );
+}
+
 /// The path after `marker` on the line of `err` that has it.
 fn path_after(err: &str, marker: &str) -> std::path::PathBuf {
     let path = err
