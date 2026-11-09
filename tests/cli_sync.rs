@@ -843,3 +843,60 @@ fn ignore_patterns_never_drop_a_tracked_or_added_file() {
     exits(&b, 0, &["sync"]);
     assert_eq!(b.read(".config/app/keep.bak"), b"keep, edited\n");
 }
+
+/// B's own copies are stricter than the repo says. `init --take-repo` keeps their modes, B reads
+/// as clean and its sync commits nothing, A keeps the repo's modes, and upstream edits still reach
+/// B at its mode. A `[modes]` entry then applies on every machine.
+#[test]
+fn a_stricter_mode_kept_on_one_machine_stays_on_that_machine() {
+    let a = first_device(&[
+        (".bashrc", b"v1\n", 0o644),
+        ("bin/tool", b"#!/bin/sh\n", 0o755),
+    ]);
+    let b = a.second_device();
+    b.write(".bashrc", b"B's own\n", 0o600);
+    b.write("bin/tool", b"#!/bin/sh\necho B\n", 0o700);
+    let err = exits(&b, 0, &["init", &b.remote_url(), "--take-repo"]);
+    assert!(
+        err.contains(".bashrc: kept at 0600 here; the repo says 0644"),
+        "{err}"
+    );
+    let mode = |env: &TestEnv, key: &str| mode_of(&env.home().join(key));
+    assert_eq!((mode(&b, ".bashrc"), mode(&b, "bin/tool")), (0o600, 0o700));
+    let err = exits(&b, 0, &["status"]);
+    assert!(
+        err.contains("bin/tool: kept at 0700 here; the repo says 0755"),
+        "{err}"
+    );
+    for key in [".bashrc", "bin/tool"] {
+        assert_eq!(b.token_of("status", key).as_deref(), Some("clean"), "{key}");
+    }
+    let head = |env: &TestEnv| env.git(&["-C", &repo_path(env), "rev-parse", "HEAD"]);
+    let before = head(&b);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(head(&b), before, "B's sync commits nothing");
+    assert!(
+        b.repo_config().modes.is_empty(),
+        "{:?}",
+        b.repo_config().modes
+    );
+    exits(&a, 0, &["sync"]);
+    assert_eq!((mode(&a, ".bashrc"), mode(&a, "bin/tool")), (0o644, 0o755));
+
+    a.write(".bashrc", b"v2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".bashrc"), b"v2\n");
+    assert_eq!(mode(&b, ".bashrc"), 0o600);
+    assert_eq!(b.token_of("status", ".bashrc").as_deref(), Some("clean"));
+
+    let mut config = a.repo_config();
+    config.modes.insert(".bashrc".to_owned(), "0644".to_owned());
+    config
+        .save(&a.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(mode(&b, ".bashrc"), 0o644);
+    assert_eq!(b.token_of("status", ".bashrc").as_deref(), Some("clean"));
+}

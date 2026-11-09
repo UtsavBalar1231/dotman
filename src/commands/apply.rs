@@ -11,7 +11,9 @@ use crate::engine::write::{
     Skip, WriteOptions, WriteOutcome, back_up_bytes, backup_run_dir, safe_symlink, safe_write,
     safe_write_over_link,
 };
-use crate::engine::{Home, Node, Tuple, hash_hex, observe, observe_portable};
+use crate::engine::{
+    Home, Node, Tuple, hash_hex, never_widen, observe, observe_portable, parse_mode,
+};
 use crate::hooks::{self, Policy};
 use crate::identity;
 use crate::lock::Lock;
@@ -20,7 +22,7 @@ use crate::output;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{self, Finding, Held, HoldsKey, Locked};
-use crate::state::{IdentitySnapshot, Kind, State};
+use crate::state::{Entry, IdentitySnapshot, Kind, State};
 use crate::sys;
 use crate::system::escalate::{Escalator, Tool};
 use crate::system::helper::{self, Plan, PlanEntry, Reported};
@@ -264,8 +266,10 @@ pub(crate) struct Item {
     /// H as the write path reads it again before renaming. It differs from the classified H only
     /// for an absolute link into `$HOME`, which classification compares in its relative form.
     raw: Home,
-    /// S, as recorded for a home key.
-    s: Option<Tuple>,
+    /// The repo's own mode, when `r` carries the stricter mode this machine keeps instead.
+    repo_mode: Option<u32>,
+    /// The repo's mode when S was recorded, for a home key.
+    basis: Option<u32>,
     /// The identity change since the snapshot moved this key to another source. Until the change
     /// is accepted, the key is left alone.
     identity: bool,
@@ -304,6 +308,11 @@ impl Item {
         } else {
             token(self.row)
         }
+    }
+
+    /// The mode kept on this machine and the repo's, when they differ.
+    pub(crate) fn kept(&self) -> Option<(u32, u32)> {
+        Some((self.r.as_ref()?.tuple.mode, self.repo_mode?))
     }
 }
 
@@ -771,16 +780,16 @@ impl Run<'_> {
             }
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };
-                let done = match action {
+                let written = match action {
                     Action::Write => self.write(item, r),
                     Action::KeepLocal => {
                         self.announce("keep local", key);
-                        true
+                        Some(r.tuple.mode)
                     }
-                    _ => true,
+                    _ => Some(r.tuple.mode),
                 };
-                if done {
-                    state.files.insert(key.clone(), r.tuple.entry(&r.source));
+                if let Some(mode) = written {
+                    state.files.insert(key.clone(), recorded(item, r, mode));
                 }
             }
         }
@@ -879,7 +888,8 @@ impl Run<'_> {
                         row,
                         r,
                         raw: h,
-                        s: None,
+                        repo_mode: None,
+                        basis: None,
                         identity: false,
                         system: true,
                     });
@@ -1275,9 +1285,11 @@ impl Run<'_> {
         ));
     }
 
-    /// Whether R reached `$HOME`. A skipped or failed write is reported here.
-    fn write(&mut self, item: &Item, r: &SourceEntry) -> bool {
+    /// The mode R reached `$HOME` with; `None` when it did not. A skipped or failed write is
+    /// reported here.
+    fn write(&mut self, item: &Item, r: &SourceEntry) -> Option<u32> {
         let key = &item.key;
+        let mode = self.kept_mode(item, r);
         // Whatever S says: after a rebase that dropped the local commit, H can equal S and still
         // be the only copy of the user's bytes.
         let replaces = matches!(&item.raw, Home::Present(h)
@@ -1290,7 +1302,6 @@ impl Run<'_> {
             modes: &self.modes,
         };
         let home = &self.ctx.paths.home;
-        let mode = self.kept_mode(item, r);
         let outcome = match &r.content {
             // Row 10 found H equal to S, so a link there is the one dotman applied.
             Content::Bytes(bytes) if item.row == Row::ChangedInRepo => {
@@ -1306,11 +1317,10 @@ impl Run<'_> {
                 if let Some(backup) = &written.backup {
                     self.backed_up(backup);
                 }
-                if mode != r.tuple.mode {
+                let repo = item.repo_mode.unwrap_or(r.tuple.mode);
+                if mode != repo && mode != r.tuple.mode {
                     output::info(&format!(
-                        "{key}: kept at {mode:04o}, not the repo's {:04o}, because it had no group or other access; `{} sync` records {mode:04o} in [modes]",
-                        r.tuple.mode,
-                        name::bin()
+                        "{key}: kept at {mode:04o} here; the repo says {repo:04o}, but dotman never gives group or others access the file did not have. A [modes] entry in .dotman.toml sets the mode for every machine"
                     ));
                 }
                 if let Some(warning) = written.warning() {
@@ -1319,40 +1329,42 @@ impl Run<'_> {
                 if written.in_place {
                     output::info(&format!("{key}: rewritten in place"));
                 }
-                true
+                Some(mode)
             }
             Ok(WriteOutcome::Skipped(skip)) => {
                 self.attention = true;
                 output::warning(&format!("{key}: {skip}"));
-                false
+                None
             }
             Err(e) => {
                 self.failed = self.failed.saturating_add(1);
                 output::warning(&format!("{key}: cannot be applied: {e:#}"));
-                false
+                None
             }
         }
     }
 
-    /// R's mode, unless it would give group or other access to a file that has none. Without a
-    /// `[modes]` entry R's mode is only git's default, which a private H must not widen to. A
-    /// mode that differs from S's was changed in the repo on purpose, as when another machine
-    /// loosened it, so it applies. A template is left out: its H is never captured, so the kept
-    /// mode would drift forever.
+    /// The repo's mode, narrowed by [`never_widen`] over a file already in `$HOME`. Without a
+    /// `[modes]` entry the repo's mode is mostly git's default, which must not open up a file
+    /// here. A `[modes]` entry is meant for every machine, so it applies as it is, and so does a
+    /// mode whose read and write bits changed in the repo since S, as when another machine
+    /// loosened one back to git's default and the capture removed its entry.
     fn kept_mode(&self, item: &Item, r: &SourceEntry) -> u32 {
-        let shared = |mode: u32| mode & 0o077 != 0;
-        let private =
-            matches!(&item.raw, Home::Present(h) if h.kind == Kind::File && !shared(h.mode));
-        let unchanged = item.s.as_ref().is_none_or(|s| s.mode == r.tuple.mode);
-        if private
-            && unchanged
-            && shared(r.tuple.mode)
-            && !r.template
-            && !self.modes.contains_key(&r.source)
+        let repo = item.repo_mode.unwrap_or(r.tuple.mode);
+        let Home::Present(h) = &item.raw else {
+            return repo;
+        };
+        let changed = item
+            .basis
+            .is_some_and(|basis| basis & 0o666 != repo & 0o666);
+        if h.kind != Kind::File
+            || r.tuple.kind != Kind::File
+            || changed
+            || self.modes.contains_key(&r.source)
         {
-            r.tuple.mode & 0o700
+            repo
         } else {
-            r.tuple.mode
+            never_widen(repo, h.mode)
         }
     }
 
@@ -1389,7 +1401,7 @@ pub(crate) fn classify_key(
                 .map(|locked| Classified::Locked(locked.0));
         }
     };
-    let r = match selection {
+    let mut r = match selection {
         Selection::None => None,
         Selection::Winner(entry) => Some(entry),
         Selection::Ambiguous(tied) => return Ok(Classified::Ambiguous(tied)),
@@ -1404,6 +1416,22 @@ pub(crate) fn classify_key(
     }
     let recorded = state.files.get(key);
     let s = recorded.map(Tuple::from_entry).transpose()?;
+    let kept_against = recorded
+        .and_then(|entry| entry.repo_mode.as_deref())
+        .map(parse_mode)
+        .transpose()?;
+    let basis = kept_against.or_else(|| s.as_ref().map(|s| s.mode));
+    // A stricter mode kept here is this machine's, not a local change, while the repo's mode is
+    // the one it was kept against.
+    let mut repo_mode = None;
+    if let (Some(entry), Some(s), Some(against)) = (r.as_mut(), s.as_ref(), kept_against)
+        && entry.tuple.kind == Kind::File
+        && entry.tuple.mode == against
+        && !variants.mode_is_explicit(&entry.source)
+    {
+        repo_mode = Some(against);
+        entry.tuple.mode = s.mode;
+    }
     let Some(row) = classify(r.as_ref().map(|e| &e.tuple), &h, s.as_ref()) else {
         return Ok(Classified::Unmanaged);
     };
@@ -1430,10 +1458,25 @@ pub(crate) fn classify_key(
         row,
         r,
         raw,
-        s,
+        repo_mode,
+        basis,
         identity,
         system: false,
     }))
+}
+
+/// S for `r` written with `mode`, recording the repo's mode when it is not the one written.
+fn recorded(item: &Item, r: &SourceEntry, mode: u32) -> Entry {
+    let repo = item.repo_mode.unwrap_or(r.tuple.mode);
+    let mut entry = Tuple {
+        mode,
+        ..r.tuple.clone()
+    }
+    .entry(&r.source);
+    if r.tuple.kind == Kind::File && mode != repo {
+        entry.repo_mode = Some(format!("{repo:04o}"));
+    }
+    entry
 }
 
 /// H's tuple leaves these bits out, so a file that has them still settles; this says so once per

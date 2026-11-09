@@ -86,6 +86,10 @@ pub struct Entry {
     pub hash: String,
     /// Permission bits as an octal string such as `0644`.
     pub mode: String,
+    /// The repo's mode, when this machine keeps the stricter `mode` instead; absent when `mode`
+    /// is the repo's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_mode: Option<String>,
 }
 
 /// What an applied path is.
@@ -161,10 +165,11 @@ impl State {
         }
         // Checked here so that a bad entry names this file, not just the key.
         for (key, entry) in state.files.iter().chain(&state.system) {
-            if entry.kind == Kind::File
-                && let Err(e) = crate::engine::parse_mode(&entry.mode)
-            {
-                bail!(corrupt(path, &format!("{key}: {e}")));
+            let modes = std::iter::once(&entry.mode).chain(&entry.repo_mode);
+            for mode in modes.filter(|_| entry.kind == Kind::File) {
+                if let Err(e) = crate::engine::parse_mode(mode) {
+                    bail!(corrupt(path, &format!("{key}: {e}")));
+                }
             }
         }
         Ok(Some(state))
@@ -220,11 +225,13 @@ mod tests {
             source: ".bashrc##host.box".to_owned(),
             kind: Kind::File,
             hash: "0123456789abcdef0123456789abcdef".to_owned(),
-            mode: "0644".to_owned(),
+            mode: "0600".to_owned(),
+            repo_mode: Some("0644".to_owned()),
         };
         let link = Entry {
             kind: Kind::Symlink,
             mode: "0777".to_owned(),
+            repo_mode: None,
             ..entry.clone()
         };
         State {
@@ -289,12 +296,13 @@ mod tests {
     fn corrupt_files_are_errors_naming_doctor() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("state.toml");
-        let bad_inputs: [&[u8]; 5] = [
+        let bad_inputs: [&[u8]; 6] = [
             b"not = [toml",
             b"\xff\xfe",
             b"version = 2\n",
             b"version = \"1\"\n",
             b"version = 1\n[files.\".a\"]\nsource = \".a\"\nkind = \"file\"\nhash = \"x\"\nmode = \"rw\"\n",
+            b"version = 1\n[files.\".a\"]\nsource = \".a\"\nkind = \"file\"\nhash = \"x\"\nmode = \"0600\"\nrepo_mode = \"rw\"\n",
         ];
         for bad in bad_inputs {
             fs::write(&path, bad).unwrap();

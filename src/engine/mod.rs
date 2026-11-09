@@ -72,8 +72,24 @@ impl Tuple {
             kind: self.kind,
             hash: self.hash.clone(),
             mode: format!("{:04o}", self.mode),
+            repo_mode: None,
         }
     }
+}
+
+/// The repo's mode `repo` as written over a file whose mode is `home`: group and other never
+/// gain a read or write bit the file lacks. Execute bits follow `repo`, for group and other only
+/// where the class can still read the file or could already execute it.
+#[must_use]
+pub fn never_widen(repo: u32, home: u32) -> u32 {
+    let mut mode = (repo & 0o700) | (repo & home & 0o066);
+    // The execute and read bits of group, then of other.
+    for (exec, read) in [(0o010, 0o040), (0o001, 0o004)] {
+        if repo & exec != 0 && (mode & read != 0 || home & exec != 0) {
+            mode |= exec;
+        }
+    }
+    mode
 }
 
 /// H: what `$HOME` holds at a key, read without following any symlink.
@@ -287,6 +303,24 @@ mod tests {
         let modes = BTreeMap::from([(".ssh/".to_owned(), "0700".to_owned())]);
         assert_eq!(recorded_mode(&modes, ".ssh/").unwrap(), Some(0o700));
         assert_eq!(recorded_mode(&modes, ".ssh").unwrap(), None);
+    }
+
+    #[test]
+    fn group_and_other_never_gain_read_or_write_and_execute_follows_the_repo() {
+        for (repo, home, written) in [
+            (0o644, 0o640, 0o640),
+            (0o644, 0o600, 0o600),
+            (0o755, 0o644, 0o755),
+            (0o755, 0o600, 0o700),
+            (0o755, 0o640, 0o750),
+            (0o755, 0o711, 0o711),
+            (0o644, 0o755, 0o644),
+            (0o644, 0o666, 0o644),
+            (0o600, 0o644, 0o600),
+            (0o4755, 0o644, 0o755),
+        ] {
+            assert_eq!(never_widen(repo, home), written, "{repo:o} over {home:o}");
+        }
     }
 
     #[test]

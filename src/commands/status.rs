@@ -84,23 +84,9 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         if !in_scope(&key) {
             continue;
         }
-        let label = match classify_key(&ctx, &variants, &state, &key) {
-            Ok(Classified::Unmanaged) => continue,
-            Ok(Classified::Item(item)) => {
-                if item.token() == "clean" && item.row() == (Row::Clean { update_state: true }) {
-                    unrecorded = unrecorded.saturating_add(1);
-                }
-                item.token()
-            }
-            Ok(Classified::Ambiguous(_)) => "ambiguous",
-            Ok(Classified::Invalid(_)) => "invalid",
-            Ok(Classified::Locked(_)) => "locked",
-            Err(e) => {
-                output::warning(&format!("{key}: {e:#}"));
-                UNREADABLE
-            }
-        };
-        rows.push((label, key));
+        if let Some(label) = home_label(&ctx, &variants, &state, &key, &mut unrecorded) {
+            rows.push((label, key));
+        }
     }
 
     let wanted = |key: &str| unfiltered || system_filters.iter().any(|f| is_under(key, f));
@@ -150,6 +136,38 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         summarize(&rows, unrecorded);
     }
     Ok(())
+}
+
+/// The token for a home key; `None` when it is not managed. A clean key whose S lags counts in
+/// `unrecorded`.
+fn home_label(
+    ctx: &Context,
+    variants: &Variants<'_>,
+    state: &State,
+    key: &str,
+    unrecorded: &mut usize,
+) -> Option<&'static str> {
+    Some(match classify_key(ctx, variants, state, key) {
+        Ok(Classified::Unmanaged) => return None,
+        Ok(Classified::Item(item)) => {
+            if item.token() == "clean" && item.row() == (Row::Clean { update_state: true }) {
+                *unrecorded = unrecorded.saturating_add(1);
+            }
+            if let Some((kept, repo)) = item.kept() {
+                output::info(&format!(
+                    "{key}: kept at {kept:04o} here; the repo says {repo:04o}"
+                ));
+            }
+            item.token()
+        }
+        Ok(Classified::Ambiguous(_)) => "ambiguous",
+        Ok(Classified::Invalid(_)) => "invalid",
+        Ok(Classified::Locked(_)) => "locked",
+        Err(e) => {
+            output::warning(&format!("{key}: {e:#}"));
+            UNREADABLE
+        }
+    })
 }
 
 fn summarize(rows: &[(&str, String)], unrecorded: usize) {

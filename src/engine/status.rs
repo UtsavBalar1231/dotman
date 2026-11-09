@@ -296,6 +296,12 @@ impl<'a> Variants<'a> {
         Ok(entry)
     }
 
+    /// Whether `[modes]` has an entry for `source`, which sets its mode on every machine.
+    #[must_use]
+    pub fn mode_is_explicit(&self, source: &str) -> bool {
+        self.worktree.modes.contains_key(source)
+    }
+
     /// The source `identity` would pick, such as the recorded snapshot rather than this run's.
     #[must_use]
     pub fn winner_under(&self, key: &str, identity: &IdentitySnapshot) -> Option<&'a str> {
