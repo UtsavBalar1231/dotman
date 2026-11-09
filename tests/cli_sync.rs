@@ -1,9 +1,13 @@
 mod common;
 
-use common::{TestEnv, assert_converged, mode_of, short_host};
+use common::{TestEnv, assert_converged, mode_of};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Output;
+
+/// Set on every run of a test that reads the host from a `sync(<host>)` subject, so the subject
+/// does not depend on the machine running the tests.
+const HOST: [(&str, &str); 1] = [("DOTMAN_HOST", "testbox")];
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
@@ -11,7 +15,11 @@ fn stderr(out: &Output) -> String {
 
 /// Runs `dotman`, asserts the exit code and returns stderr.
 fn exits(env: &TestEnv, code: i32, args: &[&str]) -> String {
-    let out = env.run(args);
+    exits_with(env, &[], code, args)
+}
+
+fn exits_with(env: &TestEnv, vars: &[(&str, &str)], code: i32, args: &[&str]) -> String {
+    let out = env.run_with(vars, args);
     assert_eq!(
         out.status.code(),
         Some(code),
@@ -228,38 +236,34 @@ fn commit_messages_name_three_paths_and_count_the_rest() {
         .map(|name| (format!("x/{name}"), b"1\n".as_slice(), 0o644))
         .collect();
     let env = TestEnv::new();
-    env.ok(&["init", "--no-bootstrap"]);
+    env.ok_with(&HOST, &["init", "--no-bootstrap"]);
     let keys: Vec<&str> = files.iter().map(|(key, _, _)| key.as_str()).collect();
     for (key, bytes, mode) in &files {
         env.write(key, bytes, *mode);
     }
     let mut add = vec!["add"];
     add.extend(&keys);
-    env.ok(&add);
-    exits(&env, 0, &["sync"]);
+    env.ok_with(&HOST, &add);
+    exits_with(&env, &HOST, 0, &["sync"]);
     let repo = repo_path(&env);
     let subject = || env.git(&["-C", &repo, "log", "-1", "--format=%s"]);
-    let host = short_host();
     assert_eq!(
         subject().trim(),
-        format!("sync({host}): .dotman.toml, x/a, x/b (+3 more)")
+        "sync(testbox): .dotman.toml, x/a, x/b (+3 more)"
     );
 
     for key in &keys {
         env.write(key, b"2\n", 0o644);
     }
-    exits(&env, 0, &["sync"]);
-    assert_eq!(
-        subject().trim(),
-        format!("sync({host}): x/a, x/b, x/c (+2 more)")
-    );
+    exits_with(&env, &HOST, 0, &["sync"]);
+    assert_eq!(subject().trim(), "sync(testbox): x/a, x/b, x/c (+2 more)");
 
     env.write("x/a", b"3\n", 0o644);
-    exits(&env, 0, &["sync", "-m", "hello"]);
+    exits_with(&env, &HOST, 0, &["sync", "-m", "hello"]);
     assert_eq!(subject().trim(), "hello");
     env.write("x/a", b"4\n", 0o644);
-    exits(&env, 0, &["sync"]);
-    assert_eq!(subject().trim(), format!("sync({host}): x/a"));
+    exits_with(&env, &HOST, 0, &["sync"]);
+    assert_eq!(subject().trim(), "sync(testbox): x/a");
 }
 
 #[test]
@@ -308,18 +312,15 @@ fn a_git_identity_from_the_environment_is_enough_to_commit() {
 #[test]
 fn without_a_remote_sync_commits_and_prints_the_hint() {
     let env = TestEnv::new();
-    env.ok(&["init"]);
+    env.ok_with(&HOST, &["init"]);
     env.write(".a", b"a\n", 0o644);
-    env.ok(&["add", ".a"]);
-    let err = exits(&env, 0, &["sync"]);
+    env.ok_with(&HOST, &["add", ".a"]);
+    let err = exits_with(&env, &HOST, 0, &["sync"]);
     assert!(err.contains("dotman init --remote <url>"), "{err}");
     let repo = repo_path(&env);
     let log = env.git(&["-C", &repo, "log", "--format=%s"]);
     assert_eq!(log.lines().count(), 1, "{log}");
-    assert!(
-        log.starts_with(&format!("sync({}): ", short_host())),
-        "{log}"
-    );
+    assert!(log.starts_with("sync(testbox): "), "{log}");
     assert_eq!(env.remote_refs(), "");
 }
 

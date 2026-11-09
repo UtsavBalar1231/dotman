@@ -495,16 +495,6 @@ fn write_stub(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
 }
 
-/// `uname -n`, cut at the first `.` and lowercased, as identity reports it for `sync`'s message.
-pub fn short_host() -> String {
-    let out = std::process::Command::new("uname")
-        .arg("-n")
-        .output()
-        .expect("run uname");
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
-    name.split('.').next().unwrap_or_default().to_owned()
-}
-
 /// Every managed key holds the same bytes, link target and mode on both devices.
 pub fn assert_converged(a: &TestEnv, b: &TestEnv) {
     let keys = a.porcelain("list");
