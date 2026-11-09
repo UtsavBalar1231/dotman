@@ -147,6 +147,18 @@ impl Ignore {
         self.any.iter().any(|p| p.matches_with(key, MATCH))
             || (is_dir && self.dirs_only.iter().any(|p| p.matches_with(key, MATCH)))
     }
+
+    /// The first pattern that matches, as `[ignore]` spells it.
+    fn matching(&self, key: &str, is_dir: bool) -> Option<String> {
+        let any = self.any.iter().find(|p| p.matches_with(key, MATCH));
+        let dir = || {
+            self.dirs_only
+                .iter()
+                .find(|p| is_dir && p.matches_with(key, MATCH))
+                .map(|p| format!("{}/", p.as_str()))
+        };
+        any.map(|p| p.as_str().to_owned()).or_else(dir)
+    }
 }
 
 /// Runs `dotman add`.
@@ -1003,9 +1015,11 @@ impl Planner<'_> {
                 if matches!(leaf, Leaf::Link) {
                     self.link_to_dir(&key);
                 }
+                self.warn_ignored(&key, false);
                 self.out.files.insert(key, leaf);
             }
             Found::Dir => {
+                self.warn_ignored(&key, true);
                 let dir = self.walk(&key);
                 self.out.dirs.push(dir);
             }
@@ -1016,6 +1030,15 @@ impl Planner<'_> {
             Found::Held(_, reason) | Found::Skip(reason) => bail!("{key}: {reason}"),
         }
         Ok(())
+    }
+
+    // `[ignore]` keeps paths out of directory walks; a path named on the command line goes in.
+    fn warn_ignored(&self, key: &str, is_dir: bool) {
+        if let Some(pattern) = self.ignore.matching(key, is_dir) {
+            output::warning(&format!(
+                "{key}: matches [ignore] {pattern}; added because you named it"
+            ));
+        }
     }
 
     // Stored as a link, so the files behind it stay unmanaged.

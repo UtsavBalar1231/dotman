@@ -397,3 +397,29 @@ fn quiet_still_shows_the_directory_preview() {
     assert!(err.contains(".config/zsh/\n  files: 1\n"), "{err}");
     assert!(err.contains("  files at mode 0600: 0"), "{err}");
 }
+
+/// `[ignore]` keeps a path out of a directory add; a path named on the command line goes in,
+/// with a warning that names the pattern.
+#[test]
+fn an_ignored_path_goes_in_only_when_named() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/vim/vimrc", b"set nu\n", 0o644);
+    env.write(".config/vim/.vimrc.swp", b"swap\n", 0o644);
+    let err = exits(&env, 0, &["add", "--yes", ".config/vim"]);
+    assert!(!err.contains("matches [ignore]"), "{err}");
+    assert_eq!(managed(&env), [".config/vim/vimrc"]);
+
+    let err = exits(&env, 0, &["add", ".config/vim/.vimrc.swp"]);
+    assert!(
+        err.contains(
+            ".config/vim/.vimrc.swp: matches [ignore] **/*.swp; added because you named it"
+        ),
+        "{err}"
+    );
+    // Whether `list` then shows it is the index's business, not the add's.
+    assert_eq!(
+        fs::read(env.repo().join(".config/vim/.vimrc.swp")).expect("stored"),
+        b"swap\n"
+    );
+}
