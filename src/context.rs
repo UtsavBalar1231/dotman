@@ -288,15 +288,7 @@ impl Context {
     /// Fails on a lock file git left in `.git`. While dotman holds its own lock, none of them can
     /// be dotman's, so they are either another git running in the repo or a killed one's.
     pub(crate) fn refuse_git_locks(&self) -> Result<()> {
-        let locks = self.git.lock_files();
-        if locks.is_empty() {
-            return Ok(());
-        }
-        let quoted = quote_all(&locks);
-        bail!(
-            "git's lock files are in the repo: {quoted}. Another git is running in {}, or one was killed and left them behind; if no git is running, remove them with `rm {quoted}` and run this again",
-            self.paths.repo.display()
-        )
+        self.git.refuse_locks()
     }
 
     /// A `.git` directory with no `HEAD`, or with a `config.lock` and no `dotman-id`, is what a

@@ -950,14 +950,42 @@ impl Git {
             return Err(self.remote_failure(&args, &out));
         }
         // Unfiltered: the filter reads `.dotman.toml`, which may hold conflict markers now.
-        let paths = self
+        let paths: Vec<PathBuf> = self
             .full_status()?
             .into_iter()
             .filter(|e| e.kind == StatusKind::Unmerged)
             .map(|e| e.path)
             .collect();
         self.run(&["rebase", "--abort"])?;
+        // A rebase that stopped with nothing in conflict hit something else, as a lock file in
+        // `.git` stops it, and calling it a conflict would leave no step that helps.
+        if paths.is_empty() {
+            let stopped = self.failure(&args, &out);
+            return Err(match self.refuse_locks() {
+                Err(locks) => anyhow!("{locks:#}\n{stopped:#}"),
+                Ok(()) => stopped,
+            });
+        }
         Ok(PullOutcome::Conflict { paths })
+    }
+
+    /// Fails naming every lock file of [`Git::lock_files`], with one `rm` step for them all. A
+    /// killed git leaves them, and so does a git still running in the repo, which the message
+    /// allows for.
+    pub fn refuse_locks(&self) -> Result<()> {
+        let locks = self.lock_files();
+        if locks.is_empty() {
+            return Ok(());
+        }
+        let quoted = locks
+            .iter()
+            .map(|path| shell_words::quote(&path.to_string_lossy()).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        bail!(
+            "git's lock files are in the repo: {quoted}. Another git is running in {}, or one was killed and left them behind; if no git is running, remove them with `rm {quoted}` and run this again",
+            self.repo.display()
+        )
     }
 
     /// Looks for the marker files of an unfinished rebase, merge, cherry-pick, revert or bisect
@@ -1009,17 +1037,21 @@ impl Git {
         Ok(paths)
     }
 
-    /// Lock files git left in `.git`: the index, `HEAD`, the config and any ref. A killed git
-    /// leaves them behind, and every later git that writes then fails.
+    /// Lock files git left in `.git`: every `*.lock` at its top, such as `index.lock`,
+    /// `MERGE_MSG.lock` or `AUTO_MERGE.lock`, and any under `refs`. A killed git leaves them
+    /// behind, and every later git that writes the same file then fails.
     #[must_use]
     pub fn lock_files(&self) -> Vec<PathBuf> {
         let git_dir = self.repo.join(".git");
-        let mut found: Vec<PathBuf> =
-            ["index.lock", "HEAD.lock", "packed-refs.lock", "config.lock"]
-                .iter()
-                .map(|name| git_dir.join(name))
-                .filter(|path| fs::symlink_metadata(path).is_ok())
-                .collect();
+        let mut found: Vec<PathBuf> = fs::read_dir(&git_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().as_bytes().ends_with(b".lock"))
+            .filter(|entry| entry.file_type().is_ok_and(|kind| !kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect();
+        found.sort();
         found.extend(
             walkdir::WalkDir::new(git_dir.join("refs"))
                 .follow_links(false)

@@ -2410,6 +2410,59 @@ fn a_stale_git_lock_gets_a_removal_step_that_works() {
     assert_eq!(remote_file(&a, ".a"), "edited\n");
 }
 
+/// Any lock file at the top of `.git`, as a killed rebase leaves `MERGE_MSG.lock` or
+/// `AUTO_MERGE.lock`, stops sync with an `rm` step that names it, whether sync finds it at the
+/// start or the pull's rebase stops on it, which no longer reads as a conflict with no paths. The
+/// step run as printed lets sync through.
+#[test]
+fn a_lock_file_a_killed_rebase_left_gets_a_removal_step_that_works() {
+    let (a, mut b) = pair(&[(".a", b"a\n", 0o644), (".b", b"b\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".b", b"from b\n", 0o644);
+    let git_dir = b.repo().join(".git");
+    let remove = |env: &TestEnv, err: &str, names: &[&str]| {
+        let rm = backticked(err)
+            .into_iter()
+            .find(|step| step.starts_with("rm "))
+            .expect("an rm step");
+        for name in names {
+            assert!(rm.contains(&*git_dir.join(name).to_string_lossy()), "{err}");
+        }
+        let out = paste(env, &rm);
+        assert!(out.status.success(), "{rm}: {}", stderr(&out));
+    };
+    let names = ["AUTO_MERGE.lock", "MERGE_MSG.lock", "ORIG_HEAD.lock"];
+    for name in names {
+        fs::write(git_dir.join(name), b"").expect("leave a lock");
+    }
+    let err = exits(&b, 1, &["sync"]);
+    remove(&b, &err, &names);
+    assert!(names.iter().all(|name| !git_dir.join(name).exists()));
+
+    // MERGE_MSG.lock stops the merge backend of rebase, REBASE_HEAD.lock the apply backend of
+    // git before 2.26.
+    let mid_run = ["MERGE_MSG.lock", "REBASE_HEAD.lock"];
+    let armed = b.root().join("lock-on-pull");
+    fs::write(&armed, b"").expect("arm the locks");
+    let leave = mid_run
+        .map(|name| format!(": > '{}'", git_dir.join(name).display()))
+        .join("; ");
+    wrap_git(
+        &mut b,
+        &format!(
+            "case \" $* \" in *\" pull \"*) if [ -e '{armed}' ]; then rm '{armed}'; {leave}; fi;; esac",
+            armed = armed.display()
+        ),
+    );
+    let err = exits(&b, 1, &["sync"]);
+    assert!(!err.contains("the pull conflicts"), "{err}");
+    remove(&b, &err, &mid_run);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
+    assert_eq!(remote_file(&a, ".b"), "from b\n");
+}
+
 /// The list of paths `git add` stages from goes to a file in `.git`, so a TMPDIR that is missing
 /// or read-only never fails a sync after it captured an edit.
 #[test]
