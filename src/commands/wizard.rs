@@ -192,10 +192,10 @@ impl Wizard<'_> {
         if args.no_remote || origin.is_some() || self.ask == Ask::Nothing {
             return Ok(Remote::Keep);
         }
-        output::info("Where will this repo live?");
-        output::info("  1. a git URL you paste");
-        output::info("  2. a new private GitHub repo, made with gh");
-        output::info("  3. nowhere yet");
+        output::context("Where will this repo live?");
+        output::context("  1. a git URL you paste");
+        output::context("  2. a new private GitHub repo, made with gh");
+        output::context("  3. nowhere yet");
         match prompt::ask_parsed("Choose 1-3 [3]:", |a| prompt::choice(a, 3))? {
             Some(1) => Ok(prompt::ask_parsed("Remote URL for origin:", |a| {
                 usable_url(a).map(str::to_owned)
@@ -241,7 +241,7 @@ impl Wizard<'_> {
             return Ok(());
         }
         let id = self.ctx.identity();
-        output::info(&format!(
+        output::context(&format!(
             "this machine: host {}, os {}, distro {}, arch {}",
             id.host, id.os, id.distro, id.arch
         ));
@@ -312,7 +312,7 @@ impl Wizard<'_> {
             return Ok(Vec::new());
         }
         let list = offered.join(", ");
-        output::info(&format!("this repo manages system files under {list}"));
+        output::context(&format!("this repo manages system files under {list}"));
         let roots: Vec<PathBuf> = offered.into_iter().map(PathBuf::from).collect();
         if !prompt::ask_yes_no(&format!("Write them on this machine? [y/N] ({list})"))? {
             return Ok(Vec::new());
@@ -341,7 +341,7 @@ impl Wizard<'_> {
         if count == 0 {
             return Ok(None);
         }
-        output::info(&format!(
+        output::context(&format!(
             "{count} encrypted files need an age key, and this machine has none"
         ));
         prompt::ask_parsed(

@@ -273,7 +273,7 @@ fn read_input(file: &Path, from_stdin: bool) -> Result<String> {
     let mut text = String::new();
     if from_stdin {
         if io::stdin().is_terminal() {
-            output::info("paste the identity, then press Ctrl-D");
+            output::context("paste the identity, then press Ctrl-D");
         }
         io::stdin().read_to_string(&mut text)?;
     } else {
