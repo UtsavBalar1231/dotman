@@ -160,17 +160,9 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     refuse_collisions(&targets.sources, &plan)?;
     targets.check(&ctx, &repo_config, &plan)?;
     let public = remote_is_public(&ctx, &mut state, dry_run)?;
-    let held = if public && !args.encrypt && !args.allow_plain {
-        guard_public(&mut plan, &repo_config)?
-    } else {
-        Vec::new()
-    };
-    for key in &held {
-        output::warning(&format!(
-            "held {key}: name matches [guard] secret_names and the remote is public; `{} add --encrypt {key}` stores it encrypted, `--allow-plain` stores it as it is",
-            name::bin()
-        ));
-    }
+    let guarded = guard_secrets(&mut plan, &repo_config, &targets.sources, public, args)?;
+    guarded.warn(public);
+    let held = guarded.held;
 
     for line in &plan.skipped {
         output::warning(&format!("skipped {line}"));
@@ -250,34 +242,76 @@ fn remote_is_public(ctx: &Context, state: &mut State, dry_run: bool) -> Result<b
     Ok(remote::is_public(state, &origin))
 }
 
-/// With a public remote: refuses explicit files whose names match `[guard] secret_names`, and
-/// takes such files out of the directories' plans. Returns the keys it took out.
-fn guard_public(plan: &mut Plan, repo_config: &RepoConfig) -> Result<Vec<String>> {
+/// What the `[guard] secret_names` check left of a plan.
+#[derive(Debug, Default)]
+struct Guarded {
+    /// New files that a directory brought in, taken out of its plan.
+    held: Vec<String>,
+    /// Files named explicitly that go in as plain text.
+    plain: Vec<String>,
+}
+
+impl Guarded {
+    fn warn(&self, public: bool) {
+        let bin = name::bin();
+        let keep = if public { "--allow-plain " } else { "" };
+        for key in &self.held {
+            output::warning(&format!(
+                "held {key}: name matches [guard] secret_names; `{bin} add --encrypt ~/{key}` stores it encrypted, `{bin} add {keep}~/{key}` stores it as it is"
+            ));
+        }
+        let (verb, which) = match self.plain.as_slice() {
+            [] => return,
+            [one] => ("matches [guard] secret_names and is", format!("~/{one}")),
+            _ => ("match [guard] secret_names and are", "<file>".to_owned()),
+        };
+        output::warning(&format!(
+            "{} {verb} stored as plain text; `{bin} add --encrypt {which}` stores it encrypted instead",
+            self.plain.join(", ")
+        ));
+    }
+}
+
+/// A secret-named file goes in only when named explicitly or with `--allow-plain`, so a directory
+/// holds back each new one, whatever the remote. With a public remote, an explicit one also needs
+/// `--encrypt` or `--allow-plain`.
+fn guard_secrets(
+    plan: &mut Plan,
+    repo_config: &RepoConfig,
+    managed: &Sources,
+    public: bool,
+    args: &AddArgs,
+) -> Result<Guarded> {
     let secrets = secret_patterns(repo_config)?;
     let named = |key: &str| secrets.iter().any(|p| p.matches_with(key, MATCH_SECRET));
-    let refused: Vec<&str> = plan
+    let explicit: Vec<String> = plan
         .files
         .keys()
-        .map(String::as_str)
         .filter(|key| named(key))
+        .cloned()
         .collect();
-    if !refused.is_empty() {
+    if public && !args.encrypt && !args.allow_plain && !explicit.is_empty() {
         bail!(
             "{} match [guard] secret_names and the remote is public; pass --encrypt to store them encrypted, or --allow-plain to store them as they are",
-            refused.join(", ")
+            explicit.join(", ")
         );
     }
-    let mut held = Vec::new();
-    for dir in &mut plan.dirs {
-        dir.items.retain(|key, _| {
-            let keep = !named(key);
-            if !keep {
-                held.push(key.clone());
-            }
-            keep
-        });
+    let mut guarded = Guarded::default();
+    if !args.allow_plain {
+        for dir in &mut plan.dirs {
+            dir.items.retain(|key, _| {
+                let keep = managed.contains(key) || !named(key);
+                if !keep {
+                    guarded.held.push(key.clone());
+                }
+                keep
+            });
+        }
     }
-    Ok(held)
+    if !args.encrypt && !args.allow_plain {
+        guarded.plain = explicit;
+    }
+    Ok(guarded)
 }
 
 struct Targets<'a> {
@@ -1338,17 +1372,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_public_remote_refuses_a_secret_name_and_holds_it_in_a_directory() {
-        let config = RepoConfig::default();
-        let mut plan = plan_of(&[".bashrc"], &[".config/x/.env", ".config/x/rc"]);
-        let held = guard_public(&mut plan, &config).unwrap();
-        assert_eq!(held, [".config/x/.env"]);
-        let kept: Vec<&String> = plan.dirs.iter().flat_map(|d| d.items.keys()).collect();
-        assert_eq!(kept, [".config/x/rc"]);
+    fn args(encrypt: bool, allow_plain: bool) -> AddArgs {
+        AddArgs {
+            paths: Vec::new(),
+            for_conditions: None,
+            encrypt,
+            allow_plain,
+            yes: false,
+            dry_run: false,
+            system: false,
+            package_owned: false,
+            add_root: false,
+        }
+    }
 
+    fn kept(plan: &Plan) -> Vec<&String> {
+        plan.dirs.iter().flat_map(|d| d.items.keys()).collect()
+    }
+
+    #[test]
+    fn a_directory_holds_a_new_secret_name_whatever_the_remote() {
+        let config = RepoConfig::default();
+        let managed = Sources::group([".config/x/managed.token"]);
+        let items = [".config/x/.env", ".config/x/rc", ".config/x/managed.token"];
+        for public in [false, true] {
+            let mut plan = plan_of(&[], &items);
+            let guarded =
+                guard_secrets(&mut plan, &config, &managed, public, &args(false, false)).unwrap();
+            assert_eq!(guarded.held, [".config/x/.env"], "public: {public}");
+            assert_eq!(kept(&plan), [".config/x/managed.token", ".config/x/rc"]);
+        }
+        let mut plan = plan_of(&[], &items);
+        let guarded =
+            guard_secrets(&mut plan, &config, &managed, false, &args(false, true)).unwrap();
+        assert_eq!(guarded.held.len(), 0);
+        assert_eq!(kept(&plan).len(), 3);
+    }
+
+    #[test]
+    fn an_explicit_secret_name_goes_in_as_plain_text_without_a_public_remote() {
+        let config = RepoConfig::default();
+        let none = Sources::default();
+        let mut plan = plan_of(&[".bashrc", ".env"], &[]);
+        let guarded = guard_secrets(&mut plan, &config, &none, false, &args(false, false)).unwrap();
+        assert_eq!(guarded.plain, [".env"]);
+        assert_eq!(plan.files.len(), 2);
+        for flags in [args(true, false), args(false, true)] {
+            let mut plan = plan_of(&[".env"], &[]);
+            let guarded = guard_secrets(&mut plan, &config, &none, true, &flags).unwrap();
+            assert!(guarded.plain.is_empty() && guarded.held.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_public_remote_refuses_an_explicit_secret_name() {
+        let config = RepoConfig::default();
+        let none = Sources::default();
         let mut plan = plan_of(&[".bashrc", ".ENV", ".aws/credentials"], &[]);
-        let err = guard_public(&mut plan, &config).unwrap_err().to_string();
+        let err = guard_secrets(&mut plan, &config, &none, true, &args(false, false))
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains(".ENV") && err.contains(".aws/credentials"),
             "{err}"
