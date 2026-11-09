@@ -18,6 +18,11 @@ const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding\n";
 
 const MIN_VERSION: (u32, u32) = (2, 25);
 
+/// For `init` and `clone`: an empty template directory copies nothing, so neither
+/// `init.templateDir` nor `GIT_TEMPLATE_DIR` can put a config, an exclude file or a sparse
+/// checkout into dotman's repo.
+const NO_TEMPLATE: &str = "--template=";
+
 /// The write engine's temp files, which are never staged. A wildcard pathspec matches whole paths
 /// only, so a temp directory needs its own `/**`.
 const TEMP_FILES: &str = ":(exclude,glob)**/.dotman-tmp-*";
@@ -30,7 +35,9 @@ const TRACKED_TEMP_DIRS: &str = ":(glob)**/.dotman-tmp-*/**";
 /// `core.fsmonitor=false` keeps a configured monitor daemon from answering for the worktree.
 /// `status.renames=true` keeps the rename records that a held rename relies on, whatever
 /// `status.renames` or `diff.renames` the user set.
-const ISOLATION: [&str; 18] = [
+/// `core.symlinks=true`: with `false`, git checks a managed symlink out as a file holding its
+/// target, and status calls it clean.
+const ISOLATION: [&str; 20] = [
     "-c",
     "core.excludesFile=",
     "-c",
@@ -49,6 +56,8 @@ const ISOLATION: [&str; 18] = [
     "core.fsmonitor=false",
     "-c",
     "status.renames=true",
+    "-c",
+    "core.symlinks=true",
 ];
 
 /// How long a short local probe, such as `git --version`, may take before it counts as hung.
@@ -471,7 +480,7 @@ impl Git {
     pub fn init(&self) -> Result<()> {
         fs::create_dir_all(&self.repo)
             .with_context(|| format!("failed to create {}", self.repo.display()))?;
-        self.run(&["init", "-q"])?;
+        self.run(&["init", "-q", NO_TEMPLATE])?;
         if self.head()?.is_none() {
             self.run(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
         }
@@ -483,6 +492,10 @@ impl Git {
     /// Attributes are written before checkout so a tracked `.gitattributes` cannot transform
     /// content. A local `src` with an `origin` remote passes that URL on as the clone's `origin`.
     pub fn clone_from(&self, src: &str) -> Result<()> {
+        self.clone_with(src, &[])
+    }
+
+    fn clone_with(&self, src: &str, refs: &[&str]) -> Result<()> {
         let src_origin = if Path::new(src).is_dir() {
             let out = self.output(
                 self.command_in(Path::new(src)),
@@ -492,16 +505,13 @@ impl Git {
         } else {
             None
         };
-        self.run_with(
-            self.base(),
-            &[
-                OsStr::new("clone"),
-                OsStr::new("-q"),
-                OsStr::new("--no-checkout"),
-                OsStr::new(src),
-                self.repo.as_os_str(),
-            ],
-        )?;
+        let mut args: Vec<&OsStr> = ["clone", "-q", "--no-checkout", NO_TEMPLATE]
+            .map(OsStr::new)
+            .to_vec();
+        args.extend(refs.iter().map(OsStr::new));
+        args.extend(["--", src].map(OsStr::new));
+        args.push(self.repo.as_os_str());
+        self.run_with(self.base(), &args)?;
         self.write_metadata()?;
         if let Some(url) = src_origin {
             self.set_remote_url("origin", &url)?;

@@ -1605,6 +1605,75 @@ fn planted_git_hooks_never_run() {
     );
 }
 
+/// A device whose repo holds `.zshrc` and `.zlink`, a symlink to it, pushed to its remote.
+fn device_with_a_symlink() -> TestEnv {
+    let a = TestEnv::new();
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".zshrc", b"zsh\n", 0o644);
+    a.symlink(".zlink", ".zshrc");
+    a.ok(&["add", ".zshrc", ".zlink"]);
+    a.ok(&["sync"]);
+    a.git(&[
+        "--git-dir",
+        &a.remote_path().to_string_lossy(),
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    a
+}
+
+fn link_target(path: &Path) -> Option<PathBuf> {
+    fs::read_link(path).ok()
+}
+
+/// `core.symlinks = false` in the user's git config never turns a managed symlink into a file
+/// holding its target, and a template directory, from `GIT_TEMPLATE_DIR` here, configures
+/// nothing in dotman's repos: not that, and not a sparse checkout that leaves files out.
+#[test]
+fn the_user_s_git_config_and_template_dir_never_shape_the_checkout() {
+    let a = device_with_a_symlink();
+
+    let b = a.second_device();
+    let gitconfig = b.home().join(".gitconfig");
+    let mut config = fs::read_to_string(&gitconfig).unwrap();
+    config.push_str("[core]\n\tsymlinks = false\n");
+    fs::write(&gitconfig, config).unwrap();
+    exits(&b.run(&["init", &a.remote_url()]), 0);
+    for dir in [b.home(), b.repo()] {
+        assert_eq!(
+            link_target(&dir.join(".zlink")),
+            Some(PathBuf::from(".zshrc")),
+            "{}",
+            dir.display()
+        );
+    }
+    assert_eq!(b.token_of("status", ".zlink").as_deref(), Some("clean"));
+
+    let c = a.second_device();
+    let template = c.root().join("template");
+    fs::create_dir_all(template.join("info")).unwrap();
+    fs::write(
+        template.join("config"),
+        "[core]\n\tsymlinks = false\n\tsparseCheckout = true\n",
+    )
+    .unwrap();
+    fs::write(template.join("info/sparse-checkout"), "/.zshrc\n").unwrap();
+    let vars = [("GIT_TEMPLATE_DIR", &*template.to_string_lossy())];
+    exits(&c.run_with(&vars, &["init", &a.remote_url()]), 0);
+    assert_eq!(
+        link_target(&c.home().join(".zlink")),
+        Some(PathBuf::from(".zshrc"))
+    );
+    assert!(c.repo().join(".dotman.toml").exists());
+
+    let d = TestEnv::new();
+    exits(&d.run_with(&vars, &["init"]), 0);
+    let repo_config = fs::read_to_string(d.repo().join(".git/config")).unwrap();
+    assert!(!repo_config.contains("sparse"), "{repo_config}");
+    assert!(!d.repo().join(".git/info/sparse-checkout").exists());
+}
+
 /// `DOTMAN_AGE_KEY` is in no hook's environment and no editor's: both write their `env` to a
 /// file that lacks the variable and has `HOME`.
 #[test]
