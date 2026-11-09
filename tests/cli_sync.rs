@@ -822,7 +822,22 @@ fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
         "{status}"
     );
 
-    exits(&env, 0, &["sync", "--allow-mass-delete"]);
+    // Each way out, run as printed.
+    let err = env.fails(&["sync"]);
+    let fix = err
+        .lines()
+        .find(|line| line.contains("To bring the files back"))
+        .expect("the fix");
+    let [restore, allow]: [String; 2] = backticked(fix).try_into().expect("two steps");
+    let out = paste(&env, &restore);
+    assert!(out.status.success(), "{restore}: {}", stderr(&out));
+    exits(&env, 0, &["sync"]);
+    assert_eq!(env.remote_refs(), published);
+    for key in &keys {
+        fs::remove_file(env.repo().join(key)).expect("delete from the worktree");
+    }
+    let out = paste(&env, &allow);
+    assert!(out.status.success(), "{allow}: {}", stderr(&out));
     let remote = env.remote_path().to_string_lossy().into_owned();
     let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
     assert!(!tree.contains(".config/app/"), "{tree}");
