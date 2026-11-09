@@ -3,17 +3,20 @@
 use crate::cli::ForgetArgs;
 use crate::commands::add::Ignore;
 use crate::context::{Context, is_real_dir, is_under};
+use crate::engine::write::{back_up_bytes, backup_run_dir};
+use crate::engine::{Node, Tuple, read_node};
 use crate::lock::Lock;
 use crate::output;
 use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
-use crate::state::State;
+use crate::state::{Entry, Kind, State};
 use crate::system;
 use anyhow::{Context as _, Result, bail};
 use glob::Pattern;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
 
 /// Runs `dotman forget`.
 ///
@@ -67,8 +70,9 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
     for dir in &dirs {
         output::action(verb, &format!("{dir}/"));
     }
+    let backups = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
     if dry_run {
-        return Ok(());
+        return save_repo_edits(&ctx, &state, &gone, &backups, true);
     }
 
     repo_config.dirs.paths.retain(|d| !dirs.contains(d));
@@ -83,7 +87,7 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
             )?;
         }
     }
-    remove_keys(&ctx, &mut repo_config, &mut state, &gone)?;
+    remove_keys(&ctx, &mut repo_config, &mut state, &gone, &backups)?;
 
     repo_config.save(&ctx.repo_config_file(), false)?;
     state.save(&ctx.paths.state_file(), false)?;
@@ -93,13 +97,15 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
 /// Removes `keys`, every variant included, from the worktree, `[modes]` and the state, then drops
 /// `dir/` modes that no remaining key lies under. `$HOME` is left alone. A key under a remaining
 /// `[dirs]` entry gets an `[ignore]` pattern, because the scan would capture the file that stays
-/// in `$HOME` again.
+/// in `$HOME` again. An uncommitted edit goes into `backups` first, as [`save_repo_edits`] says.
 pub(crate) fn remove_keys(
     ctx: &Context,
     repo_config: &mut RepoConfig,
     state: &mut State,
     keys: &BTreeSet<String>,
+    backups: &Path,
 ) -> Result<()> {
+    save_repo_edits(ctx, state, keys, backups, false)?;
     let sources = ctx.sources()?;
     for key in keys {
         for source in sources.sources_of(key) {
@@ -120,12 +126,15 @@ pub(crate) fn remove_keys(
 }
 
 /// Removes system `keys`, every variant included, from `.dotman/system`, `[system]` and the state.
+/// An uncommitted edit goes into `backups` first, as [`save_system_edits`] says.
 pub(crate) fn remove_system_keys(
     ctx: &Context,
     repo_config: &mut RepoConfig,
     state: &mut State,
     keys: &BTreeSet<String>,
+    backups: &Path,
 ) -> Result<()> {
+    save_system_edits(ctx, keys, backups, false)?;
     let sources = ctx.system_sources()?;
     for key in keys {
         for source in sources.sources_of(system::rel(key)?) {
@@ -134,6 +143,98 @@ pub(crate) fn remove_system_keys(
         repo_config.system.remove(key);
         state.system.remove(key);
     }
+    Ok(())
+}
+
+/// Copies every repo file of `keys` whose bytes are nowhere else, not in HEAD, not in `$HOME` and
+/// not what S records, into `backups` as `.dotman/repo/<source>`, before forgetting removes it. A
+/// hand edit in the repo or a `dotman edit` leaves such a file, on any variant. A dry run only
+/// says where each would go. Fails, before anything is removed, when one cannot be saved.
+pub(crate) fn save_repo_edits(
+    ctx: &Context,
+    state: &State,
+    keys: &BTreeSet<String>,
+    backups: &Path,
+    dry_run: bool,
+) -> Result<()> {
+    let sources = ctx.sources()?;
+    for key in keys {
+        let home = match read_node(&ctx.paths.home, key) {
+            Ok(Node::File { bytes, .. }) => Some(bytes),
+            _ => None,
+        };
+        for source in sources.sources_of(key) {
+            if let Some(bytes) = unsaved(ctx, source, home.as_deref(), state.files.get(key))? {
+                save(backups, source, &bytes, dry_run)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`save_repo_edits`] for system `keys`, whose targets may be unreadable here, so only HEAD
+/// counts as somewhere else.
+pub(crate) fn save_system_edits(
+    ctx: &Context,
+    keys: &BTreeSet<String>,
+    backups: &Path,
+    dry_run: bool,
+) -> Result<()> {
+    let sources = ctx.system_sources()?;
+    for key in keys {
+        for source in sources.sources_of(system::rel(key)?) {
+            let source = system::source_path(source);
+            if let Some(bytes) = unsaved(ctx, &source, None, None)? {
+                save(backups, &source, &bytes, dry_run)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The bytes of the regular repo file at `source` when neither HEAD, `home` nor `recorded` has
+/// them.
+fn unsaved(
+    ctx: &Context,
+    source: &str,
+    home: Option<&[u8]>,
+    recorded: Option<&Entry>,
+) -> Result<Option<Vec<u8>>> {
+    let Ok(Node::File { bytes, .. }) = read_node(&ctx.paths.repo, source) else {
+        return Ok(None);
+    };
+    if home == Some(bytes.as_slice()) {
+        return Ok(None);
+    }
+    let hash = Tuple::of_file(&bytes, 0).hash;
+    if recorded.is_some_and(|s| s.source == source && s.kind == Kind::File && s.hash == hash) {
+        return Ok(None);
+    }
+    let git = &ctx.git;
+    let committed = git.head()?.is_some() && git.tree_mode("HEAD", source)?.is_some();
+    if committed && git.show_blob("HEAD", source)? == bytes {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+/// Under `.dotman/repo/`, so the copy can never land on a home key's backup.
+fn save(backups: &Path, source: &str, bytes: &[u8], dry_run: bool) -> Result<()> {
+    let rel = format!(".dotman/repo/{source}");
+    if dry_run {
+        output::warning(&format!(
+            "{source}: would save the repo copy's uncommitted edit at {}",
+            backups.join(&rel).display()
+        ));
+        return Ok(());
+    }
+    let path = back_up_bytes(backups, &rel, bytes).with_context(|| {
+        format!("{source}: nothing was forgotten, because the repo copy's uncommitted edit could not be saved")
+    })?;
+    output::warning(&format!(
+        "{source}: the repo copy's uncommitted edit is saved at {}",
+        path.display()
+    ));
     Ok(())
 }
 

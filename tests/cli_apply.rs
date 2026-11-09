@@ -183,6 +183,48 @@ fn row_7_deleted_here_and_changed_upstream_is_a_local_deletion() {
     assert_eq!(token(&env, ".zshrc"), None);
 }
 
+/// The path after `marker` on the line of `err` that has it.
+fn path_after(err: &str, marker: &str) -> std::path::PathBuf {
+    let path = err
+        .lines()
+        .find_map(|line| line.split_once(marker).map(|(_, path)| path.to_owned()));
+    assert!(path.is_some(), "no `{marker}` in: {err}");
+    path.unwrap_or_default().into()
+}
+
+#[test]
+fn forget_deleted_saves_an_uncommitted_repo_edit_before_removing_it() {
+    let env = added(&[(".zshrc", b"base\n", 0o644)]);
+    env.ok(&["sync"]);
+    env.write_repo(".zshrc", b"hand edit in the repo\n");
+    fs::remove_file(env.home().join(".zshrc")).unwrap();
+    assert_eq!(
+        token(&env, ".zshrc").as_deref(),
+        Some("deleted-changed-upstream")
+    );
+    let backups = env.state_dir().join("backups");
+
+    let err = env.ok(&["apply", "--forget-deleted", "--dry-run"]);
+    let would = path_after(
+        &err,
+        ".zshrc: would save the repo copy's uncommitted edit at ",
+    );
+    assert!(would.starts_with(&backups), "{err}");
+    assert!(would.ends_with(".dotman/repo/.zshrc"), "{err}");
+    assert!(!backups.exists(), "{err}");
+    assert!(env.repo().join(".zshrc").exists());
+
+    let err = env.ok(&["apply", "--forget-deleted"]);
+    let saved = path_after(
+        &err,
+        ".zshrc: the repo copy's uncommitted edit is saved at ",
+    );
+    assert!(saved.starts_with(&backups), "{err}");
+    assert_eq!(fs::read(&saved).unwrap(), b"hand edit in the repo\n");
+    assert!(!env.repo().join(".zshrc").exists());
+    assert_eq!(token(&env, ".zshrc"), None);
+}
+
 #[test]
 fn the_printed_answer_to_each_deletion_does_what_it_says() {
     for (answer, kept) in [

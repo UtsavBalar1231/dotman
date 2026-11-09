@@ -200,6 +200,58 @@ fn forget_directory_removes_its_files_and_entry() {
     assert!(!env.repo().join(".config").exists());
 }
 
+/// Another host's variant counts too: forget removes every source of the key.
+#[test]
+fn forget_saves_each_uncommitted_repo_edit_it_removes_and_a_dry_run_says_where() {
+    let env = TestEnv::new();
+    env.write_machine_config("[identity]\nhost = \"box\"\n");
+    env.ok(&["init"]);
+    env.write(".zshrc", b"base\n", 0o644);
+    env.write(".bashrc", b"bash\n", 0o644);
+    env.ok(&["add", ".zshrc", ".bashrc"]);
+    env.ok(&["sync"]);
+    let edits = [
+        (".zshrc", &b"hand edit in the repo\n"[..]),
+        (".zshrc{host=other}", b"edit for the other host\n"),
+    ];
+    for (source, bytes) in edits {
+        env.write_repo(source, bytes);
+    }
+    let backups = env.state_dir().join("backups");
+    let saved = |err: &str, source: &str, verb: &str| {
+        let marker = format!("{source}: {verb} ");
+        let path = err
+            .lines()
+            .find_map(|line| line.split_once(marker.as_str()).map(|(_, p)| p.to_owned()));
+        assert!(path.is_some(), "{marker}: {err}");
+        std::path::PathBuf::from(path.unwrap_or_default())
+    };
+
+    let before = env.four_trees();
+    let err = env.ok(&["forget", "--dry-run", ".zshrc", ".bashrc"]);
+    for (source, _) in edits {
+        let would = saved(
+            &err,
+            source,
+            "would save the repo copy's uncommitted edit at",
+        );
+        assert!(would.starts_with(&backups), "{err}");
+        assert!(would.ends_with(format!(".dotman/repo/{source}")), "{err}");
+    }
+    assert!(!err.contains(".bashrc: would save"), "committed: {err}");
+    assert_eq!(env.four_trees(), before);
+
+    let err = env.ok(&["forget", ".zshrc", ".bashrc"]);
+    for (source, bytes) in edits {
+        let path = saved(&err, source, "the repo copy's uncommitted edit is saved at");
+        assert!(path.starts_with(&backups), "{err}");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(!env.repo().join(source).exists());
+    }
+    assert!(!err.contains(".bashrc: the repo copy"), "committed: {err}");
+    assert_eq!(env.read(".zshrc"), b"base\n");
+}
+
 #[test]
 fn status_porcelain_reports_rows() {
     let env = TestEnv::new();

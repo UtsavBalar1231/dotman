@@ -232,22 +232,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     run.capture_new(&scan, &mut state, &mut repo_config);
     run.report_kept();
 
-    let unchanged =
-        run.forget.is_empty() && run.forget_system.is_empty() && run.captured.is_empty();
-    let repo_saved = if opts.dry_run || unchanged {
-        Ok(())
-    } else {
-        let removed = if run.forget.is_empty() {
-            Ok(())
-        } else {
-            forget::remove_keys(ctx, &mut repo_config, &mut state, &run.forget)
-        };
-        removed
-            .and_then(|()| {
-                forget::remove_system_keys(ctx, &mut repo_config, &mut state, &run.forget_system)
-            })
-            .and_then(|()| repo_config.save(&ctx.repo_config_file(), false))
-    };
+    let repo_saved = run.save_repo(&mut repo_config, &mut state);
     if !opts.dry_run && (state.identity.is_none() || run.accepted) {
         state.identity = Some(ctx.identity().clone());
     }
@@ -470,6 +455,25 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// Removes what this run forgets and saves `.dotman.toml`, when the run changed the repo. A
+    /// dry run only says where an uncommitted edit that forgetting removes would be saved.
+    fn save_repo(&self, repo_config: &mut RepoConfig, state: &mut State) -> Result<()> {
+        let (ctx, backups) = (self.ctx, &self.backups);
+        let (forget, system) = (&self.forget, &self.forget_system);
+        if forget.is_empty() && system.is_empty() && self.captured.is_empty() {
+            return Ok(());
+        }
+        if self.opts.dry_run {
+            forget::save_repo_edits(ctx, state, forget, backups, true)?;
+            return forget::save_system_edits(ctx, system, backups, true);
+        }
+        if !forget.is_empty() {
+            forget::remove_keys(ctx, repo_config, state, forget, backups)?;
+        }
+        forget::remove_system_keys(ctx, repo_config, state, system, backups)?;
+        repo_config.save(&ctx.repo_config_file(), false)
+    }
+
     fn classify(&mut self, sources: &Sources, state: &State, keys: &BTreeSet<String>) -> Vec<Item> {
         let worktree = Worktree::new(&self.ctx.paths.repo, &self.modes);
         let variants = Variants::new(
