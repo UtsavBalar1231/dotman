@@ -152,6 +152,7 @@ fn show_all(
         })?;
     }
     if !differs {
+        output::info("no differences between the repo and $HOME");
         return Ok(());
     }
     for side in [&repo_side, &home_side] {

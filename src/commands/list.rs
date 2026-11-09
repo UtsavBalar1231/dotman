@@ -2,7 +2,7 @@
 
 use crate::cli::ListArgs;
 use crate::context::Context;
-use crate::output::escape_line;
+use crate::output::{self, escape_line};
 use crate::state::Kind;
 use crate::system;
 use crate::variant::{Flag, Sources};
@@ -23,6 +23,7 @@ pub fn run(args: &ListArgs) -> Result<()> {
     let managed = ctx.managed()?;
     let sources = Sources::group(managed.keys().map(String::as_str));
     let mut out = std::io::stdout().lock();
+    let mut listed = false;
     for key in sources.keys() {
         let Some(source) = sources.select(key, ctx.identity()).winner().copied() else {
             continue;
@@ -39,6 +40,7 @@ pub fn run(args: &ListArgs) -> Result<()> {
         } else {
             ""
         };
+        listed = true;
         if args.porcelain {
             write!(out, "{kind}\t{key}\0")
         } else if source == key {
@@ -67,6 +69,7 @@ pub fn run(args: &ListArgs) -> Result<()> {
             continue;
         }
         let key = system::key_of(rel);
+        listed = true;
         if args.porcelain {
             write!(out, "system\t{key}\0")
         } else if source == rel {
@@ -81,6 +84,9 @@ pub fn run(args: &ListArgs) -> Result<()> {
             )
         }
         .context("cannot write to stdout")?;
+    }
+    if !listed && !args.porcelain {
+        output::info("nothing is managed yet");
     }
     Ok(())
 }

@@ -94,13 +94,23 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
     if !config_file.exists() {
         RepoConfig::default().save(&config_file, false)?;
     }
-    if !exists {
+    if exists {
+        output::info(&format!("the repo at {} is already set up", repo.display()));
+    } else {
         output::success(&format!("created the repo at {}", repo.display()));
     }
     if bootstrap {
         bootstrap::write(repo, false)?;
     }
     wizard.apply(&answers)?;
+    if let Some(url) = &args.remote
+        && origin.as_deref() == Some(url.as_str())
+    {
+        output::info(&format!(
+            "origin is already {}",
+            crate::git::redact_credentials(url)
+        ));
+    }
     Ok(Outcome::Done)
 }
 

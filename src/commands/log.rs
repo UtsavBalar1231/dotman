@@ -27,6 +27,13 @@ pub fn run(args: &LogArgs) -> Result<()> {
     }
     let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
     let entries = ctx.git.log(&specs, args.max_count)?;
+    if entries.is_empty() && args.max_count != Some(0) {
+        output::info(&if args.paths.is_empty() {
+            "the repo has no commits yet".to_owned()
+        } else {
+            format!("no commit touches {}", args.paths.join(" "))
+        });
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));

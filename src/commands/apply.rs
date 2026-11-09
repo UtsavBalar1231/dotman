@@ -60,6 +60,9 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
         ..Options::default()
     };
     let applied = apply(&ctx, &args.paths, &opts)?;
+    if applied.announced == 0 && applied.failed == 0 && applied.outcome == Outcome::Done {
+        output::info("nothing to apply");
+    }
     let policy = Policy {
         approve: args.decisions.approve_hooks,
         no_hooks: args.no_hooks,
@@ -120,6 +123,8 @@ pub(crate) struct Applied {
     pub failed: usize,
     /// The part of `failed` that a later pass cannot clear: captures that did not happen.
     pub uncaptured: usize,
+    /// Paths reported as applied, kept, captured or forgotten.
+    pub announced: usize,
 }
 
 impl Applied {
@@ -202,6 +207,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         locked: Vec::new(),
         system_writes: Vec::new(),
         forget_system: BTreeSet::new(),
+        announced: 0,
     };
     let mut items = run.classify(&sources, &state, &keys);
     if opts.system && (inputs.is_empty() || !system_filters.is_empty()) {
@@ -256,6 +262,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         written: run.written,
         failed: run.failed,
         uncaptured: run.uncaptured,
+        announced: run.announced,
     })
 }
 
@@ -455,6 +462,7 @@ struct Run<'a> {
     locked: Vec<(String, String)>,
     system_writes: Vec<SystemWrite>,
     forget_system: BTreeSet<String>,
+    announced: usize,
 }
 
 impl Run<'_> {
@@ -1521,7 +1529,8 @@ impl Run<'_> {
         output::warning(&format!("{key}: {skip}{way_out}"));
     }
 
-    fn announce(&self, verb: &str, key: &str) {
+    fn announce(&mut self, verb: &str, key: &str) {
+        self.announced = self.announced.saturating_add(1);
         if self.opts.dry_run {
             output::action(&format!("would {verb}"), key);
         } else {

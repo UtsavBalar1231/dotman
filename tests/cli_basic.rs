@@ -364,6 +364,54 @@ fn git_before_init_names_init_and_the_printed_init_lets_it_run() {
 }
 
 #[test]
+fn commands_with_nothing_to_do_say_so_in_one_line() {
+    let mut env = TestEnv::new();
+    env.use_system_root();
+    env.ok(&["init"]);
+    let said = |args: &[&str], line: &str| {
+        let err = env.ok(args);
+        assert_eq!(
+            err.lines().filter(|l| l.contains(line)).count(),
+            1,
+            "{args:?}: {err}"
+        );
+    };
+    said(&["init"], "is already set up");
+    said(&["list"], "nothing is managed yet");
+    said(&["log"], "the repo has no commits yet");
+    let out = env.run(&["list", "--porcelain"]);
+    assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
+
+    env.write(".bashrc", b"one\n", 0o644);
+    env.ok(&["add", ".bashrc"]);
+    env.ok(&["sync"]);
+    for args in [
+        &["apply"][..],
+        &["apply", "--dry-run"],
+        &["apply", "--system"],
+        &["apply", "--approve-hooks"],
+    ] {
+        said(args, "nothing to apply");
+    }
+    said(&["diff"], "no differences between the repo and $HOME");
+    said(&["log", ".zshrc"], "no commit touches .zshrc");
+    let url = env.remote_url();
+    env.ok(&["init", "--remote", &url]);
+    said(
+        &["init", "--remote", &url],
+        &format!("origin is already {url}"),
+    );
+    let out = env.run_with(&[("EDITOR", "true")], &["edit", ".bashrc"]);
+    assert!(out.status.success());
+    assert!(
+        common::text(&out).contains(".bashrc is unchanged"),
+        "{}",
+        common::text(&out)
+    );
+    assert_eq!(env.ok(&["-q", "apply"]), "");
+}
+
+#[test]
 fn list_help_explains_the_porcelain_records_and_every_kind() {
     let env = TestEnv::new();
     let out = env.run(&["list", "--help"]);

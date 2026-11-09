@@ -8,6 +8,7 @@ use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::hooks::Policy;
 use crate::lock::Lock;
 use crate::name;
+use crate::output;
 use crate::paths::derive_key;
 use crate::proc;
 use crate::variant::Flag;
@@ -87,6 +88,9 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
     }
     // Opening the editor to look must never replace a locally edited file, so drift is answered
     // only when the source changed.
+    if before == after {
+        output::info(&format!("{source} is unchanged"));
+    }
     let opts = Options {
         take_drift: before != after,
         ..Options::default()
