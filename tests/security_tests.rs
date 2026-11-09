@@ -1632,3 +1632,25 @@ fn colliding_keys_stop_apply_and_sync_before_any_write() {
     }
     assert_eq!(env.four_trees(), before);
 }
+
+/// Keys that a hostile upstream puts in the index reach `status` as collision rows. Its output
+/// escapes their control characters, so a name can neither drive the terminal nor forge a line.
+#[test]
+fn status_escapes_the_keys_it_prints() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let repo = env.repo().to_string_lossy().into_owned();
+    let blob = env.git(&["-C", &repo, "hash-object", "-w", "/dev/null"]);
+    for key in ["x/A\u{1b}[2J.conf", "x/a\u{1b}[2J.conf"] {
+        let info = format!("100644,{},{key}", blob.trim());
+        env.git(&["-C", &repo, "update-index", "--add", "--cacheinfo", &info]);
+    }
+    let out = env.run(&["status"]);
+    let err = exits(&out, 0);
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(shown.contains("collision"), "{shown:?}");
+    assert!(shown.contains("x/A\\u{1b}[2J.conf"), "{shown:?}");
+    for text in [shown.as_ref(), err.as_str()] {
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
+}

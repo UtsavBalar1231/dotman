@@ -6,7 +6,7 @@ use crate::commands::apply::{Classified, classify_key};
 use crate::context::{Context, is_under};
 use crate::engine::status::{Row, Variants, Worktree};
 use crate::name;
-use crate::output;
+use crate::output::{self, escape_line};
 use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
 use crate::state::State;
@@ -94,7 +94,9 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     let mut twins = BTreeSet::new();
     for (a, b) in ctx.index_collisions()? {
         output::warning(&format!(
-            "{a} and {b} differ only in case or Unicode normalization; `{} apply` and `{} sync` refuse until one is renamed",
+            "{} and {} differ only in case or Unicode normalization; `{} apply` and `{} sync` refuse until one is renamed",
+            escape_line(&a),
+            escape_line(&b),
             name::bin(),
             name::bin()
         ));
@@ -117,7 +119,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         } else if *label == "clean" {
             Ok(())
         } else {
-            writeln!(out, "{label:<26}{key}")
+            writeln!(out, "{label:<26}{}", escape_line(key))
         }
         .context("cannot write to stdout")?;
     }
@@ -195,7 +197,7 @@ fn list_new(
     if !new.is_empty() {
         writeln!(out, "\nnew files, which `{} sync` captures:", name::bin())?;
         for key in new {
-            writeln!(out, "  {key}")?;
+            writeln!(out, "  {}", escape_line(key))?;
         }
     }
     if !held.is_empty() {
@@ -205,7 +207,7 @@ fn list_new(
             name::bin()
         )?;
         for (key, hold) in held {
-            writeln!(out, "  {key} ({})", hold.reason())?;
+            writeln!(out, "  {} ({})", escape_line(key), hold.reason())?;
         }
     }
     Ok(())
