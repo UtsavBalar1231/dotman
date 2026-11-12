@@ -573,6 +573,89 @@ fn a_different_key_file_is_refused_without_force_and_nothing_is_cloned() {
     assert_eq!(c.backups(".dotman/age-identity.txt").len(), 1);
 }
 
+/// A `git` on PATH that SIGKILLs the dotman calling it once the repo path holds a `.git`: a kill
+/// just after `init <url>` moved its clone into place. Returns the stub, to remove afterwards.
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+fn kill_once_cloned(env: &mut TestEnv) -> PathBuf {
+    let real = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git on PATH");
+    let dir = env.root().join("kill-stub");
+    fs::create_dir_all(&dir).expect("create the stub dir");
+    let stub = dir.join("git");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\n[ -d '{}/.git' ] && {{ kill -KILL \"$PPID\"; exit 137; }}\nexec '{}' \"$@\"\n",
+            env.repo().display(),
+            real.display()
+        ),
+    )
+    .expect("write the stub");
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod the stub");
+    env.prepend_path(&dir);
+    stub
+}
+
+#[test]
+fn a_rerun_of_an_init_killed_after_its_clone_finishes_the_machine_setup() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let mut c = a.second_device();
+    let file = key_file_of(&a, &c).to_string_lossy().into_owned();
+    let url = c.remote_url();
+    let args = ["init", &url, "--host", "box", "--age-key-file", &file];
+    let stub = kill_once_cloned(&mut c);
+    let out = c.run(&args);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), None, "{err}");
+    fs::remove_file(stub).expect("remove the stub");
+    assert!(c.repo().join(".git/dotman-id").is_file());
+    assert!(!c.xdg_config().join("dotman/config.toml").exists());
+    assert!(!identity_path(&c).exists());
+
+    let before = (c.four_trees(), tree_checksum(&c.xdg_config()));
+    let dry = [&args[..], &["--dry-run"]].concat();
+    let err = exits(&c.run(&dry), 0);
+    assert!(err.contains("would write"), "{err}");
+    assert!(err.contains("would import the age identity"), "{err}");
+    assert_eq!((c.four_trees(), tree_checksum(&c.xdg_config())), before);
+
+    let err = exits(&c.run(&args), 0);
+    assert!(!err.contains("locked"), "{err}");
+    assert_eq!(machine_config(&c).identity.host.as_deref(), Some("box"));
+    assert_eq!(identity_text(&c), identity_text(&a));
+    assert_eq!(c.read(HOSTS), PLAIN);
+}
+
+#[test]
+fn init_over_a_killed_clone_refuses_another_url_and_a_repo_init_did_not_make() {
+    let a = TestEnv::new();
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".bashrc", b"base\n", 0o644);
+    a.ok(&["add", ".bashrc"]);
+    a.push_repo();
+
+    let mut b = a.second_device();
+    let url = b.remote_url();
+    let stub = kill_once_cloned(&mut b);
+    assert_eq!(b.run(&["init", &url, "--host", "box"]).status.code(), None);
+    fs::remove_file(stub).expect("remove the stub");
+
+    let elsewhere = format!("file://{}", b.root().join("elsewhere.git").display());
+    let err = exits(&b.run(&["init", &elsewhere, "--host", "box"]), 1);
+    assert!(err.contains("a repo already exists"), "{err}");
+    fs::remove_file(b.repo().join(".git/dotman-id")).expect("remove dotman-id");
+    let err = exits(&b.run(&["init", &url, "--host", "box"]), 1);
+    assert!(err.contains("a repo already exists"), "{err}");
+    assert!(!b.xdg_config().join("dotman/config.toml").exists());
+    assert!(!b.home().join(".bashrc").exists());
+}
+
 #[test]
 fn a_clone_gets_the_machine_answers_before_it_is_applied() {
     let a = TestEnv::new();

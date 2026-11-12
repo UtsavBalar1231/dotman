@@ -63,7 +63,7 @@ From then on, edit files where they are and run `dotman sync`. It captures local
 | `dotman key` | Create or import the age identity |
 | `dotman completion` | Generate shell completions |
 
-Running `dotman init` again on a repo that is set up changes nothing, except the remote when you pass `--remote`. `dotman init <url>` refuses when a repo already exists; `dotman apply` applies it.
+Running `dotman init` again on a repo that is set up changes nothing, except the remote when you pass `--remote`. `dotman init <url>` run again over the repo it cloned from that URL, as after an interrupted run, finishes setting up this machine: it writes the machine config, imports `--age-key-file` and applies the repo. It refuses any other repo already there; `dotman apply` applies that one.
 
 `dotman diff` runs from the repo to `$HOME`, so an edit you made in `$HOME` shows as `+` lines.
 

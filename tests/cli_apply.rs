@@ -586,10 +586,10 @@ fn fresh_machine_non_interactive_init_skips_existing_files() {
     assert_eq!(b.read(".vimrc"), b"vim\n");
     assert_eq!(token(&b, ".bashrc").as_deref(), Some("existing"));
     assert!(!b.state_dir().join("backups").exists());
-    assert!(
-        b.fails(&["init", &a.remote_url()])
-            .contains("a repo already exists")
-    );
+    // A rerun finishes setting up the machine it cloned to, and still leaves the file alone.
+    let err = attention(&b, &["init", &a.remote_url()]);
+    assert!(err.contains("existing files left undecided (1)"), "{err}");
+    assert_eq!(b.read(".bashrc"), b"B's own\n");
 }
 
 #[test]

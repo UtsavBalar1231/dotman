@@ -117,15 +117,16 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let dry_run = args.dry_run;
     let _lock = ctx.lock(dry_run)?;
     let repo = &ctx.paths.repo;
-    if repo.join(".git").exists() {
-        bail!(
-            "a repo already exists at {}; `{} apply` applies it",
-            repo.display(),
-            name::bin()
-        );
-    }
-    // Before the clone, so a dry run refuses as the real run does and nothing is downloaded first.
-    let place = Place::of(repo)?;
+    // A repo already there that this command cloned from `source` is one a run stopped before it
+    // set up this machine, which this run finishes; any other repo is left alone.
+    let place = if repo.join(".git").exists() {
+        refuse_another_repo(ctx, source)?;
+        None
+    } else {
+        // Before the clone, so a dry run refuses as the real run does and nothing is downloaded
+        // first.
+        Some(Place::of(repo)?)
+    };
     // Everything a flag can get wrong is refused before the clone, which would be left behind.
     Wizard {
         ctx,
@@ -155,8 +156,15 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
         ..Policy::default()
     };
     if !dry_run {
-        clone_into_place(ctx, &place, source)?;
-        output::success(&format!("cloned {source} into {}", repo.display()));
+        if let Some(place) = &place {
+            clone_into_place(ctx, place, source)?;
+            output::success(&format!("cloned {source} into {}", repo.display()));
+        } else {
+            output::info(&format!(
+                "{} already holds the clone of {source}; setting up this machine",
+                repo.display()
+            ));
+        }
         remote::note_origin(ctx, false);
         let ask = if prompt::interactive() {
             Ask::Everything
@@ -173,14 +181,21 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
 
     // The plan needs the repo's content, so a dry run clones for real, into a temp dir that is
     // removed afterwards; nothing is created at the repo path.
-    let tmp = private_temp_dir("dotman-init-", &std::env::temp_dir())?;
-    let mut paths = ctx.paths.clone();
-    paths.repo = tmp.path().join("repo");
-    let clone = Context::new(paths, ctx.machine.clone(), "init");
-    clone.git.clone_from(source)?;
-    output::info(&format!("would clone {source} into {}", repo.display()));
+    let (_tmp, fresh);
+    let clone = if place.is_some() {
+        let tmp = private_temp_dir("dotman-init-", &std::env::temp_dir())?;
+        let mut paths = ctx.paths.clone();
+        paths.repo = tmp.path().join("repo");
+        _tmp = tmp;
+        fresh = Context::new(paths, ctx.machine.clone(), "init");
+        fresh.git.clone_from(source)?;
+        output::info(&format!("would clone {source} into {}", repo.display()));
+        &fresh
+    } else {
+        ctx
+    };
     let wizard = Wizard {
-        ctx: &clone,
+        ctx: clone,
         args,
         ask: Ask::Nothing,
     };
@@ -190,6 +205,19 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let planning = Context::new(clone.paths.clone(), wizard.machine_for(&answers), "init");
     let applied = apply::apply(&planning, &[], &opts)?;
     apply::finish(&planning, &applied, policy)
+}
+
+/// Fails unless the repo at the repo path is a dotman repo whose `origin` is `source`.
+fn refuse_another_repo(ctx: &Context, source: &str) -> Result<()> {
+    let ours = ctx.paths.repo.join(".git/dotman-id").is_file()
+        && ctx.git.remote_url("origin")?.as_deref() == Some(source);
+    ensure!(
+        ours,
+        "a repo already exists at {}; `{} apply` applies it",
+        ctx.paths.repo.display(),
+        name::bin()
+    );
+    Ok(())
 }
 
 const STAGING_PREFIX: &str = ".dotman-init-";

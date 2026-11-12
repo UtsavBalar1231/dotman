@@ -18,7 +18,6 @@ printf 'seed %s (E2E_KILL_SEED), %s kills per operation (E2E_KILL_ITERS), operat
 declare -A versions=() latest=() span=()
 killed=0
 finished=0
-known=0
 # Every plaintext of the {age} file holds this; no repo object may.
 plain_marker=PLAIN-e2e-
 key_a=
@@ -121,9 +120,9 @@ fk_whole() {
 }
 
 # Prints the commands the last dotman call printed that undo what a killed run left: removing git's
-# lock files, aborting the operation git was in, or applying a repo an init left unapplied.
+# lock files, or aborting the operation git was in.
 fk_ways_out() {
-    e2e_recipe | grep -E -- '^rm |^dotman git (rebase|merge|cherry-pick|revert|am) --abort$|^dotman apply$' || true
+    e2e_recipe | grep -E -- '^rm |^dotman git (rebase|merge|cherry-pick|revert|am) --abort$' || true
 }
 
 # Runs dotman ARGS on machine M until it exits 0 or ACCEPT (a grep -E pattern of its stderr) matches,
@@ -333,28 +332,19 @@ op_import() {
     fk_repo_invariants "$m"
 }
 
-# The first kill comes right after the clone returns, the others at random points.
+# The first kill comes right after the clone returns, the others at random points. Wherever it
+# lands, rerunning the same init sets the machine up in full: its host, and the key that opens
+# the {age} file.
 op_init() {
-    local n=$1 m=j$1 args moved=''
+    local n=$1 m=j$1 args
     e2e_machines "$m"
     args=(init "$(e2e_remote_url)" --host "join$n" --age-key-file "$key_a")
     if [[ $n == 1 ]]; then fk_kill_after_clone "$m" "${args[@]}"; else fk_kill "$m" 700 "${args[@]}"; fi
-    # Only a run that said it cloned has moved the clone into place.
-    if grep -q '^cloned ' "$E2E_ROOT/last.err"; then moved='a repo already exists'; fi
     fk_whole "$m"
     fk_age "$m"
-    fk_retry "$m" "$moved" "${args[@]}"
-    if [[ $E2E_RC != 0 && -n $moved ]]; then
-        e2e_run_printed "$m" "$(e2e_printed '^dotman apply$')"
-    fi
-    if [[ -n $moved && ! -f "$(e2e_config "$m")/age-identity.txt" ]]; then
-        # FAULT-1: a kill after the clone moved into place loses --age-key-file, and --host too when
-        # it came before the machine config; the rerun only names apply. Import the key by hand so
-        # the rest is still checked.
-        known=$((known + 1))
-        printf 'KNOWN [%s] FAULT-1: %s: the retried init dropped --age-key-file\n' "$E2E_NAME" "$m"
-        e2e_dm_rc 0 "$m" key import "$key_a"
-    fi
+    fk_retry "$m" '' "${args[@]}"
+    e2e_check "$m: the rerun imported --age-key-file" cmp -s "$key_a" "$(e2e_config "$m")/age-identity.txt"
+    e2e_check "$m: the rerun wrote --host" grep -qx "host = \"join$n\"" "$(e2e_config "$m")/config.toml"
     fk_converge "$m" "$m"
 }
 
@@ -390,7 +380,7 @@ for op in "${ops[@]}"; do
     done
     printf 'time  [%s] %s: %s kills in %ss\n' "$E2E_NAME" "$op" "$iters" $((SECONDS - began))
 done
-printf 'kills [%s] %s landed mid-run, %s runs finished first, %s hit a known bug (seed %s)\n' \
-    "$E2E_NAME" "$killed" "$finished" "$known" "$seed"
+printf 'kills [%s] %s landed mid-run, %s runs finished first (seed %s)\n' \
+    "$E2E_NAME" "$killed" "$finished" "$seed"
 
 e2e_finish
