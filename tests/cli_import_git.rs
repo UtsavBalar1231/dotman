@@ -595,6 +595,31 @@ fn the_hint_for_the_sources_own_origin_runs_as_printed_whatever_the_url_holds() 
     }
 }
 
+/// git would read such an origin as an option, so the import neither copies it nor offers a
+/// command that sets it.
+#[test]
+fn a_source_whose_origin_starts_with_a_dash_imports_and_offers_no_command() {
+    for origin in ["--upload-pack=touch PWNED", "--push", "--add", "-f", "--"] {
+        let env = TestEnv::new();
+        let work = work_tree(&env, "o", &[(".vimrc", "v\n", false)], None);
+        let source = bare(&env, &work, &env.root().join("src.git"), None);
+        git_in(&env, &source, &["config", "remote.origin.url", origin]);
+        source.seal();
+        let err = env.ok(&["import", &source.to_string_lossy(), "--no-bootstrap"]);
+        assert!(
+            err.contains("it is not a usable remote URL, so it is not offered as one"),
+            "{origin}: {err}"
+        );
+        assert!(!err.contains("init --remote"), "{origin}: {err}");
+        assert_eq!(
+            git_in(&env, &env.repo(), &["remote"]).trim(),
+            "",
+            "{origin}"
+        );
+        assert!(!env.home().join("PWNED").exists(), "{origin}");
+    }
+}
+
 #[test]
 fn a_url_import_keeps_the_url_as_origin() {
     let env = TestEnv::new();

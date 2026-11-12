@@ -579,10 +579,10 @@ pub fn set_origin(ctx: &Context, url: &str) -> Result<()> {
 
 /// A URL that git would not read as an option.
 pub fn usable_url(url: &str) -> Result<&str, String> {
-    if url.is_empty() || url.starts_with('-') {
-        Err(format!("`{url}` is not a usable remote URL"))
-    } else {
+    if crate::git::usable_remote(url) {
         Ok(url)
+    } else {
+        Err(format!("`{url}` is not a usable remote URL"))
     }
 }
 

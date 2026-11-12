@@ -530,7 +530,8 @@ impl Git {
     /// Clones `src` into this handle's repo path and populates the working tree.
     ///
     /// Attributes are written before checkout so a tracked `.gitattributes` cannot transform
-    /// content. A local `src` with an `origin` remote passes that URL on as the clone's `origin`.
+    /// content. A local `src` with an `origin` remote passes that URL on as the clone's `origin`,
+    /// unless it is not a [`usable_remote`].
     pub fn clone_from(&self, src: &str) -> Result<()> {
         self.clone_with(src, &[])
     }
@@ -562,7 +563,7 @@ impl Git {
         args.push(self.repo.as_os_str());
         self.run_with(self.base(), &args)?;
         self.write_metadata()?;
-        if let Some(url) = src_origin {
+        if let Some(url) = src_origin.filter(|url| usable_remote(url)) {
             self.set_remote_url("origin", &url)?;
         }
         if self.head()?.is_some() {
@@ -1213,7 +1214,7 @@ impl Git {
 
     /// Removes remote `name` and its remote-tracking refs.
     pub fn remove_remote(&self, name: &str) -> Result<()> {
-        self.run(&["remote", "remove", name]).map(drop)
+        self.run(&["remote", "remove", "--", name]).map(drop)
     }
 
     /// The URL of remote `name` exactly as written in the config, without `insteadOf` rewriting.
@@ -1228,7 +1229,7 @@ impl Git {
         } else {
             "add"
         };
-        self.run(&["remote", verb, name, url]).map(drop)
+        self.run(&["remote", verb, "--", name, url]).map(drop)
     }
 
     /// Whether git can name both an author and a committer from config or the environment. With
@@ -1347,6 +1348,12 @@ fn parse_ident_email(ident: &str) -> Option<String> {
     let after = ident.rsplit_once('<')?.1;
     let email = after.split_once('>')?.0;
     (!email.is_empty()).then(|| email.to_owned())
+}
+
+/// Whether `url` can be a remote's URL: git would read an empty one or one starting with `-` as
+/// nothing or as an option wherever it passes the URL on.
+pub fn usable_remote(url: &str) -> bool {
+    !url.is_empty() && !url.starts_with('-')
 }
 
 /// Hides `user:password@` in URLs so tokens do not reach error messages.
@@ -1986,6 +1993,21 @@ mod tests {
             b.remote_url("origin").expect("url").as_deref(),
             Some("/elsewhere")
         );
+
+        // An origin git would read as an option is not passed on; the clone keeps its source.
+        a.set_remote_url("origin", "--push")
+            .expect("set-url after --");
+        assert_eq!(
+            a.remote_url("origin").expect("url").as_deref(),
+            Some("--push")
+        );
+        let c = sb.git("c");
+        c.clone_from(utf8(a.repo())).expect("clone");
+        assert_eq!(
+            c.remote_url("origin").expect("url").as_deref(),
+            Some(utf8(a.repo()))
+        );
+        c.remove_remote("origin").expect("remove");
     }
 
     #[test]
