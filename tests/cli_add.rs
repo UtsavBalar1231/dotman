@@ -535,6 +535,36 @@ fn hold_hints_are_commands_that_work_when_pasted() {
     );
 }
 
+/// An `[ignore]` pattern leaves a managed file managed, so a managed file that is now a FIFO is
+/// offered `forget`, which, run as printed, ends the hold for `add` and for sync.
+#[test]
+fn a_held_managed_file_in_a_directory_is_offered_forget() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/x/rc", b"rc\n", 0o644);
+    env.write(".config/x/pipe", b"was a file\n", 0o644);
+    env.ok(&["add", ".config/x"]);
+    env.ok(&["sync"]);
+    fs::remove_file(env.home().join(".config/x/pipe")).expect("remove the file");
+    let made = Command::new("mkfifo")
+        .arg(env.home().join(".config/x/pipe"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success());
+
+    let err = exits(&env, 3, &["add", ".config/x"]);
+    let line = err
+        .lines()
+        .find(|line| line.starts_with("held .config/x/pipe: "))
+        .unwrap_or_default();
+    assert!(!line.contains("[ignore]"), "{err}");
+    let out = common::run_hint(&env, line, "forget");
+    assert_eq!(out.status.code(), Some(0), "{line}");
+    exits(&env, 0, &["add", ".config/x"]);
+    exits(&env, 0, &["sync"]);
+    assert_eq!(managed(&env), [".config/x/rc"]);
+}
+
 #[test]
 fn a_directory_with_entries_it_cannot_store_exits_3_in_both_runs() {
     let env = TestEnv::new();

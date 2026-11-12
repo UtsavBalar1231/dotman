@@ -1416,13 +1416,14 @@ impl Run<'_> {
             ));
             return false;
         }
+        let managed = self.sources.contains(key) || state.files.contains_key(key);
         if self.opts.dry_run {
             // Only a dry run reads H here; a real capture checks what it is about to store.
             if !encrypted
                 && let Some(found) =
                     add::holds_key(&self.ctx.paths.home, key, &self.ctx.machine.guard.allow)
             {
-                self.held_key(key, found);
+                self.held_key(key, found, managed);
                 return false;
             }
             self.captured.insert(key.to_owned());
@@ -1444,7 +1445,7 @@ impl Run<'_> {
                 return true;
             }
             Err(e) => match e.downcast::<Held>() {
-                Ok(Held(found)) => self.held_key(key, found),
+                Ok(Held(found)) => self.held_key(key, found, managed),
                 Err(e) => {
                     self.failed = self.failed.saturating_add(1);
                     self.uncaptured = self.uncaptured.saturating_add(1);
@@ -1455,13 +1456,19 @@ impl Run<'_> {
         false
     }
 
-    /// Never staged or committed; the pass after the pull leaves it alone too.
-    fn held_key(&mut self, key: &str, found: Finding) {
+    /// Never staged or committed; the pass after the pull leaves it alone too. An `[ignore]`
+    /// pattern keeps out only a file that is not managed yet.
+    fn held_key(&mut self, key: &str, found: Finding, managed: bool) {
         self.attention = true;
         self.undecided.insert(key.to_owned());
         let path = add::pasteable(&self.ctx.paths.home, key);
+        let keep_out = if managed {
+            format!("`{} forget {path}` stops managing it", name::bin())
+        } else {
+            "keep it out with an [ignore] pattern".to_owned()
+        };
         output::warning(&format!(
-            "{key}: held, {found}{}; or keep it out with an [ignore] pattern",
+            "{key}: held, {found}{}; or {keep_out}",
             found.remedy(Some(&path))
         ));
     }

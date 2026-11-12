@@ -1944,6 +1944,49 @@ fn add_never_destroys_a_held_hand_edit_in_the_repo() {
     }
 }
 
+/// An `[ignore]` pattern leaves a managed file managed, so a held edit to one is offered `forget`.
+/// Run as printed, it ends the hold for a plain key and for one under `[dirs]`, which the next
+/// sync does not capture again; the file stays in `$HOME` and the token never reaches the remote.
+#[test]
+fn a_held_edit_to_a_managed_file_is_offered_forget_which_ends_the_hold() {
+    let env = first_device(&[(".apprc", b"a=1\n", 0o644)]);
+    env.write(".config/app/one.conf", b"x=1\n", 0o644);
+    env.write(".config/app/two.conf", b"y=1\n", 0o644);
+    exits(&env, 0, &["add", ".config/app"]);
+    exits(&env, 0, &["sync"]);
+    let token = github_token();
+    for key in [".apprc", ".config/app/one.conf"] {
+        env.write(key, format!("a=1\ntoken = {token}\n").as_bytes(), 0o644);
+    }
+
+    let err = exits(&env, 3, &["sync"]);
+    for key in [".apprc", ".config/app/one.conf"] {
+        let line = err
+            .lines()
+            .find(|line| line.starts_with(&format!("{key}: held, ")))
+            .unwrap_or_default();
+        assert!(!line.contains("[ignore]"), "{err}");
+        let out = common::run_hint(&env, line, "forget");
+        assert_eq!(out.status.code(), Some(0), "{line}");
+    }
+    exits(&env, 0, &["sync"]);
+    let err = exits(&env, 0, &["sync"]);
+    assert!(!err.contains("capture"), "{err}");
+    let status = exits(&env, 0, &["status"]);
+    assert!(!status.contains("one.conf"), "{status}");
+    for key in [".apprc", ".config/app/one.conf"] {
+        assert!(String::from_utf8_lossy(&env.read(key)).contains(&token));
+    }
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
+    assert!(
+        tree.contains(".config/app/two.conf") && !tree.contains("one.conf"),
+        "{tree}"
+    );
+    let history = env.git(&["--git-dir", &remote, "log", "--all", "-p"]);
+    assert!(!history.contains(&token), "{history}");
+}
+
 /// What `add` replaces is the work of `$HOME`'s file: the copy an earlier `add` or `dotman edit`
 /// left in the repo, uncommitted, is replaced as before.
 #[test]

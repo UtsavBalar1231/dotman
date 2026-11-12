@@ -222,7 +222,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         let path = pasteable(&ctx.paths.home, key);
         output::warning(&format!("held {key}: {found}{}", found.remedy(Some(&path))));
     }
-    let specials = warn_held(&plan);
+    let specials = warn_held(&ctx, &plan, &targets.sources);
     let outcome = if guarded.held.is_empty() && content.held.is_empty() && specials == 0 {
         Outcome::Done
     } else {
@@ -334,14 +334,21 @@ fn adopt_dirs(ctx: &Context, repo_config: &mut RepoConfig, dirs: &[DirPlan]) -> 
 }
 
 /// Lists the sockets, FIFOs, devices and unreadable entries the directories hold back, which
-/// `[dirs]` would hold at every sync too. Returns how many.
-fn warn_held(plan: &Plan) -> usize {
+/// `[dirs]` would hold at every sync too. Returns how many. An `[ignore]` pattern keeps a managed
+/// file managed, so for one of those the way out is `forget`.
+fn warn_held(ctx: &Context, plan: &Plan, sources: &Sources) -> usize {
     let mut held = 0usize;
     for (key, hold) in plan.dirs.iter().flat_map(|dir| &dir.held) {
-        output::warning(&format!(
-            "held {key}: {}; an [ignore] pattern in .dotman.toml silences it",
-            hold.reason()
-        ));
+        let way_out = if sources.contains(key) {
+            format!(
+                "`{} forget {}` stops managing it",
+                name::bin(),
+                pasteable(&ctx.paths.home, key)
+            )
+        } else {
+            "an [ignore] pattern in .dotman.toml silences it".to_owned()
+        };
+        output::warning(&format!("held {key}: {}; {way_out}", hold.reason()));
         held = held.saturating_add(1);
     }
     held
