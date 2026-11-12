@@ -59,6 +59,9 @@ const MODE_DIFFERS: &str = "files whose executable bit differs from the repo, le
 const BLOCKED: &str = "files the repo holds in another form";
 /// Names the kind of source and not its path or URL, which may hold a credential.
 const OVERLAY_MESSAGE: &str = "import: overlay from a git repo";
+/// The one commit an import makes of a source whose history the content guard holds.
+pub(super) const SQUASHED_MESSAGE: &str =
+    "import: the current tree; the source's history holds credentials";
 
 const MAX_PROBED: usize = 500;
 const SHOWN: usize = 10;
@@ -803,14 +806,14 @@ fn within(path: &[u8], dir: &[u8]) -> bool {
 
 /// A place in the source's history whose content the guard holds, with the commits that add it
 /// or hold it.
-struct Tainted {
-    place: Place,
-    rule: &'static str,
-    commits: Vec<String>,
+pub(super) struct Tainted {
+    pub(super) place: Place,
+    pub(super) rule: &'static str,
+    pub(super) commits: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Place {
+pub(super) enum Place {
     /// A blob, at a path that names it.
     File(String),
     /// A part of a commit object: its message, or the header named, such as `commit author`.
@@ -959,7 +962,7 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
 /// The part of a commit object that holds its 1-based `line`: the message after the first empty
 /// line, or the header before it that the line belongs to, as a header's continuation lines start
 /// with a space.
-fn commit_field(bytes: &[u8], line: usize) -> &'static str {
+pub(super) fn commit_field(bytes: &[u8], line: usize) -> &'static str {
     let wanted = line.checked_sub(1);
     let mut field = "commit header";
     for (index, text) in bytes.split(|b| *b == b'\n').enumerate() {
@@ -1143,7 +1146,7 @@ fn held_names(git: &Git, commits: &Path) -> Result<BTreeMap<(String, &'static st
     Ok(held)
 }
 
-fn warn_tainted(tainted: &[Tainted], squash: bool, commits: &str) {
+pub(super) fn warn_tainted(tainted: &[Tainted], squash: bool, commits: &str) {
     if tainted.is_empty() {
         return;
     }
@@ -1199,12 +1202,7 @@ fn squash_history(staging: &Staging) -> Result<()> {
     let tree = text(git_stdout(git, &["rev-parse", "--verify", "HEAD:"], None)?);
     let commit = text(git_stdout(
         git,
-        &[
-            "commit-tree",
-            &tree,
-            "-m",
-            "import: the current tree; the source's history holds credentials",
-        ],
+        &["commit-tree", &tree, "-m", SQUASHED_MESSAGE],
         None,
     )?);
     git_stdout(git, &["update-ref", &branch, &commit], None)?;

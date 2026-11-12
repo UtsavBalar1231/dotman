@@ -2050,41 +2050,133 @@ fn a_held_name_that_leads_out_of_the_import_clone_removes_nothing_there() {
 }
 
 /// A legacy store with one commit, which `HEAD` names, holding each of `keys` with the same bytes.
+fn legacy_store(env: &TestEnv, keys: &[&str]) -> PathBuf {
+    legacy_chain(env, &[("initial", "legacyuser")], keys)
+}
+
+/// The id of the `n`th commit, from 0, of a [`legacy_chain`].
+fn legacy_id(n: usize) -> String {
+    format!("{:032x}", n.saturating_add(1))
+}
+
+/// A legacy store whose commits, a `(message, author)` each, form a chain, oldest first, and each
+/// hold each of `keys` with the same bytes. `HEAD` names the last.
 // reason: clippy.toml exempts unwrap only inside #[test] fns
 #[allow(clippy::unwrap_used)]
-fn legacy_store(env: &TestEnv, keys: &[&str]) -> PathBuf {
+fn legacy_chain(env: &TestEnv, commits: &[(&str, &str)], keys: &[&str]) -> PathBuf {
     let root = env.root().join("legacy");
-    let id = "c1".repeat(16);
     let object = "ab".repeat(16);
     let put = |out: &mut Vec<u8>, bytes: &[u8]| {
         out.extend(u64::try_from(bytes.len()).unwrap().to_le_bytes());
         out.extend_from_slice(bytes);
     };
-    // bincode's legacy encoding of the old `Snapshot`: the commit's id, parents, message, author,
-    // timestamp and tree hash, then each path with its hash, mode and content hash.
-    let mut snapshot = Vec::new();
-    put(&mut snapshot, id.as_bytes());
-    snapshot.extend(1_u64.to_le_bytes());
-    put(&mut snapshot, "0".repeat(32).as_bytes());
-    put(&mut snapshot, b"initial");
-    put(&mut snapshot, b"legacyuser");
-    snapshot.extend(1_700_000_000_i64.to_le_bytes());
-    put(&mut snapshot, "0".repeat(32).as_bytes());
-    snapshot.extend(u64::try_from(keys.len()).unwrap().to_le_bytes());
-    for key in keys {
-        put(&mut snapshot, key.as_bytes());
-        put(&mut snapshot, object.as_bytes());
-        snapshot.extend(0o644_u32.to_le_bytes());
-        put(&mut snapshot, object.as_bytes());
-    }
     let packed = |bytes: &[u8]| zstd::encode_all(bytes, 1).unwrap();
-    let commit = root.join(format!("commits/{id}.zst"));
-    env.write(commit, &packed(&snapshot), 0o644);
+    let mut parent = "0".repeat(32);
+    for (n, (message, author)) in commits.iter().enumerate() {
+        let id = legacy_id(n);
+        // bincode's legacy encoding of the old `Snapshot`: the commit's id, parents, message,
+        // author, timestamp and tree hash, then each path with its hash, mode and content hash.
+        let mut snapshot = Vec::new();
+        put(&mut snapshot, id.as_bytes());
+        snapshot.extend(1_u64.to_le_bytes());
+        put(&mut snapshot, parent.as_bytes());
+        put(&mut snapshot, message.as_bytes());
+        put(&mut snapshot, author.as_bytes());
+        let time = 1_700_000_000_i64.saturating_add(i64::try_from(n).unwrap());
+        snapshot.extend(time.to_le_bytes());
+        put(&mut snapshot, "0".repeat(32).as_bytes());
+        snapshot.extend(u64::try_from(keys.len()).unwrap().to_le_bytes());
+        for key in keys {
+            put(&mut snapshot, key.as_bytes());
+            put(&mut snapshot, object.as_bytes());
+            snapshot.extend(0o644_u32.to_le_bytes());
+            put(&mut snapshot, object.as_bytes());
+        }
+        let commit = root.join(format!("commits/{id}.zst"));
+        env.write(commit, &packed(&snapshot), 0o644);
+        parent = id;
+    }
     let object = root.join(format!("objects/{object}.zst"));
     env.write(object, &packed(b"x=1\n"), 0o644);
-    env.write(root.join("refs/heads/main"), id.as_bytes(), 0o644);
+    env.write(root.join("refs/heads/main"), parent.as_bytes(), 0o644);
     env.write(root.join("HEAD"), b"ref: refs/heads/main", 0o644);
     root
+}
+
+/// Each author, committer and message of the repo's history, and every object it holds.
+fn repo_history(env: &TestEnv) -> String {
+    let repo = env.repo();
+    let shown = env.git(&[
+        "-C",
+        &repo.to_string_lossy(),
+        "log",
+        "--all",
+        "--format=%an %ae %cn %ce%n%B",
+    ]);
+    format!("{shown}{}", every_object(env, &repo.join(".git")))
+}
+
+/// A token in an old commit's message or author, a NUL in the message aside, makes the legacy
+/// import one commit of the current state, named by the git-tree importer's warning; one in the
+/// tip's author leaves that commit's author out too. The token reaches no object of the repo.
+#[test]
+fn a_legacy_history_that_holds_a_credential_is_squashed_into_its_current_state() {
+    let token = github_token();
+    let in_message = format!("add\0 netrc {token}");
+    let in_author = format!("dev {token} <old@example.invalid>");
+    // The field that holds the token, the commit that holds it, and the chain.
+    let cases = [
+        ("message", 0, [(in_message.as_str(), "old"), ("tip", "old")]),
+        ("author", 0, [("first", in_author.as_str()), ("tip", "old")]),
+        ("author", 1, [("first", "old"), ("tip", in_author.as_str())]),
+    ];
+    for (field, held, commits) in cases {
+        let env = TestEnv::new();
+        let store = legacy_chain(&env, &commits, &[".bashrc"]);
+        let out = env.run(&["import", "--yes", &store.to_string_lossy()]);
+        let err = exits(&out, 0);
+        let id = legacy_id(held);
+        let id = id.get(..12).unwrap_or_default();
+        assert!(
+            err.contains(&format!("  commit {field}: github-token, in {id}")),
+            "{field}: {err}"
+        );
+        assert!(
+            err.contains("so the import is one commit of the current tree"),
+            "{err}"
+        );
+        assert!(!err.contains(&token), "{err}");
+        let repo = env.repo();
+        let subject = common::git_in(&env, &repo, &["log", "--format=%s"]);
+        assert_eq!(
+            subject.trim(),
+            "import: the current tree; the source's history holds credentials"
+        );
+        assert_eq!(
+            common::git_in(&env, &repo, &["show", "HEAD:.bashrc"]),
+            "x=1\n"
+        );
+        assert!(!repo_history(&env).contains(&token), "{field}");
+    }
+}
+
+/// `--keep-history` converts every commit of a legacy history that holds a credential, and
+/// warns that the repo keeps it.
+#[test]
+fn keep_history_converts_a_legacy_credential_history_with_a_warning() {
+    let token = github_token();
+    let message = format!("netrc {token}");
+    let env = TestEnv::new();
+    let store = legacy_chain(&env, &[(&message, "old"), ("tip", "old")], &[".bashrc"]);
+    let store = store.to_string_lossy().into_owned();
+    let err = exits(&env.run(&["import", "--yes", "--keep-history", &store]), 0);
+    assert!(
+        err.contains("--keep-history imports all 2 commits"),
+        "{err}"
+    );
+    assert!(!err.contains(&token), "{err}");
+    let count = common::git_in(&env, &env.repo(), &["rev-list", "--count", "HEAD"]);
+    assert_eq!(count.trim(), "2");
 }
 
 /// A legacy import, and an overlay from a legacy store or a git tree with `--include-missing`,

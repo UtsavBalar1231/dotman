@@ -2,13 +2,14 @@
 //!
 //! A legacy repo keeps one cumulative snapshot per commit in `commits/<id>.zst` and file contents
 //! in `objects/<hash>.zst`, both zstd. `HEAD` and `refs/heads/<name>` hold plain ids. The history
-//! is rebuilt as git commits through `git fast-import`. `remote-mappings.toml` is never read.
+//! is rebuilt as git commits through `git fast-import`, or as one commit of the tip when an
+//! author or message holds what the content guard holds. `remote-mappings.toml` is never read.
 //!
 //! The accounting unit is the distinct source key over the whole history, spelled as stored. A
 //! key counts as converted when every commit that holds it kept it, and as needing action when any
 //! commit dropped it.
 
-use super::gittree::shown;
+use super::gittree::{Place, SQUASHED_MESSAGE, Tainted, commit_field, shown, warn_tainted};
 use super::{
     EditedConfig, Item, Report, author_email, count, held, held_item, homes, origin_hint, proceed,
     require_clean, require_fresh,
@@ -589,6 +590,8 @@ const fn default_mode(mode: u32) -> u32 {
 }
 
 struct Planned {
+    /// The legacy commit's id.
+    id: String,
     /// Positions in the plan, always earlier ones.
     parents: Vec<usize>,
     author: String,
@@ -667,10 +670,12 @@ fn plan(
             ..RepoConfig::default()
         };
         commits.push(Planned {
+            id: id.clone(),
             parents,
             author: author_name(&snapshot.commit.author),
             timestamp: snapshot.commit.timestamp.max(0),
-            message: snapshot.commit.message.clone(),
+            // git refuses a NUL in a message, and the content guard skips text that holds one.
+            message: snapshot.commit.message.replace('\0', ""),
             files: chosen,
             config: toml::to_string_pretty(&config)?,
         });
@@ -746,6 +751,45 @@ fn write_data(out: &mut dyn Write, bytes: &[u8]) -> io::Result<()> {
     out.write_all(b"\n")
 }
 
+/// The author and committer lines [`write_stream`] writes for `commit`.
+fn commit_text(commit: &Planned, email: &str) -> String {
+    let who = format!("{} <{email}> {} +0000", commit.author, commit.timestamp);
+    format!("author {who}\ncommitter {who}\n")
+}
+
+fn message(commit: &Planned) -> String {
+    let mut message = commit.message.clone();
+    if !message.ends_with('\n') {
+        message.push('\n');
+    }
+    message
+}
+
+/// What the content guard holds in the author, committer or message of each commit of `plan`, as
+/// the git-tree importer reports it, the newest commit first. Each commit is scanned as
+/// [`write_stream`] writes it, the headers before an empty line and the message.
+fn tainted_commits(plan: &Plan, email: &str) -> Vec<Tainted> {
+    let mut grouped: BTreeMap<(&'static str, &'static str), Vec<String>> = BTreeMap::new();
+    for commit in plan.commits.iter().rev() {
+        let text = format!("{}\n{}", commit_text(commit, email), message(commit));
+        if let Some(found) = secrets::held(text.as_bytes(), "", &[]) {
+            let field = commit_field(text.as_bytes(), found.line);
+            grouped
+                .entry((field, found.rule))
+                .or_default()
+                .push(commit.id.clone());
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|((field, rule), commits)| Tainted {
+            place: Place::Commit(field),
+            rule,
+            commits,
+        })
+        .collect()
+}
+
 /// The `git fast-import` stream for the whole plan. Each commit lists its full tree after
 /// `deleteall`, because legacy snapshots are cumulative. Contents are emitted once per hash. A
 /// commit with no parent resets the branch first, since a later root commit would otherwise
@@ -772,19 +816,12 @@ fn write_stream(
             blobs.insert(file.object.as_str(), next);
         }
         next = next.saturating_add(1);
-        let who = format!("{} <{email}> {} +0000", commit.author, commit.timestamp);
         if commit.parents.is_empty() {
             writeln!(out, "reset refs/heads/main")?;
         }
-        writeln!(
-            out,
-            "commit refs/heads/main\nmark :{next}\nauthor {who}\ncommitter {who}"
-        )?;
-        let mut message = commit.message.clone();
-        if !message.ends_with('\n') {
-            message.push('\n');
-        }
-        write_data(out, message.as_bytes())?;
+        writeln!(out, "commit refs/heads/main\nmark :{next}")?;
+        out.write_all(commit_text(commit, email).as_bytes())?;
+        write_data(out, message(commit).as_bytes())?;
         for (n, parent) in commit.parents.iter().enumerate() {
             let mark = marks
                 .get(*parent)
@@ -840,19 +877,52 @@ fn held_by(guarded: &BTreeMap<String, Finding>) -> impl Fn(&str, &str) -> Option
     }
 }
 
+/// The plan of one commit of the tip's state, with no parent and [`SQUASHED_MESSAGE`], for a
+/// history whose commits hold what the content guard holds. The tip keeps its author unless that
+/// holds a finding too.
+fn squashed(
+    mut history: Vec<(String, Snapshot)>,
+    homes: &[&Path],
+    has_object: &dyn Fn(&str) -> bool,
+    held: &dyn Fn(&str, &str) -> Option<Refusal>,
+    email: &str,
+) -> Result<Plan> {
+    // Every other commit is an ancestor of the tip, so it comes last.
+    let mut tip = history
+        .pop()
+        .ok_or_else(|| anyhow!("the legacy repo has no commits"))?;
+    tip.1.commit.parents.clear();
+    SQUASHED_MESSAGE.clone_into(&mut tip.1.commit.message);
+    let mut squashed = plan(std::slice::from_ref(&tip), homes, has_object, held)?;
+    if !tainted_commits(&squashed, email).is_empty() {
+        for commit in &mut squashed.commits {
+            "unknown".clone_into(&mut commit.author);
+        }
+    }
+    ensure!(
+        tainted_commits(&squashed, email).is_empty(),
+        "the one commit of the current state would still hold a credential, in the email git names you by; nothing was imported"
+    );
+    Ok(squashed)
+}
+
 /// Converts the legacy history at `root` into the repo's `main` branch.
 pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Outcome> {
     require_fresh(ctx)?;
     let email = author_email(ctx)?;
     let history = load_history(root, &head(root)?)?;
+    let ids: BTreeSet<String> = history.iter().map(|(id, _)| id.clone()).collect();
+    let in_source = count(history.len(), "commit");
     let homes = homes(ctx);
     let guarded = guard_objects(root, &history);
-    let mut plan = plan(
-        &history,
-        &homes,
-        &|hash| object_path(root, hash).is_file(),
-        &held_by(&guarded),
-    )?;
+    let has_object = |hash: &str| object_path(root, hash).is_file();
+    let held = held_by(&guarded);
+    let mut plan = plan(&history, &homes, &has_object, &held)?;
+    let tainted = tainted_commits(&plan, &email);
+    let squash = !tainted.is_empty() && !args.keep_history;
+    if squash {
+        plan = squashed(history, &homes, &has_object, &held, &email)?;
+    }
     let home = &ctx.paths.home;
     plan.report
         .notes
@@ -863,7 +933,6 @@ pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Ou
                 .to_owned(),
         );
     }
-    let ids: BTreeSet<&str> = history.iter().map(|(id, _)| id.as_str()).collect();
     plan.report
         .notes
         .extend(left_behind(ctx, root, &|id| ids.contains(id)));
@@ -882,7 +951,12 @@ pub(super) fn import(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<Ou
     stream.rewind()?;
 
     plan.report.print();
-    let commits = count(plan.commits.len(), "commit");
+    warn_tainted(&tainted, squash, &in_source);
+    let commits = if squash {
+        format!("the current state of {in_source} as one commit")
+    } else {
+        count(plan.commits.len(), "commit")
+    };
     let repo = &ctx.paths.repo;
     if args.dry_run {
         output::info(&format!("would import {commits} into {}", repo.display()));

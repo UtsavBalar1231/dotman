@@ -399,6 +399,13 @@ const CLAIMS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "`--keep-history` converts every commit anyway",
+        &[
+            "keep_history_converts_a_legacy_credential_history_with_a_warning",
+            "a_legacy_history_that_holds_a_credential_is_squashed_into_its_current_state",
+        ],
+    ),
+    (
         "the first sync would capture every file in those directories",
         &[
             "import_lists_the_tracked_directories_and_reports_what_it_leaves_behind",
@@ -564,6 +571,13 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "an_import_commits_no_entry_whose_name_holds_a_credential",
             "legacy_imports_and_overlays_commit_no_name_that_holds_a_credential",
             "add_refuses_a_for_value_that_holds_a_credential",
+        ],
+    ),
+    (
+        "scans the author, committer and message of every commit it rebuilds",
+        &[
+            "a_legacy_history_that_holds_a_credential_is_squashed_into_its_current_state",
+            "keep_history_converts_a_legacy_credential_history_with_a_warning",
         ],
     ),
     (
