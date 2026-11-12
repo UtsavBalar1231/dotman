@@ -531,7 +531,7 @@ impl Git {
     ///
     /// Attributes are written before checkout so a tracked `.gitattributes` cannot transform
     /// content. A local `src` with an `origin` remote passes that URL on as the clone's `origin`,
-    /// a relative path made absolute against `src`, unless it is not a [`usable_remote`].
+    /// as [`Git::remote_target`] reads it in `src`, unless it is not a [`usable_remote`].
     pub fn clone_from(&self, src: &str) -> Result<()> {
         self.clone_with(src, &[])
     }
@@ -544,11 +544,9 @@ impl Git {
 
     fn clone_with(&self, src: &str, refs: &[&str]) -> Result<()> {
         let src_origin = if Path::new(src).is_dir() {
-            let out = self.output(
-                self.command_in(Path::new(src)),
-                &["config", "--get", "remote.origin.url"],
-            )?;
-            out.status.success().then(|| text(&out))
+            Self::new(src, self.dot_command)
+                .with_env(self.env.clone())
+                .remote_target("origin")?
         } else {
             None
         };
@@ -564,7 +562,7 @@ impl Git {
         self.run_with(self.base(), &args)?;
         self.write_metadata()?;
         if let Some(url) = src_origin.filter(|url| usable_remote(url)) {
-            self.set_remote_url("origin", &absolute_remote(&url, Path::new(src))?)?;
+            self.set_remote_url("origin", &url)?;
         }
         if self.head()?.is_some() {
             self.checkout_head()?;
@@ -1239,7 +1237,8 @@ impl Git {
     }
 
     /// [`Git::remote_url`] as git reads it here: a relative local path made absolute against the
-    /// directory git runs in, the top of the work tree or else the repo path itself.
+    /// directory git runs in, the top of the work tree, also for a non-bare repo given as its git
+    /// dir, or else the repo path itself.
     pub fn remote_target(&self, name: &str) -> Result<Option<String>> {
         let Some(url) = self.remote_url(name)? else {
             return Ok(None);
@@ -1252,9 +1251,28 @@ impl Git {
         let dir = if out.status.success() && !top.is_empty() {
             path_from(top)
         } else {
-            self.repo.clone()
+            self.work_tree_of_git_dir()?
+                .unwrap_or_else(|| self.repo.clone())
         };
         absolute_remote(&url, &dir).map(Some)
+    }
+
+    /// The work tree of a non-bare repo whose git dir this handle names, where `--show-toplevel`
+    /// fails: the git dir's parent.
+    fn work_tree_of_git_dir(&self) -> Result<Option<PathBuf>> {
+        let args = ["rev-parse", "--is-bare-repository", "--absolute-git-dir"];
+        let out = self.probe_bounded(self.command(), &args)?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let mut lines = out.stdout.split(|b| *b == b'\n');
+        if lines.next() != Some(b"false") {
+            return Ok(None);
+        }
+        Ok(lines
+            .next()
+            .filter(|dir| !dir.is_empty())
+            .and_then(|dir| path_from(dir).parent().map(Path::to_path_buf)))
     }
 
     /// Points remote `name` at `url`, adding the remote if needed.
@@ -2216,6 +2234,20 @@ mod tests {
         b.clone_from(utf8(a.repo())).expect("clone");
         assert_eq!(
             b.remote_url("origin").expect("url").as_deref(),
+            Some(utf8(&real))
+        );
+
+        // Given as its git dir, a non-bare repo still resolves against its work tree.
+        let git_dir = a.repo().join(".git");
+        let inside = Git::new(&git_dir, "test").with_env(sb.env());
+        assert_eq!(
+            inside.remote_target("origin").expect("target").as_deref(),
+            Some(utf8(&real))
+        );
+        let c = sb.git("c");
+        c.clone_from(utf8(&git_dir)).expect("clone of the git dir");
+        assert_eq!(
+            c.remote_url("origin").expect("url").as_deref(),
             Some(utf8(&real))
         );
     }
