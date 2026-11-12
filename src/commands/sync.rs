@@ -260,7 +260,6 @@ const fn finish(attention: bool) -> Outcome {
     }
 }
 
-/// What [`commit`] did.
 struct Committed {
     /// Files that hold an age secret key were left out.
     held: bool,
@@ -271,7 +270,6 @@ struct Committed {
     new_commit: bool,
 }
 
-/// Fails with `refusal`, if there is one.
 fn refused(refusal: Option<String>) -> Result<()> {
     refusal.map_or(Ok(()), |why| Err(anyhow!(why)))
 }

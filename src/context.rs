@@ -404,12 +404,10 @@ impl Context {
         }
     }
 
-    /// Loads `.dotman.toml`.
     pub(crate) fn repo_config(&self) -> Result<RepoConfig> {
         RepoConfig::load(&self.repo_config_file())
     }
 
-    /// Loads `state.toml` for the repo identified by `repo_id`.
     pub(crate) fn state(&self, repo_id: &str) -> Result<State> {
         State::load(&self.paths.state_file(), repo_id)
     }

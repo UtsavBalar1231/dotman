@@ -1443,7 +1443,6 @@ fn fetch(
     }
 }
 
-/// Imports the chezmoi source at `source`.
 pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<Outcome> {
     let program = proc::find_program("chezmoi").ok_or_else(|| anyhow!(HINT))?;
     require_fresh(ctx)?;

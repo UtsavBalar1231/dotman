@@ -90,8 +90,7 @@ pub fn pid_alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// Opens the directory `name` inside `dir`. A symlink is never followed: it fails with ELOOP, or
-/// ENOTDIR on some systems.
+/// A symlink is never followed: it fails with ELOOP, or ENOTDIR on some systems.
 pub(crate) fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: `dir` is an open descriptor and `name` is NUL-terminated; both outlive the call.
@@ -157,7 +156,6 @@ pub(crate) fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Option<Ent
     }))
 }
 
-/// Changes the owner and group of an open file.
 pub(crate) fn fchown(file: BorrowedFd<'_>, uid: u32, gid: u32) -> io::Result<()> {
     std::os::unix::fs::fchown(file, Some(uid), Some(gid))
 }
@@ -169,7 +167,6 @@ pub(crate) fn renameat(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> io::Resul
     check(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) })
 }
 
-/// Removes the file `name` inside `dir`.
 pub(crate) fn unlinkat(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
     // SAFETY: `dir` is open and `name` is NUL-terminated; both outlive the call.
     check(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) })

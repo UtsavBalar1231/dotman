@@ -923,7 +923,6 @@ fn write_files(repo: &Path, writes: &[Write]) -> Result<()> {
     Ok(())
 }
 
-/// Imports the farm at `source`.
 pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<Outcome> {
     require_fresh(ctx)?;
     author_email(ctx)?;
