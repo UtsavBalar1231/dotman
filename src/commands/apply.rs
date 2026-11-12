@@ -1747,9 +1747,8 @@ impl Run<'_> {
         self.attention = true;
         let way_out = if matches!(skip, Skip::Blocked(_) | Skip::Symlink) {
             format!(
-                ". `{} forget {}` stops managing it",
-                name::bin(),
-                add::pasteable(&self.ctx.paths.home, key)
+                ". {}",
+                add::forget_hint(&self.ctx.paths.home, self.sources, key)
             )
         } else {
             String::new()
