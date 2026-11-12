@@ -482,6 +482,72 @@ fn group_and_world_write_bits_are_never_recorded() {
     assert_eq!(unsettled(&env), Vec::<String>::new());
 }
 
+/// A group or other write bit that `[modes]` holds, written there by hand, stays while `$HOME` has
+/// it, whatever else changes, and goes once `$HOME` drops it. A capture never adds one.
+#[test]
+fn a_write_bit_written_into_modes_by_hand_stays_until_home_drops_it() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let chmod = |key: &str, mode: u32| {
+        fs::set_permissions(env.home().join(key), fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    env.write(".shared", b"v=1\n", 0o664);
+    env.write(".team/x.conf", b"x\n", 0o644);
+    chmod(".team", 0o775);
+    let mut repo_config = env.repo_config();
+    for (key, mode) in [(".shared", "0664"), (".team/", "0775")] {
+        repo_config.modes.insert(key.to_owned(), mode.to_owned());
+    }
+    repo_config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save");
+    let err = env.ok(&["add", ".shared", ".team"]);
+    assert!(!err.contains(" records it as "), "{err}");
+    env.ok(&["sync"]);
+    env.git(&[
+        "--git-dir",
+        &env.remote_path().to_string_lossy(),
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let other = env.second_device();
+    other.ok(&["init", &env.remote_url()]);
+    let recorded = |key: &str| env.repo_config().modes.get(key).cloned();
+    let at_other = |key: &str| mode_of(&other.home().join(key));
+    assert_eq!(at_other(".shared"), 0o664);
+    assert_eq!(at_other(".team"), 0o775);
+
+    // World write is not recorded; the hand-written group write stays.
+    chmod(".shared", 0o666);
+    chmod(".team", 0o777);
+    let err = env.ok(&["sync"]);
+    assert!(!err.contains(" records it as "), "{err}");
+    assert_eq!(recorded(".shared").as_deref(), Some("0664"));
+    assert_eq!(recorded(".team/").as_deref(), Some("0775"));
+    other.ok(&["sync"]);
+    assert_eq!(at_other(".shared"), 0o664);
+    assert_eq!(at_other(".team"), 0o775);
+
+    // Group write dropped here is dropped from the entry, and the warning names only that bit.
+    chmod(".shared", 0o642);
+    let err = env.ok(&["sync"]);
+    assert!(
+        err.contains(".shared is 0642; [modes] records it as 0640, without other write,"),
+        "{err}"
+    );
+    assert_eq!(recorded(".shared").as_deref(), Some("0640"));
+    other.ok(&["sync"]);
+    assert_eq!(at_other(".shared"), 0o640);
+
+    // Back at git's default, the entry goes.
+    chmod(".shared", 0o644);
+    env.ok(&["sync"]);
+    assert_eq!(recorded(".shared"), None);
+    other.ok(&["sync"]);
+    assert_eq!(at_other(".shared"), 0o644);
+}
+
 #[test]
 fn a_symlink_to_a_directory_is_stored_as_a_link_with_a_hint() {
     let env = TestEnv::new();

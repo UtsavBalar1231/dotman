@@ -1581,8 +1581,13 @@ fn record_ahead(
             let shared = record_mode(&mut repo_config.modes, source, mode, stored_mode(mode))?;
             let narrowed = shared != mode && shared != stored_mode(mode);
             if narrowed && old.as_deref() != Some(format!("{shared:04o}").as_str()) {
+                let dropped = match mode & !shared & SHARED_WRITE {
+                    0o020 => "group write",
+                    0o002 => "other write",
+                    _ => "group and other write",
+                };
                 output::warning(&format!(
-                    "{key} is {mode:04o}; [modes] records it as {shared:04o}, without group and other write, for every machine, so this copy is narrowed on the next apply; to keep {mode:04o}, set it for {source} in [modes] in .dotman.toml"
+                    "{key} is {mode:04o}; [modes] records it as {shared:04o}, without {dropped}, for every machine, so this copy is narrowed on the next apply; to keep {mode:04o}, set it for {source} in [modes] in .dotman.toml"
                 ));
             }
         }
@@ -1635,21 +1640,20 @@ fn store_encrypted(
 }
 
 /// Group and other write bits, which a umask of 002 gives every new file and directory. A capture
-/// or an import never records them, so no machine passes them on to the others.
+/// or an import records one only when `[modes]` already holds it for that key, so no machine
+/// passes them on to the others unless someone wrote them in by hand.
 const SHARED_WRITE: u32 = 0o022;
 
-/// `mode` as `[modes]` may hold it for `key`: without [`SHARED_WRITE`], unless the entry already
-/// holds exactly `mode`, which was written by hand and stays.
+/// `mode` as `[modes]` may hold it for `key`: without each [`SHARED_WRITE`] bit that the entry for
+/// `key` lacks. A bit the entry has stays only while `mode` has it too, so clearing it narrows the
+/// entry.
 pub(crate) fn shareable_mode(
     modes: &BTreeMap<String, String>,
     key: &str,
     mode: u32,
 ) -> Result<u32> {
-    Ok(if recorded_mode(modes, key)? == Some(mode) {
-        mode
-    } else {
-        mode & !SHARED_WRITE
-    })
+    let existing = recorded_mode(modes, key)?.unwrap_or(0);
+    Ok((mode & !SHARED_WRITE) | (mode & existing & SHARED_WRITE))
 }
 
 /// Records the mode of each directory above `key` that `[modes]` has no entry for, and returns
@@ -2060,6 +2064,33 @@ fn settle_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_write_bit_is_recorded_only_where_the_entry_and_the_mode_both_have_it() {
+        for (entry, mode, recorded) in [
+            (Some("0664"), 0o666, Some("0664")),
+            (Some("0664"), 0o664, Some("0664")),
+            (Some("0664"), 0o644, None),
+            (Some("0664"), 0o662, Some("0660")),
+            (None, 0o664, None),
+            (None, 0o660, Some("0640")),
+            (Some("0600"), 0o666, None),
+        ] {
+            let mut modes: BTreeMap<String, String> = entry
+                .map(|mode| (".f".to_owned(), mode.to_owned()))
+                .into_iter()
+                .collect();
+            record_mode(&mut modes, ".f", mode, 0o644).unwrap();
+            assert_eq!(
+                modes.get(".f").map(String::as_str),
+                recorded,
+                "{entry:?} with {mode:o}"
+            );
+        }
+        let mut modes = BTreeMap::from([(".d/".to_owned(), "0775".to_owned())]);
+        record_mode(&mut modes, ".d/", 0o777, 0o755).unwrap();
+        assert_eq!(modes.get(".d/").map(String::as_str), Some("0775"));
+    }
 
     fn file() -> Leaf {
         Leaf::File {
