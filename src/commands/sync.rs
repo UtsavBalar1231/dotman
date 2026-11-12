@@ -618,10 +618,29 @@ fn refuse_mass_delete(
 
 /// Why a sync with a remote refuses a detached `HEAD`, and the command that puts the repo on a
 /// branch at `HEAD`'s commit. It moves no branch: the first of `main`, `detached`, `detached-2`
-/// and so on that does not exist is created, or one already at `HEAD`'s commit is checked out.
+/// and so on that does not exist is created, or one already at `HEAD`'s commit is checked out. A
+/// name that another branch holds as a directory, as `main/x` holds `main`, is passed over: git
+/// cannot create it.
 pub(crate) fn detached(git: &Git) -> Result<String> {
     let bin = name::bin();
     let head = git.head()?;
+    let listed = git
+        .command()
+        .args(["for-each-ref", "--format=%(refname)%00", "refs/heads/"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| anyhow!("cannot run git for-each-ref: {e}"))?;
+    if !listed.status.success() {
+        bail!(
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&listed.stderr).trim()
+        );
+    }
+    let refs: Vec<&[u8]> = listed
+        .stdout
+        .split(|b| *b == 0)
+        .map(|name| name.strip_prefix(b"\n").unwrap_or(name))
+        .collect();
     let mut fix = "check out a branch".to_owned();
     for n in 0..10_u8 {
         let branch = match n {
@@ -629,10 +648,16 @@ pub(crate) fn detached(git: &Git) -> Result<String> {
             1 => "detached".to_owned(),
             _ => format!("detached-{n}"),
         };
-        let checkout = match git.resolve_commit(&format!("refs/heads/{branch}"))? {
-            None => format!("checkout -b {branch}"),
+        let full = format!("refs/heads/{branch}");
+        let dir = format!("{full}/");
+        if refs.iter().any(|name| name.starts_with(dir.as_bytes())) {
+            continue;
+        }
+        let exists = refs.contains(&full.as_bytes());
+        let checkout = match git.resolve_commit(&full)? {
             Some(at) if head.as_ref() == Some(&at) => format!("checkout {branch}"),
-            Some(_) => continue,
+            None if !exists => format!("checkout -b {branch}"),
+            _ => continue,
         };
         fix = format!("put the repo on {branch} with `{bin} git {checkout}`");
         break;

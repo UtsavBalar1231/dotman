@@ -1445,6 +1445,40 @@ fn a_detached_head_is_refused_with_a_way_out_that_runs_as_printed() {
     assert_eq!(main(), tip);
 }
 
+/// A branch `main/x` or `detached/x` holds that name as a directory, so git cannot create the
+/// branch; the way out passes over it.
+#[test]
+fn a_detached_head_way_out_passes_over_a_name_a_branch_holds_as_a_directory() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".a", b"one\n", 0o644);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    let repo = repo_path(&env);
+    let branches = || env.git(&["-C", &repo, "for-each-ref", "refs/heads/"]);
+    env.ok(&["git", "branch", "-q", "-m", "main", "main/x"]);
+    env.ok(&["git", "checkout", "-q", "--detach"]);
+    env.ok(&["git", "branch", "-q", "detached/x"]);
+
+    let before = branches();
+    let err = env.fails(&["sync"]);
+    assert!(err.contains("`dotman git checkout -b detached-2`"), "{err}");
+    let doctor = env.run(&["doctor"]);
+    let out = String::from_utf8_lossy(&doctor.stdout).into_owned();
+    assert!(
+        out.lines().any(|line| line.starts_with("fail  branch: ")
+            && line.contains("`dotman git checkout -b detached-2`")),
+        "{out}"
+    );
+    let ran = common::run_hint(&env, &err, "git checkout");
+    assert!(ran.status.success(), "{}", stderr(&ran));
+    assert!(
+        before.lines().all(|line| branches().contains(line)),
+        "no branch moved: {before}"
+    );
+    env.ok(&["sync"]);
+}
+
 #[test]
 fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
     let keys: Vec<String> = (0..12)
