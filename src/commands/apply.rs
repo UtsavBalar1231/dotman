@@ -18,6 +18,7 @@ use crate::hooks::{self, Policy};
 use crate::identity;
 use crate::name;
 use crate::output;
+use crate::paths::OwnPath;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{self, Finding, Held, HoldsKey, Locked};
@@ -1547,6 +1548,11 @@ impl Run<'_> {
             }
             Err(e) => match e.downcast::<Held>() {
                 Ok(Held(found)) => self.held_key(key, found, managed),
+                Err(e) if e.is::<OwnPath>() => {
+                    self.attention = true;
+                    self.undecided.insert(key.to_owned());
+                    output::warning(&format!("{key}: not captured: {e:#}"));
+                }
                 Err(e) => {
                     self.failed = self.failed.saturating_add(1);
                     self.uncaptured = self.uncaptured.saturating_add(1);
@@ -1771,6 +1777,7 @@ impl Run<'_> {
             backup: replaces.then_some(self.backups.as_path()),
             expected: &item.raw,
             modes: &self.modes,
+            own: self.ctx.keys(),
         };
         let home = &self.ctx.paths.home;
         let outcome = match &r.content {

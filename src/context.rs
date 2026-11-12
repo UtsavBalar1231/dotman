@@ -203,6 +203,11 @@ impl Context {
         self.keys.own(key, leaf)
     }
 
+    /// This machine's [`KeyRules`], which the write path checks each target against.
+    pub(crate) const fn keys(&self) -> &KeyRules {
+        &self.keys
+    }
+
     /// The key of a path the user named, refused like any other key this machine never manages.
     pub(crate) fn input_key(&self, input: &Path, cwd: &Path) -> Result<String> {
         let key = derive_key(

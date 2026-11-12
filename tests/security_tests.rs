@@ -463,6 +463,57 @@ fn a_pushed_link_above_dotman_s_own_files_is_never_applied() {
     assert_eq!(b.read(".profile"), b"a\n");
 }
 
+/// A `$HOME` entry that is one of dotman's own files under another name, as a casefold directory
+/// makes `.con<U+200D>fig/dotman/config.toml` of `.config/dotman/config.toml`, is refused by device
+/// and inode; a hard link to the machine config stands in for that name here. Whichever answer
+/// `sync` gets, it names the pushed file and exits 3, never captures the machine config, writes
+/// over it or backs it up, and the printed `git rm`, run as printed, takes the file out of the repo.
+#[test]
+fn another_name_for_an_own_file_is_never_captured_or_applied() {
+    let a = TestEnv::new();
+    a.write(".profile", b"a\n", 0o644);
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.ok(&["add", ".profile"]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+
+    let b = a.second_device();
+    b.ok(&["init", &a.remote_url()]);
+    assert_eq!(b.read(".profile"), b"a\n");
+    let mine = "[vars]\nmine = \"b\"\n";
+    b.write_machine_config(mine);
+    let config = b.xdg_config().join("dotman/config.toml");
+    fs::hard_link(&config, b.home().join("alias.toml")).unwrap();
+    a.write_repo("alias.toml", b"# pushed\n");
+    a.push_repo();
+
+    let mut err = String::new();
+    for answer in ["--keep-local", "--take-repo"] {
+        err = exits(&b.run(&["sync", answer]), 3);
+        assert!(
+            err.contains("alias.toml: in the repo, but never applied or captured here"),
+            "{answer}: {err}"
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), mine);
+        assert!(!remote_history(&a).contains("mine = "), "{answer}");
+    }
+    assert!(!found_under(&b.state_dir().join("backups"), "alias.toml"));
+
+    let removal = printed(&err, "dotman git rm ");
+    assert_eq!(removal.len(), 1, "{err}");
+    paste_with(&b, &[], removal.first().unwrap());
+    exits(&b.run(&["sync"]), 0);
+    assert_eq!(fs::read_to_string(&config).unwrap(), mine);
+    assert!(!remote_tree(&a).contains("alias.toml"));
+}
+
 /// A tracked key that a newer rule refuses, such as a name with U+202E or U+200B an older dotman
 /// tracked, never makes a command exit 1: a state entry for it is dropped with a note, `sync`,
 /// `apply` and `init` name it escaped and exit 3, and the way out they print, which cannot name

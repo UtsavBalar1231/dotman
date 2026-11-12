@@ -2,7 +2,7 @@
 //! replaced, and a temp file renamed into place after re-reading the target.
 
 use super::{Home, Node, Obstacle, Tuple, parents, read_node, recorded_mode, safe_mode};
-use crate::paths::create_private_dir;
+use crate::paths::{KeyRules, create_private_dir};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -40,6 +40,9 @@ pub struct WriteOptions<'a> {
     /// `.dotman.toml` `[modes]`. Its `dir/` entries give the modes of parents that have to be
     /// created; others get 0755.
     pub modes: &'a BTreeMap<String, String>,
+    /// This machine's own paths. A target that [`KeyRules::alias`] finds is one of them, or lies
+    /// inside one, is skipped as [`Skip::Own`] before any backup.
+    pub own: &'a KeyRules,
 }
 
 /// What a write did.
@@ -84,6 +87,8 @@ pub enum Skip {
     Busy,
     /// Rename failed with EPERM, as for an immutable file.
     Protected,
+    /// The target is, or lies inside, one of dotman's own paths under another spelling.
+    Own(&'static str),
 }
 
 impl fmt::Display for Skip {
@@ -106,6 +111,10 @@ impl fmt::Display for Skip {
             Self::Protected => {
                 f.write_str("protected, skipped; if it is immutable, run `chattr -i` on it first")
             }
+            Self::Own(what) => write!(
+                f,
+                "is {what} on this machine, or a path inside it; dotman never manages its own files, skipped"
+            ),
         }
     }
 }
@@ -362,6 +371,7 @@ pub fn restore_file_link(
     target: &Path,
     bytes: &[u8],
     mode: u32,
+    own: &KeyRules,
 ) -> Result<Restored> {
     match read_node(home, key)? {
         Node::Symlink(now) if now == target => return Ok(Restored::Untouched),
@@ -376,6 +386,7 @@ pub fn restore_file_link(
         backup: None,
         expected: &expected,
         modes: &modes,
+        own,
     };
     Ok(match safe_symlink(home, key, target, &opts)? {
         WriteOutcome::Written(_) => Restored::Back,
@@ -479,6 +490,9 @@ fn write_node(
         if current.home() != *opts.expected {
             return Ok(WriteOutcome::Skipped(Skip::Changed));
         }
+        if let Some(what) = opts.own.alias(home, key, true) {
+            return Ok(WriteOutcome::Skipped(Skip::Own(what)));
+        }
         let backup = match opts.backup {
             Some(dir) => back_up(dir, key, &current, true)?,
             None => None,
@@ -491,6 +505,10 @@ fn write_node(
     }
 
     create_parents(home, key, opts.modes)?;
+    // After the parents exist: one created under another spelling may be dotman's own directory.
+    if let Some(what) = opts.own.alias(home, key, true) {
+        return Ok(WriteOutcome::Skipped(Skip::Own(what)));
+    }
     let backup = match opts.backup {
         Some(dir) => back_up(dir, key, &current, false)?,
         None => None,
@@ -742,13 +760,17 @@ mod tests {
         backup: Option<&'a Path>,
         dry_run: bool,
         modes: &'a BTreeMap<String, String>,
+        own: Option<&'a KeyRules>,
     }
 
     const PLAIN: Call<'static> = Call {
         backup: None,
         dry_run: false,
         modes: &BTreeMap::new(),
+        own: None,
     };
+
+    static NO_RULES: std::sync::LazyLock<KeyRules> = std::sync::LazyLock::new(KeyRules::default);
 
     fn options<'a>(call: &Call<'a>, expected: &'a Home) -> WriteOptions<'a> {
         WriteOptions {
@@ -757,6 +779,7 @@ mod tests {
             backup: call.backup,
             expected,
             modes: call.modes,
+            own: call.own.unwrap_or(&NO_RULES),
         }
     }
 
@@ -1081,6 +1104,42 @@ mod tests {
     }
 
     #[test]
+    fn a_target_that_is_or_lies_in_an_own_path_is_skipped_without_a_backup() {
+        let f = fixture();
+        let home = f.home.as_os_str().to_owned();
+        let env = crate::paths::Env::from_fn(|name| (name == "HOME").then(|| home.clone()));
+        let paths = crate::paths::Paths::resolve(&env, crate::sys::geteuid()).unwrap();
+        let rules = KeyRules::new(&paths);
+        let call = Call {
+            backup: Some(&f.run_dir),
+            own: Some(&rules),
+            ..PLAIN
+        };
+        fs::create_dir_all(f.home.join(".config/dotman")).unwrap();
+        fs::write(&paths.config_file, b"mine").unwrap();
+        fs::hard_link(&paths.config_file, f.home.join("alias")).unwrap();
+        for dry_run in [true, false] {
+            let call = Call { dry_run, ..call };
+            assert_eq!(
+                write(&f.home, "alias", b"pushed", 0o644, &call),
+                WriteOutcome::Skipped(Skip::Own("the dotman machine config"))
+            );
+        }
+        assert_eq!(fs::read(&paths.config_file).unwrap(), b"mine");
+        assert!(!f.run_dir.exists());
+
+        // The state directory does not exist until the write creates it as a parent.
+        let state = paths.state_dir.parent().unwrap();
+        fs::create_dir_all(state).unwrap();
+        assert_eq!(
+            write(state, "dotman/state.toml", b"pushed", 0o644, &call),
+            WriteOutcome::Skipped(Skip::Own("the dotman state directory"))
+        );
+        assert_eq!(names(&paths.state_dir), Vec::<String>::new());
+        assert!(!f.run_dir.exists());
+    }
+
+    #[test]
     fn backups_follow_the_plan_layout() {
         let root = Path::new("/state/dotman/backups");
         let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -1277,13 +1336,13 @@ mod tests {
         let target = Path::new("../farm");
         symlink(target, f.home.join(".rc")).unwrap();
         assert_eq!(
-            restore_file_link(&f.home, ".rc", target, b"new", 0o644).unwrap(),
+            restore_file_link(&f.home, ".rc", target, b"new", 0o644, &NO_RULES).unwrap(),
             Restored::Untouched
         );
         replace_link_with_file(&f.home, ".rc", target, b"new", 0o644).unwrap();
         fs::write(f.home.join(".rc"), b"edited").unwrap();
         assert_eq!(
-            restore_file_link(&f.home, ".rc", target, b"new", 0o644).unwrap(),
+            restore_file_link(&f.home, ".rc", target, b"new", 0o644, &NO_RULES).unwrap(),
             Restored::Kept
         );
         assert_eq!(fs::read(f.home.join(".rc")).unwrap(), b"edited");
@@ -1291,7 +1350,7 @@ mod tests {
         fs::write(f.home.join(".rc"), b"new").unwrap();
         fs::set_permissions(f.home.join(".rc"), Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
-            restore_file_link(&f.home, ".rc", target, b"new", 0o644).unwrap(),
+            restore_file_link(&f.home, ".rc", target, b"new", 0o644, &NO_RULES).unwrap(),
             Restored::Back
         );
         assert_eq!(fs::read_link(f.home.join(".rc")).unwrap(), target);

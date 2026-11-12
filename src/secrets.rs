@@ -985,7 +985,8 @@ pub fn write_record(repo: &Path, recipients: &[String]) -> Result<()> {
 }
 
 /// Replaces the ciphertext at `source` in the repo through the safe write path.
-pub fn write_ciphertext(repo: &Path, source: &str, ciphertext: &[u8]) -> Result<()> {
+pub fn write_ciphertext(ctx: &Context, source: &str, ciphertext: &[u8]) -> Result<()> {
+    let repo = &ctx.paths.repo;
     let expected = observe(repo, source)?;
     let modes = BTreeMap::new();
     let opts = WriteOptions {
@@ -994,6 +995,7 @@ pub fn write_ciphertext(repo: &Path, source: &str, ciphertext: &[u8]) -> Result<
         backup: None,
         expected: &expected,
         modes: &modes,
+        own: ctx.keys(),
     };
     match safe_write(repo, source, ciphertext, 0o644, &opts)? {
         WriteOutcome::Written(_) => Ok(()),
@@ -1067,7 +1069,7 @@ pub fn reencrypt(ctx: &Context, dry_run: bool) -> Result<usize> {
         let ciphertext = age
             .encrypt(bytes, &recipients)
             .with_context(|| format!("cannot re-encrypt {source}"))?;
-        write_ciphertext(repo, source, &ciphertext)?;
+        write_ciphertext(ctx, source, &ciphertext)?;
         output::action("re-encrypt", source);
     }
     write_record(repo, &current)?;

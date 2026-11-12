@@ -92,6 +92,7 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
             backup: Some(&backups),
             expected: &source_now,
             modes: &repo_config.modes,
+            own: ctx.keys(),
         };
         let repo_mode = if git_mode == "100755" { 0o755 } else { 0o644 };
         match safe_write(&ctx.paths.repo, source, &blob, repo_mode, &opts)? {
@@ -108,6 +109,7 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
         backup: Some(&backups),
         expected: &expected,
         modes: &repo_config.modes,
+        own: ctx.keys(),
     };
     let outcome = match link {
         Some(target) => safe_symlink(home, &key, target, &opts)?,

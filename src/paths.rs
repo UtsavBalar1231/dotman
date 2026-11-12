@@ -204,10 +204,16 @@ impl Paths {
 /// Decides whether a key may be managed on this machine. Every key that a repo file, a state entry
 /// or a `$HOME` file becomes goes through [`KeyRules::check`].
 #[derive(Debug)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct KeyRules {
     /// The keys of dotman's own files and directories under `$HOME`, in [`fold`]ed form, with
     /// what each one is.
     own: Vec<(String, &'static str)>,
+    home: PathBuf,
+    /// dotman's own files and directories, wherever they are, compared by device and inode.
+    paths: Vec<(PathBuf, &'static str)>,
+    /// dotman's own paths under `$HOME` and every directory above them, which a leaf must not be.
+    above: Vec<(PathBuf, &'static str)>,
 }
 
 impl KeyRules {
@@ -234,23 +240,36 @@ impl KeyRules {
             .chain(paths.home_real.as_deref())
             .collect();
         let mut own: Vec<(String, &'static str)> = Vec::new();
+        let mut above = Vec::new();
+        let mut own_paths = Vec::new();
         for (what, path) in listed {
             let Some(path) = path else { continue };
+            own_paths.push((path.clone(), what));
             // The real form too, so `~/.config` linked to `~/cfg` also refuses `cfg/dotman/...`.
             for form in [path.clone(), resolved(path)] {
                 let keys = homes
                     .iter()
                     .filter_map(|home| form.strip_prefix(home).ok()?.to_str())
-                    .filter(|key| !key.is_empty())
-                    .map(fold);
+                    .filter(|key| !key.is_empty());
                 for key in keys {
+                    above.extend(
+                        crate::engine::parents(key)
+                            .chain(std::iter::once(key))
+                            .map(|at| (paths.home.join(at), what)),
+                    );
+                    let key = fold(key);
                     if !own.iter().any(|(known, _)| *known == key) {
                         own.push((key, what));
                     }
                 }
             }
         }
-        Self { own }
+        Self {
+            own,
+            home: paths.home.clone(),
+            paths: own_paths,
+            above,
+        }
     }
 
     /// Fails for a key that [`validate_key`] refuses or that is, or lies inside, one of dotman's
@@ -260,24 +279,98 @@ impl KeyRules {
     pub(crate) fn check(&self, key: &str, leaf: bool) -> Result<()> {
         validate_key(key)?;
         if let Some(what) = self.own(key, leaf) {
-            bail!(
-                "`{}` is {what} on this machine, or a path inside it or above it; dotman never manages its own files",
-                shown_key(key)
-            );
+            return Err(OwnPath::new(key, what).into());
         }
         Ok(())
     }
 
-    /// What of dotman's own `key` is, holds or lies inside; `None` when it is none of them.
+    /// What of dotman's own `key` is, holds or lies inside, by name or by [`KeyRules::alias`] in
+    /// `$HOME`; `None` when it is none of them.
     #[must_use]
     pub(crate) fn own(&self, key: &str, leaf: bool) -> Option<&'static str> {
-        let key = fold(key);
+        let folded = fold(key);
         self.own
             .iter()
-            .find(|(own, _)| is_under(&key, own) || (leaf && is_under(own, &key)))
+            .find(|(own, _)| is_under(&folded, own) || (leaf && is_under(own, &folded)))
+            .map(|(_, what)| *what)
+            .or_else(|| self.alias(&self.home, key, leaf))
+    }
+
+    /// What of dotman's own the entry at `key` below `root` is, lies inside or, for a `leaf`,
+    /// holds, by device and inode as the filesystem resolves the path now. No folding of names can
+    /// model every filesystem: a Linux casefold directory also folds U+017F to `s` and ignores
+    /// U+200D, and HFS+ ignores U+200C. An own path that does not exist matches nothing. `root`
+    /// itself is not compared, so a write into the repo is checked below it.
+    #[must_use]
+    pub(crate) fn alias(&self, root: &Path, key: &str, leaf: bool) -> Option<&'static str> {
+        let own: Vec<((u64, u64), &'static str)> = self
+            .paths
+            .iter()
+            .flat_map(|(path, what)| {
+                [fs::metadata(path), fs::symlink_metadata(path)]
+                    .into_iter()
+                    .filter_map(move |meta| Some((identity(&meta.ok()?), *what)))
+            })
+            .collect();
+        let mut at = root.to_path_buf();
+        let mut parts = key.split('/').peekable();
+        while let Some(part) = parts.next() {
+            at.push(part);
+            let last = parts.peek().is_none();
+            // A directory on the way is followed, as opening the path would; the entry itself is not.
+            let meta = if last {
+                fs::symlink_metadata(&at)
+            } else {
+                fs::metadata(&at)
+            };
+            let id = identity(&meta.ok()?);
+            if let Some((_, what)) = own.iter().find(|(own, _)| *own == id) {
+                return Some(what);
+            }
+        }
+        if !leaf {
+            return None;
+        }
+        let id = identity(&fs::symlink_metadata(&at).ok()?);
+        self.above
+            .iter()
+            .find(|(path, _)| fs::symlink_metadata(path).is_ok_and(|meta| identity(&meta) == id))
             .map(|(_, what)| *what)
     }
 }
+
+fn identity(meta: &fs::Metadata) -> (u64, u64) {
+    (meta.dev(), meta.ino())
+}
+
+/// A key refused because it is, holds or lies inside one of dotman's own paths.
+#[derive(Debug)]
+pub(crate) struct OwnPath {
+    key: String,
+    what: &'static str,
+}
+
+impl OwnPath {
+    pub(crate) fn new(key: &str, what: &'static str) -> Self {
+        Self {
+            key: key.to_owned(),
+            what,
+        }
+    }
+}
+
+impl std::fmt::Display for OwnPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` is {} on this machine, or a path inside it or above it; dotman never manages its own files",
+            shown_key(&self.key),
+            self.what
+        )
+    }
+}
+
+impl std::error::Error for OwnPath {}
 
 /// `key` escaped as output escapes it, and with a backtick escaped too, so the name cannot end the
 /// backticks around it or around a command printed after it.
@@ -286,9 +379,15 @@ pub(crate) fn shown_key(key: &str) -> String {
 }
 
 /// Lowercase NFC, because APFS and other case-insensitive filesystems resolve `.Config/Dotman` to
-/// `.config/dotman`.
+/// `.config/dotman`, with U+017F as `s` and without the zero-width characters that a Linux casefold
+/// directory or HFS+ ignores. Only a first layer: [`KeyRules::alias`] compares what the filesystem
+/// resolves.
 fn fold(key: &str) -> String {
-    key.nfc().collect::<String>().to_lowercase()
+    key.nfc()
+        .filter(|c| !matches!(c, '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}'))
+        .map(|c| if c == '\u{17f}' { 's' } else { c })
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// `path` with its longest existing ancestor resolved, so a file not created yet still resolves
@@ -1033,6 +1132,48 @@ mod tests {
         assert!(rules.check(&key, true).is_err(), "{key}");
         // No config file exists yet, and `.config` is a link to `cfg`.
         assert!(rules.check("cfg/dotman/config.toml", true).is_err());
+    }
+
+    #[test]
+    fn own_paths_are_refused_under_any_name_the_filesystem_resolves_to_them() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(home.join(".local/state/dotman")).unwrap();
+        fs::create_dir_all(home.join(".config/dotman")).unwrap();
+        fs::write(home.join(".config/dotman/config.toml"), b"").unwrap();
+        fs::create_dir_all(home.join("real-local")).unwrap();
+        let rules = KeyRules::new(&resolve(&env_with(home, &[])));
+        // What a casefold directory resolves to the same names; only the first layer sees them.
+        for key in [
+            ".con\u{200d}fig/dotman/config.toml",
+            ".local/\u{17f}tate/dotman/state.toml",
+            ".local/\u{17f}hare/dotman/x",
+        ] {
+            assert!(rules.check(key, true).is_err(), "{key}");
+        }
+
+        // Two names for one inode, which no folding of the names can tell.
+        fs::hard_link(home.join(".config/dotman/config.toml"), home.join("cfg")).unwrap();
+        symlink(home.join(".local/state/dotman"), home.join("st")).unwrap();
+        for key in ["cfg", "st/state.toml", "st/new/x"] {
+            let err = rules.check(key, true).unwrap_err();
+            assert!(err.is::<OwnPath>(), "{key}: {err:#}");
+        }
+        assert_eq!(
+            rules.alias(home, "st/state.toml", false),
+            Some("the dotman state directory")
+        );
+        assert!(rules.check("st", true).is_ok());
+        assert!(rules.alias(home, ".bashrc", true).is_none());
+
+        // A leaf at another name for a link above an own directory would move it.
+        fs::remove_dir(home.join(".local/state/dotman")).unwrap();
+        fs::remove_dir(home.join(".local/state")).unwrap();
+        symlink(home.join("real-local"), home.join(".local/state")).unwrap();
+        let rules = KeyRules::new(&resolve(&env_with(home, &[])));
+        fs::hard_link(home.join(".local/state"), home.join("state-link")).unwrap();
+        assert!(rules.check("state-link", true).is_err());
+        assert!(rules.check("state-link", false).is_ok());
     }
 
     #[test]

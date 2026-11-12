@@ -616,6 +616,10 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "own_files_are_refused_as_keys",
             "own_keys_follow_this_machine_s_xdg_dirs",
             "own_keys_match_the_real_spelling_of_a_symlinked_home_or_dir",
+            "own_paths_are_refused_under_any_name_the_filesystem_resolves_to_them",
+            "a_target_that_is_or_lies_in_an_own_path_is_skipped_without_a_backup",
+            "another_name_for_an_own_file_is_never_captured_or_applied",
+            "another_name_for_an_own_file_is_never_read_into_the_repo",
         ],
     ),
     (

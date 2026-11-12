@@ -1384,7 +1384,7 @@ fn replace_all(ctx: &Context, swaps: &[Swap], modes: &BTreeMap<String, String>) 
         };
         if let Err(e) = result {
             let attempted = swaps.get(..=done).unwrap_or(swaps);
-            let (restored, kept) = restore_all(home, attempted);
+            let (restored, kept) = restore_all(ctx, attempted);
             let mut message = format!(
                 "could not replace {}: {e:#}; {} restored",
                 swap.key,
@@ -1405,12 +1405,13 @@ fn replace_all(ctx: &Context, swaps: &[Swap], modes: &BTreeMap<String, String>) 
 
 /// Puts back the links of `swaps`, last first. Returns how many are links again and how many were
 /// left because they are no longer what the swap wrote.
-fn restore_all(home: &Path, swaps: &[Swap]) -> (usize, usize) {
+fn restore_all(ctx: &Context, swaps: &[Swap]) -> (usize, usize) {
+    let home = &ctx.paths.home;
     let (mut restored, mut kept) = (0usize, 0usize);
     for swap in swaps.iter().rev() {
         let result = match &swap.change {
             Change::File { bytes, mode } => {
-                restore_file_link(home, &swap.key, &swap.raw, bytes, *mode)
+                restore_file_link(home, &swap.key, &swap.raw, bytes, *mode, ctx.keys())
             }
             Change::Dir(members) => restore_dir_link(home, &swap.key, &swap.raw, members),
         };

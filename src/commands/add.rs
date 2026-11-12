@@ -13,7 +13,9 @@ use crate::engine::{
 };
 use crate::name;
 use crate::output;
-use crate::paths::{absolute_input, find_collisions, refuse_non_nfc, validate_key, write_atomic};
+use crate::paths::{
+    OwnPath, absolute_input, find_collisions, refuse_non_nfc, validate_key, write_atomic,
+};
 use crate::prompt;
 use crate::remote;
 use crate::repo_config::RepoConfig;
@@ -1699,6 +1701,9 @@ pub(crate) fn commit_one(
     let home = &ctx.paths.home;
     let repo = &ctx.paths.repo;
     let target = repo.join(source);
+    if let Some(what) = ctx.keys().alias(home, key, true) {
+        return Err(OwnPath::new(key, what).into());
+    }
     let node = read_node(home, key)?;
     let found = match &node {
         Node::File { bytes, .. } if !encrypted => {
@@ -1854,7 +1859,7 @@ fn store_encrypted(
         return Ok(());
     }
     let ciphertext = ctx.age().encrypt(plaintext, recipients)?;
-    secrets::write_ciphertext(repo, source, &ciphertext)
+    secrets::write_ciphertext(ctx, source, &ciphertext)
 }
 
 /// Group and other write bits, which a umask of 002 gives every new file and directory. A capture
@@ -2308,6 +2313,31 @@ mod tests {
         let mut modes = BTreeMap::from([(".d/".to_owned(), "0775".to_owned())]);
         record_mode(&mut modes, ".d/", 0o777, 0o755).unwrap();
         assert_eq!(modes.get(".d/").map(String::as_str), Some("0775"));
+    }
+
+    #[test]
+    fn another_name_for_an_own_file_is_never_read_into_the_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().as_os_str().to_owned();
+        let env = crate::paths::Env::from_fn(|name| (name == "HOME").then(|| home.clone()));
+        let paths = crate::paths::Paths::resolve(&env, crate::sys::geteuid()).unwrap();
+        fs::create_dir_all(paths.config_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(&paths.repo).unwrap();
+        fs::write(&paths.config_file, b"[vars]\nmine = \"1\"\n").unwrap();
+        fs::hard_link(&paths.config_file, tmp.path().join("alias")).unwrap();
+        let ctx = Context::new(paths, crate::config::Config::default(), "add");
+        let err = commit_one(
+            &ctx,
+            &mut RepoConfig::default(),
+            &mut BTreeMap::new(),
+            "alias",
+            "alias",
+            Kind::File,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.is::<OwnPath>(), "{err:#}");
+        assert!(fs::symlink_metadata(ctx.paths.repo.join("alias")).is_err());
     }
 
     fn file() -> Leaf {
