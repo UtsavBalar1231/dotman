@@ -1370,20 +1370,41 @@ fn a_head_branch_git_refuses_or_cannot_clone_is_imported_onto_main() {
 }
 
 /// When the commit of a HEAD branch git refuses cannot be read from the source's refs, or cannot
-/// be fetched, as it names no object or a blob, the import stops with words alone: no git command,
-/// since one that runs git in the source would run its hooks and config.
+/// be fetched, as it names no object, a tree or a blob, the import stops with words alone, which
+/// say what the branch names: no git command, since one that runs git in the source would run its
+/// hooks and config.
 #[test]
 fn a_refused_head_branch_without_a_usable_commit_gets_no_command() {
     let env = TestEnv::new();
     let work = work_tree(&env, "my dots", &[(".bashrc", "x\n", false)], None);
     let blob = git_in(&env, &work, &["rev-parse", "HEAD:.bashrc"]);
+    let tree = git_in(&env, &work, &["rev-parse", "HEAD:"]);
+    let missing = "1".repeat(40);
     let cases = [
         (
             "ref: refs/heads/main\n".to_owned(),
-            "cannot be read from the source's refs",
+            "and its commit cannot be read from the source's refs".to_owned(),
         ),
-        (format!("{}\n", "1".repeat(40)), "could not be fetched"),
-        (blob, "could not be fetched"),
+        (
+            format!("{missing}\n"),
+            format!(
+                "and the {missing} that branch points at could not be fetched from the source and checked out as a commit"
+            ),
+        ),
+        (
+            blob.clone(),
+            format!(
+                "and that branch points at {}, a blob, not a commit",
+                blob.trim()
+            ),
+        ),
+        (
+            tree.clone(),
+            format!(
+                "and that branch points at {}, a tree, not a commit",
+                tree.trim()
+            ),
+        ),
     ];
     let git_dir = work.join(".git");
     env.write(git_dir.join("HEAD"), b"ref: refs/heads/a.\n", 0o644);
@@ -1392,8 +1413,9 @@ fn a_refused_head_branch_without_a_usable_commit_gets_no_command() {
         let source = Source::new(work.clone());
         let err = env.fails(&["import", "--yes", &work.to_string_lossy()]);
         assert!(
-            err.contains("HEAD names the branch `a.`, whose name git refuses, and its commit")
-                && err.contains(why),
+            err.contains(&format!(
+                "HEAD names the branch `a.`, whose name git refuses, {why}"
+            )),
             "{err}"
         );
         assert!(

@@ -297,8 +297,17 @@ impl Staging {
             };
             // Words alone: git's error names the fetch command, which run elsewhere moves a `main`.
             if self.fetch_commit(&source.git_arg()?, &oid).is_err() {
+                // The fetch stores a tree or a blob before it refuses to put one on a branch.
+                let kind = git_stdout(&self.git, &["cat-file", "-t", &oid], None)
+                    .map(|out| String::from_utf8_lossy(out.trim_ascii()).into_owned())
+                    .ok()
+                    .filter(|kind| kind != "commit");
+                let what = kind.map_or_else(
+                    || format!("the {oid} that branch points at could not be fetched from the source and checked out as a commit"),
+                    |kind| format!("that branch points at {oid}, a {kind}, not a commit"),
+                );
                 bail!(
-                    "{src}'s HEAD {named}, and its commit {oid} could not be fetched from the source and checked out; give that commit a branch whose name git takes in the source, point HEAD at it, and import again"
+                    "{src}'s HEAD {named}, and {what}; give a commit a branch whose name git takes in the source, point HEAD at it, and import again"
                 );
             }
             return Ok(Some(named));
