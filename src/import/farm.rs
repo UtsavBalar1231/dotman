@@ -11,7 +11,7 @@
 
 use super::gittree::{Staging, check_target, install_keeping_origin, is_git_dir};
 use super::{
-    EditedConfig, Item, Report, author_email, chezmoi, count, proceed, refuse_overlap,
+    EditedConfig, Item, Report, author_email, chezmoi, count, origin_hint, proceed, refuse_overlap,
     require_fresh, resolved,
 };
 use crate::cli::ImportArgs;
@@ -859,11 +859,7 @@ fn farm_remote(root: &Path) -> Option<String> {
         .ancestors()
         .find(|dir| dir.join(".git").exists())?
         .to_path_buf();
-    Git::new(repo, "import")
-        .remote_url("origin")
-        .ok()
-        .flatten()
-        .map(|url| crate::git::redact_credentials(&url))
+    Git::new(repo, "import").remote_url("origin").ok().flatten()
 }
 
 /// The parent directories' modes are those of the directories the files are deployed through.
@@ -1041,9 +1037,8 @@ fn notes(
     notes.push(farm_remote(root).map_or_else(
         || format!("the new repo has no remote; add one with `{bin} init --remote <url>`"),
         |url| {
-            format!(
-                "the farm's git history is not imported, and its origin is {url} (`{bin} init --remote {url}` sets it here)"
-            )
+            let (shown, set) = origin_hint(&url);
+            format!("the farm's git history is not imported, and its origin is {shown} ({set})")
         },
     ));
     notes.extend(tool_notes(root));

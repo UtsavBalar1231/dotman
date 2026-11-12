@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    Source, TestEnv, accounting, files_containing, have_chezmoi, mode_of, source_tree as source,
-    stub_chezmoi, tree_checksum,
+    ODD_ORIGINS, Source, TestEnv, accounting, check_origin_hint, files_containing, have_chezmoi,
+    mode_of, source_tree as source, stub_chezmoi, tree_checksum,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -448,6 +448,24 @@ fn a_git_checkout_of_a_source_is_still_a_chezmoi_source_and_its_origin_is_report
         "1"
     );
     assert_eq!(env.git(&["-C", &repo, "remote"]).trim(), "");
+}
+
+#[test]
+fn the_hint_for_the_sources_own_origin_runs_as_printed_whatever_the_url_holds() {
+    if !have_chezmoi() {
+        return;
+    }
+    for origin in ODD_ORIGINS {
+        let env = TestEnv::new();
+        let source = source(&env, "cz", &[("dot_bashrc", "export A=1\n")]);
+        let dir = source.to_string_lossy().into_owned();
+        env.git(&["-C", &dir, "init", "-q"]);
+        env.git(&["-C", &dir, "remote", "add", "origin", origin]);
+        let out = env.run(&["import", &dir, "--no-bootstrap"]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(0), "{err}");
+        check_origin_hint(&env, &err, origin);
+    }
 }
 
 #[test]

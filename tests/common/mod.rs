@@ -1362,6 +1362,68 @@ pub fn run_hint(env: &TestEnv, text: &str, prefix: &str) -> Output {
     env.run(&args)
 }
 
+/// The first backticked `dotman <prefix>...` command in `text`, character for character.
+pub fn hint_line(text: &str, prefix: &str) -> String {
+    let start = format!("dotman {prefix}");
+    let found = text
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|quoted| quoted.starts_with(&start));
+    assert!(found.is_some(), "no `{start}...` hint in: {text}");
+    found.unwrap_or_default().to_owned()
+}
+
+/// Pastes `line` into `sh -c` in the harness environment, with `dotman` the binary under test,
+/// so a test sees what a shell makes of a printed command.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+pub fn paste(env: &TestEnv, line: &str) -> Output {
+    let bin = Path::new(env!("CARGO_BIN_EXE_dotman"))
+        .parent()
+        .expect("the binary's directory");
+    env.process_for(Path::new("sh"))
+        .arg("-c")
+        .arg(format!(
+            "PATH={}:\"$PATH\"; {line}",
+            shell_words::quote(&bin.to_string_lossy())
+        ))
+        .output()
+        .expect("run sh")
+}
+
+/// Origins an import source can hold that a printed command must quote: a space, a command
+/// substitution that creates `PWNED` where the pasted command runs, and credentials.
+pub const ODD_ORIGINS: [&str; 3] = [
+    "/srv/my remotes/dots.git",
+    "file:///nonexistent/dots$(touch${IFS}PWNED).git",
+    "https://user:s3cr3t@example.invalid/dots.git",
+];
+
+/// Pastes the `init --remote` hint in an import's `err` into a shell and checks that it sets
+/// `origin` and runs nothing else. A hint for a URL with credentials holds `<url>`, the secret is
+/// nowhere in `err`, and the URL is pasted in its place.
+pub fn check_origin_hint(env: &TestEnv, err: &str, origin: &str) {
+    let mut line = hint_line(err, "init --remote");
+    if origin.contains("s3cr3t") {
+        assert!(!err.contains("s3cr3t"), "{err}");
+        assert_eq!(line, "dotman init --remote <url>", "{err}");
+        line = line.replace("<url>", &shell_words::quote(origin));
+    }
+    let out = paste(env, &line);
+    assert!(
+        out.status.success(),
+        "{line}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !env.home().join("PWNED").exists(),
+        "pasting `{line}` ran a command"
+    );
+    let set = git_in(env, &env.repo(), &["config", "remote.origin.url"]);
+    assert_eq!(set.trim(), origin, "{line}");
+}
+
 /// Writes an executable hook of every name in [`GIT_HOOKS`] into `hooks_dir`; each appends its
 /// name to `marker`.
 pub fn plant_git_hooks(hooks_dir: &Path, marker: &Path) {

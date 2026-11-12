@@ -198,6 +198,23 @@ fn is_url(text: &str) -> bool {
         .is_some_and(|(host, path)| !path.is_empty() && host.contains('@') && !host.contains('/'))
 }
 
+/// A source's origin `url` as a note shows it, and the clause naming the command that sets it as
+/// the new repo's remote. The command quotes the URL for a shell, as the source picks it; a URL
+/// with credentials is shown redacted, and a command holding that would set a broken remote.
+fn origin_hint(url: &str) -> (String, String) {
+    let bin = name::bin();
+    let shown = redact_credentials(url);
+    let set = if shown == url {
+        format!(
+            "`{bin} init --remote {}` sets it here",
+            shell_words::quote(url)
+        )
+    } else {
+        format!("`{bin} init --remote <url>` sets it here, given the URL with its credentials")
+    };
+    (shown, set)
+}
+
 /// Runs `dotman import`. The caller holds the lock and has run the in-progress guard.
 ///
 /// A fresh import then writes `install.sh`, uncommitted: the next `dotman sync` commits it, or an

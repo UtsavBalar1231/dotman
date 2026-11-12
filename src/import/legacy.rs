@@ -10,7 +10,7 @@
 
 use super::gittree::shown;
 use super::{
-    EditedConfig, Item, Report, author_email, count, held, held_item, homes, proceed,
+    EditedConfig, Item, Report, author_email, count, held, held_item, homes, origin_hint, proceed,
     require_clean, require_fresh,
 };
 use crate::cli::ImportArgs;
@@ -19,7 +19,6 @@ use crate::commands::add::{ensure_worktree_parents, record_mode, shareable_mode}
 use crate::commands::sync::identity_fix;
 use crate::context::Context;
 use crate::engine::{Node, read_node, recorded_mode};
-use crate::git::redact_credentials;
 use crate::name;
 use crate::output;
 use crate::paths::{validate_key, write_atomic};
@@ -296,16 +295,7 @@ fn left_behind(ctx: &Context, root: &Path, imported: &dyn Fn(&str) -> bool) -> V
     let bin = name::bin();
     let mut notes = Vec::new();
     if let Some((remote, url)) = legacy_origin(&ctx.paths.config_home.join("dotman/config")) {
-        let shown_url = redact_credentials(&url);
-        // A command holding the redacted URL would set a broken remote when pasted.
-        let set = if shown_url == url {
-            format!(
-                "`{bin} init --remote {}` sets it here",
-                shell_words::quote(&url)
-            )
-        } else {
-            format!("`{bin} init --remote <url>` sets it here, given the URL with its credentials")
-        };
+        let (shown_url, set) = origin_hint(&url);
         notes.push(format!(
             "the old dotman config names the remote `{remote}` at {shown_url}; {set}"
         ));

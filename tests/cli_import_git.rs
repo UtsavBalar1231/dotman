@@ -4,8 +4,8 @@
 mod common;
 
 use common::{
-    File, Source, TestEnv, accounting, bare, git_in, tree_checksum, work_tree, yadm_fixture,
-    yadm_repo,
+    File, ODD_ORIGINS, Source, TestEnv, accounting, bare, check_origin_hint, git_in, tree_checksum,
+    work_tree, yadm_fixture, yadm_repo,
 };
 use dotman::config::Config;
 use std::fs;
@@ -580,6 +580,19 @@ fn a_local_path_import_has_no_origin_and_reports_the_sources_own() {
     assert!(err.contains("dotman init --remote"), "{err}");
     let remotes = git_in(&env, &env.repo(), &["remote"]);
     assert_eq!(remotes.trim(), "");
+}
+
+#[test]
+fn the_hint_for_the_sources_own_origin_runs_as_printed_whatever_the_url_holds() {
+    for origin in ODD_ORIGINS {
+        let env = TestEnv::new();
+        let work = work_tree(&env, "o", &[(".vimrc", "v\n", false)], None);
+        let source = bare(&env, &work, &env.root().join("src.git"), None);
+        git_in(&env, &source, &["config", "remote.origin.url", origin]);
+        source.seal();
+        let err = env.ok(&["import", &source.to_string_lossy(), "--no-bootstrap"]);
+        check_origin_hint(&env, &err, origin);
+    }
 }
 
 #[test]

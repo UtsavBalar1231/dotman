@@ -4,7 +4,10 @@
 
 mod common;
 
-use common::{Entry, GITCONFIG, TestEnv, accounting, mode_of, stow, tree_checksum};
+use common::{
+    Entry, GITCONFIG, ODD_ORIGINS, TestEnv, accounting, check_origin_hint, mode_of, stow,
+    tree_checksum,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -661,6 +664,20 @@ fn a_farm_that_is_a_git_checkout_is_still_a_farm() {
     );
     assert_eq!(farm_sum(&env, "dotfiles"), sum);
     assert!(!repo_has(&env, "zsh/.zshrc"));
+}
+
+#[test]
+fn the_hint_for_the_farms_origin_runs_as_printed_whatever_the_url_holds() {
+    for origin in ODD_ORIGINS {
+        let env = TestEnv::new();
+        stow(&env);
+        let farm = farm_dir(&env, "dotfiles").to_string_lossy().into_owned();
+        env.git(&["-C", &farm, "init", "-q"]);
+        env.git(&["-C", &farm, "remote", "add", "origin", origin]);
+        let (out, err) = run_import(&env, &[&farm, "--no-bootstrap"]);
+        assert_eq!(out.status.code(), Some(0), "{err}");
+        check_origin_hint(&env, &err, origin);
+    }
 }
 
 #[test]

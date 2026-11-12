@@ -14,7 +14,7 @@ use super::farm;
 use super::yadm::{self, Alternate, Machine};
 use super::{
     EditedConfig, Item, Report, Source, author_email, count, find_legacy, held, homes, legacy,
-    proceed, require_clean, require_fresh,
+    origin_hint, proceed, require_clean, require_fresh,
 };
 use crate::bootstrap;
 use crate::cli::ImportArgs;
@@ -1494,11 +1494,8 @@ fn remote_notes(
             let advice = source_origin.map_or_else(
                 || format!("add one with `{} init --remote <url>`", name::bin()),
                 |url| {
-                    let url = redact_credentials(url);
-                    format!(
-                        "the source's own origin is {url}; `{} init --remote {url}` sets it here",
-                        name::bin()
-                    )
+                    let (shown, set) = origin_hint(url);
+                    format!("the source's own origin is {shown}; {set}")
                 },
             );
             notes.push(format!(

@@ -15,7 +15,9 @@
 //! each other (`managed --include=templates` omits a `symlink_*.tmpl`).
 
 use super::gittree::{Staging, check_target, install_keeping_origin, shown};
-use super::{EditedConfig, Item, Report, author_email, count, held, proceed, require_fresh};
+use super::{
+    EditedConfig, Item, Report, author_email, count, held, origin_hint, proceed, require_fresh,
+};
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
 use crate::commands::add::{MATCH, ensure_worktree_parents, record_mode};
@@ -1248,15 +1250,14 @@ fn notes(
     let origin = Git::new(source, "import")
         .remote_url("origin")
         .ok()
-        .flatten()
-        .map(|url| crate::git::redact_credentials(&url));
+        .flatten();
     notes.push(format!(
         "imported from {}; chezmoi's git history is not imported{}",
         source.display(),
-        origin.map_or_else(String::new, |url| format!(
-            ", and the source's own origin is {url} (`{bin} init --remote {url}` sets it here)",
-            bin = name::bin()
-        ))
+        origin.map_or_else(String::new, |url| {
+            let (shown, set) = origin_hint(&url);
+            format!(", and the source's own origin is {shown} ({set})")
+        })
     ));
     notes.push(format!(
         "the new repo has no remote, as a local path is no use as one; add one with `{} init --remote <url>`",
