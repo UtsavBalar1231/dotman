@@ -440,6 +440,8 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "hooks_never_run_without_approval",
             "a_template_cannot_run_a_command",
             "row_9_changed_locally_is_reported_and_never_overwritten",
+            "an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it",
+            "an_upstream_entry_above_an_approved_one_captures_only_under_the_approved_one",
         ],
     ),
     (

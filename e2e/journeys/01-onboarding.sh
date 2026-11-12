@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Onboarding: init and add on machine A, init <url> on B, edits on both converge.
+# Onboarding: init and add on machine A, init <url> on B, B approves the [dirs] entry, edits converge.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -27,7 +27,12 @@ e2e_write a .bashrc $'export EDITOR=nvim\n'
 e2e_write b .config/app/app.conf $'theme=light\n'
 e2e_write b .config/app/themes/new.conf $'bg=grey\n'
 e2e_dm_rc 0 a sync
-e2e_dm_rc 0 b sync
+# A's `add` put .config/app in [dirs], which B never approved: its new file waits for B to.
+e2e_dm_rc 3 b sync
+e2e_err_has 'lists .config/app, which this machine has not approved'
+e2e_remote_lacks .config/app/themes/new.conf
+e2e_run_printed b "$(e2e_printed '^dotman sync --approve-dirs$')"
+e2e_remote_tracks .config/app/themes/new.conf
 e2e_dm_rc 0 a sync
 
 for m in a b; do

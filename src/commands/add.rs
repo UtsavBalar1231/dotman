@@ -6,7 +6,7 @@ use crate::cli::AddArgs;
 use crate::commands::Outcome;
 use crate::commands::apply::{Classified, classify_key};
 use crate::config::{Allow, Config};
-use crate::context::{Context, TEMP_PREFIX, is_real_dir};
+use crate::context::{Context, TEMP_PREFIX, is_real_dir, is_under};
 use crate::engine::status::{Variants, Worktree};
 use crate::engine::{
     Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
@@ -253,7 +253,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     }
 
     let (items, announced) = plan.items();
-    adopt_dirs(&ctx, &mut repo_config, &plan.dirs)?;
+    adopt_dirs(&ctx, &mut repo_config, &mut state, &plan.dirs)?;
     content.record(&mut ctx.machine, &ctx.paths.config_file, &items, false)?;
     let (added, failed) =
         targets.commit_all(&ctx, &mut repo_config, &mut state, &items, &announced)?;
@@ -318,11 +318,17 @@ fn drop_unchanged(
     settled
 }
 
-/// Lists each directory in `[dirs]`, and records the modes of the directories above the files it
-/// already manages unchanged, which no capture records: adding it again is how a tightened
-/// directory mode reaches the repo.
-fn adopt_dirs(ctx: &Context, repo_config: &mut RepoConfig, dirs: &[DirPlan]) -> Result<()> {
+/// Lists each directory in `[dirs]` and approves it on this machine, whose user named it, and
+/// records the modes of the directories above the files it already manages unchanged, which no
+/// capture records: adding it again is how a tightened directory mode reaches the repo.
+fn adopt_dirs(
+    ctx: &Context,
+    repo_config: &mut RepoConfig,
+    state: &mut State,
+    dirs: &[DirPlan],
+) -> Result<()> {
     let mut modes = BTreeMap::new();
+    state.approve_dirs(dirs.iter().map(|dir| &dir.key));
     for dir in dirs {
         if !repo_config.dirs.paths.contains(&dir.key) {
             repo_config.dirs.paths.push(dir.key.clone());
@@ -1026,6 +1032,8 @@ pub(crate) enum Hold {
     Special,
     Unreadable,
     Collision,
+    /// Under no `[dirs]` entry this machine approved.
+    Unapproved,
 }
 
 impl Hold {
@@ -1041,6 +1049,7 @@ impl Hold {
             Self::Collision => {
                 "differs only in case or Unicode normalization from another path".to_owned()
             }
+            Self::Unapproved => "under a [dirs] entry not approved on this machine".to_owned(),
         }
     }
 
@@ -1061,6 +1070,10 @@ impl Hold {
             Self::Content(found) => format!("{found}{}", found.remedy(Some(path))),
             Self::Unreadable => format!("{}; fix its permissions to add it", self.reason()),
             Self::Collision => format!("{}; rename one of them", self.reason()),
+            Self::Unapproved => format!(
+                "{}; `{bin} sync --approve-dirs` approves the entry and captures it",
+                self.reason()
+            ),
             Self::Special => self.reason(),
         }
     }
@@ -1073,14 +1086,39 @@ pub(crate) struct Scan {
     pub held: BTreeMap<String, Hold>,
     /// Dangling links and names that cannot be keys: reported, never captured.
     pub notes: Vec<String>,
+    /// The files in `held` as [`Hold::Unapproved`], which approving their entries would capture.
+    pub waiting: BTreeMap<String, Kind>,
+    /// The `[dirs]` entries this machine has not approved, in `.dotman.toml` order.
+    pub unapproved: Vec<String>,
 }
 
-/// The `[guard] secret_names` patterns, compiled.
+impl Scan {
+    /// Each unapproved entry with how many of the waiting files lie under it.
+    pub(crate) fn unapproved_counts(&self) -> Vec<(&str, usize)> {
+        self.unapproved
+            .iter()
+            .map(|dir| {
+                let n = self.waiting.keys().filter(|key| is_under(key, dir)).count();
+                (dir.as_str(), n)
+            })
+            .collect()
+    }
+
+    pub(crate) fn release_waiting(&mut self) {
+        for (key, kind) in std::mem::take(&mut self.waiting) {
+            self.held.remove(&key);
+            self.new.insert(key, kind);
+        }
+        self.unapproved.clear();
+    }
+}
+
+/// The default secret-name patterns and the ones `[guard] secret_names` adds, compiled.
 pub(crate) fn secret_patterns(repo_config: &RepoConfig) -> Result<Vec<Pattern>> {
     repo_config
         .guard
-        .secret_names
-        .iter()
+        .effective_secret_names()
+        .into_iter()
         .map(|text| {
             Pattern::new(text)
                 .with_context(|| format!("bad [guard] pattern `{text}` in .dotman.toml"))
@@ -1110,10 +1148,14 @@ pub(crate) fn hold_by_content(bytes: &[u8], key: &str, allow: &[Allow]) -> Optio
 }
 
 /// Walks every `[dirs]` entry with `add <dir>`'s walker. `known` is every key that has an R or an S.
+/// A new file that no entry in `approved` covers is held as [`Hold::Unapproved`] when it would be
+/// captured otherwise, and left out when it would be held anyway: this machine has not agreed to
+/// manage what lies there.
 pub(crate) fn scan_dirs(
     ctx: &Context,
     repo_config: &RepoConfig,
     known: &BTreeSet<String>,
+    approved: &BTreeSet<String>,
 ) -> Result<Scan> {
     let secrets = secret_patterns(repo_config)?;
     let planner = Planner {
@@ -1125,7 +1167,12 @@ pub(crate) fn scan_dirs(
     let mut found: BTreeMap<String, Leaf> = BTreeMap::new();
     let mut dangling = BTreeSet::new();
     let mut scan = Scan::default();
+    let mut covered: Vec<&str> = Vec::new();
     for dir in &repo_config.dirs.paths {
+        let ok = approved.contains(dir);
+        if !ok && !scan.unapproved.contains(dir) {
+            scan.unapproved.push(dir.clone());
+        }
         // The entry comes from a tracked file, so it is checked like a user-supplied path.
         let plain = validate_key(dir).is_ok()
             && parents(dir)
@@ -1136,10 +1183,14 @@ pub(crate) fn scan_dirs(
         }
         let walked = planner.walk(dir);
         found.extend(walked.items);
-        dangling.extend(walked.dangling);
-        scan.held.extend(walked.held);
-        scan.notes.extend(walked.notes);
+        if ok {
+            covered.push(dir);
+            dangling.extend(walked.dangling);
+            scan.held.extend(walked.held);
+            scan.notes.extend(walked.notes);
+        }
     }
+    let is_covered = |key: &str| covered.iter().any(|dir| is_under(key, dir));
     found.retain(|key, _| !known.contains(key));
     dangling.retain(|key| !known.contains(key));
     scan.held.retain(|key, _| !known.contains(key));
@@ -1153,7 +1204,7 @@ pub(crate) fn scan_dirs(
             .chain(found.keys().map(String::as_str)),
     );
     for key in colliding.iter().flat_map(|(a, b)| [a, b]) {
-        if found.remove(key).is_some() {
+        if found.remove(key).is_some() && is_covered(key) {
             scan.held.insert(key.clone(), Hold::Collision);
         }
     }
@@ -1181,13 +1232,18 @@ pub(crate) fn scan_dirs(
                         .then_some(Hold::SecretName)
                 }),
         };
-        match hold {
-            Some(hold) => {
+        match (hold, is_covered(&key)) {
+            (Some(hold), true) => {
                 scan.held.insert(key, hold);
             }
-            None => {
+            (None, true) => {
                 scan.new.insert(key, leaf.kind());
             }
+            (None, false) => {
+                scan.waiting.insert(key.clone(), leaf.kind());
+                scan.held.insert(key, Hold::Unapproved);
+            }
+            (Some(_), false) => {}
         }
     }
     Ok(scan)

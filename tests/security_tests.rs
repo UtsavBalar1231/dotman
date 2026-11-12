@@ -3590,3 +3590,216 @@ fn the_printed_pull_reaches_a_branch_other_than_main() {
     let merged = fs::read_to_string(b.repo().join(".a")).unwrap();
     assert!(merged.contains("<<<<<<<"), "{merged}");
 }
+
+// Upstream .dotman.toml
+
+/// `a` with `.bashrc` synced to the remote, and `b` cloned from it with this version.
+fn two_machines() -> (TestEnv, TestEnv) {
+    let a = TestEnv::new();
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".bashrc", b"alias ll=ls\n", 0o644);
+    a.ok(&["add", ".bashrc"]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url()]);
+    (a, b)
+}
+
+/// Pushes from `env` a `.dotman.toml` that `edit` changed, as anyone who can push can.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn push_config(env: &TestEnv, edit: impl FnOnce(&mut dotman::repo_config::RepoConfig)) {
+    env.ok(&["sync"]);
+    let mut config = env.repo_config();
+    edit(&mut config);
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+    env.ok(&["sync"]);
+}
+
+fn held(env: &TestEnv) -> Vec<String> {
+    env.porcelain("status")
+        .into_iter()
+        .filter(|(token, _)| token == "held")
+        .map(|(_, key)| key)
+        .collect()
+}
+
+/// `[dirs]` entries pushed from another machine capture nothing here until this machine approves
+/// them: a non-interactive sync holds their new files and exits 3, status and doctor name them,
+/// `add <dir>` approves the directory it names, and the printed `sync --approve-dirs` approves the
+/// rest. A clone made by this version approves nothing, and `forget <dir>` drops an approval.
+#[test]
+fn an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it() {
+    let (a, b) = two_machines();
+    let state_file = b.state_dir().join("state.toml");
+    let state = fs::read_to_string(&state_file).unwrap();
+    assert!(state.contains("capture_dirs = []"), "{state}");
+    b.write(".kube/config", b"apiVersion: v1\n", 0o600);
+    b.write(".docker/config.json", b"{}\n", 0o600);
+    push_config(&a, |config| {
+        config.dirs.paths = vec![".kube".to_owned(), ".docker".to_owned()];
+    });
+
+    b.ok(&["sync"]);
+    let err = exits(&b.run(&["sync"]), 3);
+    assert!(
+        err.contains(
+            "[dirs] in .dotman.toml lists .kube, .docker, which this machine has not approved, so 2 new files under them are held; `dotman sync --approve-dirs` approves them here and captures them"
+        ),
+        "{err}"
+    );
+    assert!(!remote_tree(&a).contains(".kube"));
+    assert!(!remote_tree(&a).contains(".docker"));
+    assert_eq!(held(&b), [".docker/config.json", ".kube/config"]);
+    let doctor = text(&b.run(&["doctor"]));
+    assert!(
+        doctor.contains(
+            "dirs: .kube, .docker not approved on this machine, so sync captures no new file under them"
+        ),
+        "{doctor}"
+    );
+
+    exits(&b.run(&["add", ".docker"]), 0);
+    let err = exits(&b.run(&["sync"]), 3);
+    assert!(remote_tree(&a).contains(".docker/config.json"));
+    assert!(!remote_tree(&a).contains(".kube"));
+    assert_eq!(held(&b), [".kube/config"]);
+
+    exits(&common::run_hint(&b, &err, "sync --approve-dirs"), 0);
+    assert!(remote_tree(&a).contains(".kube/config"));
+    assert_eq!(held(&b), Vec::<String>::new());
+    let doctor = text(&b.run(&["doctor"]));
+    assert!(doctor.contains("[dirs] entries approved"), "{doctor}");
+
+    b.ok(&["forget", ".kube"]);
+    let state = fs::read_to_string(&state_file).unwrap();
+    assert!(state.contains("capture_dirs = [\".docker\"]"), "{state}");
+}
+
+/// An interactive sync asks once, naming each unapproved entry and how many files it would
+/// capture; a no captures nothing and a yes captures them. `--approve-dirs` answers the question,
+/// which is then not asked.
+#[test]
+fn sync_asks_once_before_capturing_under_an_unapproved_entry() {
+    let (a, b) = two_machines();
+    b.write(".kube/config", b"apiVersion: v1\n", 0o600);
+    push_config(&a, |config| config.dirs.paths = vec![".kube".to_owned()]);
+    b.ok(&["sync"]);
+    let question = "capture new files under these entries on this machine from now on? [y/N]";
+
+    let Some(screen) = common::in_a_terminal(&b, &[], &["sync"], b"n\n") else {
+        eprintln!("skipped: no script(1) to give dotman a terminal");
+        return;
+    };
+    assert!(screen.contains("  .kube (1 new file)"), "{screen}");
+    assert_eq!(screen.matches(question).count(), 1, "{screen}");
+    assert!(!remote_tree(&a).contains(".kube"));
+    let screen = common::in_a_terminal(&b, &[], &["sync"], b"y\n").unwrap_or_default();
+    assert_eq!(screen.matches(question).count(), 1, "{screen}");
+    assert!(remote_tree(&a).contains(".kube/config"));
+
+    b.write(".docker/config.json", b"{}\n", 0o600);
+    push_config(&a, |config| config.dirs.paths.push(".docker".to_owned()));
+    b.ok(&["sync"]);
+    let screen =
+        common::in_a_terminal(&b, &[], &["sync", "--approve-dirs"], b"").unwrap_or_default();
+    assert!(!screen.contains(question), "{screen}");
+    assert!(
+        screen.contains("approving these [dirs] entries on this machine"),
+        "{screen}"
+    );
+    assert!(screen.contains("  .docker (1 new file)"), "{screen}");
+    assert!(remote_tree(&a).contains(".docker/config.json"));
+}
+
+/// A state from before approval approves the entries `.dotman.toml` lists when it is first read,
+/// under which that machine has been capturing, and records them; an entry the same sync then
+/// pulls is not approved.
+#[test]
+fn an_older_state_keeps_its_dirs_and_never_approves_one_it_pulls() {
+    let (a, b) = two_machines();
+    a.write(".config/app/a.conf", b"a\n", 0o644);
+    a.ok(&["add", ".config/app"]);
+    a.ok(&["sync"]);
+    let state_file = a.state_dir().join("state.toml");
+    let text = fs::read_to_string(&state_file).unwrap();
+    let old = text
+        .lines()
+        .filter(|line| !line.starts_with("capture_dirs"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(old, text);
+    fs::write(&state_file, old).unwrap();
+    push_config(&b, |config| config.dirs.paths.push(".kube".to_owned()));
+
+    a.write(".config/app/new.conf", b"n\n", 0o644);
+    a.write(".kube/config", b"apiVersion: v1\n", 0o600);
+    a.ok(&["sync"]);
+    assert!(remote_tree(&a).contains(".config/app/new.conf"));
+    let state = fs::read_to_string(&state_file).unwrap();
+    assert!(
+        state.contains("capture_dirs = [\".config/app\"]"),
+        "{state}"
+    );
+    let err = exits(&a.run(&["sync"]), 3);
+    assert!(err.contains("lists .kube, which this machine"), "{err}");
+    assert!(!remote_tree(&a).contains(".kube"));
+}
+
+/// An entry pushed above one this machine approved widens nothing: new files under the approved
+/// directory are captured, and the rest of the new entry waits.
+#[test]
+fn an_upstream_entry_above_an_approved_one_captures_only_under_the_approved_one() {
+    let (a, b) = two_machines();
+    b.write(".config/nvim/init.lua", b"x\n", 0o644);
+    b.ok(&["add", ".config/nvim"]);
+    b.ok(&["sync"]);
+    push_config(&a, |config| config.dirs.paths.push(".config".to_owned()));
+    b.ok(&["sync"]);
+
+    b.write(".config/nvim/opts.lua", b"o\n", 0o644);
+    b.write(".config/gh/config.yml", b"git_protocol: ssh\n", 0o644);
+    exits(&b.run(&["sync"]), 3);
+    let tree = remote_tree(&a);
+    assert!(tree.contains(".config/nvim/opts.lua"), "{tree}");
+    assert!(!tree.contains(".config/gh"), "{tree}");
+    assert_eq!(held(&b), [".config/gh/config.yml"]);
+}
+
+/// `[guard] secret_names` from upstream adds patterns and never removes a default: emptied, a
+/// token-named file under an approved directory is still held, and the pattern it adds holds too.
+#[test]
+fn an_upstream_secret_names_edit_never_drops_a_default() {
+    let (a, b) = two_machines();
+    b.write(".config/app/app.conf", b"x\n", 0o644);
+    b.ok(&["add", ".config/app"]);
+    b.ok(&["sync"]);
+    push_config(&a, |config| {
+        config.guard.secret_names = vec!["**/*.private".to_owned()];
+    });
+    b.ok(&["sync"]);
+    assert_eq!(b.repo_config().guard.secret_names, ["**/*.private"]);
+
+    b.write(".config/app/github_token", b"plain-value\n", 0o600);
+    b.write(".config/app/host.private", b"x\n", 0o600);
+    b.write(".config/app/ok.conf", b"ok\n", 0o644);
+    exits(&b.run(&["sync"]), 3);
+    let tree = remote_tree(&a);
+    assert!(tree.contains(".config/app/ok.conf"), "{tree}");
+    assert!(!tree.contains("github_token"), "{tree}");
+    assert!(!tree.contains("host.private"), "{tree}");
+    assert_eq!(
+        held(&b),
+        [".config/app/github_token", ".config/app/host.private"]
+    );
+}

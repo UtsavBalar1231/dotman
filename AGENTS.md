@@ -14,7 +14,7 @@ src/context.rs          per-run paths, configs and git handle; the in-progress g
 src/paths.rs            dotman's own file locations, key validation, write_atomic
 src/config.rs           the machine config, with the per-machine [guard] allow
 src/repo_config.rs      .dotman.toml and its defaults
-src/state.rs            state.toml, including the hook approval and held-back hooks
+src/state.rs            state.toml, including the hook and [dirs] approvals and held-back hooks
 src/identity.rs         the machine identity that variants match
 src/remote.rs           whether the remote is public
 src/lock.rs             the per-user process lock

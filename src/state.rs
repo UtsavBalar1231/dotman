@@ -28,6 +28,10 @@ pub struct State {
     /// Unix seconds of the last visibility check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_checked_at: Option<u64>,
+    /// The `[dirs]` entries under which this machine captures new files. `None` in a state written
+    /// before approval existed, until loading through the context approves the current entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_dirs: Option<BTreeSet<String>>,
     /// Machine identity recorded on the first run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentitySnapshot>,
@@ -118,6 +122,7 @@ impl Default for State {
             remote_public: None,
             remote_url: None,
             remote_checked_at: None,
+            capture_dirs: None,
             identity: None,
             hooks: Hooks::default(),
             files: BTreeMap::new(),
@@ -133,9 +138,9 @@ impl State {
     /// is never treated as empty. A file written for another repo keeps only its identity snapshot, so
     /// every entry counts as absent.
     pub(crate) fn load(path: &Path, repo_id: &str) -> Result<Self> {
-        Ok(Self::for_repo(
-            Self::read(path)?.unwrap_or_default(),
-            repo_id,
+        Ok(Self::read(path)?.map_or_else(
+            || Self::fresh(repo_id),
+            |state| Self::for_repo(state, repo_id),
         ))
     }
 
@@ -188,10 +193,35 @@ impl State {
             return state;
         }
         Self {
-            repo_id: repo_id.to_owned(),
             identity: state.identity,
+            ..Self::fresh(repo_id)
+        }
+    }
+
+    /// A state no dotman has written for this repo yet, which approves no `[dirs]` entry.
+    fn fresh(repo_id: &str) -> Self {
+        Self {
+            repo_id: repo_id.to_owned(),
+            capture_dirs: Some(BTreeSet::new()),
             ..Self::default()
         }
+    }
+
+    /// Approves every entry of `dirs` when the state predates approval: that machine has been
+    /// capturing new files under them already. A state that records approvals is left alone.
+    pub(crate) fn grandfather_dirs(&mut self, dirs: &[String]) {
+        self.capture_dirs
+            .get_or_insert_with(|| dirs.iter().cloned().collect());
+    }
+
+    pub(crate) fn approve_dirs<'a>(&mut self, dirs: impl IntoIterator<Item = &'a String>) {
+        self.capture_dirs
+            .get_or_insert_with(BTreeSet::new)
+            .extend(dirs.into_iter().cloned());
+    }
+
+    pub(crate) fn dirs_approved(&self) -> BTreeSet<String> {
+        self.capture_dirs.clone().unwrap_or_default()
     }
 
     /// Writes the state atomically with mode 0600, creating its directory at 0700. A dry run writes nothing.
@@ -300,6 +330,32 @@ mod tests {
         assert_eq!(loaded.repo_id, ID_B);
         assert_eq!(loaded.hooks.approved, None);
         assert_eq!(loaded.remote_url, None);
+    }
+
+    #[test]
+    fn only_a_state_that_predates_dir_approval_lacks_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("state.toml");
+        let fresh = State::load(&path, ID_A).unwrap();
+        assert_eq!(fresh.capture_dirs, Some(BTreeSet::new()));
+
+        fs::write(&path, format!("version = 1\nrepo_id = \"{ID_A}\"\n")).unwrap();
+        let mut old = State::load(&path, ID_A).unwrap();
+        assert_eq!(old.capture_dirs, None);
+        let other = State::load(&path, ID_B).unwrap();
+        assert_eq!(other.capture_dirs, Some(BTreeSet::new()));
+
+        old.grandfather_dirs(&[".config/nvim".to_owned()]);
+        old.grandfather_dirs(&[".kube".to_owned()]);
+        old.save(&path, false).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("capture_dirs = [\".config/nvim\"]"), "{text}");
+        fresh.save(&path, false).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("capture_dirs = []"), "{text}");
+        let mut reloaded = State::load(&path, ID_A).unwrap();
+        reloaded.grandfather_dirs(&[".kube".to_owned()]);
+        assert_eq!(reloaded.dirs_approved(), BTreeSet::new());
     }
 
     #[test]

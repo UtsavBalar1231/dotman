@@ -137,6 +137,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand sync" -l forget-deleted -d
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l restore-deleted -d 'Write files deleted locally back from the repo'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l accept-identity -d 'Accept a changed machine identity and use the variants it selects'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l approve-hooks -d 'Approve the current `[hooks]` table on this machine, printing it first, and run its hooks. When the table changed since a warning here showed it, show the new table and approve nothing; the same command again approves it'
+complete -c dotman -n "__fish_dotman_using_subcommand sync" -l approve-dirs -d 'Approve on this machine, printing them first, the `[dirs]` entries it has not approved, and capture the new files under them. An entry that `.dotman.toml` gained from elsewhere captures nothing here until approved; `add <dir>` approves the directory it adds'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l no-hooks -d 'Run no hooks'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l dry-run -d 'Show what would be captured, committed, pulled, applied and pushed; change nothing'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l system -d 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call'

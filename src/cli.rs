@@ -374,6 +374,9 @@ pub struct SyncArgs {
     /// Answers that replace the prompts, which a non-interactive run never shows.
     #[command(flatten)]
     pub decisions: Decisions,
+    /// Approve on this machine, printing them first, the `[dirs]` entries it has not approved, and capture the new files under them. An entry that `.dotman.toml` gained from elsewhere captures nothing here until approved; `add <dir>` approves the directory it adds
+    #[arg(long, help_heading = "Decisions")]
+    pub approve_dirs: bool,
     /// Run no hooks
     #[arg(long, conflicts_with = "approve_hooks")]
     pub no_hooks: bool,

@@ -42,6 +42,8 @@ dotman init <url>
 
 From then on, edit files where they are and run `dotman sync`. It captures local edits, commits, pulls, applies what arrived and pushes. `dotman status` shows what differs, and `dotman diff` shows how.
 
+A directory you add, such as `~/.config/nvim`, goes into `[dirs]` in `.dotman.toml`, and `sync` captures the new files that appear under it. Each machine approves a `[dirs]` entry before its own new files under it are captured: `add <dir>` approves the directory it adds, and on the second machine the first `sync` with new files under an entry from elsewhere asks, or with `--approve-dirs` approves without asking. Until then those files are held, and the run exits 3. The managed files under the entry apply and sync as usual meanwhile. The approval lives in this machine's `state.toml`, per entry; `forget <dir>` drops it, so an entry forgotten here and listed again later is asked about again. A state written by an older dotman approves the entries `.dotman.toml` lists when it is first read, because that machine was capturing under them already.
+
 ## Commands
 
 | Command | Purpose |
@@ -162,7 +164,7 @@ Back the identity up now: keep it in a password manager and one offline copy. Wi
 Two guards keep secrets out of the repo, whatever the remote.
 
 - **The content guard** looks for 20 kinds of credential that start with a fixed provider prefix: GitHub tokens of both kinds, GitLab, Slack tokens and webhooks, AWS access key IDs, Stripe live keys, OpenAI, Anthropic, npm, PyPI, DigitalOcean, SendGrid, Hugging Face, PEM private keys, OpenRouter, Groq, xAI, Perplexity and Docker. It also looks for an age identity: `AGE-SECRET-KEY-1` and 58 more characters, so the bare prefix in a script is not held. A finding names the rule and the line, never the value. It also scans each path's name and each symlink's target, which no flag and no `[guard] allow` entry lets through, since neither can be encrypted. A file with a NUL byte in its first 8000 bytes counts as binary and is not scanned.
-- **The name guard** holds new files whose names match `[guard] secret_names` in `.dotman.toml`. The defaults are `.netrc`, `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `*.kdbx`, `*.gpg`, `credentials*`, `*token*`, `*secret*`, `gh/hosts.yml`, `*.ppk` and `rclone.conf`, at any depth.
+- **The name guard** holds new files whose names match its patterns: `.netrc`, `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `*.kdbx`, `*.gpg`, `credentials*`, `*token*`, `*secret*`, `gh/hosts.yml`, `*.ppk` and `rclone.conf`, at any depth, plus those in `[guard] secret_names` in `.dotman.toml`. The file can add patterns but not remove these, so an edit pushed from another machine cannot let a `*token*` file through.
 
 The content guard runs on every plain capture: `add`, new files under a managed directory, `sync` of a local edit, `import`, and the commit `sync` makes, which also covers `dotman edit` and edits made by hand in the repo.
 
@@ -198,6 +200,7 @@ Every prompt has a flag, so unattended runs never guess. A run is non-interactiv
 | Local deletions, including a file deleted here and changed upstream | `--forget-deleted` or `--restore-deleted` |
 | Machine identity changed | `--accept-identity` |
 | Hook approval | `--approve-hooks` |
+| `sync` capturing under `[dirs]` entries this machine has not approved | `--approve-dirs` |
 | A `sync` commit that deletes most tracked files | `--allow-mass-delete` |
 | Overlay: add missing files | `--include-missing` |
 | System apply, import, symlink swap, directory preview | `--yes` |

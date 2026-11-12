@@ -20,6 +20,7 @@ A hostile repo, import source or system-write plan must never cause:
 - a write through a symlink;
 - a setuid, setgid or sticky bit;
 - a hook run without approval on that machine;
+- a capture of new files under a `[dirs]` entry that machine has not approved;
 - a template command execution;
 - the silent loss of a file.
 
@@ -60,6 +61,15 @@ It then walks each target from `/` with `openat(O_NOFOLLOW | O_DIRECTORY)`, crea
 - dotman keeps ciphertext in git history. Removing an old recipient does not revoke access to what they could already read.
 - Recipients added upstream are trusted. When `[age] recipients` in `.dotman.toml` changes, the next `sync` on a machine whose key decrypts every encrypted file re-encrypts them all to the new set without asking. Whoever can push to the repo can add a recipient and read every encrypted file after that sync. Check what changed with `dotman git log -p -- .dotman.toml`.
 
+## What `.dotman.toml` from another machine can change
+
+`.dotman.toml` is tracked, so whoever can push to the repo changes it on each machine that syncs. What it decides there:
+
+- `[dirs]`: an entry captures new files on a machine only once that machine has approved it, by `add <dir>`, by the import that wrote it, at the question `sync` asks, or with `sync --approve-dirs`. The approvals are kept per entry in `state.toml`, which is not synced. Until then `sync` holds the new files under the entry and exits 3, and `status` and `doctor` name it. An entry pushed above an approved one, such as `.config` above `.config/nvim`, captures only what the approved one covers. The managed files under an entry apply and sync without approval, like any other managed file. A state written by an older dotman approves the entries that `.dotman.toml` lists when this version first reads it, before any pull, since that machine has been capturing under them; a clone made by this version approves none.
+- `[guard] secret_names`: the repo's patterns add to dotman's own and cannot remove one, so emptying the list does not let a `*token*` file through.
+- `[guard] allow` is ignored, and `[hooks]` and `[age] recipients` are covered above.
+- Not gated: `[ignore]` patterns, the ones `forget` writes included, so dropping one turns a file under an approved entry into a new file that the next `sync` captures; `[modes]`; and the managed files themselves, which apply as files from any repo do.
+
 ## Backups hold plaintext
 
 Before a write replaces a file in `$HOME`, the file is copied to `$XDG_STATE_HOME/dotman/backups/`, as a 0600 file inside 0700 directories. For an encrypted file, that copy is the decrypted file from `$HOME`. `restore` backs up the same way, `key import --force` backs up the identity it replaces, and `key init` backs up an identity file it cannot use before it writes a new one. Backups are never pruned; `dotman doctor` counts the copies that hold plaintext. Remove the runs you no longer need.
@@ -72,7 +82,7 @@ The content guard scans what a plain capture would store: `add`, new files under
 - A finding names the rule and the line, never the value. A finding in a name is reported with its path, which shows the value.
 - The guard holds a credential in the name or link target of every file dotman writes to the repo or commits, system files aside (below): no `[guard] allow` entry covers it, encryption cannot hide a name, and `--encrypt` takes no symlink. The hold says to rename the file or point the link elsewhere, for a file dotman manages to `forget` it, and for an `add --for` value to give another. A git-tree import also checks the name of every path in any commit of the history it takes, and a finding there makes the import one commit of the current tree. Only `import --keep-history`, which you ask for, keeps a history that held one, and the repo and its remotes then have it.
 - An age identity is never stored in plain text: no flag and no `[guard] allow` entry lets one through. In a system file, `add --system` refuses any finding and `sync` holds it, since system scope does not encrypt and no allow entry applies there.
-- The name guard holds new files under a managed directory whose names match `[guard] secret_names`. With a remote known to be public, one that answers an anonymous `git ls-remote`, `add` also refuses a secret-named file you name, unless you pass `--encrypt` or `--allow-plain`.
+- The name guard holds new files under a managed directory whose names match its default patterns or one that `[guard] secret_names` adds. With a remote known to be public, one that answers an anonymous `git ls-remote`, `add` also refuses a secret-named file you name, unless you pass `--encrypt` or `--allow-plain`.
 
 What they miss:
 

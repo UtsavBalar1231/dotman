@@ -142,6 +142,7 @@ fn collect(online: bool) -> Vec<Check> {
             }
             checks.extend(repo_health(ctx));
             checks.extend(hook_table(ctx));
+            checks.extend(dir_approval(ctx));
             checks.extend(variants(ctx));
             checks.extend(encryption(ctx));
             checks.extend(system_files(ctx));
@@ -374,6 +375,35 @@ fn hook_table(ctx: &Context) -> Option<Check> {
             line: format!("hooks: {e:#}"),
         }),
     }
+}
+
+/// Whether this machine approved every `[dirs]` entry. A warning, as for hooks: an unapproved
+/// entry is a decision that waits, and each sync holds its new files and exits 3, but nothing is
+/// broken.
+fn dir_approval(ctx: &Context) -> Option<Check> {
+    let dirs = ctx.repo_config().ok()?.dirs.paths;
+    if dirs.is_empty() {
+        return None;
+    }
+    let approved = ctx.state(&ctx.repo_id().ok()?).ok()?.dirs_approved();
+    let unapproved: Vec<String> = dirs
+        .iter()
+        .filter(|dir| !approved.contains(*dir))
+        .map(|dir| output::escape_line(dir).into_owned())
+        .collect();
+    let them = match unapproved.as_slice() {
+        [] => return Some(pass("[dirs] entries approved")),
+        [_] => "it",
+        _ => "them",
+    };
+    Some(warn(
+        "dirs",
+        &format!(
+            "{} not approved on this machine, so sync captures no new file under {them}; read [dirs] in .dotman.toml, then run `{} sync --approve-dirs`",
+            unapproved.join(", "),
+            name::bin()
+        ),
+    ))
 }
 
 fn identity(git: &Git) -> Check {

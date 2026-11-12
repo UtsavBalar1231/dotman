@@ -113,6 +113,9 @@ pub(crate) struct Options {
     pub system: bool,
     /// Write them without asking.
     pub yes: bool,
+    /// Approve the `[dirs]` entries this machine has not approved, so the capture takes their new
+    /// files.
+    pub approve_dirs: bool,
 }
 
 pub(crate) struct Applied {
@@ -181,8 +184,8 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
     // Only a whole-repo capture looks for new files; `apply <path>` has no R for them.
-    let scan = if opts.pass == Pass::Capture && inputs.is_empty() {
-        add::scan_dirs(ctx, &repo_config, &keys)?
+    let mut scan = if opts.pass == Pass::Capture && inputs.is_empty() {
+        add::scan_dirs(ctx, &repo_config, &keys, &state.dirs_approved())?
     } else {
         Scan::default()
     };
@@ -240,6 +243,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         run.system(&mut state, &mut repo_config);
     }
     run.write_system(&mut state, &repo_config);
+    run.approve_dirs(&mut scan, &mut state)?;
     run.capture_new(&scan, &mut state, &mut repo_config);
     run.report_kept();
 
@@ -1371,6 +1375,74 @@ impl Run<'_> {
                 output::warning(&format!("{key}: cannot be captured: {e:#}"));
             }
         }
+    }
+
+    /// Settles the `[dirs]` entries this machine has not approved. `--approve-dirs` approves every
+    /// one of them; otherwise, when new files wait under them, an interactive run asks once and a
+    /// yes approves them all. Unapproved, their files stay held.
+    fn approve_dirs(&self, scan: &mut Scan, state: &mut State) -> Result<()> {
+        if scan.unapproved.is_empty() {
+            return Ok(());
+        }
+        let counts = scan.unapproved_counts();
+        let lines: Vec<String> = counts
+            .iter()
+            .map(|(dir, n)| {
+                format!(
+                    "  {} ({})",
+                    output::escape_line(dir),
+                    crate::import::count(*n, "new file")
+                )
+            })
+            .collect();
+        let dry_run = self.opts.dry_run;
+        let approved = if self.opts.approve_dirs {
+            output::context(if dry_run {
+                "would approve these [dirs] entries on this machine, and capture their new files:"
+            } else {
+                "approving these [dirs] entries on this machine; sync captures their new files from now on:"
+            });
+            for line in &lines {
+                output::context(line);
+            }
+            true
+        } else if !scan.waiting.is_empty() && !dry_run && prompt::interactive() {
+            output::context(
+                "[dirs] in .dotman.toml lists entries this machine has not approved, so sync captures no new file under them yet:",
+            );
+            for line in &lines {
+                output::context(line);
+            }
+            prompt::confirm(
+                "capture new files under these entries on this machine from now on? [y/N]",
+            )?
+        } else {
+            false
+        };
+        if approved {
+            state.approve_dirs(&scan.unapproved);
+            scan.release_waiting();
+        } else if !scan.waiting.is_empty() {
+            let entries: Vec<std::borrow::Cow<str>> = counts
+                .iter()
+                .filter(|(_, n)| *n > 0)
+                .map(|(dir, _)| output::escape_line(dir))
+                .collect();
+            output::warning(&format!(
+                "[dirs] in .dotman.toml lists {}, which this machine has not approved, so {} under {it} {} held; `{} sync --approve-dirs` approves {it} here and captures {}",
+                entries.join(", "),
+                crate::import::count(scan.waiting.len(), "new file"),
+                if scan.waiting.len() == 1 { "is" } else { "are" },
+                name::bin(),
+                if scan.waiting.len() == 1 {
+                    "it"
+                } else {
+                    "them"
+                },
+                it = if entries.len() == 1 { "it" } else { "them" },
+            ));
+        }
+        Ok(())
     }
 
     /// Captures the new files and lists the held ones, which keep the run at exit 3.

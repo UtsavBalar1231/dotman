@@ -71,7 +71,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     let sources = ctx.sources()?;
     let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
-    let scan = add::scan_dirs(&ctx, &repo_config, &keys)?;
+    let scan = add::scan_dirs(&ctx, &repo_config, &keys, &state.dirs_approved())?;
     let in_scope = |key: &str| unfiltered || filters.iter().any(|f| is_under(key, f));
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
     let variants = Variants::new(

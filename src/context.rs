@@ -417,8 +417,14 @@ impl Context {
         RepoConfig::load(&self.repo_config_file())
     }
 
+    /// The state, with an older one's `[dirs]` approval settled from `.dotman.toml` as it is now,
+    /// before any pull: every command that saves it records the settled approval.
     pub(crate) fn state(&self, repo_id: &str) -> Result<State> {
-        State::load(&self.paths.state_file(), repo_id)
+        let mut state = State::load(&self.paths.state_file(), repo_id)?;
+        if state.capture_dirs.is_none() {
+            state.grandfather_dirs(&self.repo_config()?.dirs.paths);
+        }
+        Ok(state)
     }
 
     /// Every regular file and symlink in the worktree outside `.git`, the reserved root names and

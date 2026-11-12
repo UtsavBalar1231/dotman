@@ -74,6 +74,10 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
     }
 
     repo_config.dirs.paths.retain(|d| !dirs.contains(d));
+    // Should another machine list the entry again, this one is asked again.
+    if let Some(approved) = state.capture_dirs.as_mut() {
+        approved.retain(|d| !dirs.contains(d));
+    }
     for key in &inputs {
         let is_key = gone.contains(key) || sources.contains(key);
         if !is_key && !dirs.contains(key) && under_dirs(&repo_config, key) {

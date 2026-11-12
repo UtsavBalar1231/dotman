@@ -192,6 +192,25 @@ fn an_explicit_farm_directory_is_imported_and_a_dry_run_changes_nothing() {
     assert!(repo_has(&env, ".config/nvim/init.lua"));
 }
 
+/// The import ran on this machine, so the folded directories it lists in `[dirs]` are approved
+/// here, and a new file under one is captured after the swap.
+#[test]
+fn the_folds_an_import_puts_in_dirs_are_approved_on_this_machine() {
+    let env = TestEnv::new();
+    stow(&env);
+    env.ok(&["import"]);
+    env.ok(&["import", "--swap"]);
+    env.write(".config/nvim/lua/keys.lua", b"return {}\n", 0o644);
+
+    let tokens = env.porcelain("status");
+    assert!(
+        tokens.contains(&("new".to_owned(), ".config/nvim/lua/keys.lua".to_owned())),
+        "{tokens:?}"
+    );
+    env.ok(&["sync"]);
+    assert!(repo_has(&env, ".config/nvim/lua/keys.lua"));
+}
+
 #[test]
 fn swap_turns_every_link_into_a_regular_file_with_the_same_bytes() {
     let env = TestEnv::new();

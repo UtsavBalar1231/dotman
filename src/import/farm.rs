@@ -1018,6 +1018,13 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
     // The subject names no path, which may hold a credential.
     staging.git.commit("import: symlink farm")?;
     install_keeping_origin(ctx, &staging, edited.as_ref())?;
+    // This machine's user asked for the import, so the folds it made `[dirs]` entries are approved
+    // here; another machine still approves them itself.
+    if !config.dirs.paths.is_empty() {
+        let mut state = ctx.state(&ctx.repo_id()?)?;
+        state.approve_dirs(&config.dirs.paths);
+        state.save(&ctx.paths.state_file(), false)?;
+    }
     output::success(&format!("imported {files} into {}", repo.display()));
     let bin = name::bin();
     output::info(&format!(

@@ -100,6 +100,20 @@ pub struct Guard {
     pub allow: Vec<Allow>,
 }
 
+impl Guard {
+    /// dotman's own patterns, then the ones `.dotman.toml` adds: a tracked file can add a pattern
+    /// but never remove a default.
+    pub(crate) fn effective_secret_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = DEFAULT_SECRET_NAMES.to_vec();
+        for name in &self.secret_names {
+            if !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+        names
+    }
+}
+
 impl Default for Guard {
     fn default() -> Self {
         Self {
@@ -302,6 +316,18 @@ mod tests {
             RepoConfig::parse("[guard]\nallow = [{ path = \"x\", rule = \"r\", line = 2 }]\n")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn secret_names_add_to_the_defaults_and_never_remove_one() {
+        let emptied = RepoConfig::parse("[guard]\nsecret_names = []\n").unwrap();
+        assert_eq!(emptied.guard.effective_secret_names(), DEFAULT_SECRET_NAMES);
+        let added =
+            RepoConfig::parse("[guard]\nsecret_names = [\"**/*.private\", \"**/*token*\"]\n")
+                .unwrap();
+        let names = added.guard.effective_secret_names();
+        assert_eq!(names.len(), DEFAULT_SECRET_NAMES.len().saturating_add(1));
+        assert_eq!(names.last(), Some(&"**/*.private"));
     }
 
     #[test]
