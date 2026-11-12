@@ -1494,12 +1494,18 @@ pub fn local_path_remote(url: &str) -> bool {
         .is_none_or(|colon| url.find('/').is_some_and(|slash| slash < colon))
 }
 
+/// git expands a leading `~` or `~user` of a local path itself, against the home of whoever runs
+/// it, so such a path is not relative to where git runs.
 fn relative_path_remote(url: &str) -> bool {
-    usable_remote(url) && local_path_remote(url) && Path::new(url).is_relative()
+    usable_remote(url)
+        && local_path_remote(url)
+        && Path::new(url).is_relative()
+        && !url.starts_with('~')
 }
 
 /// `url` as git reads it when it runs in `dir`: a relative local path made absolute, through the
-/// real directory when the path exists. Anything else comes back as it is.
+/// real directory when the path exists. Anything else, a path starting with `~` among it, comes
+/// back as it is.
 pub fn absolute_remote(url: &str, dir: &Path) -> Result<String> {
     if !relative_path_remote(url) {
         return Ok(url.to_owned());
@@ -2202,7 +2208,7 @@ mod tests {
             bare.remote_target("origin").expect("target").as_deref(),
             Some(utf8(&sb.dir.path().join("remote.git/../gone.git")))
         );
-        for url in ["host:x.git", "--push", "/srv/x.git"] {
+        for url in ["host:x.git", "--push", "/srv/x.git", "~/x.git", "~me/x.git"] {
             assert_eq!(absolute_remote(url, sb.dir.path()).expect("as is"), url);
         }
 

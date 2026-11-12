@@ -219,9 +219,11 @@ fn refuse_another_repo(ctx: &Context, source: &str) -> Result<()> {
 /// Whether `origin`, the URL stored in `repo`, is what a clone of `source` stores. A URL matches
 /// only itself. A local path names a directory: git resolves a relative origin against `repo`,
 /// and `source` was typed in the working directory. They match when the origin is the absolute
-/// form git stores for `source`, or both resolve to the same directory.
+/// form git stores for `source`, or both resolve to the same directory. A path starting with `~`,
+/// which git expands, matches only itself.
 fn same_source(origin: &str, repo: &Path, source: &str) -> bool {
-    if !local_path_remote(origin) || !local_path_remote(source) {
+    let local = |url: &str| local_path_remote(url) && !url.starts_with('~');
+    if !local(origin) || !local(source) {
         return origin == source;
     }
     let origin = repo.join(origin);

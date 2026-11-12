@@ -701,6 +701,34 @@ fn a_relative_remote_is_stored_absolute_and_reaches_the_remote() {
     }
 }
 
+/// git expands a leading `~/` in a local path against the home of whoever runs it, so `--remote`,
+/// a clone of a source with such an origin and the import's hint for one keep it as typed, and
+/// git then reaches `$HOME/dots.git`.
+#[test]
+fn a_remote_starting_with_a_tilde_is_kept_as_typed() {
+    let env = TestEnv::new();
+    let tilde = "~/dots.git";
+    let dots = env.home().join("dots.git");
+    env.git(&["init", "-q", "--bare", &dots.to_string_lossy()]);
+    env.ok(&["init", "--no-import", "--remote", tilde]);
+    assert_eq!(
+        repo_git(&env, &["config", "remote.origin.url"]).trim(),
+        tilde
+    );
+    let reached = env.git_raw(&["-C", &env.repo().to_string_lossy(), "ls-remote", "origin"]);
+    exits(&reached, 0);
+
+    let b = TestEnv::new();
+    let work = common::work_tree(&b, "src", &[(".bashrc", "# rc\n", false)], None);
+    common::git_in(&b, &work, &["config", "remote.origin.url", tilde]);
+    b.ok(&["init", &work.to_string_lossy()]);
+    assert_eq!(repo_git(&b, &["config", "remote.origin.url"]).trim(), tilde);
+
+    let c = TestEnv::new();
+    let err = c.ok(&["import", &work.to_string_lossy(), "--no-bootstrap"]);
+    common::check_origin_hint(&c, &err, tilde);
+}
+
 /// git stores a relative source made absolute, so the rerun of the same command line compares the
 /// directories, not the text.
 #[test]
