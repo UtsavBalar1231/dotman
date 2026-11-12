@@ -590,7 +590,10 @@ pub fn usable_url(url: &str) -> Result<&str, String> {
     if crate::git::usable_remote(url) {
         Ok(url)
     } else {
-        Err(format!("`{url}` is not a usable remote URL"))
+        Err(format!(
+            "`{}` is not a usable remote URL",
+            output::escape_line(url)
+        ))
     }
 }
 

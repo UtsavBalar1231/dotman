@@ -214,10 +214,10 @@ pub fn is_url(text: &str) -> bool {
 /// A source's origin `url` as a note shows it, and the clause naming the command that sets it as
 /// the new repo's remote. The command quotes the URL for a shell, as the source picks it; a URL
 /// with credentials is shown redacted, and a command holding that would set a broken remote. One
-/// that git would read as an option gets no command.
+/// that is not a [`crate::git::usable_remote`] is shown escaped, and gets no command.
 fn origin_hint(url: &str) -> (String, String) {
     let bin = name::bin();
-    let shown = redact_credentials(url);
+    let shown = output::escape_line(&redact_credentials(url)).into_owned();
     let set = if !crate::git::usable_remote(url) {
         "it is not a usable remote URL, so it is not offered as one".to_owned()
     } else if shown == url {
