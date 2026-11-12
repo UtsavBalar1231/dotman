@@ -33,6 +33,7 @@ src/output/             stderr status output and its escaping
 src/bootstrap.rs        writes and refreshes the install.sh at the repo root
 src/bootstrap/          the install.sh template written by `init`
 tests/                  integration tests; tests/common is the harness
+e2e/                    multi-machine scenario suites in bash: lib.sh is the harness, run.sh the runner
 xtask/                  man page and completion generator
 man/                    generated man pages
 completions/            generated shell completions
@@ -79,6 +80,7 @@ scripts/                release helper scripts
 - Code that reads working-tree files for tracked paths must cope with one deleted from disk.
 - Enforce each guarantee at one choke point that every path goes through, not at each caller.
 - Every command or recovery recipe that dotman prints is run, as printed, by a test.
+- A behaviour change that an `e2e/journeys` scenario covers updates that scenario in the same commit.
 - Every never, always or every claim in README.md and SECURITY.md has an entry in `tests/docs.rs`: `CLAIMS` names the tests that prove it, and `GAPS` holds the ones no test proves yet.
 - Commits follow Conventional Commits with a scope, such as `feat(sync): ...`. Use `!` for breaking changes.
 - Commit through the pre-commit hook, with your own git identity, never with `git -c user.name=... -c user.email=...`.
@@ -110,11 +112,14 @@ just lint-strict                              # pre-commit clippy set
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo run -p xtask -- generate                # man pages and completions
+just e2e                                      # e2e scenarios against a release build
+just e2e-keep 02-conflict                     # one scenario, keeping its temp root
 just release-prepare 0.2.0                    # bumps Cargo.toml, Cargo.lock, the PKGBUILD and install/install.sh
 ```
 - `DOTMAN_REQUIRE_AGE=1` and `DOTMAN_REQUIRE_CHEZMOI=1` turn a skipped age or chezmoi test into a failure. CI sets them.
 - The real-sudo test in `tests/system_scope.rs` runs only with `DOTMAN_REAL_SUDO_TEST=1` and a container marker (`/.dockerenv` or `/run/.containerenv`). Only CI's `system-scope` job sets both; elsewhere it returns early.
 - Tests shell out to `git`, which needs `user.name` and `user.email` set. The harness in `tests/common` gives each test its own HOME and XDG dirs.
+- `just e2e` builds the release binary unless `DOTMAN_BIN` names one. Each scenario runs dotman under `env -i` with HOME and the XDG dirs in a fresh temp root, against a `file://` remote, and needs git, age and age-keygen on PATH. The helpers in `e2e/lib.sh` each carry a one-line comment.
 
 ## Do not
 - Do not run `dotman` or tests against the real `~/.dotman`, `~/.config/dotman`, `~/.local/share/dotman`, `~/.local/state/dotman`, `/etc` or `$HOME`. Use `tests/common`, or a temp root with a HOME and every `XDG_*` pointing inside it.
