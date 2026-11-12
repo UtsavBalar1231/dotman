@@ -355,7 +355,7 @@ fn read_config(path: &Path, uid: u32) -> Result<Config> {
         mode & 0o022 == 0,
         "{} is writable by group or others; run `chmod go-w {}`",
         path.display(),
-        path.display()
+        shell_words::quote(&path.to_string_lossy())
     );
     let text =
         String::from_utf8(bytes).map_err(|_| anyhow!("{} is not valid UTF-8", path.display()))?;

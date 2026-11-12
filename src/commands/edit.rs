@@ -2,6 +2,7 @@
 
 use crate::cli::EditArgs;
 use crate::commands::Outcome;
+use crate::commands::add::pasteable;
 use crate::commands::apply::{self, Options};
 use crate::context::Context;
 use crate::engine::write::{back_up_bytes, backup_run_dir};
@@ -109,6 +110,7 @@ fn changed_meanwhile(
     head_before: Option<&str>,
 ) -> Result<anyhow::Error> {
     let bin = name::bin();
+    let key = pasteable(&ctx.paths.home, key);
     let path = ctx.paths.repo.join(source);
     let run = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
     let saved = back_up_bytes(&run, &format!(".dotman/edit/{source}"), edited)?;

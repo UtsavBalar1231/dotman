@@ -692,6 +692,46 @@ fn a_group_writable_config_is_refused() {
     assert!(!env.system_path("/etc/x.conf").exists());
 }
 
+/// The `chmod` the refusal prints runs as printed, on a config path with a space, and the helper
+/// then accepts the config.
+#[test]
+fn the_printed_chmod_for_a_group_writable_config_runs_as_printed() {
+    let env = setup_none(&["/etc"]);
+    fs::create_dir_all(env.system_path("/etc")).expect("mkdir");
+    let config = env.root().join("my config/config.toml");
+    fs::create_dir_all(config.parent().expect("parent")).expect("mkdir");
+    fs::copy(machine_config(&env), &config).expect("copy the config");
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o664)).expect("chmod");
+    let mut plan = plan_json(&env, &["/etc"], &[entry("/etc/x.conf", b"x", "0644")]);
+    set(
+        &mut plan,
+        "",
+        "config",
+        config.to_string_lossy().into_owned().into(),
+    );
+    let plan = write_plan(&env, &plan);
+
+    let out = system_write(&env, &plan);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    let printed = err
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|command| command.starts_with("chmod "));
+    assert!(printed.is_some(), "no chmod in: {err}");
+    let printed = printed.unwrap_or_default();
+    let ran = env
+        .process_for(Path::new("sh"))
+        .args(["-c", printed])
+        .output()
+        .expect("run sh");
+    assert!(ran.status.success(), "{printed}: {}", stderr(&ran));
+    assert_eq!(mode_of(&config) & 0o022, 0);
+    let out = system_write(&env, &plan);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
 /// `entry` for `target` with `field` replaced by `value`.
 fn entry_with(target: &str, field: &str, value: &str) -> serde_json::Value {
     let mut bad = entry(target, b"x", "0644");

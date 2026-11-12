@@ -258,6 +258,25 @@ fn add_never_overwrites_a_template_with_its_rendering() {
     );
 }
 
+/// The `edit` that the refusal of `add` prints runs as printed on a path with a space.
+#[test]
+fn the_edit_printed_when_add_meets_a_template_runs_as_printed_on_a_path_with_a_space() {
+    let source = ".config/my kitty/kitty{tmpl}.conf";
+    let key = ".config/my kitty/kitty.conf";
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_machine_config("[vars]\nfont = \"14\"\n");
+    env.write_repo(source, b"font_size {{ vars.font }}\n");
+    exits(&env.run(&["apply"]), 0);
+
+    let err = exits(&env.run(&["add", key]), 1);
+    let editor = stub_editor(&env, 0).to_string_lossy().into_owned();
+    let args = common::hint(&err, "edit");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    exits(&env.run_with(&[("EDITOR", &editor)], &args), 0);
+    assert_eq!(env.read(key), b"font_size 14\n# edited\n");
+}
+
 /// A kitty template applied once, then edited locally.
 fn drifted() -> TestEnv {
     let env = kitty("font_size {{ vars.font }}\n");

@@ -800,10 +800,16 @@ fn rerunning_an_interrupted_add_encrypt_removes_the_plain_source() {
     env.write(HOSTS, b"github.com:\n  oauth_token: gho_new\n", 0o600);
     let err = env.fails(&["add", "--encrypt", HOSTS]);
     assert!(
-        err.contains("equally specific") && err.contains("forget ~/.config/gh/hosts.yml"),
+        err.contains("equally specific")
+            && err.contains(&format!(
+                "`dotman forget {}/.config/gh/hosts.yml`",
+                env.home().display()
+            )),
         "{err}"
     );
     assert!(env.repo().join(HOSTS).exists());
+    exits(&common::run_hint(&env, &err, "forget"), 0);
+    assert_eq!(env.token_of("status", HOSTS), None);
 }
 
 #[test]

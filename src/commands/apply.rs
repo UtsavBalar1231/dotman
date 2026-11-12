@@ -1410,8 +1410,9 @@ impl Run<'_> {
             self.attention = true;
             self.undecided.insert(key.to_owned());
             output::warning(&format!(
-                "{key}: a file here, but a directory of managed files in the repo; skipped. To manage the file instead: `{bin} forget {key}`, then `{bin} add {key}`",
-                bin = name::bin()
+                "{key}: a file here, but a directory of managed files in the repo; skipped. To manage the file instead: `{bin} forget {path}`, then `{bin} add {path}`",
+                bin = name::bin(),
+                path = add::pasteable(&self.ctx.paths.home, key)
             ));
             return false;
         }

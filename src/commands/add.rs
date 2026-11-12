@@ -195,6 +195,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         sources: Sources::group(managed.iter().map(String::as_str)),
         managed,
         identity: &identity,
+        home: &ctx.paths.home,
         conditions: args.for_conditions.as_deref(),
         encrypt: args.encrypt,
         resumed: BTreeMap::new(),
@@ -611,6 +612,7 @@ struct Targets<'a> {
     managed: Vec<String>,
     sources: Sources,
     identity: &'a IdentitySnapshot,
+    home: &'a Path,
     conditions: Option<&'a str>,
     encrypt: bool,
     /// Keys whose interrupted `add --encrypt` this run completes, and their `{age}` source.
@@ -814,14 +816,16 @@ impl Targets<'_> {
         match self.sources.select(key, self.identity) {
             Selection::None => Ok(key.to_owned()),
             Selection::Winner(source) if self.sources.flag(key, source) == Flag::Tmpl => bail!(
-                "{source} is a template, so the file cannot replace it; edit the template with `{} edit {key}`",
-                name::bin()
+                "{source} is a template, so the file cannot replace it; edit the template with `{} edit {}`",
+                name::bin(),
+                pasteable(self.home, key)
             ),
             Selection::Winner(source) => Ok(source.to_owned()),
             Selection::Ambiguous(tied) => bail!(
-                "{} are equally specific here; remove one of them from the repo first, or stop managing the file with `{} forget ~/{key}`",
+                "{} are equally specific here; remove one of them from the repo first, or stop managing the file with `{} forget {}`",
                 tied.join(", "),
-                name::bin()
+                name::bin(),
+                pasteable(self.home, key)
             ),
             Selection::Invalid(problems) => bail!(
                 "{}",

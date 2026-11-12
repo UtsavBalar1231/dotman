@@ -1750,28 +1750,47 @@ fn an_unreadable_file_is_reported_as_not_captured() {
     assert_eq!(remote_file(&env, ".b"), "b edited\n");
 }
 
+/// The message names `forget` and `add` for the path, and run as printed, on a path with a space,
+/// they hand the file over to the repo.
 #[test]
 fn a_managed_directory_replaced_by_a_file_gets_a_clear_message() {
     let env = TestEnv::new();
     env.ok(&["init"]);
-    env.write(".config/nvim/init.lua", b"init\n", 0o644);
-    env.write(".config/nvim/lua/opts.lua", b"opts\n", 0o644);
-    env.ok(&["add", ".config/nvim"]);
+    env.write(".config/my nvim/init.lua", b"init\n", 0o644);
+    env.write(".config/my nvim/lua/opts.lua", b"opts\n", 0o644);
+    env.ok(&["add", ".config/my nvim"]);
     env.ok(&["sync"]);
-    fs::remove_dir_all(env.home().join(".config/nvim/lua")).expect("remove the dir");
-    env.write(".config/nvim/lua", b"not a dir\n", 0o644);
+    fs::remove_dir_all(env.home().join(".config/my nvim/lua")).expect("remove the dir");
+    env.write(".config/my nvim/lua", b"not a dir\n", 0o644);
 
     let err = exits(&env, 3, &["sync"]);
     assert!(
-        err.contains(".config/nvim/lua: a file here, but a directory of managed files in the repo"),
+        err.contains(
+            ".config/my nvim/lua: a file here, but a directory of managed files in the repo"
+        ),
         "{err}"
     );
-    assert!(err.contains("dotman forget .config/nvim/lua"), "{err}");
+    let path = env.home().join(".config/my nvim/lua");
+    let path = shell_words::quote(&path.to_string_lossy()).into_owned();
+    assert!(
+        err.contains(&format!("`dotman forget {path}`, then `dotman add {path}`")),
+        "{err}"
+    );
     assert!(!err.contains("os error"), "{err}");
-    assert_eq!(env.read(".config/nvim/lua"), b"not a dir\n");
+    assert_eq!(env.read(".config/my nvim/lua"), b"not a dir\n");
     assert_eq!(
-        fs::read(env.repo().join(".config/nvim/lua/opts.lua")).expect("repo file"),
+        fs::read(env.repo().join(".config/my nvim/lua/opts.lua")).expect("repo file"),
         b"opts\n"
+    );
+
+    for step in ["forget", "add"] {
+        let out = common::run_hint(&env, &err, step);
+        assert!(out.status.success(), "{step}: {}", stderr(&out));
+    }
+    assert_eq!(env.read(".config/my nvim/lua"), b"not a dir\n");
+    assert_eq!(
+        fs::read(env.repo().join(".config/my nvim/lua")).expect("repo file"),
+        b"not a dir\n"
     );
 }
 
@@ -2281,13 +2300,13 @@ fn a_shallow_repo_is_deepened_before_it_is_called_unrelated() {
     assert_eq!(remote_file(&a, ".profile"), "p1, edited on d\n");
 }
 
-/// An editor holds `.bashrc` in a buffer while a sync pulls a new version of it, then writes the
+/// An editor holds `.my rc` in a buffer while a sync pulls a new version of it, then writes the
 /// buffer back over it. `edit` saves the edit aside, puts the pulled version back and says so, and
 /// the next sync reverts nothing.
 #[test]
 fn an_edit_made_while_a_sync_pulled_the_same_file_reverts_nothing() {
-    let (a, b) = pair(&[(".bashrc", b"line1\nline2\n", 0o644)]);
-    a.write(".bashrc", b"line1\nline2\nA fix\n", 0o644);
+    let (a, b) = pair(&[(".my rc", b"line1\nline2\n", 0o644)]);
+    a.write(".my rc", b"line1\nline2\nA fix\n", 0o644);
     exits(&a, 0, &["sync"]);
     let started = b.root().join("editor-started");
     let resume = b.root().join("editor-resume");
@@ -2301,7 +2320,7 @@ fn an_edit_made_while_a_sync_pulled_the_same_file_reverts_nothing() {
     );
     let child = b
         .dot_process()
-        .args(["edit", ".bashrc"])
+        .args(["edit", ".my rc"])
         .env("EDITOR", &editor)
         .env("VISUAL", "")
         .stdin(std::process::Stdio::null())
@@ -2321,23 +2340,33 @@ fn an_edit_made_while_a_sync_pulled_the_same_file_reverts_nothing() {
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
-        err.contains(".bashrc changed while the editor was open"),
+        err.contains(".my rc changed while the editor was open"),
         "{err}"
     );
     assert!(err.contains("moved HEAD from"), "{err}");
-    assert!(err.contains("diff -u"), "{err}");
-    assert!(err.contains("dotman edit .bashrc"), "{err}");
     assert!(!err.contains("dotman sync"), "{err}");
+    let printed = backticked(&err);
+    let diff = printed.iter().find(|c| c.starts_with("diff -u"));
+    assert!(diff.is_some(), "no diff in: {err}");
+    let diff = diff.map_or("", String::as_str);
+    let out = paste(&b, diff);
+    assert_eq!(out.status.code(), Some(1), "{diff}: {}", stderr(&out));
+    assert!(stderr(&out).is_empty(), "{diff}: {}", stderr(&out));
+    let home = shell_words::quote(&b.home().join(".my rc").to_string_lossy()).into_owned();
+    let again = format!("dotman edit {home}");
+    assert!(printed.contains(&again), "{err}");
+    let out = paste_with(&b, &[("VISUAL", "true")], &again);
+    assert!(out.status.success(), "{again}: {}", stderr(&out));
     assert_eq!(
-        b.backups(".dotman/edit/.bashrc"),
+        b.backups(".dotman/edit/.my rc"),
         [(b"line1\nline2\nB added\n".to_vec(), 0o600)]
     );
     assert_eq!(
-        fs::read(b.repo().join(".bashrc")).expect("repo copy"),
+        fs::read(b.repo().join(".my rc")).expect("repo copy"),
         b"line1\nline2\nA fix\n"
     );
     exits(&b, 0, &["sync"]);
-    assert_eq!(remote_file(&a, ".bashrc"), "line1\nline2\nA fix\n");
+    assert_eq!(remote_file(&a, ".my rc"), "line1\nline2\nA fix\n");
 }
 
 /// Whether the line after `headline` in `err`, where git's own message goes, starts with `start`.
