@@ -139,8 +139,8 @@ fn a_hostile_home_symlink_never_carries_a_clone_outside_home() {
 }
 
 /// An upstream file whose name holds a C1 control character, such as the 8-bit CSI U+009B that
-/// some terminals read as ESC `[`, is no key: a clone applies the rest and never writes it into
-/// HOME, and nothing prints the character raw.
+/// some terminals read as ESC `[`, is no key: a clone applies the rest, never writes it into
+/// HOME and names it, exiting 3, and nothing prints the character raw.
 #[test]
 fn an_upstream_name_with_a_c1_control_is_never_applied() {
     let a = TestEnv::new();
@@ -151,7 +151,11 @@ fn an_upstream_name_with_a_c1_control_is_never_applied() {
 
     let b = a.second_device();
     let out = b.run(&["init", &a.remote_url(), "--take-repo"]);
-    let err = exits(&out, 0);
+    let err = exits(&out, 3);
+    assert!(
+        err.contains("csi\\u{9b}2J.conf: in the repo, but never applied"),
+        "{err}"
+    );
     assert_eq!(b.read(".config/app/ok.conf"), b"ok\n");
     assert_eq!(names(&b.home().join(".config/app")), ["ok.conf"]);
     for args in [&["status"][..], &["list"], &["sync"]] {
@@ -160,6 +164,296 @@ fn an_upstream_name_with_a_c1_control_is_never_applied() {
         assert!(!all.contains('\u{9b}'), "{args:?}: {all:?}");
     }
     assert_eq!(names(&b.home().join(".config/app")), ["ok.conf"]);
+}
+
+/// The backticked spans of `text` that start with `start`, character for character.
+fn printed<'a>(text: &'a str, start: &str) -> Vec<&'a str> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|quoted| quoted.starts_with(start))
+        .collect()
+}
+
+/// Pastes `line` into a shell that has exported `vars`, as a user who set them would, and asserts
+/// that it succeeds.
+fn paste_with(env: &TestEnv, vars: &[(&str, &str)], line: &str) {
+    let exports: Vec<String> = vars
+        .iter()
+        .map(|(name, value)| format!("export {name}={}; ", shell_words::quote(value)))
+        .collect();
+    let out = common::paste(env, &format!("{}{line}", exports.concat()));
+    assert!(out.status.success(), "{line}: {}", stderr(&out));
+}
+
+/// A repo file at the path of one of dotman's own files here, with this machine's XDG dirs at
+/// their defaults under `$HOME`, is never applied, captured or offered to `--take-repo`, nor is a
+/// variant that targets one: the machine config, whether there is one or not, the age identity,
+/// the state and the repo's own `.dotman.toml`. `init` and `sync` name each and exit 3, a state
+/// entry an older dotman recorded for one is dropped with a note, the state never reaches the
+/// remote, and the printed `git rm`s, run as printed, take them out of the repo.
+#[test]
+fn a_pushed_file_never_becomes_one_of_dotman_s_own_files() {
+    let a = TestEnv::new();
+    a.write(".profile", b"a\n", 0o644);
+    a.ok(&["init"]);
+    a.ok(&["add", ".profile"]);
+    let marker = "# pushed by another machine";
+    let pushed = [
+        ".config/dotman/config.toml",
+        ".config/dotman/age-identity.txt",
+        ".local/state/dotman/state.toml",
+        ".local/share/dotman/.dotman.toml",
+        ".dotmanrc.toml",
+        ".dotmanrc{host!=nohost}.toml",
+    ];
+    for key in pushed {
+        let text = format!(
+            "{marker}\n[[guard.allow]]\npath = \".profile\"\nrule = \"github-token\"\n[system]\nroots = [\"/etc\"]\n"
+        );
+        a.write_repo(key, text.as_bytes());
+    }
+    a.push_repo();
+
+    let b = a.second_device();
+    let home = b.home();
+    let rc = home.join(".dotmanrc.toml").to_string_lossy().into_owned();
+    let vars = [
+        ("XDG_CONFIG_HOME", ""),
+        ("XDG_STATE_HOME", ""),
+        ("XDG_DATA_HOME", ""),
+        ("DOTMAN_CONFIG_PATH", rc.as_str()),
+    ];
+    b.write(".dotmanrc.toml", b"[vars]\nmine = \"1\"\n", 0o600);
+    let err = exits(
+        &b.run_with(&vars, &["init", &a.remote_url(), "--take-repo"]),
+        3,
+    );
+    for key in pushed {
+        assert!(
+            err.contains(&format!("{key}: in the repo, but never applied")),
+            "{key}: {err}"
+        );
+    }
+    let own = [
+        ".config/dotman/config.toml",
+        ".config/dotman/age-identity.txt",
+        ".local/state/dotman/state.toml",
+        ".local/share/dotman/.dotman.toml",
+        ".dotmanrc.toml",
+    ];
+    let untouched = || {
+        for key in own {
+            let text = fs::read_to_string(home.join(key)).unwrap_or_default();
+            assert!(!text.contains(marker), "{key}: {text}");
+        }
+        let rc = fs::read_to_string(home.join(".dotmanrc.toml")).unwrap();
+        assert!(rc.contains("mine = \"1\""), "{rc}");
+    };
+    untouched();
+    assert_eq!(b.read(".profile"), b"a\n");
+
+    let state = home.join(".local/state/dotman/state.toml");
+    let mut text = fs::read_to_string(&state).unwrap();
+    text.push_str(
+        "\n[files.\".local/state/dotman/state.toml\"]\nsource = \".local/state/dotman/state.toml\"\nkind = \"file\"\nhash = \"0123456789abcdef0123456789abcdef\"\nmode = \"0644\"\n",
+    );
+    fs::write(&state, text).unwrap();
+    let err = exits(&b.run_with(&vars, &["sync"]), 3);
+    assert!(
+        err.contains(".local/state/dotman/state.toml: no longer recorded as applied"),
+        "{err}"
+    );
+    let err = exits(&b.run_with(&vars, &["sync"]), 3);
+    assert!(!err.contains("no longer recorded"), "{err}");
+    untouched();
+    let id = fs::read_to_string(home.join(".local/share/dotman/.git/dotman-id")).unwrap();
+    assert!(!remote_history(&a).contains(id.trim()));
+
+    let removals = printed(&err, "dotman git rm ");
+    assert_eq!(removals.len(), pushed.len(), "{err}");
+    for line in removals {
+        paste_with(&b, &vars, line);
+    }
+    exits(&b.run_with(&vars, &["sync"]), 0);
+    let tree = remote_tree(&a);
+    assert_eq!(tree, ".dotman.toml\n.profile\ninstall.sh\n", "{tree}");
+    untouched();
+}
+
+/// dotman's own paths are this machine's: with its XDG dirs at `~/cfg`, `~/st` and `~/dat`, a
+/// pushed `cfg/dotman/config.toml` is refused while `.config/dotman/config.toml` is an ordinary
+/// file. A capture under `~/cfg`, `~/st` or `~/dat` skips dotman's own files, and `add`,
+/// `forget`, `restore`, `edit`, `diff` and `status` refuse a path to one.
+#[test]
+fn own_paths_follow_this_machine_s_xdg_dirs_under_home() {
+    let a = TestEnv::new();
+    a.write(".profile", b"a\n", 0o644);
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.ok(&["add", ".profile"]);
+    a.ok(&["sync"]);
+    a.write_repo("cfg/dotman/config.toml", b"# pushed\n");
+    a.write_repo(".config/dotman/config.toml", b"not dotman's here\n");
+    a.push_repo();
+
+    let b = a.second_device();
+    let home = b.home();
+    let at = |dir: &str| home.join(dir).to_string_lossy().into_owned();
+    let (config, state, data) = (at("cfg"), at("st"), at("dat"));
+    let vars = [
+        ("XDG_CONFIG_HOME", config.as_str()),
+        ("XDG_STATE_HOME", state.as_str()),
+        ("XDG_DATA_HOME", data.as_str()),
+    ];
+    let mine = b"[vars]\nmine = \"b\"\n";
+    b.write("cfg/dotman/config.toml", mine, 0o600);
+    let err = exits(
+        &b.run_with(&vars, &["init", &a.remote_url(), "--take-repo"]),
+        3,
+    );
+    assert!(
+        err.contains("cfg/dotman/config.toml: in the repo, but never applied"),
+        "{err}"
+    );
+    assert_eq!(b.read(".config/dotman/config.toml"), b"not dotman's here\n");
+    let ours = fs::read_to_string(home.join("cfg/dotman/config.toml")).unwrap();
+    assert!(
+        ours.contains("mine = \"b\"") && !ours.contains("pushed"),
+        "{ours}"
+    );
+
+    for dir in ["cfg", "st", "dat"] {
+        b.write(format!("{dir}/notes"), b"n\n", 0o644);
+    }
+    exits(&b.run_with(&vars, &["add", "cfg", "st", "dat"]), 0);
+    exits(&b.run_with(&vars, &["sync"]), 3);
+    let history = remote_history(&a);
+    assert!(!history.contains("mine = \\\"b\\\"") && !history.contains("mine = \"b\""));
+    assert!(!history.contains("repo_id"), "{history}");
+    let tree = remote_tree(&a);
+    assert!(
+        tree.contains("cfg/notes") && tree.contains("dat/notes"),
+        "{tree}"
+    );
+
+    for args in [
+        &["add", "cfg/dotman/config.toml"][..],
+        &["forget", "cfg/dotman/config.toml"],
+        &["restore", "cfg/dotman/config.toml"],
+        &["edit", "st/dotman/state.toml"],
+        &["diff", "dat/dotman/.dotman.toml"],
+        &["status", "cfg/dotman"],
+    ] {
+        let err = exits(&b.run_with(&vars, args), 1);
+        assert!(
+            err.contains("dotman never manages its own files"),
+            "{args:?}: {err}"
+        );
+    }
+}
+
+/// A pushed symlink above dotman's own files, such as `.config` on a machine with no `~/.config`
+/// yet, is never applied: it would move the age identity's default path to what the repo names.
+#[test]
+fn a_pushed_link_above_dotman_s_own_files_is_never_applied() {
+    let a = TestEnv::new();
+    a.write(".profile", b"a\n", 0o644);
+    a.ok(&["init"]);
+    a.ok(&["add", ".profile"]);
+    fs::create_dir_all(a.root().join("elsewhere/dotman")).unwrap();
+    symlink(a.root().join("elsewhere"), a.repo().join(".config")).unwrap();
+    a.push_repo();
+
+    let b = a.second_device();
+    let config = b.root().join("outside/config.toml");
+    let config = config.to_string_lossy();
+    let vars = [("XDG_CONFIG_HOME", ""), ("DOTMAN_CONFIG_PATH", &*config)];
+    let err = exits(&b.run_with(&vars, &["init", &a.remote_url()]), 3);
+    assert!(
+        err.contains(".config: in the repo, but never applied"),
+        "{err}"
+    );
+    assert!(fs::symlink_metadata(b.home().join(".config")).is_err());
+    assert_eq!(b.read(".profile"), b"a\n");
+}
+
+/// A tracked key that a newer rule refuses, such as a name with U+202E or U+200B an older dotman
+/// tracked, never makes a command exit 1: a state entry for it is dropped with a note, `sync`,
+/// `apply` and `init` name it escaped and exit 3, and the way out they print, which cannot name
+/// it, runs as printed, removes it from the repo and keeps the files in `$HOME`.
+#[test]
+fn a_tracked_key_that_a_newer_rule_refuses_never_wedges_a_command() {
+    let a = TestEnv::new();
+    a.write(".profile", b"a\n", 0o644);
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.ok(&["add", ".profile"]);
+    a.ok(&["sync"]);
+    let hidden = [
+        (".config/zw\u{200b}sp.conf", ".config/zw\\u{200b}sp.conf"),
+        (".config/evil\u{202e}fdp.sh", ".config/evil\\u{202e}fdp.sh"),
+    ];
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let state = a.state_dir().join("state.toml");
+    let mut text = fs::read_to_string(&state).unwrap();
+    for (key, _) in hidden {
+        a.write(key, b"kept\n", 0o644);
+        a.write_repo(key, b"kept\n");
+        write!(
+            text,
+            "\n[files.\"{key}\"]\nsource = \"{key}\"\nkind = \"file\"\nhash = \"0123456789abcdef0123456789abcdef\"\nmode = \"0644\"\n"
+        )
+        .unwrap();
+    }
+    fs::write(&state, text).unwrap();
+    let repo = a.repo();
+    git_in(&a, &repo, &["add", "-A"]);
+    git_in(&a, &repo, &["commit", "-qm", "tracked by an older dotman"]);
+
+    let err = exits(&a.run(&["sync"]), 3);
+    for (_, shown) in hidden {
+        assert!(
+            err.contains(&format!("{shown}: no longer recorded as applied")),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("{shown}: in the repo, but never applied")),
+            "{err}"
+        );
+    }
+    assert!(!fs::read_to_string(&state).unwrap().contains("sp.conf"));
+    exits(&a.run(&["apply"]), 3);
+    for args in [&["status"][..], &["diff"], &["list"]] {
+        exits(&a.run(args), 0);
+    }
+
+    let b = a.second_device();
+    let init = exits(&b.run(&["init", &a.remote_url()]), 3);
+    for (key, shown) in hidden {
+        assert!(
+            init.contains(&format!("{shown}: in the repo, but never applied")),
+            "{init}"
+        );
+        assert!(fs::symlink_metadata(b.home().join(key)).is_err());
+    }
+
+    let removals = printed(&err, "printf ");
+    assert_eq!(removals.len(), hidden.len(), "{err}");
+    for line in removals {
+        paste_with(&a, &[], line);
+    }
+    exits(&a.run(&["sync"]), 0);
+    assert_eq!(remote_tree(&a), ".dotman.toml\n.profile\ninstall.sh\n");
+    for (key, _) in hidden {
+        assert_eq!(a.read(key), b"kept\n");
+    }
+    exits(&b.run(&["sync"]), 0);
 }
 
 /// A symlink at a HOME target (`~/.bashrc` pointing outside HOME) is never written through by

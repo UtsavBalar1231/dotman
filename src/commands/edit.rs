@@ -9,7 +9,6 @@ use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::hooks::Policy;
 use crate::name;
 use crate::output;
-use crate::paths::derive_key;
 use crate::proc;
 use crate::variant::Flag;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -31,12 +30,7 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
     ctx.guard()?;
     ctx.repo_id()?;
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    let key = derive_key(
-        &args.path,
-        &cwd,
-        &ctx.paths.home,
-        ctx.paths.home_real.as_deref(),
-    )?;
+    let key = ctx.input_key(&args.path, &cwd)?;
     let sources = ctx.sources()?;
     if !sources.contains(&key) {
         bail!("{key} is not managed");

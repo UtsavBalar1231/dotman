@@ -4,6 +4,7 @@
 //! tested with injected values.
 
 use crate::config::Config;
+use crate::context::is_under;
 use crate::output;
 use crate::sys;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -184,36 +185,104 @@ impl Paths {
     pub fn lock_file(&self) -> PathBuf {
         self.state_dir.join("lock")
     }
+}
 
-    /// Fails for `path` if it is, or lies inside, the repo, the state dir, the machine config
-    /// file or an age identity file. `path` must be absolute.
-    pub(crate) fn refuse_protected(&self, path: &Path) -> Result<()> {
-        ensure!(
-            !path.components().any(|c| c == Component::ParentDir),
-            "{} contains `..`",
-            path.display()
-        );
-        let protected = [
-            ("the dotman repo", &self.repo),
-            ("the dotman state directory", &self.state_dir),
-            ("the dotman machine config", &self.config_file),
-            ("the age identity file", &self.age_identity),
+/// Decides whether a key may be managed on this machine. Every key that a repo file, a state entry
+/// or a `$HOME` file becomes goes through [`KeyRules::check`].
+#[derive(Debug)]
+pub(crate) struct KeyRules {
+    /// The keys of dotman's own files and directories under `$HOME`, in [`fold`]ed form, with
+    /// what each one is.
+    own: Vec<(String, &'static str)>,
+}
+
+impl KeyRules {
+    /// dotman's own paths come from this machine's environment and config, so a key that is one
+    /// here is refused even when the machine that pushed it keeps them elsewhere.
+    #[must_use]
+    pub(crate) fn new(paths: &Paths) -> Self {
+        let config_dir = paths.config_home.join("dotman");
+        let listed = [
+            ("the dotman repo", Some(&paths.repo)),
+            ("the dotman state directory", Some(&paths.state_dir)),
+            ("the dotman machine config", Some(&paths.config_file)),
+            ("the age identity file", Some(&paths.age_identity)),
+            (
+                "the age identity file named by DOTMAN_AGE_KEY_FILE",
+                paths.age_key_file.as_ref(),
+            ),
+            ("the dotman config directory", Some(&config_dir)),
         ];
-        let key_file = self
-            .age_key_file
-            .as_ref()
-            .map(|file| ("the age identity file named by DOTMAN_AGE_KEY_FILE", file));
-        for (what, root) in protected.into_iter().chain(key_file) {
-            // The canonical form is checked too, so `/var/home/...` input matches a `/home/...` default.
-            let inside = path.starts_with(root)
-                || fs::canonicalize(root).is_ok_and(|real| path.starts_with(real));
-            ensure!(
-                !inside,
-                "{} is {what} or inside it; dotman never manages its own files",
-                path.display()
+        let homes: Vec<&Path> = std::iter::once(paths.home.as_path())
+            .chain(paths.home_real.as_deref())
+            .collect();
+        let mut own: Vec<(String, &'static str)> = Vec::new();
+        for (what, path) in listed {
+            let Some(path) = path else { continue };
+            // The real form too, so `~/.config` linked to `~/cfg` also refuses `cfg/dotman/...`.
+            for form in [path.clone(), resolved(path)] {
+                let keys = homes
+                    .iter()
+                    .filter_map(|home| form.strip_prefix(home).ok()?.to_str())
+                    .filter(|key| !key.is_empty())
+                    .map(fold);
+                for key in keys {
+                    if !own.iter().any(|(known, _)| *known == key) {
+                        own.push((key, what));
+                    }
+                }
+            }
+        }
+        Self { own }
+    }
+
+    /// Fails for a key that [`validate_key`] refuses or that is, or lies inside, one of dotman's
+    /// own paths. A `leaf`, a file or symlink rather than a directory to walk, also fails when one
+    /// of them lies inside it: a symlink there would move dotman's files to what the repo points
+    /// it at.
+    pub(crate) fn check(&self, key: &str, leaf: bool) -> Result<()> {
+        validate_key(key)?;
+        if let Some(what) = self.own(key, leaf) {
+            bail!(
+                "`{key}` is {what} on this machine, or a path inside it or above it; dotman never manages its own files"
             );
         }
         Ok(())
+    }
+
+    /// What of dotman's own `key` is, holds or lies inside; `None` when it is none of them.
+    #[must_use]
+    pub(crate) fn own(&self, key: &str, leaf: bool) -> Option<&'static str> {
+        let key = fold(key);
+        self.own
+            .iter()
+            .find(|(own, _)| is_under(&key, own) || (leaf && is_under(own, &key)))
+            .map(|(_, what)| *what)
+    }
+}
+
+/// Lowercase NFC, because APFS and other case-insensitive filesystems resolve `.Config/Dotman` to
+/// `.config/dotman`.
+fn fold(key: &str) -> String {
+    key.nfc().collect::<String>().to_lowercase()
+}
+
+/// `path` with its longest existing ancestor resolved, so a file not created yet still resolves
+/// through a symlinked directory above it.
+fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(at) {
+            return rest.iter().rev().fold(real, |dir, name| dir.join(name));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 
@@ -844,50 +913,102 @@ mod tests {
     }
 
     #[test]
-    fn own_files_are_protected() {
+    fn own_files_are_refused_as_keys() {
         let tmp = TempDir::new().unwrap();
-        let paths = resolve(&env_with(tmp.path(), &[]));
-        for p in [
-            paths.repo.clone(),
-            paths.repo.join(".bashrc"),
-            paths.state_dir.join("state.toml"),
-            paths.config_file.clone(),
-            paths.age_identity.clone(),
+        let rules = KeyRules::new(&resolve(&env_with(tmp.path(), &[])));
+        for key in [
+            ".local/share/dotman",
+            ".local/share/dotman/.bashrc",
+            ".local/share/dotman/.dotman.toml",
+            ".local/state/dotman/state.toml",
+            ".config/dotman/config.toml",
+            ".config/dotman/age-identity.txt",
+            ".config/dotman/anything",
+            ".Config/DotMan/config.toml",
         ] {
-            assert!(paths.refuse_protected(&p).is_err(), "{}", p.display());
+            assert!(rules.check(key, true).is_err(), "{key}");
+            assert!(rules.check(key, false).is_err(), "{key}");
         }
-        assert!(paths.refuse_protected(&tmp.path().join(".bashrc")).is_ok());
-        assert!(
-            paths
-                .refuse_protected(&tmp.path().join(".local/share/dotman-other"))
-                .is_ok()
-        );
-        assert!(paths.refuse_protected(&paths.repo.join("../x")).is_err());
+        for fine in [".bashrc", ".local/share/dotman-other", ".config/dotmanx"] {
+            assert!(rules.check(fine, true).is_ok(), "{fine}");
+        }
+        // A link at an ancestor would move dotman's files; a directory to walk does not.
+        for ancestor in [".config", ".local", ".local/state"] {
+            assert!(rules.check(ancestor, true).is_err(), "{ancestor}");
+            assert!(rules.check(ancestor, false).is_ok(), "{ancestor}");
+        }
+        assert!(rules.check(".local/share/dotman/a\u{202e}b", true).is_err());
 
         let key_file = tmp.path().join("keys/age.txt");
         let key_env = env_with(
             tmp.path(),
             &[("DOTMAN_AGE_KEY_FILE", key_file.to_str().unwrap())],
         );
-        let with_key = resolve(&key_env);
-        assert!(with_key.refuse_protected(&key_file).is_err());
-        assert!(paths.refuse_protected(&key_file).is_ok());
+        assert!(
+            KeyRules::new(&resolve(&key_env))
+                .check("keys/age.txt", true)
+                .is_err()
+        );
+        assert!(rules.check("keys/age.txt", true).is_ok());
         let relative = env_with(tmp.path(), &[("DOTMAN_AGE_KEY_FILE", "age.txt")]);
         assert!(Paths::resolve(&relative, sys::geteuid()).is_err());
     }
 
     #[test]
-    fn protected_check_matches_the_real_spelling_of_a_symlinked_home() {
+    fn own_keys_follow_this_machine_s_xdg_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let at = |dir: &str| home.join(dir).to_str().unwrap().to_owned();
+        let (config, state, data) = (at("cfg"), at("st"), at("dat"));
+        let env = env_with(
+            home,
+            &[
+                ("XDG_CONFIG_HOME", &config),
+                ("XDG_STATE_HOME", &state),
+                ("XDG_DATA_HOME", &data),
+            ],
+        );
+        let rules = KeyRules::new(&resolve(&env));
+        for key in [
+            "cfg/dotman/config.toml",
+            "st/dotman/state.toml",
+            "dat/dotman/x",
+        ] {
+            assert!(rules.check(key, true).is_err(), "{key}");
+        }
+        for key in [
+            ".config/dotman/config.toml",
+            ".local/state/dotman/state.toml",
+        ] {
+            assert!(rules.check(key, true).is_ok(), "{key}");
+        }
+        let outside = env_with(home, &[("XDG_CONFIG_HOME", "/elsewhere/config")]);
+        assert!(
+            KeyRules::new(&resolve(&outside))
+                .check(".config/dotman/config.toml", true)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn own_keys_match_the_real_spelling_of_a_symlinked_home_or_dir() {
         let tmp = TempDir::new().unwrap();
         let real = tmp.path().join("real");
         fs::create_dir_all(real.join(".local/share/dotman")).unwrap();
+        fs::create_dir_all(real.join("cfg")).unwrap();
+        symlink(real.join("cfg"), real.join(".config")).unwrap();
         let link = tmp.path().join("link");
         symlink(&real, &link).unwrap();
         let paths = resolve(&env_with(&link, &[]));
+        let rules = KeyRules::new(&paths);
+        let home_real = paths.home_real.as_deref();
         let via_real = fs::canonicalize(&real)
             .unwrap()
             .join(".local/share/dotman/.bashrc");
-        assert!(paths.refuse_protected(&via_real).is_err());
+        let key = derive_key(&via_real, &link, &paths.home, home_real).unwrap();
+        assert!(rules.check(&key, true).is_err(), "{key}");
+        // No config file exists yet, and `.config` is a link to `cfg`.
+        assert!(rules.check("cfg/dotman/config.toml", true).is_err());
     }
 
     #[test]

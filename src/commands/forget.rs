@@ -6,7 +6,6 @@ use crate::context::{Context, is_real_dir, is_under};
 use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::engine::{Node, Tuple, read_node};
 use crate::output;
-use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
 use crate::state::{Entry, Kind, State};
 use crate::system;
@@ -38,7 +37,7 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     let mut inputs: Vec<String> = Vec::new();
     for input in &args.paths {
-        let key = derive_key(input, &cwd, &ctx.paths.home, ctx.paths.home_real.as_deref())?;
+        let key = ctx.input_key(input, &cwd)?;
         inputs.push(key.clone());
         let before = (gone.len(), dirs.len());
         gone.extend(

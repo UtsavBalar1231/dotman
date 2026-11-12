@@ -5,7 +5,9 @@ use crate::config::Config;
 use crate::git::{Git, Operation, StatusKind, UnusableBranch};
 use crate::identity;
 use crate::lock::Lock;
-use crate::paths::{Env, Paths, derive_key, find_collisions, is_reserved_root_name, validate_key};
+use crate::paths::{
+    Env, KeyRules, Paths, derive_key, find_collisions, is_reserved_root_name, validate_key,
+};
 use crate::repo_config::RepoConfig;
 use crate::secrets::Age;
 use crate::state::{IdentitySnapshot, Kind, State};
@@ -14,7 +16,7 @@ use crate::system::{self, Scope};
 use crate::template::Vars;
 use crate::variant::Sources;
 use anyhow::{Context as _, Result, bail};
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
@@ -98,6 +100,31 @@ impl fmt::Display for InProgress {
     }
 }
 
+/// The `dotman git rm` that removes the tracked repo file `path`, and no other, from the repo and
+/// its worktree. `--cached` would leave the copy for sync's `git add -A` to stage again. Output
+/// escapes a name with a control or hidden format character, so it could not be pasted: such a
+/// name reaches git through `printf` as octal escapes instead.
+fn remove_command(path: &str) -> String {
+    let bin = crate::name::bin();
+    let glob = path.starts_with(':') || path.contains(['*', '?', '[', '\\']);
+    if crate::output::escape_line(path) == path {
+        let spec = if glob {
+            format!(":(literal){path}")
+        } else {
+            path.to_owned()
+        };
+        return format!("{bin} git rm -q -- {}", shell_words::quote(&spec));
+    }
+    let octal: String = format!(":(literal){path}")
+        .bytes()
+        .map(|b| match b {
+            b' '..=b'~' if !matches!(b, b'\\' | b'%' | b'\'') => char::from(b).to_string(),
+            _ => format!("\\{b:03o}"),
+        })
+        .collect();
+    format!("printf '{octal}' | xargs -0 {bin} git rm -q --")
+}
+
 fn quote_all(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -119,6 +146,9 @@ pub struct Context {
     command: &'static str,
     /// Keys already warned about in this run.
     warned: RefCell<BTreeSet<String>>,
+    keys: KeyRules,
+    /// The last look at the worktree found a tracked file whose key is refused.
+    refused: Cell<bool>,
     identity: OnceCell<IdentitySnapshot>,
     template_vars: OnceCell<Vars>,
     age: OnceCell<Age>,
@@ -141,10 +171,12 @@ impl Context {
             move |git: &Git, untracked: &[PathBuf]| left_out(git, &state_file, untracked);
         Self {
             git: Git::new(paths.repo.clone(), dot_command).leaving_out(Box::new(leave_out)),
+            keys: KeyRules::new(&paths),
             paths,
             machine,
             command: dot_command,
             warned: RefCell::new(BTreeSet::new()),
+            refused: Cell::new(false),
             identity: OnceCell::new(),
             template_vars: OnceCell::new(),
             age: OnceCell::new(),
@@ -157,6 +189,48 @@ impl Context {
         if self.warned.borrow_mut().insert(key.to_owned()) {
             crate::output::warning(message);
         }
+    }
+
+    /// [`KeyRules::check`] with this machine's own paths.
+    pub(crate) fn check_key(&self, key: &str, leaf: bool) -> Result<()> {
+        self.keys.check(key, leaf)
+    }
+
+    /// [`KeyRules::own`] with this machine's own paths.
+    pub(crate) fn own_key(&self, key: &str, leaf: bool) -> Option<&'static str> {
+        self.keys.own(key, leaf)
+    }
+
+    /// The key of a path the user named, refused like any other key this machine never manages.
+    pub(crate) fn input_key(&self, input: &Path, cwd: &Path) -> Result<String> {
+        let key = derive_key(
+            input,
+            cwd,
+            &self.paths.home,
+            self.paths.home_real.as_deref(),
+        )?;
+        self.check_key(&key, false)?;
+        Ok(key)
+    }
+
+    /// Whether the worktree, as last read, has a tracked file whose key is refused, which is left
+    /// for the user. A pull can remove it, so only the latest read counts.
+    pub(crate) const fn refused_any(&self) -> bool {
+        self.refused.get()
+    }
+
+    /// Names a tracked repo file that is never applied or captured here, with the commands that
+    /// take it out of the repo.
+    fn report_refused(&self, path: &str, why: &anyhow::Error) {
+        let bin = crate::name::bin();
+        self.warn_once(
+            &format!("refused\0{path}"),
+            &format!(
+                "{}: in the repo, but never applied or captured here: {why:#}. If no machine needs it, remove it from the repo with `{}`, then `{bin} sync`",
+                crate::output::escape_line(path),
+                remove_command(path)
+            ),
+        );
     }
 
     /// Detected once per run, because on macOS it runs `scutil`.
@@ -422,6 +496,7 @@ impl Context {
     /// saves it records both.
     pub(crate) fn state(&self, repo_id: &str) -> Result<State> {
         let mut state = State::load(&self.paths.state_file(), repo_id)?;
+        self.drop_refused(&mut state);
         let repo_config = self.repo_config()?;
         if state.capture_dirs.is_none() {
             state.grandfather_dirs(&repo_config.dirs.paths);
@@ -432,14 +507,41 @@ impl Context {
         Ok(state)
     }
 
+    /// Drops the entries of keys this machine never manages, such as one an older dotman applied
+    /// before a rule refused it, so they are neither applied nor captured. The file in `$HOME`
+    /// stays, and the saved state no longer lists them.
+    fn drop_refused(&self, state: &mut State) {
+        let mut dropped = Vec::new();
+        state
+            .files
+            .retain(|key, _| match self.check_key(key, true) {
+                Ok(()) => true,
+                Err(e) => {
+                    dropped.push((key.clone(), e));
+                    false
+                }
+            });
+        for (key, why) in dropped {
+            self.warn_once(
+                &format!("dropped\0{key}"),
+                &format!(
+                    "{}: no longer recorded as applied on this machine: {why:#}. The file in $HOME stays as it is",
+                    crate::output::escape_line(&key)
+                ),
+            );
+        }
+    }
+
     /// Every regular file and symlink in the worktree outside `.git`, the reserved root names and
-    /// the `[ignore]` patterns, with its kind. A symlink to a directory is one entry, never
+    /// the `[ignore]` patterns, with its kind, whose key, and whose variant's target, this machine
+    /// manages. A tracked one it refuses is reported. A symlink to a directory is one entry, never
     /// followed. Keyed by repo path, which for a variant is not the key it targets.
     pub(crate) fn managed(&self) -> Result<BTreeMap<String, Kind>> {
         let root = &self.paths.repo;
         // An editor's swap file or a merge's `.orig` in the worktree is not a key.
         let dropped = Dropped::load(&self.git, &self.paths.state_file())?;
         let mut found = BTreeMap::new();
+        let mut refused = Vec::new();
         let mut walk = WalkDir::new(root)
             .follow_links(false)
             .min_depth(1)
@@ -475,12 +577,34 @@ impl Context {
             };
             let Some(key) = rel.to_str() else { continue };
             if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
-                || validate_key(key).is_err()
+                || is_reserved_root_name(key.split('/').next().unwrap_or(key))
                 || dropped.drops(key, false)
             {
                 continue;
             }
-            found.insert(key.to_owned(), kind);
+            match self.check_key(key, true) {
+                Ok(()) => {
+                    found.insert(key.to_owned(), kind);
+                }
+                Err(e) if dropped.index.contains(key) => refused.push((key.to_owned(), e)),
+                Err(_) => {}
+            }
+        }
+        let grouped = Sources::group(found.keys().map(String::as_str));
+        for key in grouped.keys() {
+            let Err(e) = self.check_key(key, true) else {
+                continue;
+            };
+            for source in grouped.sources_of(key) {
+                found.remove(source);
+                if dropped.index.contains(source) {
+                    refused.push((source.to_owned(), anyhow::anyhow!("{e:#}")));
+                }
+            }
+        }
+        self.refused.set(!refused.is_empty());
+        for (path, why) in &refused {
+            self.report_refused(path, why);
         }
         Ok(found)
     }
@@ -620,8 +744,7 @@ impl Context {
         let cwd = std::env::current_dir().context("cannot read the current directory")?;
         let mut selected = BTreeSet::new();
         for input in inputs {
-            let home_real = self.paths.home_real.as_deref();
-            let filter = derive_key(input, &cwd, &self.paths.home, home_real)?;
+            let filter = self.input_key(input, &cwd)?;
             let under: Vec<&String> = keys.iter().filter(|k| is_under(k, &filter)).collect();
             if under.is_empty() {
                 bail!("{filter} is not managed");
@@ -690,6 +813,7 @@ fn unparsable_config_fix(git: &Git, file: &Path) -> Result<Option<String>> {
 struct Dropped {
     ignore: Ignore,
     kept: BTreeSet<String>,
+    index: BTreeSet<String>,
 }
 
 impl Dropped {
@@ -697,9 +821,11 @@ impl Dropped {
     fn load(git: &Git, state_file: &Path) -> Result<Self> {
         let repo = git.repo();
         let ignore = Ignore::compile(&load_repo_config(git)?.ignore.patterns)?;
+        let mut index = BTreeSet::new();
         let mut kept = BTreeSet::new();
         if is_real_dir(&repo.join(".git")) {
-            kept.extend(git.index_paths()?);
+            index.extend(git.index_paths()?);
+            kept.clone_from(&index);
             let state = fs::read_to_string(repo.join(".git/dotman-id"))
                 .ok()
                 .and_then(|id| State::load(state_file, id.trim()).ok());
@@ -707,7 +833,11 @@ impl Dropped {
                 kept.extend(state.files.into_values().map(|entry| entry.source));
             }
         }
-        Ok(Self { ignore, kept })
+        Ok(Self {
+            ignore,
+            kept,
+            index,
+        })
     }
 
     /// A directory that holds a kept path stays, but as in git, what lies under a directory a

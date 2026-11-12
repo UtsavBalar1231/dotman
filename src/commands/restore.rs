@@ -11,7 +11,7 @@ use crate::engine::write::{WriteOptions, WriteOutcome, backup_run_dir, safe_syml
 use crate::engine::{Home, Tuple, hash_hex, observe, observe_portable, recorded_mode};
 use crate::name;
 use crate::output;
-use crate::paths::{create_private_dir, derive_key, private_temp_dir};
+use crate::paths::{create_private_dir, private_temp_dir};
 use crate::secrets::{Locked, key_hint};
 use crate::state::Kind;
 use crate::sys;
@@ -44,7 +44,7 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
     let repo_config = ctx.repo_config()?;
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let home = &ctx.paths.home;
-    let key = derive_key(&args.path, &cwd, home, ctx.paths.home_real.as_deref())?;
+    let key = ctx.input_key(&args.path, &cwd)?;
     let sources = ctx.sources()?;
     if !sources.contains(&key) {
         bail!("{key} is not managed");

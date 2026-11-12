@@ -9,7 +9,6 @@ use crate::engine::status::{Row, TemplateError, Variants, Worktree};
 use crate::git::StatusEntry;
 use crate::name;
 use crate::output::{self, escape_line};
-use crate::paths::derive_key;
 use crate::repo_config::RepoConfig;
 use crate::secrets::Finding;
 use crate::state::State;
@@ -63,7 +62,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         let cwd = std::env::current_dir().context("cannot read the current directory")?;
         home_paths
             .iter()
-            .map(|p| derive_key(p, &cwd, &ctx.paths.home, ctx.paths.home_real.as_deref()))
+            .map(|p| ctx.input_key(p, &cwd))
             .collect::<Result<Vec<_>>>()?
     };
     let unfiltered = args.paths.is_empty();

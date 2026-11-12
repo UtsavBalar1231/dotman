@@ -13,9 +13,7 @@ use crate::engine::{
 };
 use crate::name;
 use crate::output;
-use crate::paths::{
-    absolute_input, derive_key, find_collisions, refuse_non_nfc, validate_key, write_atomic,
-};
+use crate::paths::{absolute_input, find_collisions, refuse_non_nfc, validate_key, write_atomic};
 use crate::prompt;
 use crate::remote;
 use crate::repo_config::RepoConfig;
@@ -1223,7 +1221,7 @@ pub(crate) fn scan_dirs(
             scan.unapproved.push(dir.clone());
         }
         // The entry comes from a tracked file, so it is checked like a user-supplied path.
-        let plain = validate_key(dir).is_ok()
+        let plain = ctx.check_key(dir, false).is_ok()
             && parents(dir)
                 .chain(std::iter::once(dir.as_str()))
                 .all(|part| is_real_dir(&ctx.paths.home.join(part)));
@@ -1339,7 +1337,7 @@ impl<'a> Planner<'a> {
     fn input(&mut self, input: &Path) -> Result<()> {
         let paths = &self.ctx.paths;
         let home_real = paths.home_real.as_deref();
-        let key = derive_key(input, &self.cwd, &paths.home, home_real)?;
+        let key = self.ctx.input_key(input, &self.cwd)?;
         if key
             .rsplit('/')
             .next()
@@ -1354,7 +1352,6 @@ impl<'a> Planner<'a> {
             bail!("{key}: {found}{}", found.remedy(None));
         }
         let abs = absolute_input(input, &self.cwd, &paths.home);
-        paths.refuse_protected(&abs)?;
         let rel = std::iter::once(paths.home.as_path())
             .chain(home_real)
             .find_map(|root| abs.strip_prefix(root).ok())
@@ -1375,6 +1372,7 @@ impl<'a> Planner<'a> {
                 if !key.rsplit('/').next().is_some_and(variant::is_literal) {
                     bail!("{key}: {BLOCK_NAME}");
                 }
+                self.ctx.check_key(&key, true)?;
                 if matches!(leaf, Leaf::Link) {
                     self.link_to_dir(&key);
                 }
@@ -1571,7 +1569,6 @@ impl<'a> Planner<'a> {
         rel: &Path,
         is_dir: bool,
     ) -> std::result::Result<String, Left> {
-        let paths = &self.ctx.paths;
         let named = |text: String| Left::Name(printable(&text));
         if let Err(e) = refuse_non_nfc(rel) {
             return Err(named(format!("{e}")));
@@ -1583,7 +1580,7 @@ impl<'a> Planner<'a> {
         if !is_dir && !key.rsplit('/').next().is_some_and(variant::is_literal) {
             return Err(named(format!("{key}: {BLOCK_NAME}")));
         }
-        if paths.refuse_protected(path).is_err() {
+        if self.ctx.own_key(key, !is_dir).is_some() {
             return Err(Left::Own(format!(
                 "{key}: dotman's own files are never managed"
             )));

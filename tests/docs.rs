@@ -444,6 +444,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "an_upstream_entry_above_an_approved_one_captures_only_under_the_approved_one",
             "an_upstream_ignore_removal_captures_nothing_here",
             "a_pattern_removed_here_applies_until_sync_drops_it",
+            "a_pushed_file_never_becomes_one_of_dotman_s_own_files",
         ],
     ),
     (
@@ -603,6 +604,33 @@ const CLAIMS: &[(&str, &[&str])] = &[
         &[
             "a_pushed_allow_entry_never_lets_a_credential_out_of_another_machine",
             "allow_plain_is_recorded_by_path_and_rule_never_by_line",
+            "a_pushed_file_never_becomes_one_of_dotman_s_own_files",
+        ],
+    ),
+    (
+        "dotman's own files are never managed",
+        &[
+            "a_pushed_file_never_becomes_one_of_dotman_s_own_files",
+            "own_paths_follow_this_machine_s_xdg_dirs_under_home",
+            "a_pushed_link_above_dotman_s_own_files_is_never_applied",
+            "own_files_are_refused_as_keys",
+            "own_keys_follow_this_machine_s_xdg_dirs",
+            "own_keys_match_the_real_spelling_of_a_symlinked_home_or_dir",
+        ],
+    ),
+    (
+        "refused by this or any other key rule is never applied, captured or backed up",
+        &[
+            "a_pushed_file_never_becomes_one_of_dotman_s_own_files",
+            "a_tracked_key_that_a_newer_rule_refuses_never_wedges_a_command",
+            "an_upstream_name_with_a_c1_control_is_never_applied",
+        ],
+    ),
+    (
+        "or an older dotman could track before a rule refused it, is never applied or captured",
+        &[
+            "a_tracked_key_that_a_newer_rule_refuses_never_wedges_a_command",
+            "a_pushed_file_never_becomes_one_of_dotman_s_own_files",
         ],
     ),
     (

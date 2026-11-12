@@ -250,6 +250,8 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         kept: Vec::new(),
     };
     let mut items = run.classify(&sources, &state, &keys);
+    // A pull can take a refused file out of the repo, so `sync` leaves it to the pass after.
+    run.attention |= ctx.refused_any() && (opts.pass == Pass::Apply || opts.dry_run);
     if opts.system && (inputs.is_empty() || !system_filters.is_empty()) {
         items.extend(run.system_items(&state, &repo_config, &system_filters)?);
     }
