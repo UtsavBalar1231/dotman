@@ -485,8 +485,7 @@ fn another_vcsh_repo_is_reported_and_added_by_overlay_as_one_commit() {
     assert_eq!(accounting(&err), (2, 2, 0), "{err}");
     assert_eq!(commits(&env, &repo), before + 1);
     let subject = git_in(&env, &repo, &["log", "-1", "--format=%s"]);
-    assert!(subject.starts_with("import: overlay from "), "{subject}");
-    assert!(subject.contains("vim.git"), "{subject}");
+    assert_eq!(subject.trim(), "import: overlay from a git repo");
     assert_eq!(fs::read(repo.join(".vimrc")).expect("vimrc"), b"v\n");
     let mode = fs::metadata(repo.join(".vim/colors/x.vim"))
         .expect("stat")

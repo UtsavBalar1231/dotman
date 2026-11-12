@@ -180,7 +180,7 @@ impl Source {
         }
     }
 
-    /// For messages and commit subjects: a URL without its credentials.
+    /// For messages: a URL without its credentials. No commit subject holds it.
     pub(crate) fn display(&self) -> String {
         match self {
             Self::Path(path) => path.display().to_string(),

@@ -148,13 +148,7 @@ fn a_stow_farm_is_found_and_every_file_is_imported_with_home_unchanged() {
         Some("0600")
     );
     assert!(!config.modes.contains_key(".local/bin/hello"), "{config:?}");
-    assert_eq!(
-        commit_subject(&env),
-        format!(
-            "import: symlink farm {}",
-            farm_dir(&env, "dotfiles").display()
-        )
-    );
+    assert_eq!(commit_subject(&env), "import: symlink farm");
     assert!(err.contains("dotman import --swap"), "{err}");
     assert!(err.contains("stow -D"), "{err}");
     assert!(

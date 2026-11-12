@@ -1015,9 +1015,8 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
     write_files(&staging.repo, &planner.writes)?;
     config.save(&staging.repo.join(".dotman.toml"), false)?;
     staging.git.stage_all()?;
-    staging
-        .git
-        .commit(&format!("import: symlink farm {}", root.display()))?;
+    // The subject names no path, which may hold a credential.
+    staging.git.commit("import: symlink farm")?;
     install_keeping_origin(ctx, &staging, edited.as_ref())?;
     output::success(&format!("imported {files} into {}", repo.display()));
     let bin = name::bin();

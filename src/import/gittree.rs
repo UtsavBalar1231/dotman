@@ -57,6 +57,8 @@ const MISSING: &str = "files missing from the repo, left out";
 const DIFFERS: &str = "files whose content differs from the repo, left as they are";
 const MODE_DIFFERS: &str = "files whose executable bit differs from the repo, left as it is";
 const BLOCKED: &str = "files the repo holds in another form";
+/// Names the kind of source and not its path or URL, which may hold a credential.
+const OVERLAY_MESSAGE: &str = "import: overlay from a git repo";
 
 const MAX_PROBED: usize = 500;
 const SHOWN: usize = 10;
@@ -2063,17 +2065,6 @@ fn compare(ctx: &Context, git: &Git, found: &Analysis, include_missing: bool) ->
     Ok(overlay)
 }
 
-fn overlay_message(ctx: &Context, source: &Source) -> String {
-    let name = match source {
-        Source::Path(path) => path.strip_prefix(&ctx.paths.home).map_or_else(
-            |_| path.display().to_string(),
-            |rest| format!("~/{}", rest.display()),
-        ),
-        Source::Url(_) => source.display(),
-    };
-    format!("import: overlay from {name}")
-}
-
 /// Adds the files of `source` that the repo lacks as one commit, and reports the ones that differ.
 pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Result<Outcome> {
     check_source(source)?;
@@ -2092,7 +2083,7 @@ pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Resu
         bail!(crate::commands::sync::identity_fix());
     }
     report.print();
-    let message = overlay_message(ctx, source);
+    let message = OVERLAY_MESSAGE;
     let summary = format!("{}{script}", count(files.len(), "file"));
     if files.is_empty() {
         output::info("nothing to overlay; no commit made");
@@ -2119,7 +2110,7 @@ pub(super) fn overlay(ctx: &Context, source: &Source, args: &ImportArgs) -> Resu
         }
     }
     ctx.git.stage_all()?;
-    if ctx.git.commit(&message)?.is_some() {
+    if ctx.git.commit(message)?.is_some() {
         output::success(&format!("committed: {message} ({summary})"));
         super::print_next_steps();
     } else {

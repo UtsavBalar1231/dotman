@@ -112,7 +112,7 @@ fn a_default_import_keeps_modes_and_runs_neither_templates_nor_scripts() {
             "--format=%s"
         ])
         .trim(),
-        format!("import: chezmoi {}", source.display())
+        "import: chezmoi source"
     );
 
     env.ok(&["apply"]);

@@ -2136,6 +2136,40 @@ fn legacy_imports_and_overlays_commit_no_name_that_holds_a_credential() {
     );
 }
 
+/// An overlay's commit names the kind of source, not its path or URL, which may hold a token.
+#[test]
+fn an_overlay_commit_names_neither_the_source_path_nor_its_url() {
+    let token = github_token();
+    let env = TestEnv::new();
+    let base = overlay_source(&env, 0o644, b"# bashrc\n");
+    env.ok(&["init", &base.to_string_lossy(), "--take-repo"]);
+    let dir = env.root().join(format!("dots-{token}"));
+    for (name, file, url) in [("path", ".vimrc", false), ("url", ".zshrc", true)] {
+        let source = dir.join(name);
+        env.write(source.join(file), b"x\n", 0o644);
+        common::git_in(&env, &source, &["init", "-q"]);
+        commit_all(&env, &source, "dots");
+        let source = source.to_string_lossy().into_owned();
+        let arg = if url {
+            format!("file://{source}")
+        } else {
+            source
+        };
+        exits(
+            &env.run(&["import", "--overlay", &arg, "--include-missing"]),
+            0,
+        );
+    }
+    let repo = env.repo().to_string_lossy().into_owned();
+    let messages = env.git(&["-C", &repo, "log", "--all", "--format=%B"]);
+    assert_eq!(
+        messages.matches("import: overlay from a git repo").count(),
+        2,
+        "{messages}"
+    );
+    assert!(!messages.contains(&token), "{messages}");
+}
+
 /// Commits `name` with `bytes` on top of the source, then its removal.
 fn added_and_removed(env: &TestEnv, source: &Path, name: &str, bytes: &str) {
     env.write(source.join(name), bytes.as_bytes(), 0o644);

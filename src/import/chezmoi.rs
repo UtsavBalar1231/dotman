@@ -1518,9 +1518,8 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
     plan.config
         .save(&staging.repo.join(".dotman.toml"), false)?;
     staging.git.stage_all()?;
-    staging
-        .git
-        .commit(&format!("import: chezmoi {}", source.display()))?;
+    // The subject names no path, which may hold a credential.
+    staging.git.commit("import: chezmoi source")?;
     install_keeping_origin(ctx, &staging, edited.as_ref())?;
     output::success(&format!("imported {files} into {}", repo.display()));
     super::print_next_steps();
