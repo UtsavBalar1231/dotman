@@ -120,6 +120,7 @@ just release-prepare 0.2.0                    # bumps Cargo.toml, Cargo.lock, th
 - The real-sudo test in `tests/system_scope.rs` runs only with `DOTMAN_REAL_SUDO_TEST=1` and a container marker (`/.dockerenv` or `/run/.containerenv`). Only CI's `system-scope` job sets both; elsewhere it returns early.
 - Tests shell out to `git`, which needs `user.name` and `user.email` set. The harness in `tests/common` gives each test its own HOME and XDG dirs.
 - `just e2e` builds the release binary unless `DOTMAN_BIN` names one. Each scenario runs dotman under `env -i` with HOME and the XDG dirs in a fresh temp root, against a `file://` remote, and needs git, age and age-keygen on PATH. The helpers in `e2e/lib.sh` each carry a one-line comment.
+- `just e2e` runs `e2e/journeys`, `e2e/faults` (SIGKILL campaign; `E2E_KILL_ITERS` and `E2E_KILL_SEED` for soak runs) and `e2e/import` (its chezmoi case skips without chezmoi unless `E2E_REQUIRE_CHEZMOI=1`); `just e2e-distros` runs the journeys in Docker per distro and is not in CI.
 
 ## Do not
 - Do not run `dotman` or tests against the real `~/.dotman`, `~/.config/dotman`, `~/.local/share/dotman`, `~/.local/state/dotman`, `/etc` or `$HOME`. Use `tests/common`, or a temp root with a HOME and every `XDG_*` pointing inside it.

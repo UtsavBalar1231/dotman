@@ -241,7 +241,7 @@ Every prompt has a flag, so unattended runs never guess. A run is non-interactiv
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for the layout, rules and commands. Run `just lint-strict`, `cargo test --workspace --all-targets` and `just e2e`, the multi-machine scenarios in `e2e/`, before opening a pull request. See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+See [AGENTS.md](AGENTS.md) for the layout, rules and commands. Run `just lint-strict`, `cargo test --workspace --all-targets` and `just e2e`, the multi-machine, kill-recovery and importer scenarios in `e2e/`, before opening a pull request; `just e2e-distros` repeats the journeys in Docker on several distros. See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## License
 
