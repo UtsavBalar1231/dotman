@@ -196,6 +196,34 @@ fn a_source_name_in_the_import_report_never_starts_a_line() {
     );
 }
 
+/// A hook command holding a right-to-left override or an isolate, which can make it read as
+/// another command than the one that runs, is refused by code point and shown escaped.
+#[test]
+fn a_hook_command_with_a_bidi_control_is_refused_and_shown_escaped() {
+    let env = TestEnv::new();
+    let marker = env.root().join("never");
+    hooked(
+        &env,
+        &format!("touch '{}' #\\u202E\\u2066 ;)x(\\u2069", marker.display()),
+    );
+    for args in [
+        &["apply", "--dry-run"][..],
+        &["apply", "--approve-hooks"],
+        &["apply"],
+    ] {
+        let out = env.run(args);
+        let err = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
+        assert!(err.contains("U+202E right-to-left override"), "{err}");
+        assert!(err.contains("#\\u{202e}\\u{2066} ;)x(\\u{2069}"), "{err}");
+        assert!(
+            !err.contains(['\u{202e}', '\u{2066}', '\u{2069}']),
+            "{err:?}"
+        );
+    }
+    assert!(!marker.exists());
+}
+
 /// No line of `err` starts with `next:`, the text a hostile file put after a newline, and `err`
 /// shows that newline escaped.
 fn never_starts_a_line(err: &str) {

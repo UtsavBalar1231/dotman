@@ -38,18 +38,51 @@ pub fn get_verbosity() -> Verbosity {
     }
 }
 
-/// `text` with each control character other than newline and tab (C0, DEL and C1) written as
-/// `char::escape_debug` writes it, such as `\u{1b}` or `\r`. Everything else is left alone.
+/// `text` with control characters other than newline and tab, and hidden format characters, escaped.
+///
+/// A control character (C0, DEL and C1) is written as `char::escape_debug` writes it, such as
+/// `\u{1b}` or `\r`, and an [`is_hidden_format`] character as `\u{202e}`. Everything else is left
+/// alone.
 #[must_use]
 pub fn escape(text: &str) -> Cow<'_, str> {
-    escape_where(text, |c| c.is_control() && c != '\n' && c != '\t')
+    escape_where(text, |c| {
+        (c.is_control() && c != '\n' && c != '\t') || is_hidden_format(c)
+    })
 }
 
 /// [`escape`] that also escapes newline and tab, for a field that must stay on one line, such
 /// as a key or a hook command.
 #[must_use]
 pub fn escape_line(text: &str) -> Cow<'_, str> {
-    escape_where(text, char::is_control)
+    escape_where(text, |c| c.is_control() || is_hidden_format(c))
+}
+
+/// Whether `c` changes how the text around it reads without showing itself.
+///
+/// Such a character makes a line read as other text than it holds: a bidi control (U+061C, U+200E,
+/// U+200F, U+202A to U+202E, U+2066 to U+2069), a line or paragraph separator, or an invisible
+/// format character (soft hyphen, Mongolian vowel separator, zero-width space, word joiner,
+/// invisible operators, deprecated format controls, byte order mark, interlinear annotation marks,
+/// tags). The zero-width joiner and non-joiner are not: Persian and Indic names and emoji need
+/// them, and they reorder nothing.
+#[must_use]
+pub const fn is_hidden_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{61c}'
+            | '\u{180e}'
+            | '\u{200b}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 fn escape_where(text: &str, unsafe_char: impl Fn(char) -> bool) -> Cow<'_, str> {
@@ -58,10 +91,12 @@ fn escape_where(text: &str, unsafe_char: impl Fn(char) -> bool) -> Cow<'_, str> 
     }
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if unsafe_char(c) {
+        if !unsafe_char(c) {
+            out.push(c);
+        } else if c.is_control() {
             out.extend(c.escape_debug());
         } else {
-            out.push(c);
+            out.extend(c.escape_unicode());
         }
     }
     Cow::Owned(out)
@@ -151,6 +186,22 @@ mod tests {
         assert_eq!(escape("line\nnext\ttab"), "line\nnext\ttab");
         let once = escape("\u{1b}[2J").into_owned();
         assert_eq!(escape(&once), once);
+    }
+
+    #[test]
+    fn bidi_controls_and_invisible_format_characters_are_escaped_and_joiners_are_not() {
+        let hidden = "\u{ad}\u{61c}\u{180e}\u{200b}\u{200e}\u{200f}\u{2028}\u{2029}\u{202a}\u{202e}\u{2060}\u{2064}\u{2066}\u{2069}\u{206f}\u{feff}\u{fff9}\u{fffb}\u{e0001}\u{e0020}\u{e007f}";
+        let shown = "\\u{ad}\\u{61c}\\u{180e}\\u{200b}\\u{200e}\\u{200f}\\u{2028}\\u{2029}\\u{202a}\\u{202e}\\u{2060}\\u{2064}\\u{2066}\\u{2069}\\u{206f}\\u{feff}\\u{fff9}\\u{fffb}\\u{e0001}\\u{e0020}\\u{e007f}";
+        assert_eq!(escape(hidden), shown);
+        assert_eq!(escape_line(hidden), shown);
+        assert_eq!(
+            escape("rm #\u{202e}\u{2066} ;)x(\u{2069}\n"),
+            "rm #\\u{202e}\\u{2066} ;)x(\\u{2069}\n"
+        );
+        for kept in ["\u{200c}", "\u{200d}", "\u{2065}", "\u{e0000}", "\u{e0080}"] {
+            assert!(matches!(escape_line(kept), Cow::Borrowed(_)), "{kept:?}");
+        }
+        assert_eq!(escape(shown), shown);
     }
 
     #[test]

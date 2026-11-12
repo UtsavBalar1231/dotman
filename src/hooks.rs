@@ -257,18 +257,19 @@ fn pattern(glob: &str) -> Result<Pattern> {
 }
 
 /// Fails, naming the entry and the character, when a glob holds a control character other than
-/// tab, or a command one other than tab and newline. A carriage return or an escape sequence could
-/// make the table read as other commands than the ones that run; `sh` runs a multi-line command,
-/// and the table shows its newlines escaped.
+/// tab, or a command one other than tab and newline, or either holds an
+/// [`output::is_hidden_format`] character. A carriage return, an escape sequence or a bidi control
+/// could make the table read as other commands than the ones that run; `sh` runs a multi-line
+/// command, and the table shows its newlines escaped.
 pub fn validate(table: &BTreeMap<String, String>) -> Result<()> {
     for (glob, command) in table {
         let refused = glob
             .chars()
-            .find(|c| c.is_control() && *c != '\t')
+            .find(|c| (c.is_control() && *c != '\t') || output::is_hidden_format(*c))
             .or_else(|| {
-                command
-                    .chars()
-                    .find(|c| c.is_control() && !matches!(c, '\t' | '\n'))
+                command.chars().find(|c| {
+                    (c.is_control() && !matches!(c, '\t' | '\n')) || output::is_hidden_format(*c)
+                })
             });
         if let Some(c) = refused {
             bail!(
@@ -297,7 +298,24 @@ fn char_name(c: char) -> String {
         '\u{7f}' => "delete",
         '\u{85}' => "next line",
         '\u{9b}' => "control sequence introducer",
-        _ => "control character",
+        '\u{61c}' => "arabic letter mark",
+        '\u{200b}' => "zero width space",
+        '\u{200e}' => "left-to-right mark",
+        '\u{200f}' => "right-to-left mark",
+        '\u{2028}' => "line separator",
+        '\u{2029}' => "paragraph separator",
+        '\u{202a}' => "left-to-right embedding",
+        '\u{202b}' => "right-to-left embedding",
+        '\u{202c}' => "pop directional formatting",
+        '\u{202d}' => "left-to-right override",
+        '\u{202e}' => "right-to-left override",
+        '\u{2066}' => "left-to-right isolate",
+        '\u{2067}' => "right-to-left isolate",
+        '\u{2068}' => "first strong isolate",
+        '\u{2069}' => "pop directional isolate",
+        '\u{feff}' => "zero width no-break space",
+        c if c.is_control() => "control character",
+        _ => "invisible format character",
     };
     format!("U+{:04X} {name}", u32::from(c))
 }
@@ -455,6 +473,17 @@ mod tests {
             ("a", "x\u{9b}2K", "U+009B control sequence introducer"),
             ("a", "x\u{7f}", "U+007F delete"),
             ("a", "x\u{1}", "U+0001 control character"),
+            (
+                "a",
+                "echo ok #\u{202e}\u{2066} ;)x(\u{2069}",
+                "U+202E right-to-left override",
+            ),
+            ("a\u{2067}b", "true", "U+2067 right-to-left isolate"),
+            ("a", "x\u{61c}", "U+061C arabic letter mark"),
+            ("a", "x\u{200f}", "U+200F right-to-left mark"),
+            ("a", "rm x\u{200b}", "U+200B zero width space"),
+            ("a", "x\u{2028}y", "U+2028 line separator"),
+            ("a", "x\u{e0041}", "U+E0041 invisible format character"),
         ] {
             let err = validate(&table(&[("b", "true"), (glob, command)]))
                 .err()
@@ -468,6 +497,7 @@ mod tests {
             );
             assert!(err.contains(&entry), "the entry is named: {err}");
             assert!(!err.contains('\n'), "on one line: {err:?}");
+            assert!(!err.chars().any(output::is_hidden_format), "{err:?}");
         }
     }
 

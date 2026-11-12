@@ -410,6 +410,13 @@ pub(crate) fn validate_key(key: &str) -> Result<()> {
         "key `{}` contains a control character",
         key.escape_debug()
     );
+    // Output escapes them, so a printed command could not name such a key, and git's own output
+    // under `dotman git` would show it raw.
+    ensure!(
+        !key.chars().any(crate::output::is_hidden_format),
+        "key `{}` contains a bidi control or an invisible format character",
+        crate::output::escape_line(key)
+    );
     ensure!(!key.starts_with('/'), "key `{key}` is absolute");
     ensure!(is_nfc(key), "key `{key}` is not NFC-normalized");
     for component in key.split('/') {
@@ -784,6 +791,25 @@ mod tests {
             assert!(!err.chars().any(char::is_control), "{name:?}: {err:?}");
         }
         assert!(validate_key("\u{a0}nbsp/\u{7e}tilde").is_ok());
+    }
+
+    #[test]
+    fn a_bidi_control_or_invisible_format_character_is_refused_and_escaped() {
+        for (name, shown) in [
+            ("a/evil\u{202e}fdp.sh", "evil\\u{202e}fdp.sh"),
+            ("x\u{2066}y\u{2069}", "x\\u{2066}y\\u{2069}"),
+            ("zw\u{200b}sp", "zw\\u{200b}sp"),
+            ("\u{feff}bom", "\\u{feff}bom"),
+        ] {
+            let err = validate_key(name).unwrap_err().to_string();
+            assert!(err.contains(shown), "{name:?}: {err}");
+            assert!(
+                !err.chars().any(crate::output::is_hidden_format),
+                "{name:?}: {err:?}"
+            );
+        }
+        assert!(validate_key("\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}").is_ok());
+        assert!(validate_key("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}").is_ok());
     }
 
     #[test]
