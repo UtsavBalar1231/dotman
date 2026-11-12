@@ -3118,6 +3118,39 @@ fn a_local_path_is_cloned_through_git_s_transport() {
     assert!(!every_object(&c, &c.repo().join(".git")).contains(marker));
 }
 
+/// A local source whose origin names a git remote helper, such as `ext::`, which runs its address
+/// as a command, gives the new repo no such origin: `init <path>` keeps the source path as origin,
+/// and `import <path>` offers no command that sets it. Nothing runs even where the user allows the
+/// `ext` transport.
+#[test]
+fn a_source_s_remote_helper_origin_is_neither_copied_nor_offered() {
+    let allowed = [("GIT_ALLOW_PROTOCOL", "file:ext")];
+    let a = TestEnv::new();
+    let work = common::work_tree(&a, "src", &[(".bashrc", "# rc\n", false)], None);
+    let marker = a.root().join("ext-ran");
+    let origin = format!("ext::sh -c touch% {}", marker.display());
+    git_in(&a, &work, &["remote", "add", "origin", &origin]);
+    let src = work.to_string_lossy().into_owned();
+
+    let b = TestEnv::new();
+    exits(&b.run_with(&allowed, &["init", &src]), 0);
+    assert_eq!(
+        git_in(&b, &b.repo(), &["remote", "get-url", "origin"]).trim(),
+        src
+    );
+    b.run_with(&allowed, &["sync"]);
+    b.run_with(&allowed, &["doctor"]);
+
+    let c = TestEnv::new();
+    let err = exits(&c.run_with(&allowed, &["import", "--yes", &src]), 0);
+    assert!(
+        err.contains("it is not a usable remote URL, so it is not offered as one"),
+        "{err}"
+    );
+    assert!(!err.contains("init --remote"), "{err}");
+    assert!(!marker.exists());
+}
+
 /// `DOTMAN_AGE_KEY` is in no hook's environment and no editor's: both write their `env` to a
 /// file that lacks the variable and has `HOME`.
 #[test]

@@ -1500,9 +1500,16 @@ fn push_refspec(branch: &str) -> String {
 
 /// Whether `url` can be a remote's URL: git would read an empty one or one starting with `-` as
 /// nothing or as an option wherever it passes the URL on, and a control character (C0, DEL or
-/// C1) would forge lines in a note that shows it or change a command that sets it.
+/// C1) would forge lines in a note that shows it or change a command that sets it. git hands
+/// `<transport>::<address>` to the program `git-remote-<transport>`, and `ext::` runs the address
+/// as a command, so that form is refused too: letters, digits, `+`, `.` and `-`, then `::`.
 pub fn usable_remote(url: &str) -> bool {
-    !url.is_empty() && !url.starts_with('-') && !url.chars().any(char::is_control)
+    let transport =
+        url.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    !url.is_empty()
+        && !url.starts_with('-')
+        && !url.chars().any(char::is_control)
+        && !transport.starts_with("::")
 }
 
 /// Whether git reads `url` as a local path: it does unless a `:` comes before the first `/`, as in
@@ -2193,6 +2200,22 @@ mod tests {
             Some(utf8(a.repo()))
         );
         c.remove_remote("origin").expect("remove");
+    }
+
+    #[test]
+    fn a_remote_helper_url_is_not_usable() {
+        for (url, usable) in [
+            ("ext::sh -c touch% /tmp/x", false),
+            ("fd::0", false),
+            ("gcrypt::rsync://host/x", false),
+            ("a+b.c-d::x", false),
+            ("::x", false),
+            ("https://host/x::y", true),
+            ("/srv/x::y.git", true),
+            ("git@host:me/x.git", true),
+        ] {
+            assert_eq!(usable_remote(url), usable, "{url}");
+        }
     }
 
     #[test]
