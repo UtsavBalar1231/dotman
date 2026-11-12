@@ -873,6 +873,67 @@ fn a_clean_history_keeps_every_commit() {
     assert_eq!(commits(&env, &env.repo()), 3);
 }
 
+/// A user's `color.diff`, `color.status` and `color.branch` beat `color.ui`. Set to `always`,
+/// they change nothing that dotman reads from git: the import's history scan, `status`, `log`
+/// and a `sync` that pulls behave as without them.
+#[test]
+fn a_users_color_config_changes_no_import_status_log_or_sync() {
+    let color = "[color]\n\tui = always\n\tdiff = always\n\tstatus = always\n\tbranch = always\n";
+    for gitconfig in ["", color] {
+        let a = TestEnv::new();
+        let source = history_source(&a, true);
+        let b = a.second_device();
+        for env in [&a, &b] {
+            let global = env.home().join(".gitconfig");
+            let mut text = fs::read_to_string(&global).expect("read .gitconfig");
+            text.push_str(gitconfig);
+            fs::write(&global, text).expect("write .gitconfig");
+        }
+        let out = a.run(&["import", "--yes", &source.to_string_lossy()]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(3), "{gitconfig:?}: {err}");
+        assert!(
+            err.contains("  .oldrc: github-token, added in "),
+            "{gitconfig:?}: {err}"
+        );
+        assert!(
+            err.contains("imported the current tree of 2 commits as one commit into "),
+            "{gitconfig:?}: {err}"
+        );
+        a.ok(&["init", "--remote", &a.remote_url()]);
+        a.ok(&["sync"]);
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        a.git(&[
+            "--git-dir",
+            &remote,
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+
+        b.ok(&["init", &a.remote_url()]);
+        b.write(".bashrc", b"alias lb=ls\n", 0o644);
+        b.ok(&["sync"]);
+        let pulled = a.ok(&["sync"]);
+        assert_eq!(
+            a.read(".bashrc"),
+            b"alias lb=ls\n",
+            "{gitconfig:?}: {pulled}"
+        );
+
+        let status = a.run(&["status"]);
+        let log = a.run(&["log"]);
+        for out in [&status, &log] {
+            assert!(out.status.success(), "{gitconfig:?}: {}", stderr(out));
+            let shown = [out.stdout.as_slice(), out.stderr.as_slice()].concat();
+            assert!(!shown.contains(&0x1b), "{gitconfig:?}: {}", stderr(out));
+        }
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert_eq!(log.lines().count(), 3, "{gitconfig:?}: {log}");
+        assert!(!pulled.contains('\u{1b}'), "{gitconfig:?}: {pulled}");
+    }
+}
+
 /// A bare source whose `main` is one clean commit. A token sits only where the import never
 /// looks: on the branch `feature`, and in a commit only the annotated tag `v1` reaches.
 // reason: clippy.toml exempts expect only inside #[test] fns

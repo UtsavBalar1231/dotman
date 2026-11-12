@@ -66,7 +66,9 @@ const TRACKED_TEMP_DIRS: &str = ":(glob)**/.dotman-tmp-*/**";
 /// `status.renames` or `diff.renames` the user set.
 /// `core.symlinks=true`: with `false`, git checks a managed symlink out as a file holding its
 /// target, and status calls it clean.
-const ISOLATION: [&str; 20] = [
+/// Each `color.<command>` switch beats `color.ui`, so a user's `color.diff=always` would color
+/// the `git log` output that dotman parses unless it is turned off too.
+const ISOLATION: [&str; 40] = [
     "-c",
     "core.excludesFile=",
     "-c",
@@ -81,6 +83,26 @@ const ISOLATION: [&str; 20] = [
     "log.showSignature=false",
     "-c",
     "color.ui=false",
+    "-c",
+    "color.diff=false",
+    "-c",
+    "color.status=false",
+    "-c",
+    "color.branch=false",
+    "-c",
+    "color.showBranch=false",
+    "-c",
+    "color.grep=false",
+    "-c",
+    "color.interactive=false",
+    "-c",
+    "color.advice=false",
+    "-c",
+    "color.push=false",
+    "-c",
+    "color.remote=false",
+    "-c",
+    "color.transport=false",
     "-c",
     "core.fsmonitor=false",
     "-c",
