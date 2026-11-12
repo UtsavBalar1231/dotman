@@ -342,6 +342,56 @@ fn a_signal_while_dotman_runs_leaves_no_temp_file() -> R {
     Ok(())
 }
 
+/// A signal between the copy of the downloaded binary into `~/.local/bin` and its rename removes
+/// the staged copy and the download, and the script exits with the status the signal gives.
+#[test]
+fn a_signal_while_the_binary_is_staged_leaves_no_staged_copy() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let bin = setup.stubs("bin");
+    let staged = setup.machine.root().join("staged");
+    write_exe(
+        &bin.join("cp"),
+        &format!(
+            "#!/bin/sh\nPATH=/usr/bin:/bin cp \"$@\" || exit $?\ncase \"$2\" in\n  */.dotman.*) touch '{}'; sleep 1;;\nesac\n",
+            staged.display()
+        ),
+    )?;
+    let tmp = setup.machine.root().join("tmp");
+    let local_bin = setup.home().join(".local/bin");
+    for (signal, code) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
+        fs::create_dir_all(&tmp)?;
+        let _ = fs::remove_file(&staged);
+        let mut child = setup
+            .command(&release()?, &[&bin])
+            .env("TMPDIR", &tmp)
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !staged.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{signal}: the copy never started"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let sent = Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(child.id().to_string())
+            .status()?;
+        assert!(sent.success(), "{signal}");
+        assert_eq!(child.wait()?.code(), Some(code), "{signal}");
+        let left: Vec<_> = fs::read_dir(&tmp)?.collect::<Result<_, _>>()?;
+        assert!(left.is_empty(), "{signal}: left {left:?}");
+        let names: Vec<_> = fs::read_dir(&local_bin)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<_, _>>()?;
+        assert!(names.is_empty(), "{signal}: left {names:?}");
+    }
+    Ok(())
+}
+
 /// A container whose first run held hooks back reruns `install.sh` with `DOTMAN_APPROVE_HOOKS=1`
 /// after the table changed upstream without touching a hooked path: the rerun approves the table
 /// it shows, instead of approving nothing and reporting success.

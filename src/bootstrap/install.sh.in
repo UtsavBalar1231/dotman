@@ -13,7 +13,8 @@ die() {
 
 tmp=
 said_file=
-trap 'rm -rf ${tmp:+"$tmp"} ${said_file:+"$said_file"}' EXIT
+staged=
+trap 'rm -rf ${tmp:+"$tmp"} ${said_file:+"$said_file"} ${staged:+"$staged"}' EXIT
 # dash runs no EXIT trap when a signal kills it, so each of these exits, with the status the
 # signal would have given, through the EXIT trap.
 trap 'exit 129' HUP
@@ -122,9 +123,9 @@ EOM
     # The rename is atomic, so an interrupted copy never leaves a truncated file named dotman.
     staged=$bin_dir/.dotman.$$
     if ! { cp "$tmp/out/dotman" "$staged" && chmod 0755 "$staged" && mv -f "$staged" "$bin_dir/dotman"; }; then
-        rm -f "$staged"
         die "cannot install dotman into $bin_dir"
     fi
+    staged=
 }
 
 parse_semver "$pinned"
