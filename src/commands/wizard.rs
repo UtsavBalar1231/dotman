@@ -567,8 +567,12 @@ impl GitIdentity {
 }
 
 /// What `origin` is set to for `url` typed in the working directory. git resolves a relative
-/// path against the repo, not against where it was typed, so one is stored absolute.
+/// path against the repo, not against where it was typed, so one is stored absolute. Only such a
+/// path reads the working directory, which may be gone.
 pub fn origin_url(url: &str) -> Result<String> {
+    if !crate::git::relative_path_remote(url) {
+        return Ok(url.to_owned());
+    }
     let cwd = std::env::current_dir().context("cannot read the working directory")?;
     crate::git::absolute_remote(url, &cwd)
 }

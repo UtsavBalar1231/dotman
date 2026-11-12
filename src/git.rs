@@ -1512,9 +1512,9 @@ pub fn local_path_remote(url: &str) -> bool {
         .is_none_or(|colon| url.find('/').is_some_and(|slash| slash < colon))
 }
 
-/// git expands a leading `~` or `~user` of a local path itself, against the home of whoever runs
-/// it, so such a path is not relative to where git runs.
-fn relative_path_remote(url: &str) -> bool {
+/// Whether git reads `url` as a local path relative to where it runs. git expands a leading `~` or
+/// `~user` itself, against the home of whoever runs it, so such a path is not.
+pub fn relative_path_remote(url: &str) -> bool {
     usable_remote(url)
         && local_path_remote(url)
         && Path::new(url).is_relative()

@@ -729,6 +729,31 @@ fn a_remote_starting_with_a_tilde_is_kept_as_typed() {
     common::check_origin_hint(&c, &err, tilde);
 }
 
+/// Only a relative local path needs the working directory, so `--remote` with a URL works from one
+/// that was removed.
+#[test]
+fn a_url_remote_works_from_a_removed_working_directory() {
+    let env = TestEnv::new();
+    let gone = env.root().join("gone");
+    fs::create_dir(&gone).expect("create the working directory");
+    let script = format!(
+        "cd {} && rmdir {} && exec \"$0\" init --no-import --no-key --remote {}",
+        shell_words::quote(&gone.to_string_lossy()),
+        shell_words::quote(&gone.to_string_lossy()),
+        shell_words::quote(&env.remote_url())
+    );
+    let out = env
+        .process_for(Path::new("sh"))
+        .args(["-c", &script, env!("CARGO_BIN_EXE_dotman")])
+        .output()
+        .expect("run sh");
+    exits(&out, 0);
+    assert_eq!(
+        repo_git(&env, &["config", "remote.origin.url"]).trim(),
+        env.remote_url()
+    );
+}
+
 /// git stores a relative source made absolute, so the rerun of the same command line compares the
 /// directories, not the text.
 #[test]
