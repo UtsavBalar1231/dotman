@@ -22,7 +22,8 @@ add_suite() {
     done
 }
 if [[ $# == 0 ]]; then
-    for dir in "$here"/*/; do add_suite "${dir%/}"; done
+    # distros/ is the container matrix that `just e2e-distros` runs, not a suite.
+    for dir in "$here"/*/; do [[ $dir == */distros/ ]] || add_suite "${dir%/}"; done
 else
     for arg in "$@"; do
         if [[ -d $here/$arg ]]; then

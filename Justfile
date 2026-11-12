@@ -72,6 +72,10 @@ e2e *args:
 e2e-keep *args:
     E2E_KEEP=1 just e2e {{ args }}
 
+# The journeys in Docker on each distro, against a static musl build or DOTMAN_BIN_MUSL. Not in CI.
+e2e-distros *images:
+    e2e/distros/run.sh {{ images }}
+
 fix:
     cargo fix --allow-dirty --allow-staged --all-features
 
