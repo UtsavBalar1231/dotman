@@ -532,10 +532,45 @@ jobs:
             cargo build --release --locked --target "$TARGET"
           fi
 
+  e2e:
+    name: End-to-end scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: Install git, age and shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git age shellcheck
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - name: Install just
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: just
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
+      - name: Check the scripts
+        run: shellcheck e2e/*.sh e2e/journeys/*.sh
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Run the scenarios
+        run: just e2e
+
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, test, msrv, git-floor, alpine, system-scope, root-direct, rage, chezmoi, freshness, cross-compile]
+    needs: [lint, test, msrv, git-floor, alpine, system-scope, root-direct, rage, chezmoi, freshness, cross-compile, e2e]
     if: always()
     steps:
       - name: Check every job
