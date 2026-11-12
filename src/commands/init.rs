@@ -177,8 +177,7 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     let (_tmp, fresh);
     let clone = if place.is_some() {
         let tmp = private_temp_dir("dotman-init-", &std::env::temp_dir())?;
-        let mut paths = ctx.paths.clone();
-        paths.repo = tmp.path().join("repo");
+        let paths = ctx.paths.with_clone(tmp.path().join("repo"));
         _tmp = tmp;
         fresh = Context::new(paths, ctx.machine.clone(), "init");
         fresh.git.clone_from(source)?;

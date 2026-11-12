@@ -92,6 +92,8 @@ pub struct Paths {
     /// `DOTMAN_SYSTEM_ROOT`, canonicalized once. When set, system paths are read below it.
     pub system_root: Option<PathBuf>,
     repo_from_env: bool,
+    /// This machine's repo path while `repo` is a temp clone that a dry run plans from.
+    real_repo: Option<PathBuf>,
 }
 
 impl Paths {
@@ -150,7 +152,19 @@ impl Paths {
             data_home,
             age_key_file,
             system_root,
+            real_repo: None,
         })
+    }
+
+    /// These paths with the repo at `clone`, a temp clone that a dry run plans from, whose keys
+    /// are still refused as this machine's real repo path refuses them.
+    #[must_use]
+    pub(crate) fn with_clone(&self, clone: PathBuf) -> Self {
+        Self {
+            real_repo: Some(self.real_repo.clone().unwrap_or_else(|| self.repo.clone())),
+            repo: clone,
+            ..self.clone()
+        }
     }
 
     /// Applies the machine config. `DOTMAN_REPO_PATH` still beats its `repo`.
@@ -203,7 +217,10 @@ impl KeyRules {
     pub(crate) fn new(paths: &Paths) -> Self {
         let config_dir = paths.config_home.join("dotman");
         let listed = [
-            ("the dotman repo", Some(&paths.repo)),
+            (
+                "the dotman repo",
+                Some(paths.real_repo.as_ref().unwrap_or(&paths.repo)),
+            ),
             ("the dotman state directory", Some(&paths.state_dir)),
             ("the dotman machine config", Some(&paths.config_file)),
             ("the age identity file", Some(&paths.age_identity)),

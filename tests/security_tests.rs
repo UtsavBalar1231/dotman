@@ -297,6 +297,50 @@ fn a_pushed_file_never_becomes_one_of_dotman_s_own_files() {
     untouched();
 }
 
+/// `init --dry-run <url>` plans from a temp clone, yet refuses a pushed file under this machine's
+/// repo path as the real `init` does: the same refused line, once, no plan to apply it, exit 3,
+/// and nothing created at the repo path.
+#[test]
+fn a_dry_run_init_refuses_a_file_in_this_machine_s_repo_path() {
+    let a = TestEnv::new();
+    a.write(".profile", b"a\n", 0o644);
+    a.ok(&["init"]);
+    a.ok(&["add", ".profile"]);
+    a.write_repo(".local/share/dotman/INTO-REPO", b"x\n");
+    a.push_repo();
+
+    let b = a.second_device();
+    let vars = [
+        ("XDG_CONFIG_HOME", ""),
+        ("XDG_STATE_HOME", ""),
+        ("XDG_DATA_HOME", ""),
+    ];
+    let refused = |err: &str| -> Vec<String> {
+        err.lines()
+            .filter(|line| line.contains("INTO-REPO"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let dry = exits(
+        &b.run_with(&vars, &["init", "--dry-run", &a.remote_url()]),
+        3,
+    );
+    let planned = refused(&dry);
+    assert_eq!(planned.len(), 1, "{dry}");
+    assert!(
+        planned.iter().all(|line| line.contains(
+            ".local/share/dotman/INTO-REPO: in the repo, but never applied or captured here"
+        )),
+        "{dry}"
+    );
+    assert!(!b.home().join(".local/share/dotman").exists(), "{dry}");
+    assert!(!b.home().join(".profile").exists(), "{dry}");
+
+    let real = exits(&b.run_with(&vars, &["init", &a.remote_url()]), 3);
+    assert_eq!(refused(&real), planned, "{real}");
+    assert_eq!(b.read(".profile"), b"a\n");
+}
+
 /// dotman's own paths are this machine's: with its XDG dirs at `~/cfg`, `~/st` and `~/dat`, a
 /// pushed `cfg/dotman/config.toml` is refused while `.config/dotman/config.toml` is an ordinary
 /// file. A capture under `~/cfg`, `~/st` or `~/dat` skips dotman's own files, and `add`,
