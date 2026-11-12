@@ -302,7 +302,8 @@ struct Left {
     reason: &'static str,
     detail: String,
     path: String,
-    /// Taken out of the tree by the conversion commit.
+    /// A file the conversion commit takes out of the tree. An entry whose name the guard holds
+    /// goes through [`Analysis::held`] instead.
     remove: bool,
 }
 
@@ -319,6 +320,9 @@ struct Analysis {
     cased: BTreeMap<String, BTreeSet<&'static str>>,
     /// The source path of the entry that carries a precedence report, and the report.
     precedence: BTreeMap<String, String>,
+    /// Entries of HEAD's tree whose name the guard holds, as git stores them, each with all it
+    /// holds; the conversion commit takes them out.
+    held: Vec<PathBuf>,
 }
 
 struct Named {
@@ -729,6 +733,70 @@ fn guard_content(repo: &Path, found: &mut Analysis, allow: &[Allow]) {
         found.left.extend(left);
         found.left.sort_by(|a, b| a.path.cmp(&b.path));
     }
+}
+
+/// Holds every entry of HEAD's tree whose name the guard holds, of any kind: a file, a symlink, a
+/// submodule, a path dotman cannot manage, or a directory with all it holds, an empty one too.
+/// Submodules and unmanageable paths otherwise stay in the tree unchecked, and git keeps an empty
+/// directory in no index, so the names of the kept files do not cover the tree.
+fn guard_names(git: &Git, found: &mut Analysis) -> Result<()> {
+    let held = held_in_tree(git)?;
+    if held.is_empty() {
+        return Ok(());
+    }
+    // An unreadable path is reported as its lossy text.
+    let covered = |path: &str| {
+        held.iter()
+            .any(|(raw, _)| within(path.as_bytes(), raw.to_string_lossy().as_bytes()))
+    };
+    found.kept.retain(|kept| !covered(&kept.from));
+    found.left.retain(|left| !covered(&left.path));
+    for (raw, finding) in held {
+        let path = raw.to_string_lossy().into_owned();
+        let item = held_item(&path, finding);
+        found.held.push(raw);
+        found.left.push(Left {
+            reason: item.reason,
+            detail: format!("{}; the source's history still has it", item.detail),
+            path,
+            remove: false,
+        });
+    }
+    found.left.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(())
+}
+
+/// Each entry of HEAD's tree whose name the guard holds, as git stores the path, apart from one
+/// inside another that is held.
+fn held_in_tree(git: &Git) -> Result<Vec<(PathBuf, secrets::Finding)>> {
+    let listed = git_stdout(git, &["ls-tree", "-r", "-t", "-z", "HEAD"], None)?;
+    let mut held: Vec<(PathBuf, secrets::Finding)> = Vec::new();
+    // `<mode> <type> <oid>\t<path>`; `-t` lists a directory before what it holds.
+    for record in listed.split(|b| *b == 0) {
+        let Some(raw) = record
+            .iter()
+            .position(|b| *b == b'\t')
+            .and_then(|at| record.get(at.saturating_add(1)..))
+        else {
+            continue;
+        };
+        if held
+            .iter()
+            .any(|(dir, _)| within(raw, dir.as_os_str().as_bytes()))
+        {
+            continue;
+        }
+        if let Some(finding) = secrets::held_name(&String::from_utf8_lossy(raw)) {
+            held.push((PathBuf::from(OsStr::from_bytes(raw)), finding));
+        }
+    }
+    Ok(held)
+}
+
+/// Whether `path` is `dir` or inside it.
+fn within(path: &[u8], dir: &[u8]) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))
 }
 
 /// A place in the source's history whose content the guard holds, with the commits that add it
@@ -1248,7 +1316,7 @@ fn conversion(found: &Analysis) -> Option<&'static str> {
         Some("import: convert yadm alternates")
     } else if !found.kept.iter().any(|kept| kept.to == ".dotman.toml") {
         Some("import: add .dotman.toml")
-    } else if found.left.iter().any(|left| left.remove) {
+    } else if !found.held.is_empty() || found.left.iter().any(|left| left.remove) {
         Some("import: leave out files that hold a credential")
     } else {
         None
@@ -1257,6 +1325,26 @@ fn conversion(found: &Analysis) -> Option<&'static str> {
 
 /// Writes the conversion into the worktree of `repo` and commits it.
 fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u32>) -> Result<()> {
+    let index = git_stdout(git, &["ls-files", "-z"], None)?;
+    for held in &found.held {
+        let held = held.as_os_str().as_bytes();
+        // Only what the checkout made, from paths git checked, is removed. An entry it did not
+        // make, such as an empty directory, is not on disk, and its unchecked name, `..` among
+        // them, could lead out of the clone.
+        let made = index.split(|b| *b == 0).any(|path| within(path, held));
+        if !made {
+            continue;
+        }
+        let path = repo.join(OsStr::from_bytes(held));
+        // A submodule's directory may be missing.
+        let removed = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&path),
+            Ok(_) => fs::remove_file(&path),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+        removed.with_context(|| format!("cannot remove {}", path.display()))?;
+    }
     for left in found.left.iter().filter(|left| left.remove) {
         fs::remove_file(repo.join(&left.path))
             .with_context(|| format!("cannot remove {}", left.path))?;
@@ -1288,7 +1376,11 @@ fn convert(git: &Git, repo: &Path, found: &Analysis, modes: &BTreeMap<String, u3
         return Ok(());
     };
     git.stage_all()?;
-    git.commit(message)?;
+    if git.commit(message)?.is_none() && !found.held.is_empty() {
+        // Taking out only an empty directory changes no path that `git commit` compares, yet
+        // the tree it writes from the index leaves the directory out.
+        git_stdout(git, &["commit", "-q", "--allow-empty", "-m", message], None)?;
+    }
     Ok(())
 }
 
@@ -1688,6 +1780,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     let has_own = found.kept.iter().any(|kept| kept.to == ".dotman.toml");
     let own = has_own.then(|| RepoConfig::load(&staging.repo.join(".dotman.toml")));
     let allow = &ctx.machine.guard.allow;
+    guard_names(&staging.git, &mut found)?;
     guard_content(&staging.repo, &mut found, allow);
     let tainted = tainted_history(&staging, allow)?;
     let squash = !tainted.is_empty() && !args.keep_history;
@@ -1752,6 +1845,10 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         return Ok(Outcome::Done);
     }
     convert(&staging.git, &staging.repo, &found, &modes)?;
+    ensure!(
+        held_in_tree(&staging.git)?.is_empty(),
+        "the converted tree still has a name that holds a credential; nothing was imported"
+    );
     if squash {
         squash_history(&staging)?;
     }

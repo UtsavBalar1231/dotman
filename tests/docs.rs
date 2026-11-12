@@ -561,6 +561,8 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "the_staging_guard_holds_a_credential_in_a_repo_name_or_link_target",
             "a_committed_name_with_a_credential_is_held_until_forgotten",
             "imports_leave_out_a_credential_in_a_name_or_a_link_target",
+            "an_import_commits_no_entry_whose_name_holds_a_credential",
+            "legacy_imports_and_overlays_commit_no_name_that_holds_a_credential",
             "add_refuses_a_for_value_that_holds_a_credential",
         ],
     ),
@@ -818,8 +820,8 @@ const DELETIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/import/gittree.rs",
-        6,
-        "the import's scratch history, files it leaves out or renames, and the repo it replaces",
+        8,
+        "the import's scratch history, entries of its clone it leaves out or renames, and the repo it replaces",
     ),
     (
         "src/sys.rs",

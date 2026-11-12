@@ -1901,6 +1901,241 @@ fn commit_all(env: &TestEnv, source: &Path, message: &str) {
     common::git_in(env, source, &["commit", "-q", "-m", message]);
 }
 
+/// Every path of every kind, at any depth, in any commit of the repo's history.
+fn repo_names(env: &TestEnv) -> String {
+    let repo = env.repo().to_string_lossy().into_owned();
+    let commits = env.git(&["-C", &repo, "rev-list", "--all"]);
+    commits
+        .lines()
+        .map(|commit| {
+            let names = [
+                "-C",
+                &repo,
+                "ls-tree",
+                "-r",
+                "-t",
+                "-z",
+                "--name-only",
+                commit,
+            ];
+            env.git(&names)
+        })
+        .collect()
+}
+
+/// Commits a submodule at `.vim/<token>`, which no import fetches.
+fn tip_submodule(env: &TestEnv, source: &Path, token: &str) {
+    let head = common::git_in(env, source, &["rev-parse", "HEAD"]);
+    let entry = format!("160000,{},.vim/{token}", head.trim());
+    common::git_in(
+        env,
+        source,
+        &["update-index", "--add", "--cacheinfo", &entry],
+    );
+    common::git_in(env, source, &["commit", "-q", "-m", "submodule"]);
+}
+
+/// Commits a file whose name dotman cannot manage, as it holds a newline.
+fn tip_newline(env: &TestEnv, source: &Path, token: &str) {
+    env.write(source.join(format!(".config/a\n{token}")), b"x\n", 0o644);
+    commit_all(env, source, "newline");
+}
+
+/// Commits a file whose name dotman cannot manage, as it is not UTF-8.
+fn tip_not_utf8(env: &TestEnv, source: &Path, token: &str) {
+    let mut name = b".x\xff-".to_vec();
+    name.extend_from_slice(token.as_bytes());
+    env.write(source.join(OsStr::from_bytes(&name)), b"x\n", 0o644);
+    commit_all(env, source, "bytes");
+}
+
+/// Commits an empty directory beside a `.dotman.toml` of the source's own, so that the import has
+/// nothing else to convert.
+fn tip_empty_dir(env: &TestEnv, source: &Path, token: &str) {
+    env.write(source.join(".dotman.toml"), b"", 0o644);
+    commit_all(env, source, "config");
+    let commit = with_empty_dir(env, source, &format!(".e-{token}"));
+    common::git_in(env, source, &["update-ref", "HEAD", &commit]);
+}
+
+/// An entry of a git tree's current tree whose name holds a credential is left out of what the
+/// import commits, whatever its kind: a submodule, a name dotman cannot manage, with a newline in
+/// it or bytes that are not UTF-8, and an empty directory. It is reported, and nothing in the repo
+/// names the token: no commit when the history is squashed, the tip with `--keep-history`, and
+/// the work tree either way.
+#[test]
+fn an_import_commits_no_entry_whose_name_holds_a_credential() {
+    let token = github_token();
+    let tips: [(&str, Tip); 4] = [
+        ("submodule", tip_submodule),
+        ("newline", tip_newline),
+        ("not UTF-8", tip_not_utf8),
+        ("empty dir", tip_empty_dir),
+    ];
+    for (label, tip) in tips {
+        for keep in [false, true] {
+            let env = TestEnv::new();
+            let source = source_tree(&env, "dots", &[(".bashrc", "# rc\n")]);
+            common::git_in(&env, &source, &["init", "-q"]);
+            commit_all(&env, &source, "base");
+            tip(&env, &source, &token);
+            source.seal();
+            let path = source.to_string_lossy().into_owned();
+            let mut args = vec!["import", path.as_str()];
+            if keep {
+                args.push("--keep-history");
+            }
+            let err = exits(&env.run(&args), 3);
+            assert!(
+                err.contains("the name holds a github-token"),
+                "{label}: {err}"
+            );
+            let repo = env.repo().to_string_lossy().into_owned();
+            let head = [
+                "-C",
+                &repo,
+                "ls-tree",
+                "-r",
+                "-t",
+                "-z",
+                "--name-only",
+                "HEAD",
+            ];
+            let head = env.git(&head);
+            assert!(
+                head.contains(".bashrc") && !head.contains(&token),
+                "{label}: {head}"
+            );
+            if !keep {
+                let names = repo_names(&env);
+                assert!(!names.contains(&token), "{label}: {names}");
+            }
+            let status = [
+                "-C",
+                &repo,
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+            ];
+            let status = env.git(&status);
+            assert!(!status.contains(&token), "{label}: {status}");
+        }
+    }
+}
+
+/// A held name on a tree entry that no checkout makes, an empty directory under `..`, which would
+/// name a directory beside the import's clone, is left out of the import, and nothing outside the
+/// clone is removed.
+#[test]
+fn a_held_name_that_leads_out_of_the_import_clone_removes_nothing_there() {
+    let token = github_token();
+    let env = TestEnv::new();
+    let source = source_tree(&env, "dots", &[(".bashrc", "# rc\n")]);
+    common::git_in(&env, &source, &["init", "-q"]);
+    commit_all(&env, &source, "base");
+    let commit = with_empty_dir(&env, &source, &format!("../../{token}"));
+    common::git_in(&env, &source, &["update-ref", "HEAD", &commit]);
+    source.seal();
+    let sentinel = env.xdg_data().join(&token).join("keep");
+    env.write(&sentinel, b"keep\n", 0o644);
+    let err = exits(&env.run(&["import", &source.to_string_lossy()]), 3);
+    assert!(err.contains("the name holds a github-token"), "{err}");
+    assert!(sentinel.exists(), "{err}");
+    let names = repo_names(&env);
+    assert!(
+        names.contains(".bashrc") && !names.contains(&token),
+        "{names}"
+    );
+}
+
+/// A legacy store with one commit, which `HEAD` names, holding each of `keys` with the same bytes.
+// reason: clippy.toml exempts unwrap only inside #[test] fns
+#[allow(clippy::unwrap_used)]
+fn legacy_store(env: &TestEnv, keys: &[&str]) -> PathBuf {
+    let root = env.root().join("legacy");
+    let id = "c1".repeat(16);
+    let object = "ab".repeat(16);
+    let put = |out: &mut Vec<u8>, bytes: &[u8]| {
+        out.extend(u64::try_from(bytes.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(bytes);
+    };
+    // bincode's legacy encoding of the old `Snapshot`: the commit's id, parents, message, author,
+    // timestamp and tree hash, then each path with its hash, mode and content hash.
+    let mut snapshot = Vec::new();
+    put(&mut snapshot, id.as_bytes());
+    snapshot.extend(1_u64.to_le_bytes());
+    put(&mut snapshot, "0".repeat(32).as_bytes());
+    put(&mut snapshot, b"initial");
+    put(&mut snapshot, b"legacyuser");
+    snapshot.extend(1_700_000_000_i64.to_le_bytes());
+    put(&mut snapshot, "0".repeat(32).as_bytes());
+    snapshot.extend(u64::try_from(keys.len()).unwrap().to_le_bytes());
+    for key in keys {
+        put(&mut snapshot, key.as_bytes());
+        put(&mut snapshot, object.as_bytes());
+        snapshot.extend(0o644_u32.to_le_bytes());
+        put(&mut snapshot, object.as_bytes());
+    }
+    let packed = |bytes: &[u8]| zstd::encode_all(bytes, 1).unwrap();
+    let commit = root.join(format!("commits/{id}.zst"));
+    env.write(commit, &packed(&snapshot), 0o644);
+    let object = root.join(format!("objects/{object}.zst"));
+    env.write(object, &packed(b"x=1\n"), 0o644);
+    env.write(root.join("refs/heads/main"), id.as_bytes(), 0o644);
+    env.write(root.join("HEAD"), b"ref: refs/heads/main", 0o644);
+    root
+}
+
+/// A legacy import, and an overlay from a legacy store or a git tree with `--include-missing`,
+/// commit no key whose name holds a credential, and report it; a key with a newline, which the
+/// path rules refuse, and a submodule are not committed either. The other files are.
+#[test]
+fn legacy_imports_and_overlays_commit_no_name_that_holds_a_credential() {
+    let token = github_token();
+    let token_key = format!(".config/{token}");
+    let refused = format!(".config/a\n{token}");
+
+    let env = TestEnv::new();
+    let store = legacy_store(&env, &[".bashrc", &token_key, &refused]);
+    let err = exits(&env.run(&["import", &store.to_string_lossy()]), 3);
+    assert!(err.contains("the name holds a github-token"), "{err}");
+    let names = repo_names(&env);
+    assert!(
+        names.contains(".bashrc") && !names.contains(&token),
+        "{names}"
+    );
+
+    let env = TestEnv::new();
+    let source = overlay_source(&env, 0o644, b"# bashrc\n");
+    env.ok(&["init", &source.to_string_lossy(), "--take-repo"]);
+    let store = legacy_store(&env, &[".zprofile", &token_key, &refused]);
+    let store = store.to_string_lossy().into_owned();
+    let err = exits(
+        &env.run(&["import", "--overlay", &store, "--include-missing"]),
+        3,
+    );
+    assert!(err.contains("the name holds a github-token"), "{err}");
+
+    let other = source_tree(&env, "dots", &[(".zlogin", "x\n"), (&token_key, "x\n")]);
+    common::git_in(&env, &other, &["init", "-q"]);
+    commit_all(&env, &other, "dots");
+    tip_newline(&env, &other, &token);
+    tip_submodule(&env, &other, &token);
+    other.seal();
+    let other = other.to_string_lossy().into_owned();
+    let err = exits(
+        &env.run(&["import", "--overlay", &other, "--include-missing"]),
+        3,
+    );
+    assert!(err.contains("the name holds a github-token"), "{err}");
+    let names = repo_names(&env);
+    assert!(
+        names.contains(".zprofile") && names.contains(".zlogin") && !names.contains(&token),
+        "{names}"
+    );
+}
+
 /// Commits `name` with `bytes` on top of the source, then its removal.
 fn added_and_removed(env: &TestEnv, source: &Path, name: &str, bytes: &str) {
     env.write(source.join(name), bytes.as_bytes(), 0o644);
@@ -1922,9 +2157,10 @@ fn merged_and_removed(env: &TestEnv, source: &Path, name: &str, bytes: &str) {
     added_and_removed(env, source, name, bytes);
 }
 
-/// A commit whose tree also holds `name` as an empty directory, which no work tree can make, then
-/// one of the source's tree again.
-fn empty_dir_and_removed(env: &TestEnv, source: &Path, name: &str, _: &str) {
+/// A commit of HEAD's tree, which holds only files at its root, with the directory `path` added as
+/// an empty one, which no work tree can make. Each directory on the way holds only the next, and
+/// `--literally` lets one be named `..`, which git never checks out.
+fn with_empty_dir(env: &TestEnv, source: &Path, path: &str) -> String {
     // A bad digit makes a tree that `hash-object` refuses, which fails the test.
     let raw = |hex: &str| -> Vec<u8> {
         hex.trim()
@@ -1936,26 +2172,59 @@ fn empty_dir_and_removed(env: &TestEnv, source: &Path, name: &str, _: &str) {
             })
             .collect()
     };
-    let empty = ["hash-object", "-t", "tree", "-w", "/dev/null"];
-    let empty = common::git_in(env, source, &empty);
-    let blob = common::git_in(env, source, &["rev-parse", "HEAD:.bashrc"]);
-    let mut bytes = b"100644 .bashrc\0".to_vec();
-    bytes.extend(raw(&blob));
-    bytes.extend(format!("40000 {name}\0").as_bytes());
-    bytes.extend(raw(&empty));
     let file = env.root().join("tree.bin");
-    env.write(&file, &bytes, 0o644);
-    let file = file.to_string_lossy().into_owned();
-    let tree = common::git_in(env, source, &["hash-object", "-t", "tree", "-w", &file]);
-    let evil = ["commit-tree", tree.trim(), "-p", "HEAD", "-m", "evil"];
-    let evil = common::git_in(env, source, &evil);
+    let write = |bytes: &[u8]| -> String {
+        env.write(&file, bytes, 0o644);
+        let file = file.to_string_lossy();
+        let args = ["hash-object", "--literally", "-t", "tree", "-w", &file];
+        common::git_in(env, source, &args).trim().to_owned()
+    };
+    let mut parts = path.split('/');
+    let top = parts.next().unwrap_or_default();
+    let mut dir = write(b"");
+    for part in parts.rev() {
+        let mut entry = format!("40000 {part}\0").into_bytes();
+        entry.extend(raw(&dir));
+        dir = write(&entry);
+    }
+    let listed = common::git_in(env, source, &["ls-tree", "HEAD"]);
+    // Git orders a tree's entries by name, a directory's name as if it ended in `/`.
+    let mut entries: Vec<(String, Vec<u8>)> = listed
+        .lines()
+        .filter_map(|line| {
+            let (meta, file) = line.split_once('\t')?;
+            let oid = meta.split(' ').nth(2)?;
+            let mut entry = format!("100644 {file}\0").into_bytes();
+            entry.extend(raw(oid));
+            Some((file.to_owned(), entry))
+        })
+        .collect();
+    let mut entry = format!("40000 {top}\0").into_bytes();
+    entry.extend(raw(&dir));
+    entries.push((format!("{top}/"), entry));
+    entries.sort();
+    let tree = write(
+        &entries
+            .into_iter()
+            .flat_map(|(_, entry)| entry)
+            .collect::<Vec<u8>>(),
+    );
+    let commit = ["commit-tree", &tree, "-p", "HEAD", "-m", "empty dir"];
+    common::git_in(env, source, &commit).trim().to_owned()
+}
+
+/// A commit whose tree also holds `name` as an empty directory, then one of the source's tree
+/// again.
+fn empty_dir_and_removed(env: &TestEnv, source: &Path, name: &str, _: &str) {
+    let evil = with_empty_dir(env, source, name);
     let clean = common::git_in(env, source, &["rev-parse", "HEAD:"]);
-    let gone = ["commit-tree", clean.trim(), "-p", evil.trim(), "-m", "gone"];
+    let gone = ["commit-tree", clean.trim(), "-p", &evil, "-m", "gone"];
     let gone = common::git_in(env, source, &gone);
     common::git_in(env, source, &["update-ref", "HEAD", gone.trim()]);
 }
 
 type History = fn(&TestEnv, &Path, &str, &str);
+type Tip = fn(&TestEnv, &Path, &str);
 
 /// A git tree whose clean tip hides a name with a credential in its history is imported as one
 /// commit of the current tree, whatever the name or how it came: after a newline or a tab, in an
