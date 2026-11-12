@@ -847,7 +847,16 @@ impl Targets<'_> {
     // Capture goes into the source this machine applies, which may be a variant.
     fn plain_source_for(&self, key: &str) -> Result<String> {
         if let Some(conditions) = self.conditions {
-            return variant::variant_source(key, conditions);
+            let source = variant::variant_source(key, conditions)?;
+            if secrets::held_name(key).is_none()
+                && let Some(found) = secrets::held_name(&source)
+            {
+                bail!(
+                    "the --for value holds a credential ({}), which would be in the repo's file name; give a different --for value",
+                    found.rule
+                );
+            }
+            return Ok(source);
         }
         if let Some(source) = self.resumed.get(key) {
             return Ok(source.clone());

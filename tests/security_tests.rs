@@ -1692,6 +1692,34 @@ fn a_credential_in_a_name_or_a_link_target_never_reaches_the_remote() {
     assert!(!remote_everything(&env).contains(&token));
 }
 
+/// `add --for` with a value that holds a credential, which would name the repo file, is refused,
+/// in a dry run too, with the `--for` value as the cause; another value adds the file.
+#[test]
+fn add_refuses_a_for_value_that_holds_a_credential() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".zshrc", b"x=1\n", 0o644);
+    let condition = format!("host={}", github_token());
+    for dry in [true, false] {
+        let mut args = vec!["add", "--for", &condition, ".zshrc"];
+        if dry {
+            args.push("--dry-run");
+        }
+        let err = exits(&env.run(&args), 1);
+        assert!(
+            err.contains("the --for value holds a credential (github-token), which would be in the repo's file name; give a different --for value"),
+            "{err}"
+        );
+        assert!(!err.contains("rename"), "{err}");
+    }
+    let named: Vec<String> = tree_checksum(&env.repo())
+        .into_keys()
+        .filter(|name| name.contains(".zshrc"))
+        .collect();
+    assert_eq!(named, Vec::<String>::new());
+    env.ok(&["add", "--for", "host=work", ".zshrc"]);
+}
+
 /// A managed symlink pointed again at a target that holds a credential is held at capture, so
 /// the repo keeps the old link, and the `forget` the hold prints, run as printed, stops managing
 /// it: the next sync commits that, and the target never reaches the remote.
