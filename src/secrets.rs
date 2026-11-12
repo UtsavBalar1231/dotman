@@ -220,6 +220,26 @@ pub fn findings(bytes: &[u8]) -> Box<dyn Iterator<Item = Finding> + '_> {
     if looks_binary(bytes) {
         return Box::new(std::iter::empty());
     }
+    scan(bytes)
+}
+
+/// The first finding in the commit object `bytes`, an age key first, whatever bytes it holds. As
+/// it is, a NUL, which `hash-object --literally` can write, ends a token as a space would; with
+/// every NUL removed, a UTF-16 or UTF-32 message's ASCII characters come together. Both are
+/// scanned, and removing NULs keeps every newline, so a finding's line holds for both.
+#[must_use]
+pub fn held_in_commit(bytes: &[u8]) -> Option<Finding> {
+    let joined: Vec<u8> = if bytes.contains(&0) {
+        bytes.iter().copied().filter(|b| *b != 0).collect()
+    } else {
+        Vec::new()
+    };
+    scan(bytes)
+        .chain(scan(&joined))
+        .min_by_key(|found| found.overridable())
+}
+
+fn scan(bytes: &[u8]) -> Box<dyn Iterator<Item = Finding> + '_> {
     let (Ok(scanner), Ok(age)) = (SCANNER.as_ref(), AGE_SCANNER.as_ref()) else {
         return Box::new(std::iter::once(Finding {
             rule: "unscanned",

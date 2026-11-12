@@ -2049,6 +2049,96 @@ fn a_held_name_that_leads_out_of_the_import_clone_removes_nothing_there() {
     );
 }
 
+/// A git-tree import scans every commit object of the history whatever bytes it holds: a message
+/// with a NUL, which `hash-object --literally` writes and a clone takes, on either side of the
+/// token or apart from it, and a UTF-16 message, little- or big-endian, behind an `encoding`
+/// header. Each squashes the import, and no object of the repo holds the token, NULs or not.
+#[test]
+fn a_commit_object_with_nul_bytes_is_scanned_all_the_same() {
+    let github = github_token();
+    let npm = npm_token();
+    let utf16 = |text: &str, little: bool| -> Vec<u8> {
+        text.encode_utf16()
+            .flat_map(|unit| {
+                if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                }
+            })
+            .collect()
+    };
+    let cases: [(&str, &str, Vec<u8>); 5] = [
+        (
+            "nul",
+            &github,
+            format!("\nx\0 token={github}\n").into_bytes(),
+        ),
+        (
+            "nul-before",
+            &github,
+            format!("\nx\0{github}\n").into_bytes(),
+        ),
+        ("nul-after", &npm, format!("\n{npm}\0b\n").into_bytes()),
+        (
+            "utf-16le",
+            &github,
+            [
+                b"encoding UTF-16LE\n\n".as_slice(),
+                &utf16(&format!("token={github}\n"), true),
+            ]
+            .concat(),
+        ),
+        (
+            "utf-16be",
+            &github,
+            [
+                b"encoding UTF-16BE\n\n".as_slice(),
+                &utf16(&format!("token={github}\n"), false),
+            ]
+            .concat(),
+        ),
+    ];
+    for (label, token, message) in cases {
+        let env = TestEnv::new();
+        let work = common::work_tree(&env, "src", &[(".bashrc", "# rc\n", false)], None);
+        let parent = git_in(&env, &work, &["rev-parse", "HEAD"]);
+        let tree = git_in(&env, &work, &["rev-parse", "HEAD:"]);
+        let who = "Old <old@example.invalid> 1700000000 +0000";
+        let mut object = format!(
+            "tree {}\nparent {}\nauthor {who}\ncommitter {who}\n",
+            tree.trim(),
+            parent.trim()
+        )
+        .into_bytes();
+        object.extend_from_slice(&message);
+        let file = env.root().join("commit-object");
+        fs::write(&file, &object).unwrap();
+        let file = file.to_string_lossy();
+        let args = ["hash-object", "-t", "commit", "-w", "--literally", &*file];
+        let oid = git_in(&env, &work, &args);
+        git_in(&env, &work, &["update-ref", "HEAD", oid.trim()]);
+        git_in(
+            &env,
+            &work,
+            &["commit", "-q", "--allow-empty", "-m", "after"],
+        );
+
+        let out = env.run(&["import", "--yes", &work.to_string_lossy()]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(0), "{label}: {err}");
+        assert!(
+            err.contains("so the import is one commit of the current tree"),
+            "{label}: {err}"
+        );
+        let repo = env.repo().to_string_lossy().into_owned();
+        let count = env.git(&["-C", &repo, "rev-list", "--count", "HEAD"]);
+        assert_eq!(count.trim(), "1", "{label}");
+        let objects = every_object(&env, &env.repo().join(".git")).replace('\0', "");
+        assert!(!objects.contains(token), "{label}");
+    }
+}
+
 /// A legacy store with one commit, which `HEAD` names, holding each of `keys` with the same bytes.
 fn legacy_store(env: &TestEnv, keys: &[&str]) -> PathBuf {
     legacy_chain(env, &[("initial", "legacyuser")], keys)

@@ -1103,10 +1103,9 @@ fn scan_batch(
         let mut bytes = Vec::new();
         if kind == "commit" {
             // The whole commit, headers too: a merged tag's message travels in a header. No
-            // allow entry names a commit, and git refuses a NUL in a message, so none is skipped
-            // as binary.
+            // allow entry names a commit, and none is skipped as binary.
             reader.by_ref().take(size).read_to_end(&mut bytes)?;
-            if let Some(found) = secrets::held(&bytes, "", &[]) {
+            if let Some(found) = secrets::held_in_commit(&bytes) {
                 let field = commit_field(&bytes, found.line);
                 let hit = Hit {
                     rule: found.rule,
@@ -1898,7 +1897,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     }
     report.print();
 
-    let commits = count(staging.git.log(&[], None)?.len(), "commit");
+    let commits = count(commit_count(&staging.git)?, "commit");
     warn_tainted(&tainted, squash, &commits);
     let repo = &ctx.paths.repo;
     // The same count in every line, the conversion commit apart from the source's.
@@ -1944,6 +1943,16 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     output::success(&format!("imported {what}{added} into {}", repo.display()));
     super::print_next_steps();
     Ok(report.outcome())
+}
+
+/// Counted, not logged: a UTF-16BE message, which the history scan finds, leaves `git log` no
+/// author time to print.
+fn commit_count(git: &Git) -> Result<usize> {
+    let listed = git_stdout(git, &["rev-list", "--count", "HEAD"], None)?;
+    String::from_utf8_lossy(&listed)
+        .trim()
+        .parse()
+        .context("git rev-list printed a bad count")
 }
 
 /// Removes `origin` and the refs it leaves. After a `--single-branch` clone, `git remote remove`
