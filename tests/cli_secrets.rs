@@ -725,11 +725,46 @@ fn dry_runs_of_add_encrypt_and_apply_change_nothing() {
     assert_eq!(env.four_trees(), before);
 
     env.ok(&["add", "--encrypt", HOSTS]);
+    env.write(".plain", b"plain\n", 0o644);
+    env.ok(&["add", ".plain"]);
     fs::remove_file(env.home().join(HOSTS)).unwrap();
+    fs::remove_file(env.home().join(".plain")).unwrap();
     let before = env.four_trees();
     let err = env.ok(&["apply", "--restore-deleted", "--dry-run"]);
-    assert!(err.contains("would apply .config/gh/hosts.yml"), "{err}");
+    let lines: Vec<&str> = err.lines().collect();
+    assert!(
+        lines.contains(&"would apply .config/gh/hosts.yml (decrypted)"),
+        "{err}"
+    );
+    assert!(lines.contains(&"would apply .plain"), "{err}");
     assert_eq!(env.four_trees(), before);
+
+    let err = env.ok(&["apply", "--restore-deleted"]);
+    let lines: Vec<&str> = err.lines().collect();
+    assert!(
+        lines.contains(&"apply .config/gh/hosts.yml (decrypted)"),
+        "{err}"
+    );
+    assert!(lines.contains(&"apply .plain"), "{err}");
+}
+
+/// Sync's apply pass names the decryption too.
+#[test]
+fn sync_says_when_it_applies_a_decrypted_file() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    let b = keyed_clone(&a);
+    a.write(HOSTS, b"github.com:\n  oauth_token: gho_changed\n", 0o600);
+    a.ok(&["sync"]);
+    let key = identity(&a);
+    let err = b.ok_with(&[("DOTMAN_AGE_KEY", &key)], &["sync"]);
+    assert!(
+        err.lines()
+            .any(|line| line == "apply .config/gh/hosts.yml (decrypted)"),
+        "{err}"
+    );
 }
 
 #[test]

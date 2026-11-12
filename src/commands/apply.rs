@@ -1683,7 +1683,11 @@ impl Run<'_> {
         match outcome {
             Ok(WriteOutcome::Written(written)) => {
                 self.written.insert(key.clone());
-                self.announce("apply", key);
+                if r.encrypted {
+                    self.announce("apply", &format!("{key} (decrypted)"));
+                } else {
+                    self.announce("apply", key);
+                }
                 if let Some(backup) = written.backup.as_ref().or(mode_record.as_ref()) {
                     self.backed_up(backup);
                 }
