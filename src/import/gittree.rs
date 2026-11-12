@@ -991,8 +991,9 @@ fn is_oid(text: &str) -> bool {
 /// Every blob and commit message reachable from the clone's refs, which are all the import takes,
 /// that the content guard holds, by path and rule. Each object is read once: `rev-list --objects`
 /// lists them, `cat-file --batch-check` keeps the commits and the blobs that are not empty, and
-/// `cat-file --batch` streams them, where a binary blob is skipped after its first bytes. The
-/// lists go to git through files, which a large history cannot deadlock.
+/// `cat-file --batch` streams them, where a binary blob is skipped after its first bytes. Each
+/// commit is scanned again as `git log` shows it. The lists go to git through files, which a large
+/// history cannot deadlock.
 fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
     let git = &staging.git;
     let scratch = staging
@@ -1052,10 +1053,14 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
     ensure!(status.success(), "`git cat-file --batch` failed ({status})");
     let commit_list = scratch.join("commits.txt");
     write_lines(&commit_list, commits.iter())?;
+    let mut shown = held_as_shown(git, &commit_list)?;
     let mut grouped = held_names(git, &commit_list)?;
     let mut in_commits: BTreeMap<(&'static str, &'static str), Vec<String>> = BTreeMap::new();
     for commit in commits {
-        if let Some(hit) = held.remove(&commit) {
+        let Some(as_shown) = shown.remove(&commit) else {
+            bail!("`git log` did not show commit {commit}");
+        };
+        if let Some(hit) = held.remove(&commit).or(as_shown) {
             in_commits
                 .entry((hit.field, hit.rule))
                 .or_default()
@@ -1186,6 +1191,71 @@ fn scan_batch(
         }
         let mut newline = [0u8; 1];
         reader.read_exact(&mut newline)?;
+    }
+}
+
+/// What the guard holds in each commit listed in `commits` as `git log` shows it, keyed by every
+/// commit shown. A commit with an `encoding` header is re-encoded whole, headers too, and one in
+/// IBM037 holds no ASCII byte of what it shows. `--pretty=raw` prints every line of the re-encoded
+/// headers, and the `--no-*` options keep a user's `log.*` and notes settings out of the records.
+fn held_as_shown(git: &Git, commits: &Path) -> Result<BTreeMap<String, Option<Hit>>> {
+    let mut cmd = git.command();
+    cmd.args([
+        "log",
+        "--stdin",
+        "--no-walk",
+        "--encoding=UTF-8",
+        "--pretty=raw",
+        "-z",
+        "--no-decorate",
+        "--no-abbrev-commit",
+        "--no-notes",
+        "--no-use-mailmap",
+        "--no-expand-tabs",
+    ])
+    .stdin(File::open(commits).with_context(|| format!("cannot read {}", commits.display()))?)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    let mut child = cmd.spawn().context("failed to run git")?;
+    let scanned = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("git log gave no output"))
+        .and_then(|stdout| scan_shown(&mut BufReader::new(stdout)));
+    let status = child.wait().context("failed to run git")?;
+    let held = scanned?;
+    ensure!(status.success(), "`git log --pretty=raw` failed ({status})");
+    Ok(held)
+}
+
+/// Reads `git log --pretty=raw -z`: `commit <oid>`, the headers, an empty line and the indented
+/// message per commit, with a NUL between commits. Git ends the re-encoded text at its first NUL,
+/// so a record holds none.
+fn scan_shown(reader: &mut impl BufRead) -> Result<BTreeMap<String, Option<Hit>>> {
+    let mut held = BTreeMap::new();
+    let mut record = Vec::new();
+    loop {
+        record.clear();
+        if reader.read_until(0, &mut record)? == 0 {
+            return Ok(held);
+        }
+        let shown = record.strip_suffix(b"\0").unwrap_or(&record);
+        let first = shown.split(|b| *b == b'\n').next().unwrap_or_default();
+        let oid = first
+            .strip_prefix(b"commit ")
+            .map(String::from_utf8_lossy)
+            .filter(|oid| is_oid(oid))
+            .ok_or_else(|| {
+                anyhow!(
+                    "unexpected git log record: {}",
+                    output::escape_line(&String::from_utf8_lossy(first))
+                )
+            })?;
+        let hit = secrets::held_in_commit(shown).map(|found| Hit {
+            rule: found.rule,
+            field: commit_field(shown, found.line),
+        });
+        held.insert(oid.into_owned(), hit);
     }
 }
 
@@ -2368,5 +2438,29 @@ mod tests {
         for (line, field) in named {
             assert_eq!(commit_field(commit, line), field, "line {line}");
         }
+    }
+
+    #[test]
+    fn a_shown_log_record_is_keyed_by_its_commit_and_a_stray_one_is_an_error() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let token = format!("ghp_{}", "a1B2".repeat(9));
+        let log = format!(
+            "commit {a}\ntree 1\nauthor x {token} <x@x> 1 +0000\n\n    \n\0commit {b}\ntree 1\n\n    {token}\n"
+        );
+        let held = scan_shown(&mut log.as_bytes()).expect("parses");
+        let fields: Vec<(&str, Option<&str>)> = held
+            .iter()
+            .map(|(oid, hit)| (oid.as_str(), hit.map(|hit| hit.field)))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (a.as_str(), Some("commit author")),
+                (b.as_str(), Some("commit message"))
+            ]
+        );
+        assert!(scan_shown(&mut format!("commit {a}\n\0\0").as_bytes()).is_err());
+        assert!(scan_shown(&mut b"tree 1\n".as_slice()).is_err());
     }
 }

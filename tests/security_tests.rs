@@ -2139,6 +2139,150 @@ fn a_commit_object_with_nul_bytes_is_scanned_all_the_same() {
     }
 }
 
+/// `text` in EBCDIC, which IBM037 and IBM1047 spell alike for every character it takes; `None`
+/// for a character it does not take.
+fn to_ebcdic(text: &str) -> Option<Vec<u8>> {
+    const RUNS: [(&str, u8); 7] = [
+        ("abcdefghi", 0x81),
+        ("jklmnopqr", 0x91),
+        ("stuvwxyz", 0xa2),
+        ("ABCDEFGHI", 0xc1),
+        ("JKLMNOPQR", 0xd1),
+        ("STUVWXYZ", 0xe2),
+        ("0123456789", 0xf0),
+    ];
+    const SINGLE: [(char, u8); 9] = [
+        ('\n', 0x25),
+        (' ', 0x40),
+        ('.', 0x4b),
+        ('<', 0x4c),
+        ('+', 0x4e),
+        ('_', 0x6d),
+        ('>', 0x6e),
+        ('@', 0x7c),
+        ('=', 0x7e),
+    ];
+    text.chars()
+        .map(|c| {
+            SINGLE
+                .iter()
+                .find(|(single, _)| *single == c)
+                .map(|(_, byte)| *byte)
+                .or_else(|| {
+                    RUNS.iter().find_map(|(run, first)| {
+                        let at = run.chars().position(|r| r == c)?;
+                        first.checked_add(u8::try_from(at).ok()?)
+                    })
+                })
+        })
+        .collect()
+}
+
+/// A git-tree import also scans every commit as `git log` shows it. Git re-encodes a commit with
+/// an `encoding` header to UTF-8, headers and message alike, and one in IBM037 or IBM1047 holds no
+/// ASCII byte of what it shows: in the message, the author, or a header line the re-encoding
+/// makes. A UTF-32 message, which the raw scan holds, still does. Each squashes the import, and
+/// `git log` on the repo shows no token. glibc's iconv knows both code pages; a git that cannot
+/// decode one shows the raw bytes, which hold no token.
+#[test]
+fn a_commit_that_git_log_re_encodes_is_scanned_as_shown() {
+    let github = github_token();
+    let ebcdic = |text: &str| to_ebcdic(text).expect("every character has an EBCDIC byte");
+    let who = "Old <old@example.invalid> 1700000000 +0000";
+    let people = format!("author {who}\ncommitter {who}\n");
+    let message = |encoding: &str, text: Vec<u8>| -> Vec<u8> {
+        [format!("{people}encoding {encoding}\n\n").as_bytes(), &text].concat()
+    };
+    let utf32: Vec<u8> = format!("token={github}\n")
+        .chars()
+        .flat_map(|c| u32::from(c).to_le_bytes())
+        .collect();
+    let author = format!("\nauthor token={github} <old@example.invalid> 1700000000 +0000\n");
+    let author = [
+        b"encoding IBM037\n".as_slice(),
+        &ebcdic(&format!("{author}committer {who}\n\nsettings\n")),
+    ]
+    .concat();
+    let settings = format!("settings\n\ntoken={github}\n");
+    let cases: [(&str, &str, bool, Vec<u8>); 5] = [
+        (
+            "IBM037 message",
+            "commit message",
+            true,
+            message("IBM037", ebcdic(&settings)),
+        ),
+        (
+            "IBM1047 message",
+            "commit message",
+            true,
+            message("IBM1047", ebcdic(&settings)),
+        ),
+        ("IBM037 author", "commit author", true, author),
+        (
+            "IBM037 header",
+            "commit header",
+            true,
+            message("IBM037", ebcdic(&format!("token={github}\n"))),
+        ),
+        (
+            "UTF-32LE message",
+            "commit message",
+            false,
+            message("UTF-32LE", utf32),
+        ),
+    ];
+    for (label, field, decoded, rest) in cases {
+        let env = TestEnv::new();
+        let work = common::work_tree(&env, "src", &[(".bashrc", "# rc\n", false)], None);
+        let parent = git_in(&env, &work, &["rev-parse", "HEAD"]);
+        let tree = git_in(&env, &work, &["rev-parse", "HEAD:"]);
+        let mut object = format!("tree {}\nparent {}\n", tree.trim(), parent.trim()).into_bytes();
+        object.extend_from_slice(&rest);
+        let file = env.root().join("commit-object");
+        fs::write(&file, &object).unwrap();
+        let file = file.to_string_lossy();
+        let args = ["hash-object", "-t", "commit", "-w", "--literally", &*file];
+        let oid = git_in(&env, &work, &args);
+        git_in(&env, &work, &["update-ref", "HEAD", oid.trim()]);
+        git_in(
+            &env,
+            &work,
+            &["commit", "-q", "--allow-empty", "-m", "after"],
+        );
+        let shown = ["log", "--all", "--encoding=UTF-8", "--pretty=raw"];
+        let undecoded = decoded && !git_in(&env, &work, &shown).contains(&github);
+        assert!(
+            !(undecoded && cfg!(target_env = "gnu")),
+            "{label}: git did not decode it"
+        );
+        if undecoded {
+            eprintln!("{label}: this git cannot decode it, so there is nothing to scan");
+            continue;
+        }
+
+        let out = env.run(&["import", "--yes", &work.to_string_lossy()]);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(0), "{label}: {err}");
+        assert!(
+            err.contains("so the import is one commit of the current tree"),
+            "{label}: {err}"
+        );
+        // Another iconv's table may map a line break differently, which moves the token to
+        // another field of what git shows.
+        let named = if cfg!(target_env = "gnu") {
+            format!("{field}: github-token, in ")
+        } else {
+            ": github-token, in ".to_owned()
+        };
+        assert!(err.contains(&named), "{label}: {err}");
+        let repo = env.repo().to_string_lossy().into_owned();
+        let count = env.git(&["-C", &repo, "rev-list", "--count", "HEAD"]);
+        assert_eq!(count.trim(), "1", "{label}");
+        let log = git_in(&env, &env.repo(), &shown);
+        assert!(!log.contains(&github), "{label}: {log}");
+    }
+}
+
 /// A legacy store with one commit, which `HEAD` names, holding each of `keys` with the same bytes.
 fn legacy_store(env: &TestEnv, keys: &[&str]) -> PathBuf {
     legacy_chain(env, &[("initial", "legacyuser")], keys)
