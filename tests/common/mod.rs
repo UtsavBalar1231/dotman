@@ -39,8 +39,10 @@ pub struct Entry {
     pub target: Option<PathBuf>,
 }
 
-/// `GIT_CONFIG_PARAMETERS` that rewrites every http(s) URL to a missing local path.
-pub const NO_NETWORK: &str = "'url.file:///dotman-tests-no-network/.insteadOf=https://' 'url.file:///dotman-tests-no-network/.insteadOf=http://'";
+/// `GIT_CONFIG_PARAMETERS` that rewrites every http(s) URL to a missing local path, and turns off
+/// the maintenance `git commit` starts in the background since git 2.47, which can write into a
+/// sealed [`Source`] while a test checksums it.
+pub const GIT_PARAMETERS: &str = "'url.file:///dotman-tests-no-network/.insteadOf=https://' 'url.file:///dotman-tests-no-network/.insteadOf=http://' 'maintenance.auto=false'";
 
 pub struct TestEnv {
     root: Arc<TempDir>,
@@ -201,7 +203,7 @@ impl TestEnv {
             // Every http(s) URL points at a path that does not exist, so no test reaches the network.
             // GIT_CONFIG_PARAMETERS is what `git -c` sets; unlike GIT_CONFIG_COUNT (git 2.31) it
             // works on the 2.25 floor.
-            ("GIT_CONFIG_PARAMETERS", NO_NETWORK.into()),
+            ("GIT_CONFIG_PARAMETERS", GIT_PARAMETERS.into()),
             // Fails closed if a rewrite is ever missed: only local transports may run.
             ("GIT_ALLOW_PROTOCOL", "file".into()),
             ("DOTMAN_NON_INTERACTIVE", "1".into()),

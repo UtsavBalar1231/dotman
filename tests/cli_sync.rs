@@ -328,7 +328,7 @@ fn an_encrypted_conflict_keeps_the_version_the_printed_step_picks() {
     if !common::age_installed() {
         return;
     }
-    let apply_backend = format!("{} 'rebase.backend=apply'", common::NO_NETWORK);
+    let apply_backend = format!("{} 'rebase.backend=apply'", common::GIT_PARAMETERS);
     let older = [("GIT_CONFIG_PARAMETERS", apply_backend.as_str())];
     for (side, kept, git) in [
         ("--ours", "from a\n", &[][..]),
