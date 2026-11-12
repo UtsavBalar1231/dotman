@@ -460,7 +460,11 @@ fn the_hint_for_the_sources_own_origin_runs_as_printed_whatever_the_url_holds() 
         let source = source(&env, "cz", &[("dot_bashrc", "export A=1\n")]);
         let dir = source.to_string_lossy().into_owned();
         env.git(&["-C", &dir, "init", "-q"]);
+        env.git(&["-C", &dir, "symbolic-ref", "HEAD", "refs/heads/main"]);
+        env.git(&["-C", &dir, "add", "-A"]);
+        env.git(&["-C", &dir, "commit", "-q", "-m", "chezmoi history"]);
         env.git(&["-C", &dir, "remote", "add", "origin", origin]);
+        source.seal();
         let out = env.run(&["import", &dir, "--no-bootstrap"]);
         let err = stderr(&out);
         assert_eq!(out.status.code(), Some(0), "{err}");
