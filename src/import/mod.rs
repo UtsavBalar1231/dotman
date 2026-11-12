@@ -229,6 +229,9 @@ pub fn origin_arg(url: &str) -> (String, OriginArg) {
     let shown = output::escape_line(&redact_credentials(url)).into_owned();
     let arg = if !crate::git::usable_remote(url) {
         OriginArg::Unusable
+    } else if url.contains('`') {
+        // A backtick would close the span a message shows the command in.
+        OriginArg::Placeholder("<url>", format!("the URL {shown}"))
     } else if shown == url {
         OriginArg::Quoted(shell_words::quote(url).into_owned())
     } else {
@@ -565,6 +568,10 @@ mod tests {
                 OriginArg::Placeholder("<url>", "the URL with its credentials".to_owned()),
             ),
             ("-u/dots.git", OriginArg::Unusable),
+            (
+                "/srv/dots`id`.git",
+                OriginArg::Placeholder("<url>", "the URL /srv/dots`id`.git".to_owned()),
+            ),
         ] {
             assert_eq!(clone_arg_with(url, home, users).1, arg, "{url}");
         }
