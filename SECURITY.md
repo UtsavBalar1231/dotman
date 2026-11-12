@@ -75,7 +75,7 @@ The content guard scans what a plain capture would store: `add`, new files under
 What they miss:
 
 - credentials without a known prefix, such as passwords, generic API keys and tokens of providers not on the list;
-- files that look binary, with a NUL byte in the first 8000 bytes, which are not scanned;
+- files that look binary, with a NUL byte in the first 8000 bytes, which are not scanned; for a secret-named one, the hints offer `--encrypt` and not `--allow-plain`;
 - a file whose name does not match `secret_names` and whose content no rule finds.
 
 ## Outside the threat model

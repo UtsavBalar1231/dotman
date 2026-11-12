@@ -1013,6 +1013,72 @@ fn a_secret_named_dirs_file_that_holds_a_credential_is_never_offered_allow_plain
     }
 }
 
+/// The content guard does not scan a binary file, so a secret-named one with a token in it is
+/// offered `--encrypt` only, by `add <dir>`, `status`, `sync`, and `add <file>` on a public
+/// remote. Running every command they print for it, as printed, encrypts it and never sends the
+/// token to the remote.
+#[test]
+fn a_binary_secret_named_file_is_never_offered_allow_plain() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    let origin = env.remote_url();
+    env.ok(&["init", "--remote", &origin]);
+    env.ok(&["key", "init"]);
+    let state_file = env.state_dir().join("state.toml");
+    let mut state = dotman::state::State::read(&state_file)
+        .expect("read state")
+        .expect("state");
+    state.remote_public = Some(dotman::state::RemotePublic::True);
+    state.remote_url = Some(origin);
+    state.remote_checked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_secs());
+    state.save(&state_file, false).expect("save state");
+
+    let token = github_token();
+    let key = ".config/s/id.key";
+    env.write(".config/s/rc", b"rc\n", 0o644);
+    env.write(key, format!("bin\0t={token}\n").as_bytes(), 0o600);
+    let mut printed = std::collections::BTreeSet::new();
+    for (args, code) in [
+        (&["add", ".config/s"][..], 3),
+        (&["status"], 0),
+        (&["sync", "--dry-run"], 3),
+        (&["sync"], 3),
+        (&["add", key], 1),
+    ] {
+        let out = env.run(args);
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr(&out));
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {text}");
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(key)).collect();
+        assert!(
+            lines.iter().any(|line| line.contains("binary")),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("--allow-plain"), "{args:?}: {text}");
+        printed.extend(
+            lines
+                .iter()
+                .flat_map(|line| line.split('`').skip(1).step_by(2))
+                .map(str::to_owned),
+        );
+    }
+    assert!(!printed.is_empty());
+
+    for command in &printed {
+        let words = shell_words::split(command).expect("a pasteable command");
+        let args: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
+        env.run(&args);
+        env.run(&["sync"]);
+        assert!(!remote_objects(&env).contains(&token), "{command}");
+    }
+    assert!(remote_tree(&env).contains(".config/s/id{age}.key"));
+    assert!(!env.repo().join(key).exists());
+}
+
 /// `add --allow-plain` stores the file and records `[guard] allow` by key and rule; later edits,
 /// which move the line, sync without a hold, while a credential of another rule is held.
 #[test]

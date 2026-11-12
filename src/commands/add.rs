@@ -383,6 +383,8 @@ struct Guarded {
     plain: Vec<String>,
 }
 
+const UNSCANNED: &str = "it is binary, which the content guard does not scan";
+
 /// `key` as a path to paste into a shell.
 pub(crate) fn pasteable(home: &Path, key: &str) -> String {
     shell_words::quote(&home.join(key).to_string_lossy()).into_owned()
@@ -414,6 +416,9 @@ impl Guarded {
             let hint = match (leaf, holds_key(home, key, allow)) {
                 // --encrypt takes regular files only.
                 (Leaf::Link, _) => format!("; `{bin} add {keep}{path}` stores the link as it is"),
+                (Leaf::File { binary: true, .. }, _) => {
+                    format!(", and {UNSCANNED}; `{bin} add --encrypt {path}` stores it encrypted")
+                }
                 // Storing it as it is would put the credential in the repo.
                 (Leaf::File { .. }, Some(found)) => format!(
                     ", and {found}; `{bin} add --encrypt {path}` stores it encrypted, or remove the secret from it, then add it"
@@ -474,11 +479,16 @@ fn guard_secrets(
         let found = explicit
             .iter()
             .find_map(|key| holds(key).map(|found| (key, found)));
+        let unscanned = explicit
+            .iter()
+            .find(|key| matches!(plan.files.get(*key), Some(Leaf::File { binary: true, .. })));
+        // --allow-plain would publish the credential, or whatever the guard did not see.
         let fix = if explicit.iter().all(is_link) {
             "pass --allow-plain to store the links as they are".to_owned()
         } else if let Some((key, found)) = found {
-            // --allow-plain would publish the credential.
             format!("{key}: {found}{}", found.remedy(None))
+        } else if let Some(key) = unscanned {
+            format!("{key}: {UNSCANNED}; --encrypt stores it encrypted")
         } else {
             "pass --encrypt to store them encrypted, or --allow-plain to store them as they are"
                 .to_owned()
@@ -988,6 +998,9 @@ pub(crate) enum Hold {
     Large,
     Binary,
     SecretName,
+    /// A [`Self::SecretName`] file the content guard does not scan, so storing it as it is could
+    /// publish what it holds.
+    SecretBinary,
     /// An age identity or a credential that `[guard] allow` does not cover.
     Content(Finding),
     Special,
@@ -1001,6 +1014,7 @@ impl Hold {
             Self::Large => "over 1 MiB".to_owned(),
             Self::Binary => "binary: NUL in the first 8000 bytes".to_owned(),
             Self::SecretName => "name matches [guard] secret_names".to_owned(),
+            Self::SecretBinary => format!("{}, and {UNSCANNED}", Self::SecretName.reason()),
             Self::Content(found) => format!("{found}{}", found.remedy(None)),
             Self::Special => "a socket, FIFO or device, which dotman never stores".to_owned(),
             Self::Unreadable => "cannot be read".to_owned(),
@@ -1018,6 +1032,10 @@ impl Hold {
             Self::Large | Self::Binary => format!("{}; `{bin} add {path}` adds it", self.reason()),
             Self::SecretName => format!(
                 "{}; `{bin} add --encrypt {path}` stores it encrypted, `{bin} add --allow-plain {path}` as it is",
+                self.reason()
+            ),
+            Self::SecretBinary => format!(
+                "{}; `{bin} add --encrypt {path}` stores it encrypted",
                 self.reason()
             ),
             Self::Content(found) => format!("{found}{}", found.remedy(Some(path))),
@@ -1124,9 +1142,10 @@ pub(crate) fn scan_dirs(
                     holds_key(&ctx.paths.home, &key, &ctx.machine.guard.allow).map(Hold::Content)
                 };
                 match hold_by_name_and_size(&secrets, &key, size) {
-                    // The finding wins: a name hold's hint offers --allow-plain. The guard never
-                    // scans a binary file, so one is not read.
-                    Some(Hold::SecretName) if !binary => content().or(Some(Hold::SecretName)),
+                    // A name hold's hint offers --allow-plain, which only a scanned file with no
+                    // finding gets.
+                    Some(Hold::SecretName) if binary => Some(Hold::SecretBinary),
+                    Some(Hold::SecretName) => content().or(Some(Hold::SecretName)),
                     Some(hold) => Some(hold),
                     None => binary.then_some(Hold::Binary).or_else(content),
                 }
