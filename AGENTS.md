@@ -107,6 +107,7 @@ scripts/                release helper scripts
 ## Commands
 ```bash
 cargo test --workspace --all-targets          # the full suite; run before every commit
+just ci                                       # CI's lint, test, freshness, deny and e2e checks; run before a push
 cargo test --test cli_sync                    # one test file
 just lint-strict                              # pre-commit clippy set
 cargo fmt --check

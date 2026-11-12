@@ -139,8 +139,8 @@ install:
 uninstall:
     cargo uninstall dotman-cli
 
-# Bumps Cargo.toml, Cargo.lock, the PKGBUILD and install.sh's fallback version. The
-# src/bootstrap/install.sh.in template pins CARGO_PKG_VERSION itself and is not touched.
+# The src/bootstrap/install.sh.in template pins CARGO_PKG_VERSION itself, so it needs no bump.
+# Bumps Cargo.toml, Cargo.lock, the PKGBUILD and install.sh's fallback version, then runs `just ci`.
 release-prepare version:
     #!/usr/bin/env bash
     set -e
@@ -148,9 +148,7 @@ release-prepare version:
     sed -i 's/^pkgver=.*/pkgver={{ version }}/' packaging/arch/PKGBUILD
     sed -i 's/^FALLBACK_VERSION=.*/FALLBACK_VERSION="{{ version }}"/' install/install.sh
     cargo check --workspace
-    just test
-    just lint
-    just audit
+    just ci
 
 clean:
     cargo clean
@@ -158,6 +156,20 @@ clean:
 
 pre-commit: lint-strict
 
-ci: fmt-check lint test audit docs-check
+# The container, MSRV, rage, chezmoi and cross jobs are not here; they need act or their own toolchains.
+# What CI's lint, test, freshness and e2e jobs and the security workflow check, run locally before a push.
+ci: fmt-check lint-strict docs-check test-workspace freshness deny shellcheck e2e
+
+test-workspace:
+    DOTMAN_REQUIRE_AGE=1 cargo test --locked --workspace --all-targets
+
+freshness: generate
+    test -z "$(git status --porcelain man completions)"
+
+deny:
+    cargo deny check
+
+shellcheck:
+    shellcheck e2e/*.sh e2e/*/*.sh
 
 dev: clean build-optimized test lint docs
