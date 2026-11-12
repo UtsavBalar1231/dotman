@@ -1385,6 +1385,66 @@ fn the_start_over_steps_run_as_printed_for_a_tilde_or_credential_origin() {
     }
 }
 
+/// A remote whose `HEAD` names a commit no branch has gives a clone with a detached `HEAD`. sync
+/// and doctor refuse it with a way out that runs as printed and moves no branch, so the next sync
+/// pushes: a new `main`, a branch already at `HEAD`'s commit, or a new branch when `main` and
+/// `detached` are elsewhere.
+#[test]
+fn a_detached_head_is_refused_with_a_way_out_that_runs_as_printed() {
+    let env = TestEnv::new();
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let work = env.root().join("work");
+    let dir = work.to_string_lossy().into_owned();
+    env.git(&["init", "-q", &dir]);
+    fs::write(work.join(".a"), b"one\n").expect("write");
+    env.git(&["-C", &dir, "add", "."]);
+    env.git(&["-C", &dir, "commit", "-q", "-m", "one"]);
+    env.git(&["-C", &dir, "push", "-q", &remote, "HEAD:refs/heads/main"]);
+    fs::write(work.join(".a"), b"two\n").expect("write");
+    env.git(&["-C", &dir, "commit", "-q", "-a", "-m", "two"]);
+    env.git(&["-C", &dir, "push", "-q", &remote, "HEAD:refs/heads/tmp"]);
+    let tip = env.git(&["-C", &dir, "rev-parse", "HEAD"]);
+    fs::write(env.remote_path().join("HEAD"), &tip).expect("detach the remote's HEAD");
+    env.git(&["--git-dir", &remote, "update-ref", "-d", "refs/heads/tmp"]);
+    env.ok(&["init", &env.remote_url()]);
+
+    let way_out = |fix: &str| {
+        let command = format!("`dotman git {fix}`");
+        let err = env.fails(&["sync"]);
+        assert!(err.contains(&command), "{err}");
+        let doctor = env.run(&["doctor"]);
+        assert_eq!(doctor.status.code(), Some(1));
+        let out = String::from_utf8_lossy(&doctor.stdout).into_owned();
+        assert!(
+            out.lines()
+                .any(|line| line.starts_with("fail  branch: ") && line.contains(&command)),
+            "{out}"
+        );
+        let ran = common::run_hint(&env, &err, "git checkout");
+        assert!(ran.status.success(), "{}", stderr(&ran));
+        env.ok(&["sync"]);
+    };
+    way_out("checkout -b main");
+    let main = || env.git(&["--git-dir", &remote, "rev-parse", "refs/heads/main"]);
+    assert_eq!(main(), tip);
+
+    env.ok(&["git", "checkout", "-q", "--detach"]);
+    way_out("checkout main");
+
+    env.ok(&["git", "checkout", "-q", "--detach", "HEAD~1"]);
+    way_out("checkout -b detached");
+    assert_eq!(main(), tip);
+    assert_eq!(env.git(&["-C", &repo_path(&env), "rev-parse", "main"]), tip);
+
+    env.ok(&["git", "checkout", "-q", "--detach"]);
+    way_out("checkout detached");
+
+    env.ok(&["git", "checkout", "-q", "--detach"]);
+    env.ok(&["git", "commit", "-q", "--allow-empty", "-m", "on no branch"]);
+    way_out("checkout -b detached-2");
+    assert_eq!(main(), tip);
+}
+
 #[test]
 fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
     let keys: Vec<String> = (0..12)

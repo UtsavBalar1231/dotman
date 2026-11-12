@@ -12,7 +12,7 @@ use crate::commands::apply::{self, Applied, Options, Pass};
 use crate::config::Allow;
 use crate::context::{Context, TEMP_PREFIX, is_under};
 use crate::engine::{Node, read_node};
-use crate::git::{PullOutcome, RemoteFailure, StatusEntry, StatusKind};
+use crate::git::{Git, PullOutcome, RemoteFailure, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
 use crate::import::{OriginArg, clone_arg};
 use crate::name;
@@ -103,11 +103,10 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     )?;
 
     let branch = match ctx.git.remote_url(REMOTE)? {
-        Some(_) => Some(
-            ctx.git
-                .branch()?
-                .ok_or_else(|| anyhow!("the repo's HEAD is detached; check out a branch first"))?,
-        ),
+        Some(_) => match ctx.git.branch()? {
+            Some(branch) => Some(branch),
+            None => bail!("{}", detached(&ctx.git)?),
+        },
         None => None,
     };
     let Some(branch) = branch else {
@@ -615,6 +614,32 @@ fn refuse_mass_delete(
     bail!(
         "{what}, as a broken checkout or a forget of many files does; nothing was committed or pushed. {fix}"
     )
+}
+
+/// Why a sync with a remote refuses a detached `HEAD`, and the command that puts the repo on a
+/// branch at `HEAD`'s commit. It moves no branch: the first of `main`, `detached`, `detached-2`
+/// and so on that does not exist is created, or one already at `HEAD`'s commit is checked out.
+pub(crate) fn detached(git: &Git) -> Result<String> {
+    let bin = name::bin();
+    let head = git.head()?;
+    let mut fix = "check out a branch".to_owned();
+    for n in 0..10_u8 {
+        let branch = match n {
+            0 => "main".to_owned(),
+            1 => "detached".to_owned(),
+            _ => format!("detached-{n}"),
+        };
+        let checkout = match git.resolve_commit(&format!("refs/heads/{branch}"))? {
+            None => format!("checkout -b {branch}"),
+            Some(at) if head.as_ref() == Some(&at) => format!("checkout {branch}"),
+            Some(_) => continue,
+        };
+        fix = format!("put the repo on {branch} with `{bin} git {checkout}`");
+        break;
+    }
+    Ok(format!(
+        "the repo's HEAD is detached, so sync has no branch to pull into or push; {fix} and run this again"
+    ))
 }
 
 /// Refuses to pull a `branch` that shares no commit with `HEAD`: rebasing onto a replaced or

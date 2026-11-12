@@ -417,12 +417,23 @@ fn remote(git: &Git, online: bool) -> Check {
     }
 }
 
-/// A branch name that sync and status refuse.
+/// A branch name that sync and status refuse, or a detached `HEAD` that sync refuses. A rebase or
+/// a bisect detaches `HEAD` too, and gets its own check.
 fn branch(git: &Git) -> Option<Check> {
-    let err = git.branch().err()?;
-    err.is::<UnusableBranch>().then(|| Check {
+    let line = match git.branch() {
+        Ok(None) => {
+            let remote = matches!(git.remote_url("origin"), Ok(Some(_)));
+            if !remote || git.operation().is_some() {
+                return None;
+            }
+            sync::detached(git).ok()?
+        }
+        Err(err) if err.is::<UnusableBranch>() => err.to_string(),
+        Ok(Some(_)) | Err(_) => return None,
+    };
+    Some(Check {
         level: Level::Fail,
-        line: format!("branch: {err}"),
+        line: format!("branch: {line}"),
     })
 }
 
