@@ -1439,9 +1439,7 @@ impl Run<'_> {
         );
         match done {
             Ok(entry) => {
-                state
-                    .files
-                    .insert(key.to_owned(), entry.tuple.entry(&entry.source));
+                state.files.insert(key.to_owned(), entry);
                 self.captured.insert(key.to_owned());
                 return true;
             }

@@ -7,7 +7,7 @@ use crate::commands::Outcome;
 use crate::commands::apply::{Classified, classify_key};
 use crate::config::{Allow, Config};
 use crate::context::{Context, TEMP_PREFIX, is_real_dir};
-use crate::engine::status::{Content, SourceEntry, Variants, Worktree};
+use crate::engine::status::{Variants, Worktree};
 use crate::engine::{
     Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
 };
@@ -20,7 +20,7 @@ use crate::prompt;
 use crate::remote;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{self, Finding, Held};
-use crate::state::{IdentitySnapshot, Kind, State};
+use crate::state::{Entry, IdentitySnapshot, Kind, State};
 use crate::system::{self, Ownership, Standing};
 use crate::variant::{self, Flag, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -874,9 +874,7 @@ impl Targets<'_> {
             ));
         }
         if self.applies(key, &source, replaced.as_deref()) {
-            state
-                .files
-                .insert(key.to_owned(), entry.tuple.entry(&source));
+            state.files.insert(key.to_owned(), entry);
         } else {
             output::info(&format!(
                 "{key}: this machine does not apply {source}, so it keeps its current source"
@@ -1465,8 +1463,8 @@ pub(crate) fn preview(dir: &DirPlan) {
 /// Copies H of `key` into the repo at `source`, which is `key` or one of its variants, and records
 /// the mode under `source`, so each variant keeps its own. An `encrypted` source gets ciphertext,
 /// and a plain one that the content guard holds is refused with [`Held`]. `expected` is the kind
-/// the caller saw, and a different kind now is an error. The caller records S and saves
-/// `repo_config`.
+/// the caller saw, and a different kind now is an error. Returns S for `key`; the caller records it
+/// and saves `repo_config`.
 pub(crate) fn commit_one(
     ctx: &Context,
     repo_config: &mut RepoConfig,
@@ -1475,7 +1473,7 @@ pub(crate) fn commit_one(
     source: &str,
     expected: Kind,
     encrypted: bool,
-) -> Result<SourceEntry> {
+) -> Result<Entry> {
     validate_key(source)?;
     let home = &ctx.paths.home;
     let repo = &ctx.paths.repo;
@@ -1509,13 +1507,7 @@ pub(crate) fn commit_one(
     let plaintext = match (expected, node) {
         (Kind::File, Node::File { bytes, mode, .. }) if encrypted => {
             store_encrypted(ctx, &repo_config.age.recipients, source, &bytes)?;
-            Some(SourceEntry {
-                source: source.to_owned(),
-                tuple: Tuple::of_file(&bytes, safe_mode(mode)),
-                content: Content::Bytes(bytes),
-                template: false,
-                encrypted: true,
-            })
+            Some(Tuple::of_file(&bytes, safe_mode(mode)).entry(source))
         }
         (Kind::File, Node::File { bytes, mode, .. }) => {
             write_atomic(&target, &bytes, stored_mode(mode))?;
@@ -1538,9 +1530,21 @@ pub(crate) fn commit_one(
     if let Some(entry) = plaintext {
         return Ok(entry);
     }
-    Worktree::new(repo, &repo_config.modes)
+    let written = Worktree::new(repo, &repo_config.modes)
         .get(source)?
-        .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))
+        .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))?
+        .tuple;
+    let mut entry = written.entry(source);
+    // A mode `[modes]` leaves out stays this machine's: S holds it against the repo's, as for a
+    // stricter mode apply keeps, so the file stays clean here.
+    if let Some(mode) = file_mode
+        .map(safe_mode)
+        .filter(|mode| *mode != written.mode)
+    {
+        entry.mode = format!("{mode:04o}");
+        entry.repo_mode = Some(format!("{:04o}", written.mode));
+    }
+    Ok(entry)
 }
 
 const fn stored_mode(mode: u32) -> u32 {
@@ -1566,7 +1570,20 @@ fn record_ahead(
         if encrypted {
             keep_private(repo_config, key, source, safe_mode(mode))?;
         } else {
-            record_mode(repo_config, source, mode & 0o777, stored_mode(mode));
+            let mode = safe_mode(mode);
+            // An entry that already holds the mode was written by hand, and stays.
+            let shared = if recorded_mode(&repo_config.modes, source)? == Some(mode) {
+                mode
+            } else {
+                mode & !SHARED_WRITE
+            };
+            record_mode(repo_config, source, shared, stored_mode(mode));
+            let narrowed = shared != mode && shared != stored_mode(mode);
+            if narrowed && old.as_deref() != Some(format!("{shared:04o}").as_str()) {
+                output::warning(&format!(
+                    "{key} is {mode:04o}; [modes] records it as {shared:04o}, without group and other write, for every machine, so this copy is narrowed on the next apply; to keep {mode:04o}, set it for {source} in [modes] in .dotman.toml"
+                ));
+            }
         }
         let new = repo_config.modes.get(source).cloned();
         match (old, new) {
@@ -1616,6 +1633,10 @@ fn store_encrypted(
     secrets::write_ciphertext(repo, source, &ciphertext)
 }
 
+/// Group and other write bits, which a umask of 002 gives every new file and directory. A capture
+/// never records them, so no machine passes them on to the others.
+const SHARED_WRITE: u32 = 0o022;
+
 /// Records the mode of each directory above `key` that `[modes]` has no entry for, and returns
 /// whether it added one. Machines differ in umask, so an entry, which may be another machine's, is
 /// never replaced or removed here; otherwise each capture would flip it.
@@ -1631,7 +1652,7 @@ fn record_dirs(
         if repo_config.modes.contains_key(&entry) {
             continue;
         }
-        let mode = dir_mode(cache, home, parent)?;
+        let mode = dir_mode(cache, home, parent)? & !SHARED_WRITE;
         record_mode(repo_config, &entry, mode, 0o755);
         added = added || mode != 0o755;
     }

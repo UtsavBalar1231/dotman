@@ -373,6 +373,106 @@ fn adding_a_managed_directory_again_records_its_tightened_modes() {
     assert_eq!(mode_of(&other.home().join(".config/nvim/lua")), 0o750);
 }
 
+/// Under umask 002 a new directory is 0775 and a new file 0664. Neither group write bit reaches
+/// `[modes]`, through add or sync's capture, so no other machine gets it, and this machine keeps
+/// its own modes and stays clean. A mode stricter than git's default is recorded without its write
+/// bits and applies on every machine, this one included; an entry already there is kept.
+#[test]
+fn group_and_world_write_bits_are_never_recorded() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let chmod = |key: &str, mode: u32| {
+        fs::set_permissions(env.home().join(key), fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    env.write(".config/nvim/init.lua", b"-- init\n", 0o664);
+    env.write(".config/nvim/lua/a.lua", b"return {}\n", 0o664);
+    env.write(".local/bin/tool", b"#!/bin/sh\n", 0o775);
+    env.write(".config/team/x.conf", b"x\n", 0o660);
+    env.write(".config/team/shared.conf", b"s\n", 0o664);
+    env.write(".ssh/config", b"Host *\n", 0o600);
+    for dir in [".config/nvim", ".config/nvim/lua", ".local/bin"] {
+        chmod(dir, 0o775);
+    }
+    chmod(".config/team", 0o770);
+    chmod(".ssh", 0o700);
+    let mut repo_config = env.repo_config();
+    repo_config
+        .modes
+        .insert(".config/team/shared.conf".to_owned(), "0664".to_owned());
+    repo_config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save");
+
+    let err = env.ok(&[
+        "add",
+        ".config/nvim",
+        ".local/bin/tool",
+        ".config/team",
+        ".ssh/config",
+    ]);
+    assert_eq!(err.matches(" records it as ").count(), 1, "{err}");
+    assert!(
+        err.contains(".config/team/x.conf is 0660; [modes] records it as 0640"),
+        "{err}"
+    );
+    let modes = || -> Vec<(String, String)> { env.repo_config().modes.into_iter().collect() };
+    let expected = [
+        (".config/team/", "0750"),
+        (".config/team/shared.conf", "0664"),
+        (".config/team/x.conf", "0640"),
+        (".ssh/", "0700"),
+        (".ssh/config", "0600"),
+    ]
+    .map(|(key, mode)| (key.to_owned(), mode.to_owned()));
+    assert_eq!(modes(), expected);
+    let unsettled = |env: &TestEnv| -> Vec<String> {
+        env.porcelain("status")
+            .into_iter()
+            .filter(|(token, _)| token != "clean")
+            .map(|(_, key)| key)
+            .collect()
+    };
+    assert_eq!(unsettled(&env), [".config/team/x.conf"]);
+
+    env.write(".config/nvim/after/b.lua", b"-- after\n", 0o664);
+    chmod(".config/nvim/after", 0o775);
+    env.write(".config/nvim/init.lua", b"-- edited\n", 0o664);
+    env.ok(&["sync"]);
+    assert_eq!(modes(), expected);
+    assert_eq!(unsettled(&env), Vec::<String>::new());
+    assert_eq!(mode_of(&env.home().join(".config/nvim/init.lua")), 0o664);
+    assert_eq!(mode_of(&env.home().join(".config/nvim/after")), 0o775);
+    assert_eq!(mode_of(&env.home().join(".config/team/x.conf")), 0o640);
+    env.git(&[
+        "--git-dir",
+        &env.remote_path().to_string_lossy(),
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+
+    let other = env.second_device();
+    other.ok(&["init", &env.remote_url()]);
+    for (key, mode) in [
+        (".config/nvim", 0o755),
+        (".config/nvim/after", 0o755),
+        (".config/nvim/init.lua", 0o644),
+        (".local/bin/tool", 0o755),
+        (".config/team", 0o750),
+        (".config/team/x.conf", 0o640),
+        (".config/team/shared.conf", 0o664),
+        (".ssh", 0o700),
+    ] {
+        assert_eq!(mode_of(&other.home().join(key)), mode, "{key}");
+    }
+    other.ok(&["sync"]);
+    env.ok(&["sync"]);
+    assert_eq!(modes(), expected);
+    assert_eq!(unsettled(&env), Vec::<String>::new());
+    assert_eq!(unsettled(&other), Vec::<String>::new());
+    assert_eq!(mode_of(&env.home().join(".config/nvim/init.lua")), 0o664);
+}
+
 #[test]
 fn a_symlink_to_a_directory_is_stored_as_a_link_with_a_hint() {
     let env = TestEnv::new();
