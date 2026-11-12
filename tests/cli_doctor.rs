@@ -401,6 +401,32 @@ fn an_empty_or_missing_dotman_toml_fails_with_the_restore_command() {
     assert!(line(&out, "fail", ".dotman.toml").is_none(), "{out}");
 }
 
+/// A `.dotman.toml` that does not parse fails under its own name, not under variants, with the
+/// way out that every command names, which runs as printed.
+#[test]
+fn an_unparsable_dotman_toml_fails_under_its_name_with_the_way_out() {
+    let env = committed();
+    let config = env.repo().join(".dotman.toml");
+    let good = fs::read_to_string(&config).expect("read");
+    let bad = good.replacen(
+        "[ignore]\npatterns = [",
+        "[ignore]\npatterns = [\n    \"a**/b\",",
+        1,
+    );
+    assert_ne!(bad, good);
+    fs::write(&config, bad).expect("write");
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(1), "{out}");
+    let failed = line(&out, "fail", ".dotman.toml: cannot parse").unwrap_or_default();
+    assert!(failed.contains("bad [ignore] pattern `a**/b`"), "{out}");
+    assert!(!out.contains("variants:"), "{out}");
+    let step = common::hint_line(failed, "git checkout");
+    let ran = common::paste(&env, &step);
+    assert!(ran.status.success(), "{step}: {}", common::text(&ran));
+    let (code, out) = doctor(&env, &[]);
+    assert_eq!(code, Some(0), "{out}");
+}
+
 #[test]
 fn a_half_made_repo_is_named_with_a_fix_that_keeps_commits() {
     let repo_line = |env: &TestEnv| {

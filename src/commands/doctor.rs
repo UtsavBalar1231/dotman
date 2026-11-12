@@ -584,6 +584,7 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
         },
     }
     checks.extend(lost_config(ctx));
+    checks.extend(unloadable_config(ctx));
     match ctx.git.operation() {
         Some(op) => checks.push(fail(
             "git operation",
@@ -669,6 +670,16 @@ fn lost_config(ctx: &Context) -> Option<Check> {
     })
 }
 
+/// A `.dotman.toml` that does not load stops every command that reads it; the error names the
+/// way out.
+fn unloadable_config(ctx: &Context) -> Option<Check> {
+    let e = ctx.repo_config().err()?;
+    Some(Check {
+        level: Level::Fail,
+        line: format!(".dotman.toml: {e:#}"),
+    })
+}
+
 fn install_script(ctx: &Context) -> Option<Check> {
     match bootstrap::inspect(&ctx.paths.repo) {
         Err(e) => Some(warn("install.sh", &format!("{e:#}"))),
@@ -702,6 +713,8 @@ fn install_script(ctx: &Context) -> Option<Check> {
 fn variants(ctx: &Context) -> Vec<Check> {
     let sources = match ctx.sources() {
         Ok(sources) => sources,
+        // The `.dotman.toml` check reports it.
+        Err(_) if ctx.repo_config().is_err() => return Vec::new(),
         Err(e) => return vec![warn("variants", &format!("{e:#}"))],
     };
     let mut checks = Vec::new();
