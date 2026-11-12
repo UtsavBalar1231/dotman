@@ -282,6 +282,14 @@ fn a_conflict_in_dotman_toml_is_aborted_with_junk_in_the_worktree() {
     assert!(!b.repo().join(".git/rebase-merge").exists());
     assert!(!b.repo().join(".git/rebase-apply").exists());
     exits(&b, 0, &["status"]);
+
+    // Redone by hand, the pull leaves the markers; a checkout of the last commit's copy would
+    // resolve the conflict by dropping one side, so doctor does not offer it.
+    let pull = steps(&err).into_iter().next().expect("the pull step");
+    assert!(!paste(&b, &pull).status.success(), "the pull stops");
+    let doctor = String::from_utf8_lossy(&b.run(&["doctor"]).stdout).into_owned();
+    assert!(doctor.contains(".dotman.toml: cannot parse"), "{doctor}");
+    assert!(!doctor.contains("git checkout HEAD"), "{doctor}");
 }
 
 /// Writes a bad `[ignore]` glob into `env`'s `.dotman.toml` and returns the text it had.
@@ -341,24 +349,28 @@ fn a_pulled_bad_glob_names_the_pull_that_brings_its_correction() {
     assert_converged(&a, &b);
 }
 
-/// A bad glob edited here names the last commit's copy, which the printed checkout puts back.
+/// A bad glob or text that is not UTF-8, edited here, names the last commit's copy, which the
+/// printed checkout puts back.
 #[test]
 fn a_bad_glob_edited_here_names_the_checkout_that_puts_back_the_last_commits_copy() {
     let (_, b) = pair(&[(".a", b"a\n", 0o644)]);
+    let file = b.repo().join(".dotman.toml");
     let good = write_bad_glob(&b);
-    let err = exits(&b, 1, &["status"]);
-    assert!(
-        err.contains("the last commit's copy parses, so fix the edit, or put that copy back with `dotman git checkout HEAD -- .dotman.toml`"),
-        "{err}"
-    );
-    let line = common::hint_line(&err, "git checkout");
-    let out = paste(&b, &line);
-    assert!(out.status.success(), "{line}: {}", stderr(&out));
-    assert_eq!(
-        fs::read_to_string(b.repo().join(".dotman.toml")).expect("read"),
-        good
-    );
-    exits(&b, 0, &["sync"]);
+    for round in 0..2 {
+        if round == 1 {
+            fs::write(&file, b"[ignore]\npatterns = [\"\xff\"]\n").expect("write");
+        }
+        let err = exits(&b, 1, &["status"]);
+        assert!(
+            err.contains("the last commit's copy parses, so fix the edit, or put that copy back with `dotman git checkout HEAD -- .dotman.toml`"),
+            "{err}"
+        );
+        let line = common::hint_line(&err, "git checkout");
+        let out = paste(&b, &line);
+        assert!(out.status.success(), "{line}: {}", stderr(&out));
+        assert_eq!(fs::read_to_string(&file).expect("read"), good);
+        exits(&b, 0, &["sync"]);
+    }
 }
 
 #[test]

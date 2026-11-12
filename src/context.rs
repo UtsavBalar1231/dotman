@@ -637,7 +637,12 @@ impl Context {
 fn load_repo_config(git: &Git) -> Result<RepoConfig> {
     let file = git.repo().join(".dotman.toml");
     RepoConfig::load(&file).map_err(|e| {
-        if e.root_cause().is::<io::Error>() {
+        // Text that is not UTF-8 is a bad file too, as a pull can bring it.
+        let unreadable = e
+            .root_cause()
+            .downcast_ref::<io::Error>()
+            .is_some_and(|err| err.kind() != io::ErrorKind::InvalidData);
+        if unreadable {
             return e;
         }
         match unparsable_config_fix(git, &file) {
@@ -649,9 +654,13 @@ fn load_repo_config(git: &Git) -> Result<RepoConfig> {
 
 /// One line, since doctor shows it too. A copy in the last commit that parses means the broken
 /// text is an edit made here; one that holds the same broken text came in a commit, pulled or
-/// made here, and the next pull brings the correction once another machine pushes it.
+/// made here, and the next pull brings the correction once another machine pushes it. Mid-rebase
+/// the file may hold conflict markers, which a checkout would resolve by dropping one side.
 fn unparsable_config_fix(git: &Git, file: &Path) -> Result<Option<String>> {
-    if git.head()?.is_none() || git.tree_mode("HEAD", ".dotman.toml")?.is_none() {
+    if git.operation().is_some()
+        || git.head()?.is_none()
+        || git.tree_mode("HEAD", ".dotman.toml")?.is_none()
+    {
         return Ok(None);
     }
     let committed = git.show_blob("HEAD", ".dotman.toml")?;
