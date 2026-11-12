@@ -13,11 +13,9 @@ env:
 
 jobs:
   verify:
-    name: Test and check version
+    name: Check the tag
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      DOTMAN_REQUIRE_AGE: 1
+    timeout-minutes: 5
     steps:
       - name: Checkout code
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -30,28 +28,16 @@ jobs:
             exit 1
           fi
 
-      - name: Configure git for tests
-        run: |
-          git config --global user.email "release@users.noreply.github.com"
-          git config --global user.name "release"
-
-      - name: Install age and shellcheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y age shellcheck
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
-
-      - name: Run tests
-        run: cargo test --locked --workspace --all-targets
+  # The whole CI suite on the tagged commit, macOS and e2e included, so a tag cannot publish
+  # binaries that CI would reject.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
 
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    needs: verify
+    needs: [verify, ci]
     timeout-minutes: 60
     strategy:
       fail-fast: true
