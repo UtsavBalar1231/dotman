@@ -18,7 +18,7 @@ e2e_join b beta
 
 # Lists b's backup runs.
 runs() {
-    find "$(e2e_backups b)" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort
+    { find "$(e2e_backups b)" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | LC_ALL=C sort
 }
 
 # b never edited these files: each is replaced as it was last applied, which is still backed up.

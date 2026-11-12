@@ -588,7 +588,11 @@ e2e_decrypted_sums() {
     [[ -s $E2E_ROOT/ledger/identities ]] || return 0
     while read -r oid; do
         e2e_tool git --git-dir="$gd" cat-file blob "$oid" >"$E2E_ROOT/blob" 2>/dev/null || continue
-        [[ $(head -c 21 "$E2E_ROOT/blob") == "age-encryption.org/v1" ]] || continue
+        # dotman stores armored ciphertext; the binary header is accepted as well.
+        case $(head -c 34 "$E2E_ROOT/blob") in
+            "-----BEGIN AGE ENCRYPTED FILE-----" | age-encryption.org/v1*) ;;
+            *) continue ;;
+        esac
         while IFS= read -r id; do
             if e2e_tool age -d -i "$id" -o "$E2E_ROOT/plain" "$E2E_ROOT/blob" 2>/dev/null; then
                 sha256sum <"$E2E_ROOT/plain" | cut -d' ' -f1
