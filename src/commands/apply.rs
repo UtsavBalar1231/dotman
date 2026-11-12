@@ -1482,8 +1482,9 @@ impl Run<'_> {
         if !scan.held.is_empty() {
             self.attention = true;
             output::warning(&format!(
-                "{} new files held back; an [ignore] pattern in .dotman.toml silences one:",
-                scan.held.len(),
+                "{} held back{}:",
+                crate::import::count(scan.held.len(), "new file"),
+                crate::commands::status::held_note(scan.held.values().copied()),
             ));
             for (key, hold) in &scan.held {
                 let path = add::pasteable(&self.ctx.paths.home, key);

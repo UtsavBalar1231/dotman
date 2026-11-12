@@ -4014,6 +4014,37 @@ fn an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it() {
     assert_eq!(state.capture_dirs, Some(approved.into_iter().collect()));
 }
 
+/// The header over held files offers an `[ignore]` pattern only for the ones held for another
+/// reason than an unapproved `[dirs]` entry, whose lines name `sync --approve-dirs`.
+#[test]
+fn the_held_back_header_offers_an_ignore_pattern_only_where_it_applies() {
+    let (a, b) = two_machines();
+    b.write(".kube/config", b"apiVersion: v1\n", 0o600);
+    push_config(&a, |config| config.dirs.paths = vec![".kube".to_owned()]);
+    b.ok(&["sync"]);
+    let err = exits(&b.run(&["sync"]), 3);
+    assert!(err.contains("\n1 new file held back:\n"), "{err}");
+    assert!(!err.contains("[ignore] pattern"), "{err}");
+    let status = text(&b.run(&["status"]));
+    assert!(status.contains("\nheld back:\n"), "{status}");
+
+    b.write(".docker/config.json", b"{}\n", 0o600);
+    b.ok(&["add", ".docker"]);
+    b.write(".docker/big.dat", &vec![b'x'; 2 << 20], 0o600);
+    let mixed =
+        "; an [ignore] pattern in .dotman.toml silences one not under an unapproved [dirs] entry:";
+    let err = exits(&b.run(&["sync"]), 3);
+    assert!(
+        err.contains(&format!("\n2 new files held back{mixed}\n")),
+        "{err}"
+    );
+    let status = text(&b.run(&["status"]));
+    assert!(
+        status.contains(&format!("\nheld back{mixed}\n")),
+        "{status}"
+    );
+}
+
 /// An interactive sync asks once, naming each unapproved entry and how many files it would
 /// capture; a no captures nothing and a yes captures them. `--approve-dirs` answers the question,
 /// which is then not asked.

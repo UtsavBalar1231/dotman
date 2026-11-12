@@ -126,7 +126,10 @@ fn big_binary_and_secret_named_files_are_held_and_sync_exits_3_but_pushes_the_re
     assert_eq!((a.four_trees(), a.remote_refs()), before);
 
     let err = exits(&a, 3, &["sync"]);
-    assert!(err.contains("3 new files held back"), "{err}");
+    assert!(
+        err.contains("3 new files held back; an [ignore] pattern in .dotman.toml silences one:"),
+        "{err}"
+    );
     let tree = remote_tree(&a);
     assert!(
         tree.contains(&".config/nvim/foo.lua".to_owned()),

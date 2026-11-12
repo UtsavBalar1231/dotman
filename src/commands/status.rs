@@ -333,6 +333,19 @@ fn summarize(rows: &[(&str, String)], unrecorded: usize, [new, held, held_in_rep
     }
 }
 
+/// The header's note on a list of held files. An `[ignore]` pattern is no answer for a file held
+/// only because its `[dirs]` entry is not approved here; its own line names the one that is.
+pub(crate) fn held_note(holds: impl IntoIterator<Item = Hold>) -> &'static str {
+    let holds: Vec<Hold> = holds.into_iter().collect();
+    if holds.iter().all(|hold| *hold == Hold::Unapproved) {
+        ""
+    } else if holds.contains(&Hold::Unapproved) {
+        "; an [ignore] pattern in .dotman.toml silences one not under an unapproved [dirs] entry"
+    } else {
+        "; an [ignore] pattern in .dotman.toml silences one"
+    }
+}
+
 fn list_new(
     out: &mut impl Write,
     ctx: &Context,
@@ -348,7 +361,8 @@ fn list_new(
     if !held.is_empty() {
         writeln!(
             out,
-            "\nheld back; an [ignore] pattern in .dotman.toml silences one:"
+            "\nheld back{}:",
+            held_note(held.iter().map(|(_, hold)| *hold))
         )?;
         for (key, hold) in held {
             let path = add::pasteable(&ctx.paths.home, key);
