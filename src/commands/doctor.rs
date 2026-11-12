@@ -584,10 +584,17 @@ fn install_script(ctx: &Context) -> Option<Check> {
                 name::bin()
             ),
         )),
-        Ok(Found::Unedited { version }) if bootstrap::is_older(&version) => Some(warn(
+        Ok(Found::Unedited { version, .. }) if bootstrap::is_older(&version) => Some(warn(
             "install.sh",
             &format!(
                 "pins dotman {version}, older than {VERSION}; run `{} init --refresh-bootstrap`",
+                name::bin()
+            ),
+        )),
+        Ok(Found::Unedited { current: false, .. }) => Some(warn(
+            "install.sh",
+            &format!(
+                "written by another build of dotman {VERSION}; run `{} init --refresh-bootstrap`",
                 name::bin()
             ),
         )),
