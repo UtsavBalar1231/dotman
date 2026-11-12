@@ -1306,6 +1306,85 @@ fn a_remote_with_unrelated_history_is_refused_before_the_pull() {
     assert!(log.lines().any(|oid| oid == head.trim()), "{log}");
 }
 
+/// A bare repo whose `HEAD` is `main`, and an origin for it: `~/dots.git`, which git expands
+/// itself, or a URL with credentials.
+fn odd_origin(env: &TestEnv, tilde: bool) -> (String, std::path::PathBuf) {
+    let bare = if tilde {
+        let bare = env.home().join("dots.git");
+        env.git(&["init", "-q", "--bare", &bare.to_string_lossy()]);
+        bare
+    } else {
+        env.remote_path()
+    };
+    let dir = bare.to_string_lossy().into_owned();
+    env.git(&["--git-dir", &dir, "symbolic-ref", "HEAD", "refs/heads/main"]);
+    let origin = if tilde {
+        "~/dots.git".to_owned()
+    } else {
+        format!("file://user:s3cr3t@localhost{dir}")
+    };
+    (origin, bare)
+}
+
+/// The start-over steps run as printed, from `$HOME`, for an origin starting with `~/`, which
+/// neither `git clone` nor a quoted path expands, and for one with credentials, which is shown as
+/// `<url>` and never printed.
+#[test]
+fn the_start_over_steps_run_as_printed_for_a_tilde_or_credential_origin() {
+    for tilde in [true, false] {
+        let env = TestEnv::new();
+        let (origin, bare) = odd_origin(&env, tilde);
+        env.ok(&["init", "--no-import", "--remote", &origin]);
+        env.write(".a", b"a\n", 0o644);
+        env.ok(&["add", ".a"]);
+        env.ok(&["sync"]);
+        let other = env.root().join("other");
+        let dir = other.to_string_lossy().into_owned();
+        env.git(&["init", "-q", &dir]);
+        fs::write(other.join(".z"), b"only on the remote\n").expect("write");
+        env.git(&["-C", &dir, "add", "."]);
+        env.git(&["-C", &dir, "commit", "-q", "-m", "other"]);
+        let bare = bare.to_string_lossy().into_owned();
+        env.git(&[
+            "-C",
+            &dir,
+            "push",
+            "-q",
+            "-f",
+            &bare,
+            "HEAD:refs/heads/main",
+        ]);
+        env.write(".a", b"edited\n", 0o644);
+
+        let err = env.fails(&["sync"]);
+        assert!(!err.contains("s3cr3t"), "{err}");
+        let block = err
+            .split_once("To start over from the remote")
+            .and_then(|(_, rest)| rest.split_once("To merge the two histories"))
+            .map(|(block, _)| block)
+            .unwrap_or_default();
+        let steps: Vec<&str> = block
+            .lines()
+            .filter_map(|line| line.strip_prefix("  "))
+            .collect();
+        assert_eq!(steps.len(), 3, "{err}");
+        assert_eq!(
+            block.contains("<url> as the URL with its credentials"),
+            !tilde,
+            "{err}"
+        );
+        for step in steps {
+            let step = step.replace("<url>", &shell_words::quote(&origin));
+            let out = common::paste(&env, &step);
+            assert!(out.status.success(), "{step}: {}", stderr(&out));
+            assert!(!stderr(&out).contains("s3cr3t"), "{}", stderr(&out));
+        }
+        let tracked = env.git(&["-C", &repo_path(&env), "ls-files"]);
+        assert!(tracked.lines().any(|key| key == ".z"), "{tracked}");
+        assert!(tracked.lines().any(|key| key == ".a"), "{tracked}");
+    }
+}
+
 #[test]
 fn a_commit_that_deletes_most_tracked_files_needs_allow_mass_delete() {
     let keys: Vec<String> = (0..12)

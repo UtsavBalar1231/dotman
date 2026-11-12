@@ -211,22 +211,89 @@ pub fn is_url(text: &str) -> bool {
         .is_some_and(|(host, path)| !path.is_empty() && host.contains('@') && !host.contains('/'))
 }
 
-/// A source's origin `url` as a note shows it, and the clause naming the command that sets it as
-/// the new repo's remote. The command quotes the URL for a shell, as the source picks it; a URL
+/// How a printed command names an origin.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OriginArg {
+    /// Quoted for a shell, so the command runs as printed.
+    Quoted(String),
+    /// What the command takes in the origin's place, and what to put there.
+    Placeholder(&'static str, String),
+    /// Not a [`crate::git::usable_remote`], so no command names it.
+    Unusable,
+}
+
+/// The origin `url` as a note shows it, and as a command that sets it as a remote takes it. A URL
 /// with credentials is shown redacted, and a command holding that would set a broken remote. One
-/// that is not a [`crate::git::usable_remote`] is shown escaped, and gets no command.
+/// that is not a [`crate::git::usable_remote`] is shown escaped.
+pub fn origin_arg(url: &str) -> (String, OriginArg) {
+    let shown = output::escape_line(&redact_credentials(url)).into_owned();
+    let arg = if !crate::git::usable_remote(url) {
+        OriginArg::Unusable
+    } else if shown == url {
+        OriginArg::Quoted(shell_words::quote(url).into_owned())
+    } else {
+        OriginArg::Placeholder("<url>", "the URL with its credentials".to_owned())
+    };
+    (shown, arg)
+}
+
+/// [`origin_arg`] for a command that clones `url`, `init <url>` or `import <url>`. git expands a
+/// leading `~` or `~user` of a local path when it fetches or pushes, but `git clone` does not, and
+/// `import` reads a quoted one as a path below the working directory. So the command gets the
+/// path as git expands it: against `home`, or the home of that user, or a `<path>` placeholder
+/// when the user is unknown here.
+pub fn clone_arg(url: &str, home: &Path) -> (String, OriginArg) {
+    clone_arg_with(url, home, |user| {
+        crate::sys::passwd_by_name(user).map(|pw| pw.home)
+    })
+}
+
+fn clone_arg_with(
+    url: &str,
+    home: &Path,
+    user_home: impl Fn(&str) -> Option<PathBuf>,
+) -> (String, OriginArg) {
+    let (shown, arg) = origin_arg(url);
+    let tilde = url
+        .strip_prefix('~')
+        .filter(|_| matches!(arg, OriginArg::Quoted(_)) && crate::git::local_path_remote(url));
+    let Some(rest) = tilde else {
+        return (shown, arg);
+    };
+    let (user, tail) = rest
+        .find('/')
+        .and_then(|slash| rest.split_at_checked(slash))
+        .unwrap_or((rest, ""));
+    let dir = if user.is_empty() {
+        Some(home.to_path_buf())
+    } else {
+        user_home(user)
+    };
+    let Some(dir) = dir.as_deref().and_then(Path::to_str) else {
+        let what = format!("the path {shown} names");
+        return (shown, OriginArg::Placeholder("<path>", what));
+    };
+    let path = if tail.is_empty() {
+        dir.to_owned()
+    } else {
+        format!("{}{tail}", dir.trim_end_matches('/'))
+    };
+    (shown, origin_arg(&path).1)
+}
+
+/// A source's origin `url` as a note shows it, and the clause naming the command that sets it as
+/// the new repo's remote. git expands a leading `~` of a remote itself, so it stays as typed.
 fn origin_hint(url: &str) -> (String, String) {
     let bin = name::bin();
-    let shown = output::escape_line(&redact_credentials(url)).into_owned();
-    let set = if !crate::git::usable_remote(url) {
-        "it is not a usable remote URL, so it is not offered as one".to_owned()
-    } else if shown == url {
-        format!(
-            "`{bin} init --remote {}` sets it here",
-            shell_words::quote(url)
-        )
-    } else {
-        format!("`{bin} init --remote <url>` sets it here, given the URL with its credentials")
+    let (shown, arg) = origin_arg(url);
+    let set = match arg {
+        OriginArg::Unusable => {
+            "it is not a usable remote URL, so it is not offered as one".to_owned()
+        }
+        OriginArg::Quoted(url) => format!("`{bin} init --remote {url}` sets it here"),
+        OriginArg::Placeholder(slot, what) => {
+            format!("`{bin} init --remote {slot}` sets it here, given {what}")
+        }
     };
     (shown, set)
 }
@@ -473,6 +540,35 @@ mod tests {
         let repo = real.join("not/yet/created");
         let source = tmp.path().join("link/not");
         assert!(refuse_overlap(&repo, &source).is_err());
+    }
+
+    /// A clone does not expand `~`, so the command gets the path git reads for a fetch; anything
+    /// else is what a remote takes.
+    #[test]
+    fn a_clone_command_gets_a_tilde_origin_expanded_as_git_does() {
+        let home = Path::new("/home/me");
+        let users = |user: &str| (user == "bob").then(|| PathBuf::from("/srv/bob/"));
+        let quoted = |text: &str| OriginArg::Quoted(shell_words::quote(text).into_owned());
+        for (url, arg) in [
+            ("~/dots.git", quoted("/home/me/dots.git")),
+            ("~", quoted("/home/me")),
+            ("~bob/my dots.git", quoted("/srv/bob/my dots.git")),
+            ("~bob", quoted("/srv/bob/")),
+            ("/abs/~/dots.git", quoted("/abs/~/dots.git")),
+            ("~host:dots.git", quoted("~host:dots.git")),
+            (
+                "~nobody/dots.git",
+                OriginArg::Placeholder("<path>", "the path ~nobody/dots.git names".to_owned()),
+            ),
+            (
+                "https://user:s3cr3t@example.invalid/dots.git",
+                OriginArg::Placeholder("<url>", "the URL with its credentials".to_owned()),
+            ),
+            ("-u/dots.git", OriginArg::Unusable),
+        ] {
+            assert_eq!(clone_arg_with(url, home, users).1, arg, "{url}");
+        }
+        assert_eq!(origin_arg("~/dots.git").1, quoted("~/dots.git"));
     }
 
     #[test]

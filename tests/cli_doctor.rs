@@ -247,6 +247,68 @@ fn damaged_objects_fail_the_object_check() {
     );
 }
 
+/// The steps for damaged objects run as printed, from `$HOME`, for an origin starting with `~/`,
+/// which `git clone` does not expand, and for one with credentials, which is shown as `<url>` and
+/// never printed.
+#[test]
+fn the_clone_step_runs_as_printed_for_a_tilde_or_credential_origin() {
+    for tilde in [true, false] {
+        let env = TestEnv::new();
+        let bare = if tilde {
+            env.home().join("dots.git")
+        } else {
+            env.remote_path()
+        };
+        let dir = bare.to_string_lossy().into_owned();
+        if tilde {
+            env.git(&["init", "-q", "--bare", &dir]);
+        }
+        env.git(&["--git-dir", &dir, "symbolic-ref", "HEAD", "refs/heads/main"]);
+        let origin = if tilde {
+            "~/dots.git".to_owned()
+        } else {
+            format!("file://user:s3cr3t@localhost{dir}")
+        };
+        env.ok(&["init", "--remote", &origin]);
+        env.write(".bashrc", b"x\n", 0o644);
+        env.ok(&["add", ".bashrc"]);
+        env.ok(&["sync"]);
+        let blob = env.git(&[
+            "-C",
+            &env.repo().to_string_lossy(),
+            "rev-parse",
+            "HEAD:.bashrc",
+        ]);
+        let (fan, rest) = blob.trim().split_at(2);
+        fs::remove_file(env.repo().join(".git/objects").join(fan).join(rest)).expect("lose it");
+
+        let (code, out) = doctor(&env, &[]);
+        assert_eq!(code, Some(1), "{out}");
+        assert!(!out.contains("s3cr3t"), "{out}");
+        let failed = line(&out, "fail", "repo objects").unwrap_or_default();
+        assert_eq!(
+            failed.contains("given the URL with its credentials"),
+            !tilde,
+            "{out}"
+        );
+        let steps: Vec<&str> = failed.split('`').skip(1).step_by(2).collect();
+        assert_eq!(steps.len(), 3, "{out}");
+        for step in steps {
+            let step = step.replace("<url>", &shell_words::quote(&origin));
+            let ran = common::paste(&env, &step);
+            assert!(
+                ran.status.success(),
+                "{step}: {}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
+        }
+        let tracked = env.git(&["-C", &env.repo().to_string_lossy(), "ls-files"]);
+        assert!(tracked.lines().any(|key| key == ".bashrc"), "{tracked}");
+        let (code, out) = doctor(&env, &[]);
+        assert_eq!(code, Some(0), "{out}");
+    }
+}
+
 /// A ref that points at nothing, as a remote's `HEAD` left dangling by an import, fails the object
 /// check with a step that removes that ref alone, never the repo, and the step run as printed
 /// clears it. A branch that points at nothing gets the backup steps instead.

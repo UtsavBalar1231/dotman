@@ -7,7 +7,7 @@ use crate::commands::sync;
 use crate::context::Context;
 use crate::git::{Git, Operation, UnusableBranch};
 use crate::hooks::{self, Standing};
-use crate::import::count;
+use crate::import::{OriginArg, clone_arg, count};
 use crate::lock::Lock;
 use crate::name;
 use crate::output;
@@ -321,15 +321,25 @@ fn corrupt_repo_steps(ctx: &Context) -> String {
     let backup_step = format!(
         "back the repo up first with `cp -a {here} {backup}`, which keeps any commit that is only here"
     );
-    match ctx.git.remote_url("origin") {
-        Ok(Some(url)) => format!(
-            "{backup_step}; then clone it again from origin: `rm -rf {here}` and `{} init {}`",
-            name::bin(),
-            shell_words::quote(&url)
+    let clone = ctx
+        .git
+        .remote_target("origin")
+        .ok()
+        .flatten()
+        .map(|url| clone_arg(&url, &ctx.paths.home));
+    let bin = name::bin();
+    match clone {
+        Some((_, OriginArg::Quoted(url))) => format!(
+            "{backup_step}; then clone it again from origin: `rm -rf {here}` and `{bin} init {url}`"
         ),
-        _ => format!(
-            "{backup_step}; `{} git fsck` lists what is missing, and with no origin there is no other copy to clone",
-            name::bin()
+        Some((_, OriginArg::Placeholder(slot, what))) => format!(
+            "{backup_step}; then clone it again from origin: `rm -rf {here}` and `{bin} init {slot}`, given {what}"
+        ),
+        Some((shown, OriginArg::Unusable)) => format!(
+            "{backup_step}; `{bin} git fsck` lists what is missing, and the origin URL {shown} is not a usable remote URL, so no command clones it"
+        ),
+        None => format!(
+            "{backup_step}; `{bin} git fsck` lists what is missing, and with no origin there is no other copy to clone"
         ),
     }
 }

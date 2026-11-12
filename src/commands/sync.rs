@@ -14,6 +14,7 @@ use crate::context::{Context, TEMP_PREFIX, is_under};
 use crate::engine::{Node, read_node};
 use crate::git::{PullOutcome, RemoteFailure, StatusEntry, StatusKind};
 use crate::hooks::{self, Policy};
+use crate::import::{OriginArg, clone_arg};
 use crate::name;
 use crate::output;
 use crate::prompt;
@@ -639,13 +640,28 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
         shell_words::quote(&repo),
         shell_words::quote(&format!("{repo}.old")).into_owned(),
     );
-    let url = ctx.git.remote_url(REMOTE)?.map_or_else(
-        || "<url>".to_owned(),
-        |url| shell_words::quote(&url).into_owned(),
+    let (shown, url) = ctx.git.remote_target(REMOTE)?.map_or_else(
+        || {
+            let what = "the remote's URL".to_owned();
+            (String::new(), OriginArg::Placeholder("<url>", what))
+        },
+        |url| clone_arg(&url, &ctx.paths.home),
     );
+    let start_over = |url: &str, given: &str| {
+        format!(
+            "To start over from the remote and keep what only this repo has, which --include-missing adds{given}:\n  mv {here} {old}\n  {bin} import {url}\n  {bin} import --overlay {old} --include-missing\n"
+        )
+    };
+    let start_over = match url {
+        OriginArg::Quoted(url) => start_over(&url, ""),
+        OriginArg::Placeholder(slot, what) => start_over(slot, &format!(", with {slot} as {what}")),
+        OriginArg::Unusable => format!(
+            "The origin URL {shown} is not a usable remote URL, so no command starts over from it. "
+        ),
+    };
     let quoted = shell_words::quote(branch);
     bail!(
-        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has, which --include-missing adds:\n  mv {here} {old}\n  {bin} import {url}\n  {bin} import --overlay {old} --include-missing\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {quoted}`, then `{bin} sync`"
+        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. {start_over}To merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {quoted}`, then `{bin} sync`"
     )
 }
 
