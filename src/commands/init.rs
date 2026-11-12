@@ -114,6 +114,7 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
 
 fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outcome> {
     check_url(source)?;
+    let shown = crate::git::redact_credentials(source);
     let dry_run = args.dry_run;
     let _lock = ctx.lock(dry_run)?;
     let repo = &ctx.paths.repo;
@@ -158,10 +159,10 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     if !dry_run {
         if let Some(place) = &place {
             clone_into_place(ctx, place, source)?;
-            output::success(&format!("cloned {source} into {}", repo.display()));
+            output::success(&format!("cloned {shown} into {}", repo.display()));
         } else {
             output::info(&format!(
-                "{} already holds the clone of {source}; setting up this machine",
+                "{} already holds the clone of {shown}; setting up this machine",
                 repo.display()
             ));
         }
@@ -189,7 +190,7 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
         _tmp = tmp;
         fresh = Context::new(paths, ctx.machine.clone(), "init");
         fresh.git.clone_from(source)?;
-        output::info(&format!("would clone {source} into {}", repo.display()));
+        output::info(&format!("would clone {shown} into {}", repo.display()));
         &fresh
     } else {
         ctx
@@ -210,7 +211,10 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
 /// Fails unless the repo at the repo path is a dotman repo whose `origin` is `source`.
 fn refuse_another_repo(ctx: &Context, source: &str) -> Result<()> {
     let ours = ctx.paths.repo.join(".git/dotman-id").is_file()
-        && ctx.git.remote_url("origin")?.as_deref() == Some(source);
+        && ctx
+            .git
+            .remote_url("origin")?
+            .is_some_and(|origin| same_source(&origin, source));
     ensure!(
         ours,
         "a repo already exists at {}; `{} apply` applies it",
@@ -218,6 +222,25 @@ fn refuse_another_repo(ctx: &Context, source: &str) -> Result<()> {
         name::bin()
     );
     Ok(())
+}
+
+/// Whether `origin` is what a clone of `source` stores. git stores a local path made absolute
+/// against the working directory, so a local path matches that form, or a path that resolves to
+/// the same directory; a URL matches only itself.
+fn same_source(origin: &str, source: &str) -> bool {
+    if origin == source {
+        return true;
+    }
+    if import::is_url(origin) || import::is_url(source) {
+        return false;
+    }
+    if std::path::absolute(source).is_ok_and(|source| source.as_os_str() == origin) {
+        return true;
+    }
+    matches!(
+        (fs::canonicalize(origin), fs::canonicalize(source)),
+        (Ok(origin), Ok(source)) if origin == source
+    )
 }
 
 const STAGING_PREFIX: &str = ".dotman-init-";

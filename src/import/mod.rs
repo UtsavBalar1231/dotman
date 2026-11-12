@@ -187,7 +187,7 @@ impl Source {
 }
 
 /// `scheme://...`, or scp-like `user@host:path` with no `/` before the colon.
-fn is_url(text: &str) -> bool {
+pub fn is_url(text: &str) -> bool {
     if let Some((scheme, _)) = text.split_once("://") {
         return !scheme.is_empty()
             && scheme

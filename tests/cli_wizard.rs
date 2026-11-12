@@ -656,6 +656,85 @@ fn init_over_a_killed_clone_refuses_another_url_and_a_repo_init_did_not_make() {
     assert!(!b.home().join(".bashrc").exists());
 }
 
+/// A repo with `.bashrc` pushed to the remote.
+fn published() -> TestEnv {
+    let a = TestEnv::new();
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".bashrc", b"base\n", 0o644);
+    a.ok(&["add", ".bashrc"]);
+    a.push_repo();
+    a
+}
+
+/// git stores a relative source made absolute, so the rerun of the same command line compares the
+/// directories, not the text.
+#[test]
+fn a_rerun_with_the_same_relative_source_finishes_the_machine_setup() {
+    let b = published().second_device();
+    let up: PathBuf = b.home().components().skip(1).map(|_| "..").collect();
+    let remote = b.remote_path();
+    let relative = up.join(remote.strip_prefix("/").expect("an absolute remote"));
+    let relative = relative.to_string_lossy().into_owned();
+    b.ok(&["init", &relative]);
+
+    let args = ["init", &relative, "--host", "box"];
+    let before = (b.four_trees(), tree_checksum(&b.xdg_config()));
+    exits(&b.run(&[&args[..], &["--dry-run"]].concat()), 0);
+    assert_eq!((b.four_trees(), tree_checksum(&b.xdg_config())), before);
+    let err = exits(&b.run(&args), 0);
+    assert!(err.contains("already holds the clone"), "{err}");
+    assert_eq!(machine_config(&b).identity.host.as_deref(), Some("box"));
+
+    // The stored form still matches when the source cannot be resolved.
+    fs::rename(&remote, remote.with_extension("moved")).expect("move the remote away");
+    exits(&b.run(&["init", &relative, "--host", "den"]), 0);
+    assert_eq!(machine_config(&b).identity.host.as_deref(), Some("den"));
+}
+
+#[test]
+fn a_rerun_refuses_a_source_that_only_resembles_the_origin() {
+    let b = published().second_device();
+    let url = b.remote_url();
+    let path = b.remote_path().to_string_lossy().into_owned();
+    b.ok(&["init", &url]);
+    let other = b.root().to_string_lossy().into_owned();
+    let refused = |origin: &str, sources: &[&str]| {
+        repo_git(&b, &["remote", "set-url", "origin", origin]);
+        for source in sources {
+            let err = exits(&b.run(&["init", source, "--host", "box"]), 1);
+            assert!(err.contains("a repo already exists"), "{source}: {err}");
+        }
+    };
+    refused(&url, &[&path, &format!("{url}/")]);
+    refused(&path, &[&url, &other]);
+    assert_ne!(machine_config(&b).identity.host.as_deref(), Some("box"));
+}
+
+#[test]
+fn init_never_prints_the_credentials_in_its_source() {
+    let a = published();
+    let b = a.second_device();
+    let url = format!("file://user:s3cr3t@localhost{}", b.remote_path().display());
+    let first = exits(&b.run(&["init", &url]), 0);
+    assert!(first.contains("cloned file://***@localhost/"), "{first}");
+    let again = b.run(&["init", &url]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(
+        said.contains("already holds the clone of file://***@localhost/"),
+        "{said}"
+    );
+    let c = a.second_device();
+    let dry = exits(&c.run(&["init", &url, "--dry-run"]), 0);
+    assert!(dry.contains("would clone file://***@localhost/"), "{dry}");
+    for text in [first, said, dry] {
+        assert!(!text.contains("s3cr3t"), "{text}");
+    }
+}
+
 #[test]
 fn a_clone_gets_the_machine_answers_before_it_is_applied() {
     let a = TestEnv::new();
