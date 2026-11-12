@@ -88,6 +88,7 @@ case \" \$* \" in *' clone '*) kill -KILL \"\$PPID\" ;; esac
 exit \$rc
 "
     e2e_dm "$m" "$@"
+    e2e_rc_is 137 "$m: dotman $1 killed after its clone"
     rm -f -- "$(e2e_bin "$m")/git"
     killed=$((killed + 1))
     printf 'kill  [%s] %s: dotman %s killed after its git clone returned (exit %s)\n' "$E2E_NAME" "$m" "$1" "$E2E_RC"
@@ -346,11 +347,12 @@ op_init() {
     if [[ $E2E_RC != 0 && -n $moved ]]; then
         e2e_run_printed "$m" "$(e2e_printed '^dotman apply$')"
     fi
-    if [[ -n $moved && ! -f "$(e2e_config "$m")/config.toml" ]]; then
-        # FAULT-1: a kill after the clone moved into place loses --host and --age-key-file, and
-        # the rerun only names apply. Import the key by hand so the rest is still checked.
+    if [[ -n $moved && ! -f "$(e2e_config "$m")/age-identity.txt" ]]; then
+        # FAULT-1: a kill after the clone moved into place loses --age-key-file, and --host too when
+        # it came before the machine config; the rerun only names apply. Import the key by hand so
+        # the rest is still checked.
         known=$((known + 1))
-        printf 'KNOWN [%s] FAULT-1: %s: the retried init dropped --host and --age-key-file\n' "$E2E_NAME" "$m"
+        printf 'KNOWN [%s] FAULT-1: %s: the retried init dropped --age-key-file\n' "$E2E_NAME" "$m"
         e2e_dm_rc 0 "$m" key import "$key_a"
     fi
     fk_converge "$m" "$m"
