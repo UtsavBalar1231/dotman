@@ -151,7 +151,7 @@ fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>> {
     ensure!(
         u64::try_from(bytes.len()).is_ok_and(|n| n <= limit),
         "{} is larger than {limit} bytes",
-        path.display()
+        output::escape_line(&path.to_string_lossy())
     );
     Ok(bytes)
 }
@@ -359,8 +359,12 @@ fn read_object(root: &Path, hash: &str) -> Result<Vec<u8>> {
 /// The commit `HEAD` names. The old writer added no newline, so both files are trimmed.
 fn head(root: &Path) -> Result<String> {
     let text = |path: PathBuf| -> Result<String> {
-        let bytes =
-            read_capped(&path, 4096).with_context(|| format!("cannot read {}", path.display()))?;
+        let bytes = read_capped(&path, 4096).with_context(|| {
+            format!(
+                "cannot read {}",
+                output::escape_line(&path.to_string_lossy())
+            )
+        })?;
         Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
     };
     let head = text(root.join("HEAD"))?;
@@ -374,7 +378,10 @@ fn head(root: &Path) -> Result<String> {
             );
             let path = root.join("refs/heads").join(branch);
             if !path.is_file() {
-                bail!("the legacy repo has no commits: branch {branch} does not exist");
+                bail!(
+                    "the legacy repo has no commits: branch {} does not exist",
+                    output::escape_line(branch)
+                );
             }
             text(path)?
         }
@@ -808,8 +815,8 @@ fn write_stream(
             if blobs.contains_key(file.object.as_str()) {
                 continue;
             }
-            let bytes =
-                read(&file.object).with_context(|| format!("while reading {}", file.source))?;
+            let bytes = read(&file.object)
+                .with_context(|| format!("while reading {}", output::escape_line(&file.source)))?;
             next = next.saturating_add(1);
             writeln!(out, "blob\nmark :{next}")?;
             write_data(out, &bytes)?;

@@ -1,6 +1,7 @@
 //! Text that a hostile upstream or a hostile file name controls reaches the terminal escaped: a
-//! commit subject in `log`, a hook command where approval is asked, a name refused as a key, and a
-//! source name in the import report.
+//! commit subject in `log`, a hook command where approval is asked, a name refused as a key, a
+//! source name in the import report, and what an error quotes from a pushed `.dotman.toml` or a
+//! legacy store.
 
 mod common;
 
@@ -193,4 +194,78 @@ fn a_source_name_in_the_import_report_never_starts_a_line() {
             .any(|line| line.contains("forged") && !line.contains("\\n")),
         "a newline in a name never starts a line: {err}"
     );
+}
+
+/// No line of `err` starts with `next:`, the text a hostile file put after a newline, and `err`
+/// shows that newline escaped.
+fn never_starts_a_line(err: &str) {
+    assert!(err.contains("\\nnext: forged"), "{err}");
+    assert!(
+        !err.lines().any(|line| line.starts_with("next:")),
+        "a newline from the file never starts a line: {err}"
+    );
+}
+
+/// A `.dotman.toml` that another machine pushed fails `sync` and `status` with an error that
+/// quotes a key holding a newline; the newline is shown escaped.
+#[test]
+fn a_pushed_dotman_toml_never_starts_a_line_of_an_error() {
+    for (section, entry) in [
+        ("[modes]", "\"x\\nnext: forged\" = \"zz\""),
+        ("[dirs]", "\"x\\nnext: forged\" = 1"),
+    ] {
+        let one = TestEnv::new();
+        one.ok(&["init", "--remote", &one.remote_url()]);
+        one.write(".a", b"a\n", 0o644);
+        one.ok(&["add", ".a"]);
+        one.ok(&["sync"]);
+        let remote = one.remote_path().to_string_lossy().into_owned();
+        one.git(&[
+            "--git-dir",
+            &remote,
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+        let two = one.second_device();
+        two.ok(&["init", &one.remote_url()]);
+
+        let config = text(&one.read(one.repo().join(".dotman.toml")));
+        assert!(config.contains(&format!("\n{section}\n")), "{config}");
+        one.write_repo(
+            ".dotman.toml",
+            config
+                .replace(
+                    &format!("\n{section}\n"),
+                    &format!("\n{section}\n{entry}\n"),
+                )
+                .as_bytes(),
+        );
+        one.push_repo();
+        for args in [&["sync"][..], &["status"]] {
+            let out = two.run(args);
+            assert!(!out.status.success(), "{args:?}");
+            never_starts_a_line(&text(&out.stderr));
+        }
+    }
+}
+
+/// A legacy store whose `HEAD` names a branch holding a newline is refused, the name escaped.
+#[test]
+fn a_legacy_head_never_starts_a_line_of_an_error() {
+    let env = TestEnv::new();
+    let store = env.root().join("legacy");
+    for dir in ["commits", "objects", "refs/heads"] {
+        std::fs::create_dir_all(store.join(dir)).unwrap();
+    }
+    std::fs::write(store.join("HEAD"), "ref: refs/heads/x\nnext: forged").unwrap();
+    let source = store.to_string_lossy().into_owned();
+    for args in [
+        &["import", "--yes", &source][..],
+        &["import", "--dry-run", &source],
+    ] {
+        let out = env.run(args);
+        assert!(!out.status.success(), "{args:?}");
+        never_starts_a_line(&text(&out.stderr));
+    }
 }

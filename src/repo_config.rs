@@ -4,11 +4,12 @@
 //! byte-identical.
 
 use crate::config::Allow;
-use crate::engine::recorded_mode;
+use crate::engine::parse_mode;
 use crate::name;
 use crate::output;
 use crate::paths::write_atomic;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -145,12 +146,36 @@ impl RepoConfig {
     ///
     /// # Errors
     ///
-    /// Fails when the text is not valid TOML, has an unknown key, or has a `[modes]` value that is
-    /// not octal.
+    /// Fails when the text is not valid TOML, has an unknown key, has an `[ignore]` or `[guard]`
+    /// pattern that is not a glob, or has a `[modes]` value that is not octal. What the error
+    /// quotes from the text is escaped onto one line.
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Self = toml::from_str(text)?;
-        for key in config.modes.keys() {
-            recorded_mode(&config.modes, key)?;
+        let config: Self = toml::from_str(text).map_err(|e| syntax_error(&e))?;
+        // Compiled here, as `add` compiles them, so a bad one is named with its newlines escaped.
+        let globs = config
+            .ignore
+            .patterns
+            .iter()
+            .map(|text| ("[ignore]", text, text.strip_suffix('/').unwrap_or(text)))
+            .chain(
+                config
+                    .guard
+                    .secret_names
+                    .iter()
+                    .map(|text| ("[guard]", text, text.as_str())),
+            );
+        for (table, text, body) in globs {
+            Pattern::new(body)
+                .map_err(|e| anyhow!("bad {table} pattern `{}`: {e}", output::escape_line(text)))?;
+        }
+        for (key, value) in &config.modes {
+            parse_mode(value).map_err(|e| {
+                anyhow!(
+                    "[modes] entry `{}`: {}",
+                    output::escape_line(key),
+                    output::escape_line(&format!("{e:#}"))
+                )
+            })?;
         }
         Ok(config)
     }
@@ -184,6 +209,18 @@ impl RepoConfig {
         }
         write_atomic(path, toml::to_string_pretty(self)?.as_bytes(), 0o644)
     }
+}
+
+/// toml's error, its message on one line. The message quotes keys and values from the file, which
+/// may hold a newline that would forge a line of output; the frame above it shows one line of the
+/// file, after a line number.
+fn syntax_error(e: &toml::de::Error) -> anyhow::Error {
+    let message = output::escape_line(e.message().trim_end());
+    let shown = e.to_string();
+    let frame = shown
+        .strip_suffix(&format!("{}\n", e.message()))
+        .unwrap_or_default();
+    anyhow!("{frame}{message}")
 }
 
 // Once per run, since a run loads the file several times.
@@ -283,6 +320,46 @@ mod tests {
             assert!(err.contains("[modes] entry"), "{err}");
         }
         assert!(RepoConfig::parse("[modes]\n\".ssh/\" = \"0700\"\n\"x\" = \"4755\"\n").is_ok());
+    }
+
+    #[test]
+    fn what_an_error_quotes_from_the_file_never_starts_a_line() {
+        for (text, quoted) in [
+            (
+                "[modes]\n\"x\\nnext: forged\" = \"zz\"\n",
+                "`x\\nnext: forged`",
+            ),
+            (
+                "[modes]\n\"x\" = \"7\\nnext: forged\"\n",
+                "`7\\nnext: forged`",
+            ),
+            ("[dirs]\n\"x\\nnext: forged\" = 1\n", "`x\\nnext: forged`"),
+            (
+                "[ignore]\npatterns = [\"x\\nnext: forged[\"]\n",
+                "`x\\nnext: forged[`",
+            ),
+            (
+                "[guard]\nsecret_names = [\"x\\nnext: forged[\"]\n",
+                "`x\\nnext: forged[`",
+            ),
+            (
+                "[ignore]\npatterns = \"\"\"\nnext: forged\n\"\"\"\n",
+                "next: forged\\n",
+            ),
+        ] {
+            let err = format!("{:#}", RepoConfig::parse(text).unwrap_err());
+            assert!(err.contains(quoted), "{text:?}: {err}");
+            assert!(
+                !err.lines().any(|line| line.starts_with("next:")),
+                "{text:?}: {err}"
+            );
+        }
+        let err = format!("{:#}", RepoConfig::parse("surprise = 1\n").unwrap_err());
+        assert!(
+            err.contains("line 1, column 1\n"),
+            "the frame is kept: {err}"
+        );
+        assert!(err.contains("\n1 | surprise = 1\n"), "{err}");
     }
 
     #[test]

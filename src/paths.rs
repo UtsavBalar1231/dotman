@@ -403,14 +403,14 @@ pub(crate) fn derive_key(
 /// component at any depth, not a reserved name.
 pub(crate) fn validate_key(key: &str) -> Result<()> {
     ensure!(!key.is_empty(), "empty key");
-    ensure!(!key.starts_with('/'), "key `{key}` is absolute");
     // A newline in a name would forge lines of output, and an ESC or a C1 CSI (U+009B) would
-    // reach the terminal.
+    // reach the terminal. First, so the messages below can show the key as it is.
     ensure!(
         !key.chars().any(char::is_control),
         "key `{}` contains a control character",
         key.escape_debug()
     );
+    ensure!(!key.starts_with('/'), "key `{key}` is absolute");
     ensure!(is_nfc(key), "key `{key}` is not NFC-normalized");
     for component in key.split('/') {
         ensure!(
@@ -753,7 +753,14 @@ mod tests {
 
     #[test]
     fn a_control_character_is_refused_in_any_component() {
-        for name in ["a/b\nc", "a\tb", "x/\u{1b}[2Jy", "del\u{7f}", "nul\0"] {
+        for name in [
+            "a/b\nc",
+            "a\tb",
+            "x/\u{1b}[2Jy",
+            "del\u{7f}",
+            "nul\0",
+            "/abs\nnext: run x",
+        ] {
             let err = validate_key(name).unwrap_err().to_string();
             assert!(
                 !err.chars().any(char::is_control),
