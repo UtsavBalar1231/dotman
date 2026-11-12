@@ -1071,7 +1071,7 @@ impl Hold {
             Self::Unreadable => format!("{}; fix its permissions to add it", self.reason()),
             Self::Collision => format!("{}; rename one of them", self.reason()),
             Self::Unapproved => format!(
-                "{}; `{bin} sync --approve-dirs` approves the entry and captures it",
+                "{}; `{bin} sync --approve-dirs` approves every [dirs] entry not approved here and captures it",
                 self.reason()
             ),
             Self::Special => self.reason(),

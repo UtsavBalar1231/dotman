@@ -3635,8 +3635,9 @@ fn held(env: &TestEnv) -> Vec<String> {
 }
 
 /// `[dirs]` entries pushed from another machine capture nothing here until this machine approves
-/// them: a non-interactive sync holds their new files and exits 3, status and doctor name them,
-/// `add <dir>` approves the directory it names, and the printed `sync --approve-dirs` approves the
+/// them: a non-interactive sync holds their new files and exits 3, naming every entry the printed
+/// `sync --approve-dirs` approves, status and doctor name them, a dry run with the flag changes
+/// nothing, `add <dir>` approves the directory it names, and the printed command approves the
 /// rest. A clone made by this version approves nothing, and `forget <dir>` drops an approval.
 #[test]
 fn an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it() {
@@ -3647,14 +3648,14 @@ fn an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it() {
     b.write(".kube/config", b"apiVersion: v1\n", 0o600);
     b.write(".docker/config.json", b"{}\n", 0o600);
     push_config(&a, |config| {
-        config.dirs.paths = vec![".kube".to_owned(), ".docker".to_owned()];
+        config.dirs.paths = vec![".kube".to_owned(), ".docker".to_owned(), ".ssh".to_owned()];
     });
 
     b.ok(&["sync"]);
     let err = exits(&b.run(&["sync"]), 3);
     assert!(
         err.contains(
-            "[dirs] in .dotman.toml lists .kube, .docker, which this machine has not approved, so 2 new files under them are held; `dotman sync --approve-dirs` approves them here and captures them"
+            "[dirs] in .dotman.toml lists .kube (1 new file), .docker (1 new file), .ssh (0 new files), which this machine has not approved, so 2 new files are held; `dotman sync --approve-dirs` approves them all here and captures the files"
         ),
         "{err}"
     );
@@ -3664,10 +3665,17 @@ fn an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it() {
     let doctor = text(&b.run(&["doctor"]));
     assert!(
         doctor.contains(
-            "dirs: .kube, .docker not approved on this machine, so sync captures no new file under them"
+            "dirs: .kube, .docker, .ssh not approved on this machine, so sync captures no new file under them"
         ),
         "{doctor}"
     );
+    let before = b.four_trees();
+    let err = exits(&b.run(&["sync", "--dry-run", "--approve-dirs"]), 0);
+    assert!(
+        err.contains("would approve these [dirs] entries on this machine"),
+        "{err}"
+    );
+    assert_eq!(b.four_trees(), before);
 
     exits(&b.run(&["add", ".docker"]), 0);
     let err = exits(&b.run(&["sync"]), 3);
@@ -3682,8 +3690,9 @@ fn an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it() {
     assert!(doctor.contains("[dirs] entries approved"), "{doctor}");
 
     b.ok(&["forget", ".kube"]);
-    let state = fs::read_to_string(&state_file).unwrap();
-    assert!(state.contains("capture_dirs = [\".docker\"]"), "{state}");
+    let state = dotman::state::State::read(&state_file).unwrap().unwrap();
+    let approved = [".docker", ".ssh"].map(str::to_owned);
+    assert_eq!(state.capture_dirs, Some(approved.into_iter().collect()));
 }
 
 /// An interactive sync asks once, naming each unapproved entry and how many files it would
@@ -3752,7 +3761,10 @@ fn an_older_state_keeps_its_dirs_and_never_approves_one_it_pulls() {
         "{state}"
     );
     let err = exits(&a.run(&["sync"]), 3);
-    assert!(err.contains("lists .kube, which this machine"), "{err}");
+    assert!(
+        err.contains("lists .kube (1 new file), which this machine"),
+        "{err}"
+    );
     assert!(!remote_tree(&a).contains(".kube"));
 }
 

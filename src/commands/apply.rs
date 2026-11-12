@@ -234,6 +234,8 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     }
     run.decide_identity(&mut items, state.identity.as_ref())?;
     let actions = run.plan(&items)?;
+    // Asked with the other questions, before anything is written.
+    run.approve_dirs(&mut scan, &mut state)?;
     for (item, action) in items.iter().zip(actions) {
         if let Some(action) = action {
             run.execute(item, action, &mut state, &mut repo_config);
@@ -243,7 +245,6 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         run.system(&mut state, &mut repo_config);
     }
     run.write_system(&mut state, &repo_config);
-    run.approve_dirs(&mut scan, &mut state)?;
     run.capture_new(&scan, &mut state, &mut repo_config);
     run.report_kept();
 
@@ -1423,23 +1424,20 @@ impl Run<'_> {
             state.approve_dirs(&scan.unapproved);
             scan.release_waiting();
         } else if !scan.waiting.is_empty() {
-            let entries: Vec<std::borrow::Cow<str>> = counts
-                .iter()
-                .filter(|(_, n)| *n > 0)
-                .map(|(dir, _)| output::escape_line(dir))
-                .collect();
+            // Every entry the printed command approves is named, files under it or not.
+            let entries: Vec<String> = lines.iter().map(|line| line.trim().to_owned()).collect();
             output::warning(&format!(
-                "[dirs] in .dotman.toml lists {}, which this machine has not approved, so {} under {it} {} held; `{} sync --approve-dirs` approves {it} here and captures {}",
+                "[dirs] in .dotman.toml lists {}, which this machine has not approved, so {} {} held; `{} sync --approve-dirs` approves {} here and captures {}",
                 entries.join(", "),
                 crate::import::count(scan.waiting.len(), "new file"),
                 if scan.waiting.len() == 1 { "is" } else { "are" },
                 name::bin(),
+                if entries.len() == 1 { "it" } else { "them all" },
                 if scan.waiting.len() == 1 {
-                    "it"
+                    "the file"
                 } else {
-                    "them"
+                    "the files"
                 },
-                it = if entries.len() == 1 { "it" } else { "them" },
             ));
         }
         Ok(())
