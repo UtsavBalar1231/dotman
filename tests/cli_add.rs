@@ -471,6 +471,15 @@ fn group_and_world_write_bits_are_never_recorded() {
     assert_eq!(unsettled(&env), Vec::<String>::new());
     assert_eq!(unsettled(&other), Vec::<String>::new());
     assert_eq!(mode_of(&env.home().join(".config/nvim/init.lua")), 0o664);
+
+    // The repo's version, once it replaces the file here, comes at the repo's mode.
+    other.write(".config/nvim/init.lua", b"-- from other\n", 0o644);
+    other.ok(&["sync"]);
+    env.ok(&["sync"]);
+    assert_eq!(env.read(".config/nvim/init.lua"), b"-- from other\n");
+    assert_eq!(mode_of(&env.home().join(".config/nvim/init.lua")), 0o644);
+    assert_eq!(modes(), expected);
+    assert_eq!(unsettled(&env), Vec::<String>::new());
 }
 
 #[test]
