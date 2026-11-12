@@ -619,7 +619,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "refused by this or any other key rule is never applied, captured or backed up",
+        "is never applied, captured or backed up: `init`, `apply` and `sync` name it",
         &[
             "a_pushed_file_never_becomes_one_of_dotman_s_own_files",
             "a_tracked_key_that_a_newer_rule_refuses_never_wedges_a_command",

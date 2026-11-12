@@ -206,6 +206,9 @@ fn a_pushed_file_never_becomes_one_of_dotman_s_own_files() {
         ".local/share/dotman/.dotman.toml",
         ".dotmanrc.toml",
         ".dotmanrc{host!=nohost}.toml",
+        ".config/dotman/[x].toml",
+        ".config/dotman/x.toml",
+        ".config/dotman/tick`x",
     ];
     for key in pushed {
         let text = format!(
@@ -230,8 +233,9 @@ fn a_pushed_file_never_becomes_one_of_dotman_s_own_files() {
         3,
     );
     for key in pushed {
+        let shown = key.replace('`', "\\u{60}");
         assert!(
-            err.contains(&format!("{key}: in the repo, but never applied")),
+            err.contains(&format!("{shown}: in the repo, but never applied")),
             "{key}: {err}"
         );
     }
@@ -252,6 +256,8 @@ fn a_pushed_file_never_becomes_one_of_dotman_s_own_files() {
     };
     untouched();
     assert_eq!(b.read(".profile"), b"a\n");
+    let backups = home.join(".local/state/dotman/backups");
+    assert!(!found_under(&backups, ".dotmanrc.toml"));
 
     let state = home.join(".local/state/dotman/state.toml");
     let mut text = fs::read_to_string(&state).unwrap();
@@ -270,8 +276,18 @@ fn a_pushed_file_never_becomes_one_of_dotman_s_own_files() {
     let id = fs::read_to_string(home.join(".local/share/dotman/.git/dotman-id")).unwrap();
     assert!(!remote_history(&a).contains(id.trim()));
 
-    let removals = printed(&err, "dotman git rm ");
+    let mut removals = printed(&err, "dotman git rm ");
+    removals.extend(printed(&err, "printf "));
     assert_eq!(removals.len(), pushed.len(), "{err}");
+    // `[x]` is a glob that matches `x.toml` too, so its command takes that name literally.
+    let glob = removals
+        .iter()
+        .position(|line| line.contains("[x]"))
+        .unwrap();
+    paste_with(&b, &vars, removals.remove(glob));
+    let repo = home.join(".local/share/dotman");
+    let tracked = git_in(&b, &repo, &["ls-files", ".config/dotman"]);
+    assert!(tracked.contains(".config/dotman/x.toml\n"), "{tracked}");
     for line in removals {
         paste_with(&b, &vars, line);
     }

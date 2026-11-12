@@ -244,7 +244,8 @@ impl KeyRules {
         validate_key(key)?;
         if let Some(what) = self.own(key, leaf) {
             bail!(
-                "`{key}` is {what} on this machine, or a path inside it or above it; dotman never manages its own files"
+                "`{}` is {what} on this machine, or a path inside it or above it; dotman never manages its own files",
+                shown_key(key)
             );
         }
         Ok(())
@@ -259,6 +260,12 @@ impl KeyRules {
             .find(|(own, _)| is_under(&key, own) || (leaf && is_under(own, &key)))
             .map(|(_, what)| *what)
     }
+}
+
+/// `key` escaped as output escapes it, and with a backtick escaped too, so the name cannot end the
+/// backticks around it or around a command printed after it.
+pub(crate) fn shown_key(key: &str) -> String {
+    output::escape_line(key).replace('`', "\\u{60}")
 }
 
 /// Lowercase NFC, because APFS and other case-insensitive filesystems resolve `.Config/Dotman` to

@@ -6,7 +6,8 @@ use crate::git::{Git, Operation, StatusKind, UnusableBranch};
 use crate::identity;
 use crate::lock::Lock;
 use crate::paths::{
-    Env, KeyRules, Paths, derive_key, find_collisions, is_reserved_root_name, validate_key,
+    Env, KeyRules, Paths, derive_key, find_collisions, is_reserved_root_name, shown_key,
+    validate_key,
 };
 use crate::repo_config::RepoConfig;
 use crate::secrets::Age;
@@ -102,12 +103,13 @@ impl fmt::Display for InProgress {
 
 /// The `dotman git rm` that removes the tracked repo file `path`, and no other, from the repo and
 /// its worktree. `--cached` would leave the copy for sync's `git add -A` to stage again. Output
-/// escapes a name with a control or hidden format character, so it could not be pasted: such a
-/// name reaches git through `printf` as octal escapes instead.
+/// escapes a name with a control or hidden format character, so it could not be pasted, and a
+/// backtick would end the hint's quotes: such a name reaches git through `printf` as octal escapes
+/// instead.
 fn remove_command(path: &str) -> String {
     let bin = crate::name::bin();
     let glob = path.starts_with(':') || path.contains(['*', '?', '[', '\\']);
-    if crate::output::escape_line(path) == path {
+    if crate::output::escape_line(path) == path && !path.contains('`') {
         let spec = if glob {
             format!(":(literal){path}")
         } else {
@@ -118,7 +120,7 @@ fn remove_command(path: &str) -> String {
     let octal: String = format!(":(literal){path}")
         .bytes()
         .map(|b| match b {
-            b' '..=b'~' if !matches!(b, b'\\' | b'%' | b'\'') => char::from(b).to_string(),
+            b' '..=b'~' if !matches!(b, b'\\' | b'%' | b'\'' | b'`') => char::from(b).to_string(),
             _ => format!("\\{b:03o}"),
         })
         .collect();
@@ -227,7 +229,7 @@ impl Context {
             &format!("refused\0{path}"),
             &format!(
                 "{}: in the repo, but never applied or captured here: {why:#}. If no machine needs it, remove it from the repo with `{}`, then `{bin} sync`",
-                crate::output::escape_line(path),
+                shown_key(path),
                 remove_command(path)
             ),
         );
@@ -526,7 +528,7 @@ impl Context {
                 &format!("dropped\0{key}"),
                 &format!(
                     "{}: no longer recorded as applied on this machine: {why:#}. The file in $HOME stays as it is",
-                    crate::output::escape_line(&key)
+                    shown_key(&key)
                 ),
             );
         }
