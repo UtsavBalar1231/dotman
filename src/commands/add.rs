@@ -340,11 +340,7 @@ fn warn_held(ctx: &Context, plan: &Plan, sources: &Sources) -> usize {
     let mut held = 0usize;
     for (key, hold) in plan.dirs.iter().flat_map(|dir| &dir.held) {
         let way_out = if sources.contains(key) {
-            format!(
-                "`{} forget {}` stops managing it",
-                name::bin(),
-                pasteable(&ctx.paths.home, key)
-            )
+            forget_hint(&ctx.paths.home, sources, key)
         } else {
             "an [ignore] pattern in .dotman.toml silences it".to_owned()
         };
@@ -390,6 +386,21 @@ struct Guarded {
 /// `key` as a path to paste into a shell.
 pub(crate) fn pasteable(home: &Path, key: &str) -> String {
     shell_words::quote(&home.join(key).to_string_lossy()).into_owned()
+}
+
+/// The hint that `forget` stops managing `key`. It takes a key, never one source, so for a key
+/// with more than one source the hint says it removes them all, other machines' variants too.
+pub(crate) fn forget_hint(home: &Path, sources: &Sources, key: &str) -> String {
+    let command = format!("`{} forget {}`", name::bin(), pasteable(home, key));
+    let all: Vec<&str> = sources.sources_of(key).collect();
+    if all.len() < 2 {
+        return format!("{command} stops managing it");
+    }
+    format!(
+        "{command} stops managing it on every machine and removes all {} of its repo files ({})",
+        all.len(),
+        all.join(", ")
+    )
 }
 
 impl Guarded {

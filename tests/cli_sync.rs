@@ -1987,6 +1987,59 @@ fn a_held_edit_to_a_managed_file_is_offered_forget_which_ends_the_hold() {
     assert!(!history.contains(&token), "{history}");
 }
 
+/// `forget` takes a key, never one variant, so for a held edit to a key with variants the hint says
+/// it removes every repo file of the key. Run as printed, it removes those it names; the other
+/// machine keeps its file, and the token never reaches the remote.
+#[test]
+fn the_forget_hint_for_a_key_with_variants_names_every_repo_file_it_removes() {
+    let a = first_device(&[(".prof", b"shared=1\n", 0o644)]);
+    a.write_machine_config("[identity]\nhost = \"alpha\"\n");
+    a.write(".prof", b"alpha=1\n", 0o644);
+    exits(&a, 0, &["add", "--for", "host=alpha", ".prof"]);
+    exits(&a, 0, &["sync"]);
+    let b = a.second_device();
+    b.write_machine_config("[identity]\nhost = \"beta\"\n");
+    b.ok(&["init", &b.remote_url()]);
+    b.write(".prof", b"beta=1\n", 0o644);
+    b.ok(&["add", "--for", "host=beta", ".prof"]);
+    b.ok(&["sync"]);
+    exits(&a, 0, &["sync"]);
+    let token = github_token();
+    a.write(
+        ".prof",
+        format!("alpha=1\ntoken = {token}\n").as_bytes(),
+        0o644,
+    );
+
+    let err = exits(&a, 3, &["sync"]);
+    let line = err
+        .lines()
+        .find(|line| line.starts_with(".prof: held, "))
+        .unwrap_or_default();
+    let sources = [".prof", ".prof{host=alpha}", ".prof{host=beta}"];
+    assert!(
+        line.contains(&format!(
+            "stops managing it on every machine and removes all 3 of its repo files ({})",
+            sources.join(", ")
+        )),
+        "{err}"
+    );
+    let out = common::run_hint(&a, line, "forget");
+    assert_eq!(out.status.code(), Some(0), "{line}");
+    exits(&a, 0, &["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    let tree = a.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
+    for source in sources {
+        assert!(!tree.lines().any(|path| path == source), "{tree}");
+    }
+    let history = a.git(&["--git-dir", &remote, "log", "--all", "-p"]);
+    assert!(!history.contains(&token), "{history}");
+
+    b.ok(&["sync"]);
+    assert_eq!(b.read(".prof"), b"beta=1\n");
+    assert_eq!(b.porcelain("list"), []);
+}
+
 /// What `add` replaces is the work of `$HOME`'s file: the copy an earlier `add` or `dotman edit`
 /// left in the repo, uncommitted, is replaced as before.
 #[test]

@@ -1463,7 +1463,7 @@ impl Run<'_> {
         self.undecided.insert(key.to_owned());
         let path = add::pasteable(&self.ctx.paths.home, key);
         let keep_out = if managed {
-            format!("`{} forget {path}` stops managing it", name::bin())
+            add::forget_hint(&self.ctx.paths.home, self.sources, key)
         } else {
             "keep it out with an [ignore] pattern".to_owned()
         };
