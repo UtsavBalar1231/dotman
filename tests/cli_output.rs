@@ -1,5 +1,6 @@
 //! Text that a hostile upstream or a hostile file name controls reaches the terminal escaped: a
-//! commit subject in `log`, a hook command where approval is asked, and a name refused as a key.
+//! commit subject in `log`, a hook command where approval is asked, a name refused as a key, and a
+//! source name in the import report.
 
 mod common;
 
@@ -167,4 +168,29 @@ fn a_name_refused_as_a_key_is_reported_escaped() {
     let (listed, _) = ok(&env.run(&["list"]));
     assert_eq!(listed.lines().count(), 1, "only d/ok is managed: {listed}");
     assert!(listed.contains("d/ok"), "{listed}");
+}
+
+/// A source name with a newline stays on its line in the import report, both as an entry that
+/// needs action and in a note.
+#[test]
+fn a_source_name_in_the_import_report_never_starts_a_line() {
+    let env = TestEnv::new();
+    let source = env.root().join("src");
+    let src = source.to_string_lossy().into_owned();
+    env.git(&["init", "-q", &src]);
+    for name in [".bashrc", ".plain\nnext: forged", "README\nnext: forged"] {
+        std::fs::write(source.join(name), b"x\n").unwrap();
+    }
+    env.git(&["-C", &src, "add", "-A"]);
+    env.git(&["-C", &src, "commit", "-q", "-m", "init"]);
+    let out = env.run(&["import", "--yes", &src]);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("  .plain\\nnext: forged: "), "{err}");
+    assert!(err.contains("README\\nnext: forged"), "{err}");
+    assert!(
+        !err.lines()
+            .any(|line| line.contains("forged") && !line.contains("\\n")),
+        "a newline in a name never starts a line: {err}"
+    );
 }

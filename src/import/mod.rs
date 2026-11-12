@@ -71,6 +71,8 @@ impl Report {
     }
 
     /// Prints the summary line, the entries that need action grouped by reason, then the notes.
+    /// Each entry and note stays on one line, since it may name a source path that holds a
+    /// newline.
     pub fn print(&self) {
         output::info(&format!(
             "{} entries: {} converted, {} need action",
@@ -80,7 +82,7 @@ impl Report {
         ));
         self.print_items();
         for note in &self.notes {
-            output::info(note);
+            output::info(&output::escape_line(note));
         }
     }
 
@@ -100,7 +102,7 @@ impl Report {
                 details.len()
             ));
             for detail in details {
-                output::warning(&format!("  {detail}"));
+                output::warning(&format!("  {}", output::escape_line(detail)));
             }
         }
     }
