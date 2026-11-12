@@ -284,6 +284,83 @@ fn a_conflict_in_dotman_toml_is_aborted_with_junk_in_the_worktree() {
     exits(&b, 0, &["status"]);
 }
 
+/// Writes a bad `[ignore]` glob into `env`'s `.dotman.toml` and returns the text it had.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn write_bad_glob(env: &TestEnv) -> String {
+    let file = env.repo().join(".dotman.toml");
+    let good = fs::read_to_string(&file).expect("read .dotman.toml");
+    let bad = good.replacen(
+        "[ignore]\npatterns = [",
+        "[ignore]\npatterns = [\n    \"a**/b\",",
+        1,
+    );
+    assert_ne!(bad, good);
+    fs::write(&file, bad).expect("write .dotman.toml");
+    good
+}
+
+/// A bad glob that another machine pushes, and then corrects, stops every command here that
+/// reads `.dotman.toml`, sync included, which therefore cannot pull the correction; each names
+/// the pull that brings it, which runs as printed, also with an uncommitted edit in the repo.
+#[test]
+fn a_pulled_bad_glob_names_the_pull_that_brings_its_correction() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    // With git, since dotman reads the file before it commits.
+    let good = write_bad_glob(&a);
+    a.ok(&["git", "commit", "-qam", "bad glob"]);
+    a.ok(&["git", "push", "-q", "origin", "HEAD:refs/heads/main"]);
+    let err = exits(&b, 1, &["sync"]);
+    assert!(err.contains("bad [ignore] pattern `a**/b`"), "{err}");
+
+    fs::write(a.repo().join(".dotman.toml"), &good).expect("write .dotman.toml");
+    a.ok(&["git", "commit", "-qam", "fix glob"]);
+    a.ok(&["git", "push", "-q", "origin", "HEAD:refs/heads/main"]);
+    for args in [&["sync"][..], &["status"], &["forget", ".a", "--dry-run"]] {
+        let err = exits(&b, 1, args);
+        assert!(
+            err.contains("the last commit holds this text too: once a fix is pushed, pull it with `dotman git pull --rebase --autostash origin refs/heads/main` and run `dotman sync`"),
+            "{args:?}: {err}"
+        );
+    }
+    let err = exits(&b, 1, &["sync"]);
+    b.write_repo(".a", b"edited in the repo\n");
+    for line in [
+        common::hint_line(&err, "git pull"),
+        common::hint_line(&err, "sync"),
+    ] {
+        let out = paste(&b, &line);
+        assert!(out.status.success(), "{line}: {}", stderr(&out));
+    }
+    assert_eq!(
+        fs::read_to_string(b.repo().join(".dotman.toml")).expect("read"),
+        good
+    );
+    assert_eq!(b.read(".a"), b"edited in the repo\n");
+    exits(&a, 0, &["sync"]);
+    assert_converged(&a, &b);
+}
+
+/// A bad glob edited here names the last commit's copy, which the printed checkout puts back.
+#[test]
+fn a_bad_glob_edited_here_names_the_checkout_that_puts_back_the_last_commits_copy() {
+    let (_, b) = pair(&[(".a", b"a\n", 0o644)]);
+    let good = write_bad_glob(&b);
+    let err = exits(&b, 1, &["status"]);
+    assert!(
+        err.contains("the last commit's copy parses, so fix the edit, or put that copy back with `dotman git checkout HEAD -- .dotman.toml`"),
+        "{err}"
+    );
+    let line = common::hint_line(&err, "git checkout");
+    let out = paste(&b, &line);
+    assert!(out.status.success(), "{line}: {}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(b.repo().join(".dotman.toml")).expect("read"),
+        good
+    );
+    exits(&b, 0, &["sync"]);
+}
+
 #[test]
 fn a_rebase_conflict_wins_over_a_skipped_path() {
     let (a, b) = pair(&[(".a", b"base\n", 0o644), (".d", b"d\n", 0o644)]);

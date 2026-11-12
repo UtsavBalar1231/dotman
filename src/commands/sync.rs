@@ -29,7 +29,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-const REMOTE: &str = "origin";
+pub(crate) const REMOTE: &str = "origin";
 
 // Paths named in the generated commit message; the rest are counted.
 const LISTED: usize = 3;

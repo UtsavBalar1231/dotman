@@ -414,7 +414,7 @@ impl Context {
     }
 
     pub(crate) fn repo_config(&self) -> Result<RepoConfig> {
-        RepoConfig::load(&self.repo_config_file())
+        load_repo_config(&self.git)
     }
 
     /// The state, with an older one's `[dirs]` approval settled and the `[ignore]` patterns added
@@ -632,6 +632,49 @@ impl Context {
     }
 }
 
+/// The repo's `.dotman.toml`. Every load goes through here, so a file that does not parse names
+/// the way out wherever it is read: a sync cannot pull a correction past it.
+fn load_repo_config(git: &Git) -> Result<RepoConfig> {
+    let file = git.repo().join(".dotman.toml");
+    RepoConfig::load(&file).map_err(|e| {
+        if e.root_cause().is::<io::Error>() {
+            return e;
+        }
+        match unparsable_config_fix(git, &file) {
+            Ok(Some(fix)) => anyhow::anyhow!("{e:#}; {fix}"),
+            _ => e,
+        }
+    })
+}
+
+/// One line, since doctor shows it too. A copy in the last commit that parses means the broken
+/// text is an edit made here; one that holds the same broken text came in a commit, pulled or
+/// made here, and the next pull brings the correction once another machine pushes it.
+fn unparsable_config_fix(git: &Git, file: &Path) -> Result<Option<String>> {
+    if git.head()?.is_none() || git.tree_mode("HEAD", ".dotman.toml")?.is_none() {
+        return Ok(None);
+    }
+    let committed = git.show_blob("HEAD", ".dotman.toml")?;
+    let bin = crate::name::bin();
+    let parses = std::str::from_utf8(&committed).is_ok_and(|text| RepoConfig::parse(text).is_ok());
+    if parses {
+        return Ok(Some(format!(
+            "the last commit's copy parses, so fix the edit, or put that copy back with `{bin} git checkout HEAD -- .dotman.toml`"
+        )));
+    }
+    let remote = crate::commands::sync::REMOTE;
+    if fs::read(file)? != committed || git.remote_url(remote)?.is_none() {
+        return Ok(None);
+    }
+    let Some(branch) = git.branch()? else {
+        return Ok(None);
+    };
+    let refname = shell_words::quote(&format!("refs/heads/{branch}")).into_owned();
+    Ok(Some(format!(
+        "the last commit holds this text too: once a fix is pushed, pull it with `{bin} git pull --rebase --autostash {remote} {refname}` and run `{bin} sync`, or fix it in this file and run `{bin} sync`"
+    )))
+}
+
 /// What `[ignore]` drops from the repo worktree: what its patterns match, minus what git's own
 /// ignore rules would keep, a tracked file. Here that is a path in the index, or one this machine
 /// applied or added, which `add` puts in the worktree before any commit.
@@ -644,11 +687,7 @@ impl Dropped {
     /// A state that cannot be read keeps nothing; the command that loads it reports it.
     fn load(git: &Git, state_file: &Path) -> Result<Self> {
         let repo = git.repo();
-        let ignore = Ignore::compile(
-            &RepoConfig::load(&repo.join(".dotman.toml"))?
-                .ignore
-                .patterns,
-        )?;
+        let ignore = Ignore::compile(&load_repo_config(git)?.ignore.patterns)?;
         let mut kept = BTreeSet::new();
         if is_real_dir(&repo.join(".git")) {
             kept.extend(git.index_paths()?);
