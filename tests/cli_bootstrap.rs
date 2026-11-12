@@ -278,6 +278,70 @@ fn approving_hooks_runs_the_approval_once_more_when_it_approved_nothing_and_neve
     Ok(())
 }
 
+/// The approval holds dotman's stderr in a temp file, which falls back to /tmp when `TMPDIR` names
+/// a directory that does not exist.
+#[test]
+fn approving_hooks_works_when_tmpdir_is_missing() -> R {
+    let setup = Setup::new()?;
+    let log = setup.machine.root().join("fake.log");
+    let bin = setup.stubs("bin");
+    refusing_dotman(&bin, 1, &log)?;
+    let out = setup
+        .command(&setup.empty_base()?, &[&bin])
+        .env("DOTMAN_APPROVE_HOOKS", "1")
+        .env("TMPDIR", setup.machine.root().join("no-such-dir"))
+        .output()?;
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let init = format!("init {} --take-repo", setup.dotfiles.display());
+    assert_eq!(
+        fs::read_to_string(&log)?,
+        format!("{init} --approve-hooks\napply --approve-hooks\n"),
+        "{said}"
+    );
+    Ok(())
+}
+
+/// A signal while dotman runs removes the file holding its stderr, and the script exits with the
+/// status the signal gives, 128 plus its number.
+#[test]
+fn a_signal_while_dotman_runs_leaves_no_temp_file() -> R {
+    let setup = Setup::new()?;
+    let bin = setup.stubs("bin");
+    let started = setup.machine.root().join("started");
+    write_exe(
+        &bin.join("dotman"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'dotman {VERSION}';;\n  status) exit 1;;\n  *) touch '{}'; sleep 1;;\nesac\n",
+            started.display()
+        ),
+    )?;
+    let tmp = setup.machine.root().join("tmp");
+    for (signal, code) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
+        fs::create_dir_all(&tmp)?;
+        let _ = fs::remove_file(&started);
+        let mut child = setup
+            .command(&setup.empty_base()?, &[&bin])
+            .env("DOTMAN_APPROVE_HOOKS", "1")
+            .env("TMPDIR", &tmp)
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "{signal}: dotman never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let sent = Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(child.id().to_string())
+            .status()?;
+        assert!(sent.success(), "{signal}");
+        assert_eq!(child.wait()?.code(), Some(code), "{signal}");
+        let left: Vec<_> = fs::read_dir(&tmp)?.collect::<Result<_, _>>()?;
+        assert!(left.is_empty(), "{signal}: left {left:?}");
+    }
+    Ok(())
+}
+
 /// A container whose first run held hooks back reruns `install.sh` with `DOTMAN_APPROVE_HOOKS=1`
 /// after the table changed upstream without touching a hooked path: the rerun approves the table
 /// it shows, instead of approving nothing and reporting success.
