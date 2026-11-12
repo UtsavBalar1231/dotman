@@ -221,7 +221,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --include-missing 'With `--overlay`, add the files the repo lacks without asking'
             cand --render-templates 'For a chezmoi source, run its templates and import this host''s rendering'
             cand --swap 'Replace the symlinks of an imported farm with real files holding the same bytes'
-            cand --keep-history 'For a git source whose history holds a credential or an age secret key in a file, a file''s name or a commit, import every commit, and with them what the guard found, instead of one commit of the current tree'
+            cand --keep-history 'For a git or legacy dotman source whose history holds a credential or an age secret key in a file, a file''s name or a commit, import every commit, and with them what the guard found, instead of one commit of the current tree'
             cand --yes 'Do not ask before writing'
             cand --no-bootstrap 'Do not write install.sh, the script that sets up `dotman` in a container'
             cand --dry-run 'Show the report and change nothing'

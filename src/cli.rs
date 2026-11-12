@@ -508,7 +508,7 @@ pub struct ImportArgs {
         conflicts_with_all = ["source", "overlay", "include_missing", "render_templates"]
     )]
     pub swap: bool,
-    /// For a git source whose history holds a credential or an age secret key in a file, a file's name or a commit, import every commit, and with them what the guard found, instead of one commit of the current tree
+    /// For a git or legacy dotman source whose history holds a credential or an age secret key in a file, a file's name or a commit, import every commit, and with them what the guard found, instead of one commit of the current tree
     #[arg(long, conflicts_with_all = ["overlay", "swap"])]
     pub keep_history: bool,
     /// Do not ask before writing
