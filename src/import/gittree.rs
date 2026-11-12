@@ -1885,28 +1885,36 @@ fn drop_origin(git: &Git) -> Result<()> {
     Ok(())
 }
 
-/// Puts a clone whose HEAD is detached on a new branch, `main`, at that commit, since sync pushes
-/// a branch, and renames a branch whose name sync refuses to `main`; returns what the source's
-/// HEAD was, as the notes say it. A detached HEAD names no branch, and the clone of one brings no
-/// other, so there is no default branch to take instead.
+/// Puts a clone whose HEAD is detached, or names a branch sync refuses, on a new branch, `main`, at
+/// that commit, since sync pushes a branch; returns what the source's HEAD was, as the notes say
+/// it. A detached HEAD names no branch, and the clone of one brings no other, so there is no
+/// default branch to take instead.
 fn branch_detached(git: &Git) -> Result<Option<String>> {
-    match git.branch() {
-        Ok(Some(_)) => Ok(None),
-        Ok(None) => {
-            // The empty old value refuses to move a `main` that exists.
-            git_stdout(git, &["update-ref", "refs/heads/main", "HEAD", ""], None)?;
-            git_stdout(git, &["symbolic-ref", "HEAD", "refs/heads/main"], None)?;
-            Ok(Some("is detached".to_owned()))
-        }
+    let refused = match git.branch() {
+        Ok(Some(_)) => return Ok(None),
+        Ok(None) => None,
         Err(err) => {
             let Some(unusable) = err.downcast_ref::<UnusableBranch>() else {
                 return Err(err);
             };
-            // A single-branch clone has no other branch, so no `main` is in the way.
-            git_stdout(git, &unusable.way_out(), None)?;
-            Ok(Some(format!("names a branch whose {}", unusable.why())))
+            let old = git_stdout(git, &["symbolic-ref", "-q", "HEAD"], None)?;
+            Some((old.trim_ascii_end().to_vec(), unusable.why().to_owned()))
         }
-    }
+    };
+    // The empty old value refuses to move a `main` that exists.
+    git_stdout(git, &["update-ref", "refs/heads/main", "HEAD", ""], None)?;
+    git_stdout(git, &["symbolic-ref", "HEAD", "refs/heads/main"], None)?;
+    let Some((old, why)) = refused else {
+        return Ok(Some("is detached".to_owned()));
+    };
+    // Deleted with its reflog, not renamed: `branch -m` would carry the old name into the reflogs.
+    let delete = [
+        OsStr::new("update-ref"),
+        OsStr::new("-d"),
+        OsStr::from_bytes(&old),
+    ];
+    git_stdout(git, &delete, None)?;
+    Ok(Some(format!("names a branch whose {why}")))
 }
 
 fn same_dir(a: &Path, source: &Source) -> bool {

@@ -3363,6 +3363,10 @@ fn an_import_puts_a_source_branch_dotman_refuses_on_main() {
             );
             let refs = git_in(&env, &repo, &["for-each-ref", "--format=%(refname)"]);
             assert_eq!(refs.trim(), "refs/heads/main", "{err}");
+            assert_eq!(
+                files_containing(&repo, name.as_bytes()),
+                Vec::<String>::new()
+            );
             assert_eq!(git_in(&env, &repo, &["remote"]), "", "{err}");
             env.ok(&["init", "--remote", &env.remote_url()]);
             exits(&env.run(&["sync"]), 0);
