@@ -1404,7 +1404,7 @@ fn parse_ident_email(ident: &str) -> Option<String> {
 }
 
 /// A branch name that [`checked_branch`] refuses. It is shown escaped, or not at all when it holds a
-/// credential, and the way out it prints renames the branch without naming it.
+/// credential, and the way out it prints puts the repo on `main` without naming it.
 #[derive(Debug)]
 pub struct UnusableBranch {
     shown: Option<String>,
