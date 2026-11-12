@@ -51,9 +51,7 @@ e2e_file_is b .netrc.local $'machine work login b\n'
 e2e_write b .prompt $'PS1="> "\n'
 e2e_dm_rc 3 b sync
 e2e_err_has 'template-drift'
-# This hint prints its commands after a colon, without backticks.
-drift=$(grep -F '.prompt: template-drift' "$E2E_ROOT/last.err" || true)
-e2e_run_printed b "${drift##*discard the local change: }"
+e2e_run_printed b "$(e2e_printed 'apply --take-repo')"
 e2e_file_is b .prompt $'PS1="beta (linux) $ "\n'
 e2e_check "the template source is unchanged" test \
     "$(e2e_remote_show '.prompt{tmpl}')" = 'PS1="{{ host }} ({{ os }}) $ "'

@@ -95,6 +95,36 @@ fn only_allowlisted_environment_variables_render() {
     );
 }
 
+/// Both commands of the drift hint run as printed on a path with a space, and do what they say.
+#[test]
+fn the_printed_drift_commands_run_as_printed_on_a_path_with_a_space() {
+    let source = ".config/my kitty/kitty{tmpl}.conf";
+    let key = ".config/my kitty/kitty.conf";
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_machine_config("[vars]\nfont = \"14\"\n");
+    env.write_repo(source, b"font_size {{ vars.font }}\n");
+    exits(&env.run(&["apply"]), 0);
+
+    env.write(key, b"font_size 99\n", 0o644);
+    let err = exits(&env.run(&["apply"]), 3);
+    let out = common::run_hint(&env, &err, "apply --take-repo");
+    exits(&out, 0);
+    assert_eq!(env.read(key), b"font_size 14\n");
+
+    env.write(key, b"font_size 99\n", 0o644);
+    let err = exits(&env.run(&["apply"]), 3);
+    let editor = stub_editor(&env, 0).to_string_lossy().into_owned();
+    let args = common::hint(&err, "edit");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    exits(&env.run_with(&[("EDITOR", &editor)], &args), 0);
+    assert_eq!(
+        fs::read(env.repo().join(source)).unwrap(),
+        b"font_size {{ vars.font }}\n# edited\n"
+    );
+    assert_eq!(env.read(key), b"font_size 14\n# edited\n");
+}
+
 #[test]
 fn a_local_edit_is_template_drift_and_is_never_captured() {
     let env = kitty("font_size {{ vars.font }}\n");
@@ -103,10 +133,11 @@ fn a_local_edit_is_template_drift_and_is_never_captured() {
 
     assert_eq!(token(&env, KEY).as_deref(), Some("template-drift"));
     let err = exits(&env.run(&["apply"]), 3);
+    let path = env.home().join(KEY).display().to_string();
     assert!(
-        err.contains(
-            "template-drift; edit the template: dotman edit .config/kitty/kitty.conf, or discard the local change: dotman apply --take-repo .config/kitty/kitty.conf"
-        ),
+        err.contains(&format!(
+            "template-drift; edit the template with `dotman edit {path}`, or discard the local change with `dotman apply --take-repo {path}`"
+        )),
         "{err}"
     );
     exits(&env.run(&["sync"]), 3);

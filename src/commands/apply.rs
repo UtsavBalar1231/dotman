@@ -755,8 +755,9 @@ impl Run<'_> {
                 // `sync` reports it in its capture pass; the pass after the pull leaves it alone.
                 self.undecided.insert(key.clone());
                 output::warning(&format!(
-                    "{key}: template-drift; edit the template: {bin} edit {key}, or discard the local change: {bin} apply --take-repo {key}",
-                    bin = name::bin()
+                    "{key}: template-drift; edit the template with `{bin} edit {path}`, or discard the local change with `{bin} apply --take-repo {path}`",
+                    bin = name::bin(),
+                    path = add::pasteable(&self.ctx.paths.home, key)
                 ));
                 None
             }
