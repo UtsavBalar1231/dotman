@@ -1868,6 +1868,137 @@ fn imports_leave_out_a_credential_in_a_name_or_a_link_target() {
     );
 }
 
+fn commit_all(env: &TestEnv, source: &Path, message: &str) {
+    common::git_in(env, source, &["add", "-A"]);
+    common::git_in(env, source, &["commit", "-q", "-m", message]);
+}
+
+/// Commits `name` with `bytes` on top of the source, then its removal.
+fn added_and_removed(env: &TestEnv, source: &Path, name: &str, bytes: &str) {
+    env.write(source.join(name), bytes.as_bytes(), 0o644);
+    commit_all(env, source, "add");
+    common::git_in(env, source, &["rm", "-q", "--", name]);
+    commit_all(env, source, "gone");
+}
+
+/// Like [`added_and_removed`], where `name` comes only in a merge commit, which neither parent has.
+fn merged_and_removed(env: &TestEnv, source: &Path, name: &str, bytes: &str) {
+    common::git_in(env, source, &["checkout", "-q", "-b", "side"]);
+    env.write(source.join(".side"), b"s\n", 0o644);
+    commit_all(env, source, "side");
+    common::git_in(env, source, &["checkout", "-q", "-"]);
+    env.write(source.join(".main"), b"m\n", 0o644);
+    commit_all(env, source, "main");
+    let merge = ["merge", "-q", "--no-ff", "--no-commit", "side"];
+    common::git_in(env, source, &merge);
+    added_and_removed(env, source, name, bytes);
+}
+
+/// A commit whose tree also holds `name` as an empty directory, which no work tree can make, then
+/// one of the source's tree again.
+fn empty_dir_and_removed(env: &TestEnv, source: &Path, name: &str, _: &str) {
+    // A bad digit makes a tree that `hash-object` refuses, which fails the test.
+    let raw = |hex: &str| -> Vec<u8> {
+        hex.trim()
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).unwrap_or_default();
+                u8::from_str_radix(pair, 16).unwrap_or_default()
+            })
+            .collect()
+    };
+    let empty = ["hash-object", "-t", "tree", "-w", "/dev/null"];
+    let empty = common::git_in(env, source, &empty);
+    let blob = common::git_in(env, source, &["rev-parse", "HEAD:.bashrc"]);
+    let mut bytes = b"100644 .bashrc\0".to_vec();
+    bytes.extend(raw(&blob));
+    bytes.extend(format!("40000 {name}\0").as_bytes());
+    bytes.extend(raw(&empty));
+    let file = env.root().join("tree.bin");
+    env.write(&file, &bytes, 0o644);
+    let file = file.to_string_lossy().into_owned();
+    let tree = common::git_in(env, source, &["hash-object", "-t", "tree", "-w", &file]);
+    let evil = ["commit-tree", tree.trim(), "-p", "HEAD", "-m", "evil"];
+    let evil = common::git_in(env, source, &evil);
+    let clean = common::git_in(env, source, &["rev-parse", "HEAD:"]);
+    let gone = ["commit-tree", clean.trim(), "-p", evil.trim(), "-m", "gone"];
+    let gone = common::git_in(env, source, &gone);
+    common::git_in(env, source, &["update-ref", "HEAD", gone.trim()]);
+}
+
+type History = fn(&TestEnv, &Path, &str, &str);
+
+/// A git tree whose clean tip hides a name with a credential in its history is imported as one
+/// commit of the current tree, whatever the name or how it came: after a newline or a tab, in an
+/// empty file, in a file only a merge adds, empty or with another file's bytes, and as an empty
+/// directory. With `--keep-history` every commit is kept, with the warning.
+#[test]
+fn an_import_squashes_a_history_that_once_held_a_credential_in_a_name() {
+    let token = github_token();
+    let cases: [(&str, History, String, &str); 5] = [
+        (
+            "newline",
+            added_and_removed,
+            format!(".config/a\n{token}"),
+            "x\n",
+        ),
+        (
+            "tab, empty",
+            added_and_removed,
+            format!(".config/a\t{token}"),
+            "",
+        ),
+        (
+            "merge, empty",
+            merged_and_removed,
+            format!(".config/{token}"),
+            "",
+        ),
+        (
+            "merge, shared",
+            merged_and_removed,
+            format!(".config/{token}"),
+            "# rc\n",
+        ),
+        (
+            "empty dir",
+            empty_dir_and_removed,
+            format!(".e-{token}"),
+            "",
+        ),
+    ];
+    for (label, make, name, bytes) in cases {
+        for keep in [false, true] {
+            let env = TestEnv::new();
+            let source = source_tree(&env, "dots", &[(".bashrc", "# rc\n")]);
+            common::git_in(&env, &source, &["init", "-q"]);
+            commit_all(&env, &source, "base");
+            make(&env, &source, &name, bytes);
+            source.seal();
+            let tip = ["ls-tree", "-r", "-t", "--name-only", "HEAD"];
+            let tip = common::git_in(&env, &source, &tip);
+            assert!(!tip.contains(&token), "{label}: {tip}");
+            let path = source.to_string_lossy().into_owned();
+            let mut args = vec!["import", path.as_str()];
+            if keep {
+                args.push("--keep-history");
+            }
+            let err = exits(&env.run(&args), 0);
+            assert!(err.contains(": github-token, added in "), "{label}: {err}");
+            let repo = env.repo().to_string_lossy().into_owned();
+            let count = env.git(&["-C", &repo, "rev-list", "--count", "--all"]);
+            if keep {
+                assert!(err.contains("--keep-history imports all"), "{label}: {err}");
+                assert_ne!(count.trim(), "1", "{label}");
+            } else {
+                assert!(err.contains("the history is left out"), "{label}: {err}");
+                assert_eq!(count.trim(), "1", "{label}");
+            }
+        }
+    }
+}
+
 /// The age identity file named by `[age] identity`, and the file named by `DOTMAN_AGE_KEY_FILE`,
 /// are refused by `add`, plain or encrypted, and a directory add skips the identity: nothing is
 /// copied.

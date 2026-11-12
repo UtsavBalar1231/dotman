@@ -846,6 +846,9 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
     let status = child.wait().context("failed to run git")?;
     let mut held = scanned?;
     ensure!(status.success(), "`git cat-file --batch` failed ({status})");
+    let commit_list = scratch.join("commits.txt");
+    write_lines(&commit_list, commits.iter())?;
+    let mut grouped = held_names(git, &commit_list)?;
     let mut in_commits: BTreeMap<(&'static str, &'static str), Vec<String>> = BTreeMap::new();
     for commit in commits {
         if let Some(hit) = held.remove(&commit) {
@@ -855,7 +858,6 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
                 .push(commit);
         }
     }
-    let mut grouped = held_names(git)?;
     if !held.is_empty() {
         let adding = adding_commits(git, &held)?;
         for (oid, hit) in &held {
@@ -1021,35 +1023,51 @@ fn adding_commits(
     Ok(commits)
 }
 
-/// Each path whose name the guard holds, with the commits that add it, newest first. A path is
-/// as `--raw` quotes it, which leaves a token's characters as they are.
-fn held_names(git: &Git) -> Result<BTreeMap<(String, &'static str), Vec<String>>> {
-    let log = git_stdout(
+/// Each path whose name the guard holds, with the commits that add it, newest first, for the
+/// commits listed in `commits`. Every path in any of their trees is added by some commit against
+/// one of its parents, or is in a root commit, so `-m --root` sees them all, a path that only a
+/// merge brings and an empty file among them, and `-t` an empty directory. `diff-tree` is
+/// plumbing, which no `log.diffMerges` or `diff.*` setting of the user's changes.
+fn held_names(git: &Git, commits: &Path) -> Result<BTreeMap<(String, &'static str), Vec<String>>> {
+    let added = git_stdout(
         git,
         &[
-            "log",
-            "--all",
+            "diff-tree",
+            "--stdin",
+            "-z",
+            "-r",
+            "-t",
+            "-m",
             "--root",
             "--no-renames",
-            "--no-abbrev",
-            "--raw",
             "--diff-filter=A",
-            "--format=commit %H",
         ],
-        None,
+        Some(commits),
     )?;
     let mut held: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
     let mut current = String::new();
-    for line in String::from_utf8_lossy(&log).lines() {
-        if let Some(commit) = line.strip_prefix("commit ") {
-            commit.clone_into(&mut current);
-        } else if line.starts_with(':')
-            && let Some((_, path)) = line.split_once('\t')
-            && let Some(found) = secrets::held_name(path)
-        {
-            held.entry((path.to_owned(), found.rule))
-                .or_default()
-                .push(current.clone());
+    // `<commit>\0`, then `:<modes> <oids> A\0<path>\0` per path; a path may hold any byte but NUL.
+    let mut fields = added.split(|b| *b == 0);
+    while let Some(field) = fields.next() {
+        if !field.starts_with(b":") {
+            current = String::from_utf8_lossy(field).into_owned();
+            continue;
+        }
+        let Some(path) = fields.next() else { break };
+        let path = String::from_utf8_lossy(path);
+        let Some(found) = secrets::held_name(&path) else {
+            continue;
+        };
+        // A directory comes before what it holds, which is reported under the directory.
+        let in_held = held.keys().any(|(dir, _)| {
+            path.strip_prefix(dir.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if !in_held {
+            let entry = held.entry((path.into_owned(), found.rule)).or_default();
+            if !entry.contains(&current) {
+                entry.push(current.clone());
+            }
         }
     }
     Ok(held)
