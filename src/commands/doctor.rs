@@ -263,16 +263,10 @@ fn objects(ctx: &Context) -> Check {
             let shown: Vec<&str> = lines.iter().take(3).copied().collect();
             let refs: Option<Vec<&str>> = lines.iter().map(|line| broken_ref(line)).collect();
             let fix = match refs {
-                Some(refs) if !refs.is_empty() => {
-                    let steps: Vec<String> = refs
-                        .iter()
-                        .map(|name| format!("{} git update-ref --no-deref -d {name}", name::bin()))
-                        .collect();
-                    format!(
-                        "only refs that point at nothing are broken, and removing them loses no commit; a fetch brings a remote's back: `{}`",
-                        steps.join(" && ")
-                    )
-                }
+                Some(refs) if !refs.is_empty() => format!(
+                    "only refs that point at nothing are broken, and removing them loses no commit; a fetch brings a remote's back: `{}`",
+                    remove_refs(&refs)
+                ),
                 _ => corrupt_repo_steps(ctx),
             };
             fail(
@@ -291,14 +285,29 @@ fn objects(ctx: &Context) -> Check {
 
 /// The ref in fsck's `error: <ref>: invalid sha1 pointer <oid>`, as a dangling symref or a ref to
 /// a missing object gives, unless it is a branch or `HEAD`: those name the user's history, which a
-/// repair must not drop.
+/// repair must not drop. A ref name may hold `;` or `$(`, which the step quotes, but a backtick
+/// would close the step's span in the message and a control character would be shown escaped.
 fn broken_ref(line: &str) -> Option<&str> {
     let (name, rest) = line.strip_prefix("error: ")?.split_once(": ")?;
     let usable = rest.starts_with("invalid sha1 pointer ")
         && name.starts_with("refs/")
         && !name.starts_with("refs/heads/")
-        && !name.contains(char::is_whitespace);
+        && !name.contains(|c: char| c.is_whitespace() || c.is_control() || c == '`');
     usable.then_some(name)
+}
+
+fn remove_refs(refs: &[&str]) -> String {
+    let steps: Vec<String> = refs
+        .iter()
+        .map(|name| {
+            format!(
+                "{} git update-ref --no-deref -d {}",
+                name::bin(),
+                shell_words::quote(name)
+            )
+        })
+        .collect();
+    steps.join(" && ")
 }
 
 /// Objects are missing or damaged: back the repo up first, since it may hold commits that are
@@ -1019,4 +1028,26 @@ fn size(bytes: u64) -> String {
     }
     let name = ["B", "KiB", "MiB", "GiB"].get(unit).copied().unwrap_or("B");
     format!("{value} {name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ref name can hold what a shell runs; the step quotes it, so a shell reads the name back.
+    /// A backtick or a control character cannot be shown in the step, so no step names it.
+    #[test]
+    fn a_broken_ref_is_quoted_in_the_step_or_not_named() {
+        let pointer = format!("invalid sha1 pointer {}", "1".repeat(40));
+        let name = "refs/remotes/x;touch${IFS}PWNED$(id)";
+        assert_eq!(broken_ref(&format!("error: {name}: {pointer}")), Some(name));
+        let words = shell_words::split(&remove_refs(&[name])).unwrap();
+        assert_eq!(
+            words,
+            [name::bin(), "git", "update-ref", "--no-deref", "-d", name]
+        );
+        for name in ["refs/remotes/x`id`", "refs/remotes/x\u{1b}[2J"] {
+            assert_eq!(broken_ref(&format!("error: {name}: {pointer}")), None);
+        }
+    }
 }
