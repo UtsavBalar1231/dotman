@@ -427,6 +427,37 @@ e2e_remote_never_holds() {
     fi
 }
 
+# Asserts that no object in the git dir GD, reachable or not, contains the fixed string TEXT.
+e2e_objects_lack() {
+    local gd=$1 hits
+    hits=$(e2e_tool git --git-dir="$gd" cat-file --batch-all-objects --batch | grep -acF -- "$2") || true
+    if [[ ${hits:-0} == 0 ]]; then
+        e2e_pass "no object in $gd holds '$2'"
+    else
+        e2e_fail "no object in $gd holds '$2' ($hits lines do)"
+    fi
+}
+
+# Asserts that git fsck passes on each git dir named.
+e2e_fsck() {
+    local gd
+    for gd in "$@"; do
+        if e2e_tool git --git-dir="$gd" fsck --no-progress >"$E2E_ROOT/fsck.out" 2>&1; then
+            e2e_pass "git fsck passes on $gd"
+        else
+            e2e_violation "git fsck passes on $gd"
+            head -n 10 "$E2E_ROOT/fsck.out" | sed 's/^/      | /'
+        fi
+    done
+}
+
+# Asserts that git fsck passes on the remote and on every machine's repo.
+e2e_fsck_all() {
+    local dirs
+    mapfile -t dirs < <(e2e_git_dirs)
+    e2e_fsck "${dirs[@]}"
+}
+
 # Prints the remote's copy of PATH on main.
 e2e_remote_show() {
     e2e_tool git --git-dir="$(e2e_remote)" show "main:$1"
@@ -688,6 +719,14 @@ e2e_inv_modes() {
         fi
     done
     [[ $bad == 1 ]] || e2e_pass "invariant: no mode is widened"
+}
+
+# Ends the scenario as skipped, with REASON, before it ran anything; counts as neither pass nor fail.
+e2e_skip() {
+    printf 'SKIP  [%s] %s\n' "$E2E_NAME" "$1"
+    E2E_FINISHED=1
+    e2e_record
+    exit 0
 }
 
 # Runs every invariant, prints the scenario's counts and exits non-zero on any failure.
