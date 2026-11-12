@@ -1684,16 +1684,20 @@ fn parse_status(raw: &[u8]) -> Result<Vec<StatusEntry>> {
     Ok(entries)
 }
 
+/// `-z` separates the records with a NUL and ends the last with one. An empty subject is an empty
+/// field, and a commit git cannot read an author time from, such as one in UTF-16, shows 0.
 fn parse_log(raw: &[u8]) -> Result<Vec<LogEntry>> {
-    let fields: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|f| !f.is_empty()).collect();
+    let raw = raw.strip_suffix(b"\0").unwrap_or(raw);
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fields: Vec<&[u8]> = raw.split(|b| *b == 0).collect();
     fields
         .chunks(3)
         .map(|chunk| match chunk {
             [oid, time, subject] => Ok(LogEntry {
                 oid: String::from_utf8_lossy(oid).into_owned(),
-                time: String::from_utf8_lossy(time)
-                    .parse()
-                    .context("git log printed a bad author time")?,
+                time: String::from_utf8_lossy(time).parse().unwrap_or(0),
                 subject: String::from_utf8_lossy(subject).into_owned(),
             }),
             _ => Err(anyhow!("git log output ended mid-record")),
@@ -1706,6 +1710,26 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_log_record_with_an_empty_subject_or_no_author_time_keeps_its_place() {
+        let raw = b"aaa\x00100\x00\x00bbb\x00\x00second\x00ccc\x00300\x00third\x00";
+        let entries = parse_log(raw).unwrap();
+        let got: Vec<(&str, i64, &str)> = entries
+            .iter()
+            .map(|e| (e.oid.as_str(), e.time, e.subject.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("aaa", 100, ""),
+                ("bbb", 0, "second"),
+                ("ccc", 300, "third")
+            ]
+        );
+        assert_eq!(parse_log(b"").unwrap().len(), 0);
+        assert!(parse_log(b"aaa\x00100\x00").is_err());
+    }
 
     struct Sandbox {
         dir: TempDir,
