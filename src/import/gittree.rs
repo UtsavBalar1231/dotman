@@ -308,7 +308,6 @@ fn unclonable_branch(git: &Git, source: &Path, clone_failed: bool) -> Option<Str
     };
     let head = small_file(&git_dir.join("HEAD"))?;
     let branch = head.trim_end().strip_prefix("ref: refs/heads/")?;
-    let shown = output::escape_line(branch);
     let src = source.display();
     let quoted = shell_words::quote(&source.to_string_lossy()).into_owned();
     let full = format!("refs/heads/{branch}");
@@ -322,7 +321,15 @@ fn unclonable_branch(git: &Git, source: &Path, clone_failed: bool) -> Option<Str
     } else {
         "whose name git refuses, so the clone took none of its commits; no git command can rename it"
     };
-    let refused = format!("{src}'s HEAD names the branch `{shown}`, {why}");
+    // A backtick in the name would close the span and open one of its own.
+    let refused = if branch.contains('`') {
+        format!("{src}'s HEAD names a branch, not shown as its name holds a backtick, {why}")
+    } else {
+        format!(
+            "{src}'s HEAD names the branch `{}`, {why}",
+            output::escape_line(branch)
+        )
+    };
     // A component `..` would leave `refs/heads`; git never writes one there anyway.
     let commit = Path::new(branch)
         .components()

@@ -324,10 +324,17 @@ fn left_behind(ctx: &Context, root: &Path, imported: &dyn Fn(&str) -> bool) -> V
         })
         .collect();
     branches.sort();
-    if !branches.is_empty() {
+    // A backtick in a name would open a span of its own in the note.
+    let ticked = branches.iter().filter(|name| name.contains('`')).count();
+    branches.retain(|name| !name.contains('`'));
+    let mut listed = shown(&branches);
+    if ticked > 0 {
+        let sep = if listed.is_empty() { "" } else { ", " };
+        listed = format!("{listed}{sep}{ticked} with a backtick in the name, not shown");
+    }
+    if !listed.is_empty() {
         notes.push(format!(
-            "only the history of HEAD is imported; these branches are not: {}",
-            shown(&branches)
+            "only the history of HEAD is imported; these branches are not: {listed}"
         ));
     }
     let stashed = fs::read_dir(root.join("stash/entries")).map_or(0, Iterator::count);

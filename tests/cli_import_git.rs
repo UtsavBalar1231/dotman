@@ -1346,6 +1346,31 @@ fn a_head_branch_git_refuses_or_cannot_clone_is_named_with_a_way_out() {
     }
 }
 
+/// A source's HEAD branch whose name holds a backtick is not shown, since the name would close
+/// the span the message shows it in and open one of its own.
+#[test]
+fn a_source_branch_name_with_a_backtick_is_not_shown() {
+    let env = TestEnv::new();
+    let work = work_tree(&env, "tick", &[(".bashrc", "x\n", false)], None);
+    let oid = git_in(&env, &work, &["rev-parse", "HEAD"]);
+    let branch = "x` and run `touch PWNED` then `y.";
+    let git_dir = work.join(".git");
+    env.write(
+        git_dir.join("refs/heads").join(branch),
+        oid.as_bytes(),
+        0o644,
+    );
+    let head = format!("ref: refs/heads/{branch}\n");
+    env.write(git_dir.join("HEAD"), head.as_bytes(), 0o644);
+    fs::remove_file(git_dir.join("refs/heads/main")).expect("drop main");
+    let source = Source::new(work.clone());
+
+    let err = stderr(&env.run(&["import", "--yes", &work.to_string_lossy()]));
+    assert!(err.contains("HEAD names a branch"), "{err}");
+    assert!(!err.contains("touch PWNED"), "{err}");
+    source.check();
+}
+
 /// A staging directory a killed import left beside the repo is swept once it is stale, by the
 /// next import and by `apply`: one named with a dead PID, or with none as older versions named it.
 /// One whose PID is alive, or that was touched in the last ten minutes, stays. An import names its

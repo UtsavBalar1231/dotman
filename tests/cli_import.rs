@@ -668,6 +668,25 @@ fn branches_behind_a_symlinked_refs_directory_are_not_read() {
     assert!(!err.contains("these branches are not"), "{err}");
 }
 
+/// A branch left behind whose name holds a backtick is counted, not shown, since the name would
+/// open a span of its own in the note.
+#[test]
+fn a_branch_left_behind_with_a_backtick_is_not_shown() {
+    let env = TestEnv::new();
+    let legacy = rich_legacy(&env);
+    fs::write(
+        legacy.join("refs/heads/x` and run `touch PWNED` then `y"),
+        "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    )
+    .expect("branch");
+    let err = env.ok(&["import", &legacy.to_string_lossy(), "--dry-run"]);
+    assert!(
+        err.contains("these branches are not: wip, 1 with a backtick in the name, not shown"),
+        "{err}"
+    );
+    assert!(!err.contains("touch PWNED"), "{err}");
+}
+
 #[test]
 fn overlay_names_the_tracked_directories_and_leaves_dirs_alone() {
     let env = overlay_env(0o644, BASHRC);
