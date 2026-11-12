@@ -32,6 +32,10 @@ pub struct State {
     /// before approval existed, until loading through the context approves the current entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_dirs: Option<BTreeSet<String>>,
+    /// Every `[ignore]` pattern this machine has seen in `.dotman.toml`. The capture scan keeps
+    /// applying one after the file drops it, until `sync --drop-unlisted-ignores` drops it here.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub ignore_seen: BTreeSet<String>,
     /// Machine identity recorded on the first run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentitySnapshot>,
@@ -123,6 +127,7 @@ impl Default for State {
             remote_url: None,
             remote_checked_at: None,
             capture_dirs: None,
+            ignore_seen: BTreeSet::new(),
             identity: None,
             hooks: Hooks::default(),
             files: BTreeMap::new(),
@@ -185,6 +190,13 @@ impl State {
                 }
             }
         }
+        for pattern in &state.ignore_seen {
+            let body = pattern.strip_suffix('/').unwrap_or(pattern);
+            if let Err(e) = glob::Pattern::new(body) {
+                let shown = crate::output::escape_line(pattern);
+                bail!(corrupt(path, &format!("ignore_seen `{shown}`: {e}")));
+            }
+        }
         Ok(Some(state))
     }
 
@@ -222,6 +234,15 @@ impl State {
 
     pub(crate) fn dirs_approved(&self) -> BTreeSet<String> {
         self.capture_dirs.clone().unwrap_or_default()
+    }
+
+    /// The patterns this machine has seen in `[ignore]` that `listed` no longer has.
+    pub(crate) fn unlisted_ignores(&self, listed: &[String]) -> Vec<String> {
+        self.ignore_seen
+            .iter()
+            .filter(|seen| !listed.contains(seen))
+            .cloned()
+            .collect()
     }
 
     /// Writes the state atomically with mode 0600, creating its directory at 0700. A dry run writes nothing.
@@ -362,13 +383,14 @@ mod tests {
     fn corrupt_files_are_errors_naming_doctor() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("state.toml");
-        let bad_inputs: [&[u8]; 6] = [
+        let bad_inputs: [&[u8]; 7] = [
             b"not = [toml",
             b"\xff\xfe",
             b"version = 2\n",
             b"version = \"1\"\n",
             b"version = 1\n[files.\".a\"]\nsource = \".a\"\nkind = \"file\"\nhash = \"x\"\nmode = \"rw\"\n",
             b"version = 1\n[files.\".a\"]\nsource = \".a\"\nkind = \"file\"\nhash = \"x\"\nmode = \"0600\"\nrepo_mode = \"rw\"\n",
+            b"version = 1\nignore_seen = [\"**/[\"]\n",
         ];
         for bad in bad_inputs {
             fs::write(&path, bad).unwrap();

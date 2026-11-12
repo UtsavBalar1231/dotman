@@ -442,6 +442,15 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "row_9_changed_locally_is_reported_and_never_overwritten",
             "an_upstream_dirs_entry_captures_nothing_until_this_machine_approves_it",
             "an_upstream_entry_above_an_approved_one_captures_only_under_the_approved_one",
+            "an_upstream_ignore_removal_captures_nothing_here",
+            "a_pattern_removed_here_applies_until_sync_drops_it",
+        ],
+    ),
+    (
+        "records in `state.toml` every pattern it has seen in the file",
+        &[
+            "an_upstream_ignore_removal_captures_nothing_here",
+            "a_pattern_removed_here_applies_until_sync_drops_it",
         ],
     ),
     (

@@ -417,13 +417,18 @@ impl Context {
         RepoConfig::load(&self.repo_config_file())
     }
 
-    /// The state, with an older one's `[dirs]` approval settled from `.dotman.toml` as it is now,
-    /// before any pull: every command that saves it records the settled approval.
+    /// The state, with an older one's `[dirs]` approval settled and the `[ignore]` patterns added
+    /// to the ones seen, from `.dotman.toml` as it is now, before any pull: every command that
+    /// saves it records both.
     pub(crate) fn state(&self, repo_id: &str) -> Result<State> {
         let mut state = State::load(&self.paths.state_file(), repo_id)?;
+        let repo_config = self.repo_config()?;
         if state.capture_dirs.is_none() {
-            state.grandfather_dirs(&self.repo_config()?.dirs.paths);
+            state.grandfather_dirs(&repo_config.dirs.paths);
         }
+        state
+            .ignore_seen
+            .extend(repo_config.ignore.patterns.iter().cloned());
         Ok(state)
     }
 

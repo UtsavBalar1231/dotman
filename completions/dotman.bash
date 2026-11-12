@@ -384,7 +384,7 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__sync)
-            opts="-m -v -q -h --message --keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --approve-dirs --no-hooks --dry-run --system --yes --allow-mass-delete --verbose --quiet --no-pager --allow-root --help"
+            opts="-m -v -q -h --message --keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --approve-dirs --drop-unlisted-ignores --no-hooks --dry-run --system --yes --allow-mass-delete --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

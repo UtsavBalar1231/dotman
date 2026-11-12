@@ -143,6 +143,7 @@ fn collect(online: bool) -> Vec<Check> {
             checks.extend(repo_health(ctx));
             checks.extend(hook_table(ctx));
             checks.extend(dir_approval(ctx));
+            checks.extend(unlisted_ignores(ctx));
             checks.extend(variants(ctx));
             checks.extend(encryption(ctx));
             checks.extend(system_files(ctx));
@@ -401,6 +402,31 @@ fn dir_approval(ctx: &Context) -> Option<Check> {
         &format!(
             "{} not approved on this machine, so sync captures no new file under {them}; read [dirs] in .dotman.toml, then run `{} sync --approve-dirs`",
             unapproved.join(", "),
+            name::bin()
+        ),
+    ))
+}
+
+/// The `[ignore]` patterns this machine still applies that `.dotman.toml` no longer lists.
+/// Information only: keeping them is the safe default.
+fn unlisted_ignores(ctx: &Context) -> Option<Check> {
+    let listed = ctx.repo_config().ok()?.ignore.patterns;
+    let unlisted = ctx
+        .state(&ctx.repo_id().ok()?)
+        .ok()?
+        .unlisted_ignores(&listed);
+    if unlisted.is_empty() {
+        return None;
+    }
+    Some(info(
+        "ignore",
+        &format!(
+            "this machine still applies {}, which .dotman.toml no longer lists, so sync captures nothing they match; `{} sync --drop-unlisted-ignores` stops applying them here",
+            unlisted
+                .iter()
+                .map(|pattern| output::escape_line(pattern))
+                .collect::<Vec<_>>()
+                .join(", "),
             name::bin()
         ),
     ))

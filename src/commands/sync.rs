@@ -86,6 +86,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
             decisions: args.decisions,
             pass: Pass::Capture,
             approve_dirs: args.approve_dirs,
+            drop_unlisted_ignores: args.drop_unlisted_ignores,
             ..Options::default()
         },
     )?;

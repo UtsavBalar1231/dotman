@@ -3990,3 +3990,171 @@ fn an_upstream_secret_names_edit_never_drops_a_default() {
         [".config/app/github_token", ".config/app/host.private"]
     );
 }
+
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn ignore_seen(env: &TestEnv) -> Vec<String> {
+    let state = dotman::state::State::read(&env.state_dir().join("state.toml"))
+        .expect("read state.toml")
+        .expect("state.toml exists");
+    state.ignore_seen.into_iter().collect()
+}
+
+/// An `[ignore]` pattern dropped upstream, one `forget` wrote included, keeps files out of capture
+/// on a machine that has seen it: the next syncs capture nothing it matches, status names each
+/// file with the `add` that takes it, doctor names the pattern, and the printed `add` adds the
+/// file. A clone made by this version records the patterns `.dotman.toml` lists.
+#[test]
+fn an_upstream_ignore_removal_captures_nothing_here() {
+    let (a, b) = two_machines();
+    let mut listed = b.repo_config().ignore.patterns;
+    listed.sort();
+    assert_eq!(ignore_seen(&b), listed);
+
+    b.write(".config/app/app.conf", b"x\n", 0o644);
+    b.write(".config/app/notes.txt", b"n\n", 0o644);
+    b.ok(&["add", ".config/app"]);
+    b.ok(&["sync"]);
+    b.ok(&["forget", ".config/app/notes.txt"]);
+    assert!(
+        b.repo_config()
+            .ignore
+            .patterns
+            .contains(&".config/app/notes.txt".to_owned())
+    );
+    b.ok(&["sync"]);
+    push_config(&a, |config| {
+        config.ignore.patterns.push("**/*.local".to_owned());
+    });
+    b.ok(&["sync"]);
+    b.write(".config/app/host.local", b"h\n", 0o644);
+    b.ok(&["sync"]);
+
+    push_config(&a, |config| {
+        config
+            .ignore
+            .patterns
+            .retain(|p| p != "**/*.local" && p != ".config/app/notes.txt");
+    });
+    b.ok(&["sync"]);
+    let err = exits(&b.run(&["sync"]), 0);
+    assert!(
+        err.contains("kept out by [ignore] patterns that .dotman.toml no longer lists"),
+        "{err}"
+    );
+    let tree = remote_tree(&a);
+    assert!(!tree.contains("host.local"), "{tree}");
+    assert!(!tree.contains("notes.txt"), "{tree}");
+    assert!(
+        b.porcelain("status")
+            .iter()
+            .all(|(_, key)| !key.contains("host.local"))
+    );
+
+    let status = text(&b.run(&["status"]));
+    assert!(
+        status.contains("  .config/app/notes.txt ([ignore] .config/app/notes.txt; `dotman add "),
+        "{status}"
+    );
+    let doctor = text(&b.run(&["doctor"]));
+    assert!(
+        doctor.contains(
+            "ignore: this machine still applies **/*.local, .config/app/notes.txt, which .dotman.toml no longer lists"
+        ),
+        "{doctor}"
+    );
+    let readded = exits(&b.run(&["add", "--yes", ".config/app"]), 0);
+    assert!(
+        readded.contains("kept out by [ignore] patterns that .dotman.toml no longer lists"),
+        "{readded}"
+    );
+    b.ok(&["sync"]);
+    assert!(!remote_tree(&a).contains("host.local"));
+
+    let added = common::run_hint(&b, &status, "add ");
+    assert!(added.status.success(), "{}", stderr(&added));
+    assert!(
+        stderr(&added).contains(
+            "matches [ignore] **/*.local, which .dotman.toml no longer lists and this machine still applies; added because you named it"
+        ),
+        "{}",
+        stderr(&added)
+    );
+    b.ok(&["sync"]);
+    let tree = remote_tree(&a);
+    assert!(tree.contains(".config/app/host.local"), "{tree}");
+    assert!(!tree.contains("notes.txt"), "{tree}");
+}
+
+/// A recorded pattern comes from a tracked file, so its newline cannot forge a line in what sync
+/// and status print about it.
+#[test]
+fn a_dropped_ignore_pattern_cannot_forge_output() {
+    let (a, b) = two_machines();
+    let pattern = "**/*.tm[p\nforged: line]";
+    b.write(".config/app/app.conf", b"x\n", 0o644);
+    b.ok(&["add", ".config/app"]);
+    push_config(&a, |config| config.ignore.patterns.push(pattern.to_owned()));
+    b.ok(&["sync"]);
+    b.write(".config/app/cache.tmp", b"t\n", 0o644);
+    push_config(&a, |config| config.ignore.patterns.retain(|p| p != pattern));
+    b.ok(&["sync"]);
+
+    let outputs = [
+        exits(&b.run(&["sync"]), 0),
+        text(&b.run(&["status"])),
+        text(&b.run(&["doctor"])),
+        exits(&b.run(&["sync", "--dry-run", "--drop-unlisted-ignores"]), 0),
+    ];
+    for out in outputs {
+        assert!(out.contains("tm[p\\nforged: line]"), "{out}");
+        assert!(!out.lines().any(|line| line.starts_with("forged")), "{out}");
+    }
+    assert!(!remote_tree(&a).contains("cache.tmp"));
+}
+
+/// A pattern removed from `.dotman.toml` on this machine is the same edit as one removed upstream,
+/// so it keeps applying here until `sync --drop-unlisted-ignores`, which a dry run only previews,
+/// and which the printed hint runs.
+#[test]
+fn a_pattern_removed_here_applies_until_sync_drops_it() {
+    let (a, b) = two_machines();
+    b.write(".config/app/app.conf", b"x\n", 0o644);
+    b.write(".config/app/draft.swp", b"s\n", 0o644);
+    b.ok(&["add", ".config/app"]);
+    b.ok(&["sync"]);
+    let mut config = b.repo_config();
+    config.ignore.patterns.retain(|p| p != "**/*.swp");
+    config.save(&b.repo().join(".dotman.toml"), false).unwrap();
+
+    let err = exits(&b.run(&["sync"]), 0);
+    assert!(!remote_tree(&a).contains("draft.swp"));
+    assert!(
+        !b.repo_config()
+            .ignore
+            .patterns
+            .contains(&"**/*.swp".to_owned())
+    );
+    assert!(ignore_seen(&b).contains(&"**/*.swp".to_owned()));
+
+    let before = b.four_trees();
+    let dry = exits(&b.run(&["sync", "--dry-run", "--drop-unlisted-ignores"]), 0);
+    assert!(
+        dry.contains("would stop applying these [ignore] patterns on this machine"),
+        "{dry}"
+    );
+    assert!(dry.contains("  **/*.swp"), "{dry}");
+    assert_eq!(b.four_trees(), before);
+
+    exits(
+        &common::run_hint(&b, &err, "sync --drop-unlisted-ignores"),
+        0,
+    );
+    assert!(remote_tree(&a).contains(".config/app/draft.swp"));
+    assert!(!ignore_seen(&b).contains(&"**/*.swp".to_owned()));
+    let doctor = text(&b.run(&["doctor"]));
+    assert!(
+        !doctor.contains("ignore: this machine still applies"),
+        "{doctor}"
+    );
+}

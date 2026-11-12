@@ -377,6 +377,9 @@ pub struct SyncArgs {
     /// Approve on this machine, printing them first, the `[dirs]` entries it has not approved, and capture the new files under them. An entry that `.dotman.toml` gained from elsewhere captures nothing here until approved; `add <dir>` approves the directory it adds
     #[arg(long, help_heading = "Decisions")]
     pub approve_dirs: bool,
+    /// Stop applying on this machine, printing them first, the `[ignore]` patterns it has seen that `.dotman.toml` no longer lists, and capture what they kept out. A pattern removed from `.dotman.toml`, here or elsewhere, keeps files out of capture on each machine that has seen it until then; `add <file>` adds one file it keeps out
+    #[arg(long, help_heading = "Decisions")]
+    pub drop_unlisted_ignores: bool,
     /// Run no hooks
     #[arg(long, conflicts_with = "approve_hooks")]
     pub no_hooks: bool,

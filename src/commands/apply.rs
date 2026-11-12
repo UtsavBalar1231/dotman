@@ -116,6 +116,9 @@ pub(crate) struct Options {
     /// Approve the `[dirs]` entries this machine has not approved, so the capture takes their new
     /// files.
     pub approve_dirs: bool,
+    /// Stop applying the `[ignore]` patterns this machine has seen that `.dotman.toml` no longer
+    /// lists, before the capture scan.
+    pub drop_unlisted_ignores: bool,
 }
 
 pub(crate) struct Applied {
@@ -175,6 +178,25 @@ impl std::fmt::Display for HomeUnreadable {
     }
 }
 
+/// Stops this machine applying the `[ignore]` patterns it has seen that `listed` no longer has,
+/// naming each one first. A dry run saves no state, so it only names them.
+fn drop_unlisted_ignores(state: &mut State, listed: &[String], dry_run: bool) {
+    let unlisted = state.unlisted_ignores(listed);
+    if unlisted.is_empty() {
+        output::info("every [ignore] pattern this machine applies is in .dotman.toml");
+        return;
+    }
+    output::context(if dry_run {
+        "would stop applying these [ignore] patterns on this machine, which .dotman.toml no longer lists, and capture what they kept out:"
+    } else {
+        "this machine stops applying these [ignore] patterns, which .dotman.toml no longer lists, and captures what they kept out:"
+    });
+    for pattern in &unlisted {
+        output::context(&format!("  {}", output::escape_line(pattern)));
+    }
+    state.ignore_seen.retain(|seen| !unlisted.contains(seen));
+}
+
 /// Applies the keys under `inputs` (every key when empty). The caller holds the lock.
 pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result<Applied> {
     let repo_id = ctx.repo_id()?;
@@ -183,9 +205,12 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     let sources = ctx.sources()?;
     let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
+    if opts.drop_unlisted_ignores {
+        drop_unlisted_ignores(&mut state, &repo_config.ignore.patterns, opts.dry_run);
+    }
     // Only a whole-repo capture looks for new files; `apply <path>` has no R for them.
     let mut scan = if opts.pass == Pass::Capture && inputs.is_empty() {
-        add::scan_dirs(ctx, &repo_config, &keys, &state.dirs_approved())?
+        add::scan_dirs(ctx, &repo_config, &keys, &state)?
     } else {
         Scan::default()
     };
@@ -1453,6 +1478,7 @@ impl Run<'_> {
         for note in &scan.notes {
             output::warning(note);
         }
+        add::warn_still_ignored(&self.ctx.paths.home, &scan.still_ignored);
         if !scan.held.is_empty() {
             self.attention = true;
             output::warning(&format!(

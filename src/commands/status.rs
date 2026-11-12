@@ -71,7 +71,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     let sources = ctx.sources()?;
     let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
-    let scan = add::scan_dirs(&ctx, &repo_config, &keys, &state.dirs_approved())?;
+    let scan = add::scan_dirs(&ctx, &repo_config, &keys, &state)?;
     let in_scope = |key: &str| unfiltered || filters.iter().any(|f| is_under(key, f));
     let worktree = Worktree::new(&ctx.paths.repo, &repo_config.modes);
     let variants = Variants::new(
@@ -145,6 +145,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         }
     } else {
         list_new(&mut out, &ctx, &new, &held).context("cannot write to stdout")?;
+        list_still_ignored(&mut out, &ctx, &scan, in_scope).context("cannot write to stdout")?;
         list_held_in_repo(&mut out, &ctx, &in_repo).context("cannot write to stdout")?;
         for note in &scan.notes {
             output::warning(note);
@@ -358,6 +359,34 @@ fn list_new(
                 escape_line(&hold.listed(&path))
             )?;
         }
+    }
+    Ok(())
+}
+
+fn list_still_ignored(
+    out: &mut impl Write,
+    ctx: &Context,
+    scan: &add::Scan,
+    in_scope: impl Fn(&str) -> bool,
+) -> std::io::Result<()> {
+    let found: Vec<_> = scan
+        .still_ignored
+        .iter()
+        .filter(|(key, _)| in_scope(key))
+        .collect();
+    if found.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "\n{}", add::still_ignored_header())?;
+    for (key, entry) in found {
+        let path = add::pasteable(&ctx.paths.home, key);
+        writeln!(
+            out,
+            "  {}{} ({})",
+            escape_line(key),
+            if entry.is_dir { "/" } else { "" },
+            escape_line(&entry.listed(&path))
+        )?;
     }
     Ok(())
 }

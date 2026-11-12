@@ -79,6 +79,50 @@ enum Left {
     Own(String),
     /// A name dotman cannot use as a key.
     Name(String),
+    /// Matched only by a pattern `.dotman.toml` no longer lists, which this machine still applies.
+    StillIgnored(String, StillIgnored),
+}
+
+/// An entry that a pattern `.dotman.toml` no longer lists keeps out on this machine.
+pub(crate) struct StillIgnored {
+    pub(crate) pattern: String,
+    pub(crate) is_dir: bool,
+}
+
+impl StillIgnored {
+    /// The pattern, and for a file what adds it; `path` is the entry as [`pasteable`] gives it.
+    pub(crate) fn listed(&self, path: &str) -> String {
+        if self.is_dir {
+            format!("[ignore] {}", self.pattern)
+        } else {
+            format!(
+                "[ignore] {}; `{} add {path}` adds it",
+                self.pattern,
+                name::bin()
+            )
+        }
+    }
+}
+
+pub(crate) fn still_ignored_header() -> String {
+    format!(
+        "kept out by [ignore] patterns that .dotman.toml no longer lists and this machine still applies; `{} sync --drop-unlisted-ignores` stops applying them here and captures what they kept out:",
+        name::bin()
+    )
+}
+
+pub(crate) fn warn_still_ignored(home: &Path, found: &BTreeMap<String, StillIgnored>) {
+    if found.is_empty() {
+        return;
+    }
+    output::warning(&still_ignored_header());
+    for (key, entry) in found {
+        output::warning(&format!(
+            "  {key}{} ({})",
+            if entry.is_dir { "/" } else { "" },
+            entry.listed(&pasteable(home, key))
+        ));
+    }
 }
 
 #[derive(Default)]
@@ -86,6 +130,7 @@ pub(crate) struct DirPlan {
     pub(crate) key: String,
     pub(crate) items: BTreeMap<String, Leaf>,
     pub(crate) skipped: Vec<String>,
+    pub(crate) still_ignored: BTreeMap<String, StillIgnored>,
     pub(crate) dangling: Vec<String>,
     /// Sockets, FIFOs, devices and what cannot be read.
     pub(crate) held: BTreeMap<String, Hold>,
@@ -149,7 +194,8 @@ impl Ignore {
             || (is_dir && self.dirs_only.iter().any(|p| p.matches_with(key, MATCH)))
     }
 
-    /// The first pattern that matches, as `[ignore]` spells it.
+    /// The first pattern that matches, as `[ignore]` spells it, escaped onto one line: it comes
+    /// from a tracked file and is only ever printed.
     fn matching(&self, key: &str, is_dir: bool) -> Option<String> {
         let any = self.any.iter().find(|p| p.matches_with(key, MATCH));
         let dir = || {
@@ -158,7 +204,9 @@ impl Ignore {
                 .find(|p| is_dir && p.matches_with(key, MATCH))
                 .map(|p| format!("{}/", p.as_str()))
         };
-        any.map(|p| p.as_str().to_owned()).or_else(dir)
+        any.map(|p| p.as_str().to_owned())
+            .or_else(dir)
+            .map(|text| output::escape_line(&text).into_owned())
     }
 }
 
@@ -184,12 +232,12 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     let mut state = ctx.state(&repo_id)?;
     let identity = ctx.identity().clone();
 
-    let mut plan = Planner {
-        ctx: &ctx,
-        ignore: Ignore::compile(&repo_config.ignore.patterns)?,
-        cwd: std::env::current_dir().context("cannot read the current directory")?,
-        out: Plan::default(),
-    }
+    let mut plan = Planner::new(
+        &ctx,
+        &repo_config,
+        &state,
+        std::env::current_dir().context("cannot read the current directory")?,
+    )?
     .plan(&args.paths)?;
     let managed: Vec<String> = ctx.managed()?.into_keys().collect();
     let mut targets = Targets {
@@ -224,6 +272,9 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         output::warning(&format!("held {key}: {found}{}", found.remedy(Some(&path))));
     }
     let specials = warn_held(&ctx, &plan, &targets.sources);
+    for dir in &plan.dirs {
+        warn_still_ignored(&ctx.paths.home, &dir.still_ignored);
+    }
     let outcome = if guarded.held.is_empty() && content.held.is_empty() && specials == 0 {
         Outcome::Done
     } else {
@@ -1090,6 +1141,8 @@ pub(crate) struct Scan {
     pub waiting: BTreeMap<String, Kind>,
     /// The `[dirs]` entries this machine has not approved, in `.dotman.toml` order.
     pub unapproved: Vec<String>,
+    /// What only a pattern `.dotman.toml` no longer lists keeps out: reported, never captured.
+    pub still_ignored: BTreeMap<String, StillIgnored>,
 }
 
 impl Scan {
@@ -1148,22 +1201,18 @@ pub(crate) fn hold_by_content(bytes: &[u8], key: &str, allow: &[Allow]) -> Optio
 }
 
 /// Walks every `[dirs]` entry with `add <dir>`'s walker. `known` is every key that has an R or an S.
-/// A new file that no entry in `approved` covers is held as [`Hold::Unapproved`] when it would be
-/// captured otherwise, and left out when it would be held anyway: this machine has not agreed to
-/// manage what lies there.
+/// A new file that no entry `state` approves covers is held as [`Hold::Unapproved`] when it would
+/// be captured otherwise, and left out when it would be held anyway: this machine has not agreed
+/// to manage what lies there.
 pub(crate) fn scan_dirs(
     ctx: &Context,
     repo_config: &RepoConfig,
     known: &BTreeSet<String>,
-    approved: &BTreeSet<String>,
+    state: &State,
 ) -> Result<Scan> {
     let secrets = secret_patterns(repo_config)?;
-    let planner = Planner {
-        ctx,
-        ignore: Ignore::compile(&repo_config.ignore.patterns)?,
-        cwd: PathBuf::new(),
-        out: Plan::default(),
-    };
+    let approved = state.dirs_approved();
+    let planner = Planner::new(ctx, repo_config, state, PathBuf::new())?;
     let mut found: BTreeMap<String, Leaf> = BTreeMap::new();
     let mut dangling = BTreeSet::new();
     let mut scan = Scan::default();
@@ -1188,12 +1237,16 @@ pub(crate) fn scan_dirs(
             dangling.extend(walked.dangling);
             scan.held.extend(walked.held);
             scan.notes.extend(walked.notes);
+            scan.still_ignored.extend(walked.still_ignored);
         }
     }
     let is_covered = |key: &str| covered.iter().any(|dir| is_under(key, dir));
     found.retain(|key, _| !known.contains(key));
     dangling.retain(|key| !known.contains(key));
     scan.held.retain(|key, _| !known.contains(key));
+    // A directory added by name is an entry of its own, walked as one.
+    scan.still_ignored
+        .retain(|key, _| !known.contains(key) && !repo_config.dirs.paths.contains(key));
     scan.notes
         .extend(dangling.into_iter().map(|key| format!("{key}: {DANGLING}")));
 
@@ -1252,11 +1305,30 @@ pub(crate) fn scan_dirs(
 struct Planner<'a> {
     ctx: &'a Context,
     ignore: Ignore,
+    /// The patterns this machine has seen in `[ignore]` that `.dotman.toml` no longer lists: an
+    /// upstream edit that drops one must not widen what this machine captures.
+    unlisted: Ignore,
     cwd: PathBuf,
     out: Plan,
 }
 
-impl Planner<'_> {
+impl<'a> Planner<'a> {
+    fn new(
+        ctx: &'a Context,
+        repo_config: &RepoConfig,
+        state: &State,
+        cwd: PathBuf,
+    ) -> Result<Self> {
+        let listed = &repo_config.ignore.patterns;
+        Ok(Self {
+            ctx,
+            ignore: Ignore::compile(listed)?,
+            unlisted: Ignore::compile(&state.unlisted_ignores(listed))?,
+            cwd,
+            out: Plan::default(),
+        })
+    }
+
     fn plan(mut self, inputs: &[PathBuf]) -> Result<Plan> {
         for input in inputs {
             self.input(input)?;
@@ -1325,7 +1397,14 @@ impl Planner<'_> {
 
     // `[ignore]` keeps paths out of directory walks; a path named on the command line goes in.
     fn warn_ignored(&self, key: &str, is_dir: bool) {
-        if let Some(pattern) = self.ignore.matching(key, is_dir) {
+        let unlisted = || {
+            self.unlisted.matching(key, is_dir).map(|pattern| {
+                format!(
+                    "{pattern}, which .dotman.toml no longer lists and this machine still applies"
+                )
+            })
+        };
+        if let Some(pattern) = self.ignore.matching(key, is_dir).or_else(unlisted) {
             output::warning(&format!(
                 "{key}: matches [ignore] {pattern}; added because you named it"
             ));
@@ -1408,7 +1487,7 @@ impl Planner<'_> {
                         Ok(key) => {
                             dir.held.insert(key, Hold::Unreadable);
                         }
-                        Err(Left::Quiet | Left::Own(_)) => {}
+                        Err(Left::Quiet | Left::Own(_) | Left::StillIgnored(..)) => {}
                         Err(Left::Name(_)) => dir.notes.push(line.clone()),
                     }
                     dir.skipped.push(line);
@@ -1431,6 +1510,9 @@ impl Planner<'_> {
                         Left::Name(line) => {
                             dir.notes.push(line.clone());
                             dir.skipped.push(line);
+                        }
+                        Left::StillIgnored(key, entry) => {
+                            dir.still_ignored.insert(key, entry);
                         }
                     }
                     if is_dir {
@@ -1464,15 +1546,33 @@ impl Planner<'_> {
 
     fn entry_key(&self, path: &Path, is_dir: bool) -> std::result::Result<String, Left> {
         let paths = &self.ctx.paths;
-        let named = |text: String| Left::Name(printable(&text));
         let rel = path
             .strip_prefix(&paths.home)
-            .map_err(|e| named(format!("{}: {e}", path.display())))?;
+            .map_err(|e| Left::Name(printable(&format!("{}: {e}", path.display()))))?;
         // Before the name checks, so an ignored entry is never reported, whatever its name; a
         // name that is not UTF-8 matches in its lossy form.
-        if self.ignore.matches(&rel.to_string_lossy(), is_dir) {
+        let lossy = rel.to_string_lossy();
+        if self.ignore.matches(&lossy, is_dir) {
             return Err(Left::Quiet);
         }
+        let unlisted = self.unlisted.matching(&lossy, is_dir);
+        match (self.checked_key(path, rel, is_dir), unlisted) {
+            (Ok(key), Some(pattern)) => {
+                Err(Left::StillIgnored(key, StillIgnored { pattern, is_dir }))
+            }
+            (Err(_), Some(_)) => Err(Left::Quiet),
+            (checked, None) => checked,
+        }
+    }
+
+    fn checked_key(
+        &self,
+        path: &Path,
+        rel: &Path,
+        is_dir: bool,
+    ) -> std::result::Result<String, Left> {
+        let paths = &self.ctx.paths;
+        let named = |text: String| Left::Name(printable(&text));
         if let Err(e) = refuse_non_nfc(rel) {
             return Err(named(format!("{e}")));
         }

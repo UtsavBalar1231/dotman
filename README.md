@@ -44,6 +44,8 @@ From then on, edit files where they are and run `dotman sync`. It captures local
 
 A directory you add, such as `~/.config/nvim`, goes into `[dirs]` in `.dotman.toml`, and `sync` captures the new files that appear under it. Each machine approves a `[dirs]` entry before its own new files under it are captured: `add <dir>` approves the directory it adds, and on the second machine the first `sync` with new files under an entry from elsewhere asks, or with `--approve-dirs` approves without asking. Until then those files are held, and the run exits 3. The managed files under the entry apply and sync as usual meanwhile. The approval lives in this machine's `state.toml`, per entry; `forget <dir>` drops it, so an entry forgotten here and listed again later is asked about again. A state written by an older dotman approves the entries `.dotman.toml` lists when it is first read, because that machine was capturing under them already.
 
+`[ignore]` patterns are recorded the same way. `state.toml` keeps each pattern this machine has seen in `.dotman.toml`, and the capture under `[dirs]` goes on applying one after the file drops it, whether the edit came from another machine or was made here, so a removed pattern does not turn what it kept out into new files. `status` lists what only such a pattern keeps out, `add <file>` adds one of those files, and `sync --drop-unlisted-ignores` stops applying, on this machine, the patterns `.dotman.toml` no longer lists and captures what they kept out.
+
 ## Commands
 
 | Command | Purpose |
@@ -126,7 +128,7 @@ A hook table needs approval on each machine. The prompt shows every command, and
 
 ## Ignoring files
 
-`[ignore] patterns` in `.dotman.toml` keeps files under managed directories out of the repo. The defaults are `.git/`, `*.swp`, `*~`, `.DS_Store`, `__pycache__/`, `node_modules/`, `*.orig` and `*.rej`, at any depth. As with git's ignore rules, a pattern applies only to files the repo does not track yet: a tracked file keeps syncing. `add <dir>` skips ignored files, and `add <file>` adds an ignored file you name, with a warning.
+`[ignore] patterns` in `.dotman.toml` keeps files under managed directories out of the repo. The defaults are `.git/`, `*.swp`, `*~`, `.DS_Store`, `__pycache__/`, `node_modules/`, `*.orig` and `*.rej`, at any depth. As with git's ignore rules, a pattern applies only to files the repo does not track yet: a tracked file keeps syncing. `add <dir>` skips ignored files, and `add <file>` adds an ignored file you name, with a warning. Removing a pattern takes effect on a machine that has seen it only after `sync --drop-unlisted-ignores` runs there.
 
 ## System files
 

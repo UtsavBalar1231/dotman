@@ -179,6 +179,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --accept-identity 'Accept a changed machine identity and use the variants it selects'
             cand --approve-hooks 'Approve the current `[hooks]` table on this machine, printing it first, and run its hooks. When the table changed since a warning here showed it, show the new table and approve nothing; the same command again approves it'
             cand --approve-dirs 'Approve on this machine, printing them first, the `[dirs]` entries it has not approved, and capture the new files under them. An entry that `.dotman.toml` gained from elsewhere captures nothing here until approved; `add <dir>` approves the directory it adds'
+            cand --drop-unlisted-ignores 'Stop applying on this machine, printing them first, the `[ignore]` patterns it has seen that `.dotman.toml` no longer lists, and capture what they kept out. A pattern removed from `.dotman.toml`, here or elsewhere, keeps files out of capture on each machine that has seen it until then; `add <file>` adds one file it keeps out'
             cand --no-hooks 'Run no hooks'
             cand --dry-run 'Show what would be captured, committed, pulled, applied and pushed; change nothing'
             cand --system 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call'

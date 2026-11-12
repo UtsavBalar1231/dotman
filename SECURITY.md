@@ -21,6 +21,7 @@ A hostile repo, import source or system-write plan must never cause:
 - a setuid, setgid or sticky bit;
 - a hook run without approval on that machine;
 - a capture of new files under a `[dirs]` entry that machine has not approved;
+- a capture from `$HOME` of a new file that an `[ignore]` pattern seen on that machine keeps out;
 - a template command execution;
 - the silent loss of a file.
 
@@ -68,7 +69,8 @@ It then walks each target from `/` with `openat(O_NOFOLLOW | O_DIRECTORY)`, crea
 - `[dirs]`: an entry captures new files on a machine only once that machine has approved it, by `add <dir>`, by the import that wrote it, at the question `sync` asks, or with `sync --approve-dirs`. The approvals are kept per entry in `state.toml`, which is not synced. Until then `sync` holds the new files under the entry and exits 3, and `status` and `doctor` name it. An entry pushed above an approved one, such as `.config` above `.config/nvim`, captures only what the approved one covers. The managed files under an entry apply and sync without approval, like any other managed file. A state written by an older dotman approves the entries that `.dotman.toml` lists when this version first reads it, before any pull, since that machine has been capturing under them; a clone made by this version approves none.
 - `[guard] secret_names`: the repo's patterns add to dotman's own and cannot remove one, so emptying the list does not let a `*token*` file through.
 - `[guard] allow` is ignored, and `[hooks]` and `[age] recipients` are covered above.
-- Not gated: `[ignore]` patterns, the ones `forget` writes included, so dropping one turns a file under an approved entry into a new file that the next `sync` captures; `[modes]`; and the managed files themselves, which apply as files from any repo do.
+- `[ignore]`: each machine records in `state.toml` every pattern it has seen in the file, the ones `forget` writes included, adding the ones the file lists each time a command reads the state, before any pull. The capture of new files under `[dirs]` applies them all, so dropping a pattern, upstream or here, does not turn what it kept out into new files on a machine that has seen it. `status` lists each file that only such a pattern keeps out, with the `add <file>` that adds it, and `doctor` names the patterns. `sync --drop-unlisted-ignores` stops applying them on that machine. A state written by an older dotman and a fresh clone both record the patterns the file lists when first read.
+- Not gated: `[modes]`; an untracked file in the repo worktree itself, which `sync` commits, guards permitting, unless a pattern the file lists matches it; and the managed files themselves, which apply as files from any repo do.
 
 ## Backups hold plaintext
 
