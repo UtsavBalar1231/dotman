@@ -361,6 +361,9 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "imports_leave_out_files_that_hold_a_credential",
             "the_staging_guard_keeps_a_credential_out_of_the_commit",
             "a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit",
+            "a_credential_in_a_name_or_a_link_target_never_reaches_the_remote",
+            "a_managed_link_pointed_at_a_credential_is_held_with_a_forget_that_works",
+            "imports_leave_out_a_credential_in_a_name_or_a_link_target",
         ],
     ),
     (
@@ -546,6 +549,8 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "imports_leave_out_files_that_hold_a_credential",
             "the_staging_guard_keeps_a_credential_out_of_the_commit",
             "a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit",
+            "the_staging_guard_holds_a_credential_in_a_repo_name_or_link_target",
+            "a_credential_in_a_name_or_a_link_target_never_reaches_the_remote",
         ],
     ),
     (

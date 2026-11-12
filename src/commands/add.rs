@@ -28,6 +28,7 @@ use glob::{MatchOptions, Pattern};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -414,6 +415,9 @@ impl Guarded {
         for (key, leaf) in &self.held {
             let path = pasteable(home, key);
             let hint = match (leaf, holds_key(home, key, allow)) {
+                (_, Some(found)) if found.place != secrets::Place::Content => {
+                    format!(", and {found}{}", found.remedy(None))
+                }
                 // --encrypt takes regular files only.
                 (Leaf::Link, _) => format!("; `{bin} add {keep}{path}` stores the link as it is"),
                 (Leaf::File { binary: true, .. }, _) => {
@@ -577,6 +581,13 @@ fn guard_content(
     let mut content = ContentGuard::default();
     // An unreadable file, or one whose source cannot be chosen, fails later with its own error.
     let mut check = |key: &str, leaf: &Leaf, named: bool| -> Option<Finding> {
+        // Neither a flag nor an allow entry lets a name or a link target through.
+        if let Some(found) = secrets::held_name(key) {
+            return Some(found);
+        }
+        if matches!(leaf, Leaf::Link) {
+            return holds_key(home, key, allow);
+        }
         let source = targets.source_for(key).ok()?;
         if !matches!(leaf, Leaf::File { .. })
             || args.encrypt
@@ -1068,14 +1079,16 @@ pub(crate) fn secret_patterns(repo_config: &RepoConfig) -> Result<Vec<Pattern>> 
         .collect()
 }
 
-/// The holds that need only the name and size of a new file. A name that matches `secrets` wins
-/// over everything else.
+/// The holds that need only the name and size of a new file. A credential in the name wins over
+/// everything else, since no flag lets one through, then a name that matches `secrets`.
 pub(crate) fn hold_by_name_and_size(secrets: &[Pattern], key: &str, size: u64) -> Option<Hold> {
-    if secrets.iter().any(|p| p.matches_with(key, MATCH_SECRET)) {
-        Some(Hold::SecretName)
-    } else {
-        (size > HOLD_BYTES).then_some(Hold::Large)
-    }
+    secrets::held_name(key).map(Hold::Content).or_else(|| {
+        if secrets.iter().any(|p| p.matches_with(key, MATCH_SECRET)) {
+            Some(Hold::SecretName)
+        } else {
+            (size > HOLD_BYTES).then_some(Hold::Large)
+        }
+    })
 }
 
 /// The holds that need the bytes of `key`, a file that passed [`hold_by_name_and_size`].
@@ -1150,10 +1163,14 @@ pub(crate) fn scan_dirs(
                     None => binary.then_some(Hold::Binary).or_else(content),
                 }
             }
-            Leaf::Link => secrets
-                .iter()
-                .any(|p| p.matches_with(&key, MATCH_SECRET))
-                .then_some(Hold::SecretName),
+            Leaf::Link => holds_key(&ctx.paths.home, &key, &ctx.machine.guard.allow)
+                .map(Hold::Content)
+                .or_else(|| {
+                    secrets
+                        .iter()
+                        .any(|p| p.matches_with(&key, MATCH_SECRET))
+                        .then_some(Hold::SecretName)
+                }),
         };
         match hold {
             Some(hold) => {
@@ -1194,6 +1211,10 @@ impl Planner<'_> {
             bail!(
                 "{key}: names starting with {TEMP_PREFIX} are dotman's temporary files, which are never managed; rename it to add it"
             );
+        }
+        // A directory's key goes into `[dirs]` in `.dotman.toml`.
+        if let Some(found) = secrets::held_name(&key) {
+            bail!("{key}: {found}{}", found.remedy(None));
         }
         let abs = absolute_input(input, &self.cwd, &paths.home);
         paths.refuse_protected(&abs)?;
@@ -1419,11 +1440,12 @@ fn printable(text: &str) -> String {
     })
 }
 
-/// What the content guard holds in H of `key`. An unreadable file is not held here; capturing it
-/// fails and is reported then.
+/// What the content guard holds in H of `key`, a file or a symlink. An unreadable file is not held
+/// here; capturing it fails and is reported then.
 pub(crate) fn holds_key(home: &Path, key: &str, allow: &[Allow]) -> Option<Finding> {
     match read_node(home, key) {
         Ok(Node::File { bytes, .. }) => secrets::held(&bytes, key, allow),
+        Ok(Node::Symlink(target)) => secrets::held_link(target.as_os_str().as_bytes(), key),
         _ => None,
     }
 }
@@ -1516,10 +1538,14 @@ pub(crate) fn commit_one(
     let repo = &ctx.paths.repo;
     let target = repo.join(source);
     let node = read_node(home, key)?;
-    if let Node::File { bytes, .. } = &node
-        && !encrypted
-        && let Some(found) = secrets::held(bytes, key, &ctx.machine.guard.allow)
-    {
+    let found = match &node {
+        Node::File { bytes, .. } if !encrypted => {
+            secrets::held(bytes, key, &ctx.machine.guard.allow)
+        }
+        Node::Symlink(target) => secrets::held_link(target.as_os_str().as_bytes(), key),
+        _ => None,
+    };
+    if let Some(found) = found.or_else(|| secrets::held_name(source)) {
         return Err(Held(found).into());
     }
     ensure_worktree_parents(repo, source)?;
@@ -2333,6 +2359,7 @@ mod tests {
             (key == ".aws/credentials").then_some(Finding {
                 rule: "github-token",
                 line: 2,
+                place: secrets::Place::Content,
             })
         };
         let err = guard_secrets(

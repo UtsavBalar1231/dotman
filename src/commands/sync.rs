@@ -427,6 +427,12 @@ pub(crate) fn held_remedy(ctx: &Context, entry: &StatusEntry) -> String {
         .keys()
         .next()
         .map_or_else(|| source.clone().into_owned(), str::to_owned);
+    if secrets::held_name(&source).is_some() {
+        return format!(
+            "encryption cannot hide a name: `{bin} forget {}` stops managing it; rename it before you add it again",
+            add::pasteable(&ctx.paths.home, &key)
+        );
+    }
     let in_home = matches!(
         (read_node(&ctx.paths.home, &key), read_node(&ctx.paths.repo, &source)),
         (Ok(Node::File { bytes: home, .. }), Ok(Node::File { bytes: repo, .. })) if home == repo
@@ -479,20 +485,29 @@ fn holds_back_the_pull(ctx: &Context) -> Result<bool> {
     Ok(true)
 }
 
-/// What the content guard holds in the regular file at `path` in the repo, minus what `[guard]
-/// allow` covers for its key. A FIFO swapped in cannot hang the open, and anything unreadable is
-/// left to `git add` to report.
+/// What the content guard holds at `path` in the repo: in its name, in a symlink's target, or in a
+/// regular file minus what `[guard] allow` covers for its key. A path gone from the worktree is a
+/// deletion, which is never held. A FIFO swapped in cannot hang the open, and anything unreadable
+/// is left to `git add` to report.
 fn holds_secret_key(ctx: &Context, path: &Path, allow: &[Allow]) -> Option<Finding> {
+    let full = ctx.paths.repo.join(path);
+    let source = path.to_string_lossy();
+    if fs::symlink_metadata(&full).ok()?.is_symlink() {
+        let target = fs::read_link(&full).ok()?;
+        return secrets::held_link(target.as_os_str().as_bytes(), &source);
+    }
+    if let Some(found) = secrets::held_name(&source) {
+        return Some(found);
+    }
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(ctx.paths.repo.join(path))
+        .open(&full)
         .ok()?;
     let mut bytes = Vec::new();
     if !file.metadata().is_ok_and(|meta| meta.is_file()) || file.read_to_end(&mut bytes).is_err() {
         return None;
     }
-    let source = path.to_string_lossy();
     let key = Sources::group([source.as_ref()])
         .keys()
         .next()

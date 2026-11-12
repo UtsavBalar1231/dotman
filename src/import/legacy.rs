@@ -834,7 +834,8 @@ fn guard_objects(root: &Path, history: &[(String, Snapshot)]) -> BTreeMap<String
 /// The `held` argument of [`plan`] for what [`guard_objects`] found.
 fn held_by(guarded: &BTreeMap<String, Finding>) -> impl Fn(&str, &str) -> Option<Refusal> + '_ {
     |key, hash| {
-        let item = held_item(key, *guarded.get(hash)?);
+        let found = secrets::held_name(key).or_else(|| guarded.get(hash).copied())?;
+        let item = held_item(key, found);
         Some((item.reason, item.detail))
     }
 }

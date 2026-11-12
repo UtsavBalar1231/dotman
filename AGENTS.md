@@ -53,7 +53,7 @@ scripts/                release helper scripts
 | Variant selection | `src/variant.rs` | Pure; the status model calls it |
 | Template variables | `src/template.rs` | `env` holds only `[template] env` names |
 | Encryption, keys, recipients | `src/secrets.rs`, `src/commands/key.rs` | The key goes to age's stdin only |
-| The content guard | `src/secrets.rs` (`RULES`, `held`) | One combined regex; the age rule also runs alone, and binary files are skipped |
+| The content guard | `src/secrets.rs` (`RULES`, `held`, `held_link`) | One combined regex; the age rule also runs alone, and binary files are skipped. `held` scans the key's name first and `held_link` a symlink's target; no allow entry covers either |
 | What sync holds or refuses | `src/commands/sync.rs` | `held_entries` is the staging guard; the mass-delete and unrelated-history refusals live here too |
 | Key rules | `src/paths.rs` (`validate_key`) | Control characters, `.git` in NTFS spellings and reserved root names |
 | Checks every command runs first | `src/context.rs` (`guard`, `lock`) | All but `doctor`, `git` and `completion`; `log` runs only the first. A command that writes calls `lock`, which takes the lock, runs `guard` and refreshes `.git/info/attributes` |

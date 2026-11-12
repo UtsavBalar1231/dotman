@@ -16,7 +16,8 @@
 
 use super::gittree::{Staging, check_target, install_keeping_origin, shown};
 use super::{
-    EditedConfig, Item, Report, author_email, count, held, origin_hint, proceed, require_fresh,
+    EditedConfig, Item, Report, author_email, count, held, held_link, origin_hint, proceed,
+    require_fresh,
 };
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
@@ -1008,7 +1009,7 @@ fn settle(
             Content::Path(path) => fs::read(path)
                 .ok()
                 .and_then(|bytes| held(&bytes, &entry.target, &[])),
-            Content::Link(_) => None,
+            Content::Link(link) => held_link(link, &entry.target),
         };
         if let Some(item) = found {
             items.push(item);

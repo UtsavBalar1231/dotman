@@ -1419,10 +1419,12 @@ impl Run<'_> {
         let managed = self.sources.contains(key) || state.files.contains_key(key);
         if self.opts.dry_run {
             // Only a dry run reads H here; a real capture checks what it is about to store.
-            if !encrypted
-                && let Some(found) =
-                    add::holds_key(&self.ctx.paths.home, key, &self.ctx.machine.guard.allow)
-            {
+            let found = if encrypted {
+                secrets::held_name(source)
+            } else {
+                add::holds_key(&self.ctx.paths.home, key, &self.ctx.machine.guard.allow)
+            };
+            if let Some(found) = found {
                 self.held_key(key, found, managed);
                 return false;
             }

@@ -134,13 +134,26 @@ static SCANNER: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| {
 static AGE_SCANNER: LazyLock<Result<Regex, regex::Error>> =
     LazyLock::new(|| RegexBuilder::new(AGE_PATTERN).unicode(false).build());
 
-/// What the content guard found: the rule, and the 1-based line where its match starts.
+/// What the content guard found: the rule, where, and the 1-based line where its match starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Finding {
     /// A name from the rule list, such as `github-token`.
     pub rule: &'static str,
-    /// 1-based.
+    /// 1-based; 1 for a name or a link target.
     pub line: usize,
+    /// Decides how the hold is reported and what resolves it.
+    pub place: Place,
+}
+
+/// Where a finding is. Only content can be encrypted or let through by `[guard] allow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// What `--encrypt` can store encrypted.
+    Content,
+    /// The path, which every tree, commit subject and log shows.
+    Name,
+    /// A symlink's target, which git stores as the link's content.
+    Target,
 }
 
 impl Finding {
@@ -154,6 +167,7 @@ impl Finding {
     #[must_use]
     pub fn allowed(self, key: &str, allow: &[Allow]) -> bool {
         self.overridable()
+            && self.place == Place::Content
             && allow
                 .iter()
                 .any(|entry| entry.path == key && entry.rule == self.rule)
@@ -161,19 +175,23 @@ impl Finding {
 
     /// What follows the finding in a message: how to resolve the hold, with the commands for
     /// `path`, or with only the `add` flags. It never offers `--allow-plain`, which would publish
-    /// the credential.
+    /// the credential, and offers `--encrypt` only for content.
     #[must_use]
     pub fn remedy(self, path: Option<&str>) -> String {
         let bin = name::bin();
         let never = ", which dotman never stores in plain text";
         let remove = "; or remove the secret from the file";
-        match (path, self.overridable()) {
-            (None, true) => format!("; --encrypt stores it encrypted{remove}"),
-            (None, false) => format!("{never}; --encrypt stores it encrypted"),
-            (Some(path), true) => {
+        match (self.place, path, self.overridable()) {
+            (Place::Name, ..) => "; encryption cannot hide a name, so rename it".to_owned(),
+            (Place::Target, ..) => {
+                "; --encrypt takes regular files only, so point the link elsewhere".to_owned()
+            }
+            (Place::Content, None, true) => format!("; --encrypt stores it encrypted{remove}"),
+            (Place::Content, None, false) => format!("{never}; --encrypt stores it encrypted"),
+            (Place::Content, Some(path), true) => {
                 format!("; `{bin} add --encrypt {path}` stores it encrypted{remove}")
             }
-            (Some(path), false) => {
+            (Place::Content, Some(path), false) => {
                 format!("{never}; `{bin} add --encrypt {path}` stores it encrypted")
             }
         }
@@ -182,14 +200,15 @@ impl Finding {
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.overridable() {
-            write!(f, "line {} holds a {}", self.line, self.rule)
+        let what = if self.overridable() {
+            format!("a {}", self.rule)
         } else {
-            write!(
-                f,
-                "line {} holds an age secret key (AGE-SECRET-KEY-)",
-                self.line
-            )
+            "an age secret key (AGE-SECRET-KEY-)".to_owned()
+        };
+        match self.place {
+            Place::Content => write!(f, "line {} holds {what}", self.line),
+            Place::Name => write!(f, "the name holds {what}"),
+            Place::Target => write!(f, "the link target holds {what}"),
         }
     }
 }
@@ -205,6 +224,7 @@ pub fn findings(bytes: &[u8]) -> Box<dyn Iterator<Item = Finding> + '_> {
         return Box::new(std::iter::once(Finding {
             rule: "unscanned",
             line: 1,
+            place: Place::Content,
         }));
     };
     let mut found: Vec<(usize, &'static str)> = scanner
@@ -223,6 +243,7 @@ pub fn findings(bytes: &[u8]) -> Box<dyn Iterator<Item = Finding> + '_> {
     Box::new(found.into_iter().map(move |(start, rule)| Finding {
         rule,
         line: line_at(bytes, start),
+        place: Place::Content,
     }))
 }
 
@@ -242,13 +263,39 @@ fn line_at(bytes: &[u8], offset: usize) -> usize {
         .count()
 }
 
-/// The first finding in `bytes` that no `[guard] allow` entry for `key` covers, an age key before
-/// any credential, since no flag stores one in plain text.
+/// What the guard holds in the file `key`: a finding in the name first, which nothing lets
+/// through, then the first finding in `bytes` that no `[guard] allow` entry for `key` covers, an
+/// age key before any credential, since no flag stores one in plain text.
 #[must_use]
 pub fn held(bytes: &[u8], key: &str, allow: &[Allow]) -> Option<Finding> {
+    held_name(key).or_else(|| {
+        findings(bytes)
+            .filter(|found| !found.allowed(key, allow))
+            .min_by_key(|found| found.overridable())
+    })
+}
+
+/// A finding in the path `key`, an age key before any credential.
+#[must_use]
+pub fn held_name(key: &str) -> Option<Finding> {
+    placed(key.as_bytes(), Place::Name)
+}
+
+/// What the guard holds in the symlink `key` that points at `target`: a finding in the name, then
+/// one in the target.
+#[must_use]
+pub fn held_link(target: &[u8], key: &str) -> Option<Finding> {
+    held_name(key).or_else(|| placed(target, Place::Target))
+}
+
+fn placed(bytes: &[u8], place: Place) -> Option<Finding> {
     findings(bytes)
-        .filter(|found| !found.allowed(key, allow))
         .min_by_key(|found| found.overridable())
+        .map(|found| Finding {
+            line: 1,
+            place,
+            ..found
+        })
 }
 
 /// Whether `bytes` hold an age identity or a credential a rule finds, whatever `[guard] allow`
@@ -1202,6 +1249,36 @@ mod tests {
     }
 
     #[test]
+    fn no_allow_entry_covers_a_name_or_a_link_target() {
+        let token = format!("ghp_{}", "x".repeat(36));
+        let key = format!(".config/{token}");
+        let allow = [Allow {
+            path: key.clone(),
+            rule: "github-token".to_owned(),
+        }];
+        let found = held(b"plain\n", &key, &allow);
+        assert_eq!(
+            found,
+            Some(Finding {
+                rule: "github-token",
+                line: 1,
+                place: Place::Name,
+            })
+        );
+        assert_eq!(
+            found.map(|found| format!("{found}{}", found.remedy(Some("p")))),
+            Some(
+                "the name holds a github-token; encryption cannot hide a name, so rename it".into()
+            )
+        );
+        let target = held_link(format!("../{token}").as_bytes(), ".link");
+        assert_eq!(target.map(|found| found.place), Some(Place::Target));
+        assert_eq!(held_link(b"../plain", ".link"), None);
+        // SECURITY.md lists this miss: the rules start at a word boundary.
+        assert_eq!(held_name(&format!("x/cache_{token}")), None);
+    }
+
+    #[test]
     fn allow_entries_match_by_key_and_rule_and_never_cover_an_age_key() {
         let allow = [Allow {
             path: ".config/zsh/local.zsh".to_owned(),
@@ -1217,13 +1294,15 @@ mod tests {
             held(".config/zsh/local.zsh"),
             Some(Finding {
                 rule: "npm-token",
-                line: 3
+                line: 3,
+                place: Place::Content,
             })
         );
         assert_eq!(held(".zshrc").map(|f| f.rule), Some("github-token"));
         let age = Finding {
             rule: AGE_RULE,
             line: 1,
+            place: Place::Content,
         };
         let allow_age = [Allow {
             path: "k".to_owned(),

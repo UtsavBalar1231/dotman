@@ -11,8 +11,8 @@
 
 use super::gittree::{Staging, check_target, install_keeping_origin, is_git_dir};
 use super::{
-    EditedConfig, Item, Report, author_email, chezmoi, count, origin_hint, proceed, refuse_overlap,
-    require_fresh, resolved,
+    EditedConfig, Item, Report, author_email, chezmoi, count, held_link, origin_hint, proceed,
+    refuse_overlap, require_fresh, resolved,
 };
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
@@ -730,10 +730,9 @@ impl Planner<'_> {
             self.item(DANGLING_LINK, format!("{sub} -> {}", raw.display()));
             return;
         }
-        if hold_by_name_and_size(&self.secrets, sub, 0).is_some() {
-            plan.skipped
-                .push(format!("{sub}: held, {}", Hold::SecretName.reason()));
-            self.item(HELD, format!("{sub}: {}", Hold::SecretName.reason()));
+        if let Some(hold) = hold_by_name_and_size(&self.secrets, sub, 0) {
+            plan.skipped.push(format!("{sub}: held, {}", hold.reason()));
+            self.item(HELD, format!("{sub}: {}", hold.reason()));
             return;
         }
         let dir = path.parent().unwrap_or(real);
@@ -741,6 +740,11 @@ impl Planner<'_> {
             self.item(ODD, format!("{sub}: the link text is not valid UTF-8"));
             return;
         };
+        if let Some(item) = held_link(&text, sub) {
+            plan.skipped.push(item.detail.clone());
+            self.items.push(item);
+            return;
+        }
         plan.items.insert(sub.to_owned(), Leaf::Link);
         self.writes.push(Write {
             key: sub.to_owned(),

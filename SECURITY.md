@@ -65,10 +65,11 @@ Before a write replaces a file in `$HOME`, the file is copied to `$XDG_STATE_HOM
 
 ## What the guards hold
 
-The content guard scans what a plain capture would store: `add`, new files under a managed directory, `sync` of a local edit, `import`, and every file `sync` is about to commit, which covers `dotman edit` and edits made by hand in the repo. It holds whatever the remote, public or not.
+The content guard scans what a plain capture would store: `add`, new files under a managed directory, `sync` of a local edit, `import`, and every file `sync` is about to commit, which covers `dotman edit` and edits made by hand in the repo. It holds whatever the remote, public or not. Besides a file's content, it scans each path's name and each symlink's target, which git stores as the link's content.
 
 - The rules: an age identity (`AGE-SECRET-KEY-1` and 58 bech32 characters), GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and fine-grained tokens (`github_pat_`), GitLab tokens, Slack tokens and webhooks, AWS access key IDs, Stripe live keys, and OpenAI, Anthropic, npm, PyPI, DigitalOcean, SendGrid, Hugging Face, OpenRouter, Groq, xAI, Perplexity and Docker tokens, and PEM private key blocks. Each rule starts with a fixed prefix.
-- A finding names the rule and the line, never the value.
+- A finding names the rule and the line, never the value. A finding in a name is reported with its path, which shows the value.
+- A credential in a name or a link target is held whatever the flags: no `[guard] allow` entry covers it, encryption cannot hide a name, and `--encrypt` takes no symlink. The hold says to rename the file or point the link elsewhere, and for a file dotman manages, to `forget` it. A git-tree import also scans the path of each file its history adds, and a finding there makes the import one commit of the current tree.
 - An age identity is never stored in plain text: no flag and no `[guard] allow` entry lets one through. In a system file, `add --system` refuses any finding and `sync` holds it, since system scope does not encrypt and no allow entry applies there.
 - The name guard holds new files under a managed directory whose names match `[guard] secret_names`. With a remote known to be public, one that answers an anonymous `git ls-remote`, `add` also refuses a secret-named file you name, unless you pass `--encrypt` or `--allow-plain`.
 
@@ -76,7 +77,9 @@ What they miss:
 
 - credentials without a known prefix, such as passwords, generic API keys and tokens of providers not on the list;
 - files that look binary, with a NUL byte in the first 8000 bytes, which are not scanned; for a secret-named one, the hints offer `--encrypt` and not `--allow-plain`;
-- a file whose name does not match `secret_names` and whose content no rule finds.
+- a file whose name matches neither `secret_names` nor a rule, and whose content no rule finds;
+- a token joined to a letter, digit or underscore before it, such as `cache_ghp_...`, since each rule starts at a word boundary;
+- in system scope, a name or a link target at capture: `add --system` and a system capture scan only the content.
 
 ## Outside the threat model
 

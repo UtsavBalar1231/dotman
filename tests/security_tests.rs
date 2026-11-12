@@ -1594,6 +1594,280 @@ fn imports_leave_out_files_that_hold_a_credential() {
     );
 }
 
+/// Every subject and body in the remote's history, and its trees and patches.
+fn remote_everything(env: &TestEnv) -> String {
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let messages = env.git(&["--git-dir", &remote, "log", "--all", "--format=%s%n%b"]);
+    format!("{messages}{}{}", remote_tree(env), remote_history(env))
+}
+
+/// A credential in a path's name or in a symlink's target is held like one in a file, and no flag
+/// lets it through: `add` refuses the file and the link, `--allow-plain` and `--encrypt` too, and
+/// a directory whose name holds one, which `[dirs]` would record; `add <dir>` and
+/// `sync` hold each new one under a managed directory and exit 3, and neither the remote's trees,
+/// patches and messages nor `dotman log` ever show it. Renamed, the file is captured.
+#[test]
+fn a_credential_in_a_name_or_a_link_target_never_reaches_the_remote() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    let token = github_token();
+    let named = format!(".config/d/{token}");
+    let link = ".config/d/current";
+    env.write(".config/d/rc", b"safe=1\n", 0o644);
+    env.write(&named, b"x=1\n", 0o644);
+    env.write(format!(".cache/x/{token}.json"), b"y=1\n", 0o644);
+    env.symlink(link, format!("../../.cache/x/{token}.json"));
+    for (args, found) in [
+        (&["add", &named][..], "the name holds a github-token"),
+        (
+            &["add", "--allow-plain", &named],
+            "the name holds a github-token",
+        ),
+        (&["add", link], "the link target holds a github-token"),
+    ] {
+        let err = exits(&env.run(args), 1);
+        assert!(err.contains(found), "{args:?}: {err}");
+        assert!(!err.contains("--encrypt stores"), "{args:?}: {err}");
+    }
+    let dir = format!(".config/{token}");
+    env.write(format!("{dir}/rc"), b"a=1\n", 0o644);
+    let err = exits(&env.run(&["add", "--yes", &dir]), 1);
+    assert!(err.contains("the name holds a github-token"), "{err}");
+    fs::remove_dir_all(env.home().join(&dir)).unwrap();
+    if age_installed() {
+        env.ok(&["key", "init"]);
+        let err = exits(&env.run(&["add", "--encrypt", &named]), 1);
+        assert!(err.contains("encryption cannot hide a name"), "{err}");
+    }
+    assert_eq!(env.porcelain("list"), []);
+    assert_eq!(
+        files_containing(&env.repo(), token.as_bytes()),
+        Vec::<String>::new()
+    );
+
+    let err = exits(&env.run(&["add", "--yes", ".config/d"]), 3);
+    assert!(
+        err.contains(&format!(
+            "held {named}: the name holds a github-token; encryption cannot hide a name, so rename it"
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains("held .config/d/current: the link target holds a github-token; --encrypt takes regular files only, so point the link elsewhere"),
+        "{err}"
+    );
+    env.write(format!(".config/d/sub/{token}.conf"), b"z=1\n", 0o644);
+    for _ in 0..2 {
+        let err = exits(&env.run(&["sync"]), 3);
+        for key in [named.as_str(), link] {
+            assert!(err.contains(&format!("  {key} (")), "{err}");
+        }
+        assert!(
+            err.contains(&format!(".config/d/sub/{token}.conf (the name holds")),
+            "{err}"
+        );
+    }
+    assert_eq!(
+        remote_tree(&env).lines().collect::<Vec<_>>(),
+        [".config/d/rc", ".dotman.toml", "install.sh"]
+    );
+    let log = env.ok(&["log"]);
+    assert!(!log.contains(&token), "{log}");
+    assert!(!remote_everything(&env).contains(&token));
+
+    fs::rename(
+        env.home().join(&named),
+        env.home().join(".config/d/renamed"),
+    )
+    .unwrap();
+    fs::remove_dir_all(env.home().join(".config/d/sub")).unwrap();
+    fs::remove_file(env.home().join(link)).unwrap();
+    env.symlink(link, "rc");
+    exits(&env.run(&["sync"]), 0);
+    let tree = remote_tree(&env);
+    assert!(
+        tree.contains(".config/d/renamed") && tree.contains(link),
+        "{tree}"
+    );
+    assert!(!remote_everything(&env).contains(&token));
+}
+
+/// A managed symlink pointed again at a target that holds a credential is held at capture, so
+/// the repo keeps the old link, and the `forget` the hold prints, run as printed, stops managing
+/// it: the next sync commits that, and the target never reaches the remote.
+#[test]
+fn a_managed_link_pointed_at_a_credential_is_held_with_a_forget_that_works() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".zshrc", b"zsh\n", 0o644);
+    env.symlink(".zlink", ".zshrc");
+    env.ok(&["add", ".zlink"]);
+    env.ok(&["sync"]);
+    let token = github_token();
+    env.write(format!(".cache/{token}"), b"x\n", 0o644);
+    fs::remove_file(env.home().join(".zlink")).unwrap();
+    env.symlink(".zlink", format!(".cache/{token}"));
+
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(
+        err.contains(".zlink: held, the link target holds a github-token"),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read_link(env.repo().join(".zlink")).unwrap(),
+        PathBuf::from(".zshrc")
+    );
+    let out = common::run_hint(&env, &err, "forget");
+    assert!(out.status.success(), "{}", stderr(&out));
+    exits(&env.run(&["sync"]), 0);
+    assert!(!remote_tree(&env).contains(".zlink"));
+    assert!(!remote_everything(&env).contains(&token));
+}
+
+/// A symlink or a file made in the repo by hand reaches no capture: the staging guard holds one
+/// whose target or name holds a credential, sync stops before the pull and commits nothing, and
+/// status lists both. Moved out of the repo, as the hold says, they leave nothing behind.
+#[test]
+fn the_staging_guard_holds_a_credential_in_a_repo_name_or_link_target() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(".a", b"a\n", 0o644);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    let token = github_token();
+    let link = env.repo().join(".config/l");
+    fs::create_dir_all(env.repo().join(".config")).unwrap();
+    symlink(format!("../.cache/{token}"), &link).unwrap();
+    let named = format!(".x/{token}");
+    env.write_repo(&named, b"1\n");
+
+    let listed: Vec<String> = env
+        .porcelain("status")
+        .into_iter()
+        .filter(|(token, _)| token == "held-in-repo")
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(listed, [".config/l".to_owned(), named.clone()]);
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(
+        err.contains("  .config/l: the link target holds a github-token\n    not tracked; move "),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("  {named}: the name holds a github-token\n")),
+        "{err}"
+    );
+    assert!(!remote_everything(&env).contains(&token));
+
+    fs::remove_file(&link).unwrap();
+    fs::remove_dir_all(env.repo().join(".x")).unwrap();
+    exits(&env.run(&["sync"]), 0);
+    assert!(!remote_everything(&env).contains(&token));
+}
+
+/// A file that a commit made by hand already holds, under a name with a credential, is held when
+/// edited, and the `forget` the hold prints, run as printed, works: the deletion it leaves is
+/// never held, so the next sync commits it.
+#[test]
+fn a_committed_name_with_a_credential_is_held_until_forgotten() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let token = github_token();
+    let named = format!(".y/{token}");
+    env.write_repo(&named, b"1\n");
+    env.ok(&["git", "add", "--", &named]);
+    env.ok(&["git", "commit", "-q", "-m", "by hand"]);
+    env.ok(&["apply"]);
+    env.write_repo(&named, b"2\n");
+
+    let err = exits(&env.run(&["sync"]), 3);
+    assert!(
+        err.contains(&format!("  {named}: the name holds a github-token\n")),
+        "{err}"
+    );
+    let out = common::run_hint(&env, &err, "forget");
+    assert!(out.status.success(), "{}", stderr(&out));
+    exits(&env.run(&["sync"]), 0);
+    let repo = env.repo().to_string_lossy().into_owned();
+    let tree = env.git(&["-C", &repo, "ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(!tree.contains(&token), "{tree}");
+}
+
+/// A git tree whose current tree or history holds a credential in a name or a link target is
+/// imported as one commit, with the file and the link left out and reported, root files such as
+/// a README and a LICENSE link among them, and a symlink farm
+/// leaves them out too: nothing in the repo names the token.
+#[test]
+fn imports_leave_out_a_credential_in_a_name_or_a_link_target() {
+    let token = github_token();
+    let commit = |env: &TestEnv, source: &Path, message: &str| {
+        common::git_in(env, source, &["add", "-A"]);
+        common::git_in(env, source, &["commit", "-q", "-m", message]);
+    };
+    // The old file has `.bashrc`'s bytes, so only the walk over the history's paths finds it.
+    let env = TestEnv::new();
+    let source = source_tree(&env, "dots", &[(".bashrc", "# rc\n")]);
+    common::git_in(&env, &source, &["init", "-q"]);
+    fs::write(source.join(format!(".old-{token}")), "# rc\n").unwrap();
+    commit(&env, &source, "old");
+    fs::remove_file(source.join(format!(".old-{token}"))).unwrap();
+    commit(&env, &source, "gone");
+    source.seal();
+    let err = exits(&env.run(&["import", &source.to_string_lossy()]), 0);
+    assert!(err.contains(": github-token, added in "), "{err}");
+    let repo = env.repo().to_string_lossy().into_owned();
+    let history = env.git(&["-C", &repo, "log", "--all", "-p", "--format=%s%n%b"]);
+    assert!(history.contains(".bashrc"), "{history}");
+    assert!(!history.contains(&token), "{history}");
+
+    let env = TestEnv::new();
+    let source = source_tree(&env, "dots", &[(".bashrc", "# rc\n")]);
+    common::git_in(&env, &source, &["init", "-q"]);
+    fs::write(source.join(format!(".{token}")), "1\n").unwrap();
+    symlink(format!(".cache/{token}"), source.join(".link")).unwrap();
+    fs::write(source.join(format!("README-{token}")), "1\n").unwrap();
+    symlink(format!("../{token}"), source.join("LICENSE")).unwrap();
+    commit(&env, &source, "dots");
+    source.seal();
+    let err = exits(&env.run(&["import", &source.to_string_lossy()]), 3);
+    assert!(err.contains("the name holds a github-token"), "{err}");
+    assert!(
+        err.contains(".link: the link target holds a github-token"),
+        "{err}"
+    );
+    let repo = env.repo().to_string_lossy().into_owned();
+    let history = env.git(&["-C", &repo, "log", "--all", "-p", "--format=%s%n%b"]);
+    assert!(history.contains(".bashrc"), "{history}");
+    assert!(!history.contains(&token), "{history}");
+    assert_eq!(
+        files_containing(&env.repo(), token.as_bytes()),
+        Vec::<String>::new()
+    );
+
+    let env = TestEnv::new();
+    stow(&env);
+    env.write(format!("dotfiles/zsh/.z-{token}"), b"1\n", 0o644);
+    env.symlink(format!(".z-{token}"), format!("dotfiles/zsh/.z-{token}"));
+    env.symlink(
+        "dotfiles/nvim/.config/nvim/current",
+        format!("../../../../.cache/{token}"),
+    );
+    env.write(format!(".cache/{token}"), b"1\n", 0o644);
+    let err = exits(&env.run(&["import", "--yes"]), 3);
+    assert!(err.contains("the name holds a github-token"), "{err}");
+    assert!(
+        err.contains(".config/nvim/current: the link target holds a github-token"),
+        "{err}"
+    );
+    let repo = env.repo().to_string_lossy().into_owned();
+    let tree = env.git(&["-C", &repo, "ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(tree.contains(".config/nvim/init.lua"), "{tree}");
+    assert!(
+        !tree.contains(&token) && !tree.contains("nvim/current"),
+        "{tree}"
+    );
+}
+
 /// The age identity file named by `[age] identity`, and the file named by `DOTMAN_AGE_KEY_FILE`,
 /// are refused by `add`, plain or encrypted, and a directory add skips the identity: nothing is
 /// copied.

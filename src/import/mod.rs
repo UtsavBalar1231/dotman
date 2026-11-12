@@ -109,16 +109,29 @@ impl Report {
 /// What the content guard holds is left out of every commit the import makes.
 const CREDENTIAL: &str = "files that hold an age secret key or a credential, left out of the repo; `{bin} add --encrypt` stores one encrypted";
 
+/// Encryption cannot hide a name, and `--encrypt` takes no symlink.
+const NAMED: &str = "files whose name or link target holds an age secret key or a credential, left out of the repo; rename the file, or point the link elsewhere";
+
 /// The first finding in `bytes` that `allow` does not cover for `key`, as an entry that needs
 /// action.
 pub fn held(bytes: &[u8], key: &str, allow: &[Allow]) -> Option<Item> {
     secrets::held(bytes, key, allow).map(|found| held_item(key, found))
 }
 
+/// What the guard holds in the symlink `key` that points at `target`, as an entry that needs
+/// action.
+pub fn held_link(target: &str, key: &str) -> Option<Item> {
+    secrets::held_link(target.as_bytes(), key).map(|found| held_item(key, found))
+}
+
 /// `found` in `key` as an entry that needs action.
 pub fn held_item(key: &str, found: Finding) -> Item {
     Item {
-        reason: CREDENTIAL,
+        reason: if found.place == secrets::Place::Content {
+            CREDENTIAL
+        } else {
+            NAMED
+        },
         detail: format!("{key}: {found}"),
     }
 }

@@ -13,8 +13,8 @@ use super::chezmoi;
 use super::farm;
 use super::yadm::{self, Alternate, Machine};
 use super::{
-    EditedConfig, Item, Report, Source, author_email, count, find_legacy, held, homes, legacy,
-    origin_hint, proceed, require_clean, require_fresh,
+    EditedConfig, Item, Report, Source, author_email, count, find_legacy, held, held_item,
+    held_link, homes, legacy, origin_hint, proceed, require_clean, require_fresh,
 };
 use crate::bootstrap;
 use crate::cli::ImportArgs;
@@ -697,20 +697,23 @@ fn tally(found: &Analysis, recover: bool) -> Report {
 
 /// Takes each file the content guard holds out of the conversion, so the conversion commit removes
 /// it from the tree; the history the source brings still has it. Root files dotman never applies
-/// are not dotfiles and stay.
+/// are not dotfiles, so only their names and link targets are held.
 fn guard_content(repo: &Path, found: &mut Analysis, allow: &[Allow]) {
     let mut left = Vec::new();
     found.kept.retain(|kept| {
-        if kept.reserved || kept.mode == "120000" {
-            return true;
-        }
-        let item = kept.body.as_ref().map_or_else(
-            || match read_node(repo, &kept.from) {
+        // `read_node` refuses a reserved root name, so a link is read directly.
+        let link = (kept.mode == "120000")
+            .then(|| fs::read_link(repo.join(&kept.from)).ok())
+            .flatten();
+        let item = match (link, kept.reserved, &kept.body) {
+            (Some(target), ..) => held_link(&target.to_string_lossy(), &kept.to),
+            (None, true, _) => secrets::held_name(&kept.to).map(|found| held_item(&kept.to, found)),
+            (None, false, Some(body)) => held(body.as_bytes(), &kept.to, allow),
+            (None, false, None) => match read_node(repo, &kept.from) {
                 Ok(Node::File { bytes, .. }) => held(&bytes, &kept.to, allow),
                 _ => None,
             },
-            |body| held(body.as_bytes(), &kept.to, allow),
-        );
+        };
         let Some(item) = item else {
             return true;
         };
@@ -852,7 +855,7 @@ fn tainted_history(staging: &Staging, allow: &[Allow]) -> Result<Vec<Tainted>> {
                 .push(commit);
         }
     }
-    let mut grouped: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
+    let mut grouped = held_names(git)?;
     if !held.is_empty() {
         let adding = adding_commits(git, &held)?;
         for (oid, hit) in &held {
@@ -1016,6 +1019,40 @@ fn adding_commits(
         }
     }
     Ok(commits)
+}
+
+/// Each path whose name the guard holds, with the commits that add it, newest first. A path is
+/// as `--raw` quotes it, which leaves a token's characters as they are.
+fn held_names(git: &Git) -> Result<BTreeMap<(String, &'static str), Vec<String>>> {
+    let log = git_stdout(
+        git,
+        &[
+            "log",
+            "--all",
+            "--root",
+            "--no-renames",
+            "--no-abbrev",
+            "--raw",
+            "--diff-filter=A",
+            "--format=commit %H",
+        ],
+        None,
+    )?;
+    let mut held: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
+    let mut current = String::new();
+    for line in String::from_utf8_lossy(&log).lines() {
+        if let Some(commit) = line.strip_prefix("commit ") {
+            commit.clone_into(&mut current);
+        } else if line.starts_with(':')
+            && let Some((_, path)) = line.split_once('\t')
+            && let Some(found) = secrets::held_name(path)
+        {
+            held.entry((path.to_owned(), found.rule))
+                .or_default()
+                .push(current.clone());
+        }
+    }
+    Ok(held)
 }
 
 fn warn_tainted(tainted: &[Tainted], squash: bool, commits: &str) {
@@ -1829,7 +1866,12 @@ fn compare(ctx: &Context, git: &Git, found: &Analysis, include_missing: bool) ->
         match read_node(&ctx.paths.repo, key)? {
             Node::Missing if include_missing => {
                 let bytes = content(git, kept)?;
-                if !symlink && let Some(item) = held(&bytes, key, allow) {
+                let item = if symlink {
+                    held_link(&String::from_utf8_lossy(&bytes), key)
+                } else {
+                    held(&bytes, key, allow)
+                };
+                if let Some(item) = item {
                     needs(item.reason, item.detail);
                     continue;
                 }
