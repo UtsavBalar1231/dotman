@@ -1404,7 +1404,7 @@ fn parse_ident_email(ident: &str) -> Option<String> {
 }
 
 /// A branch name that [`checked_branch`] refuses. It is shown escaped, or not at all when it holds a
-/// credential, and the way out it prints puts the repo on `main` without naming it.
+/// credential or a backtick, and the way out it prints puts the repo on `main` without naming it.
 #[derive(Debug)]
 pub struct UnusableBranch {
     shown: Option<String>,
@@ -1421,8 +1421,7 @@ impl UnusableBranch {
 
     /// The git arguments that put `HEAD` on `main` without naming the branch. An unborn branch
     /// has no ref for `branch -m` to rename, so `HEAD` is pointed at `main` instead.
-    #[must_use]
-    pub const fn way_out(&self) -> [&'static str; 3] {
+    const fn way_out(&self) -> [&'static str; 3] {
         if self.unborn {
             ["symbolic-ref", "HEAD", "refs/heads/main"]
         } else {
@@ -1481,8 +1480,9 @@ pub fn checked_branch(name: &str) -> Result<String, UnusableBranch> {
     } else {
         return Ok(name.to_owned());
     };
+    // A backtick would let the name open a command span of its own in the message.
     Err(UnusableBranch {
-        shown: Some(crate::output::escape_line(name).into_owned()),
+        shown: (!name.contains('`')).then(|| crate::output::escape_line(name).into_owned()),
         why: why.to_owned(),
         unborn: false,
     })
@@ -2409,6 +2409,7 @@ mod tests {
             assert!(!shown.contains('\u{1b}'), "{shown}");
             assert!(!shown.contains(&token), "{shown}");
             assert!(shown.contains("`dotman git branch -m main`"), "{shown}");
+            assert_eq!(shown.matches('`').count(), 2, "{shown}");
         }
         assert!(
             sb.raw(sb.dir.path(), &["check-ref-format", "--branch", "+main"])
