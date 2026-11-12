@@ -94,8 +94,8 @@ pub struct Entry {
     pub hash: String,
     /// Permission bits as an octal string such as `0644`.
     pub mode: String,
-    /// The repo's mode, when this machine keeps the stricter `mode` instead; absent when `mode`
-    /// is the repo's.
+    /// The repo's mode, when this machine keeps its own `mode` instead; absent when `mode` is the
+    /// repo's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_mode: Option<String>,
 }

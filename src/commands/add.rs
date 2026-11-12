@@ -1543,7 +1543,7 @@ pub(crate) fn commit_one(
         .tuple;
     let mut entry = written.entry(source);
     // A mode `[modes]` leaves out stays this machine's: S holds it against the repo's, as for a
-    // stricter mode apply keeps, so the file stays clean here.
+    // mode apply keeps, so the file stays clean here.
     if let Some(mode) = file_mode
         .map(safe_mode)
         .filter(|mode| *mode != written.mode)

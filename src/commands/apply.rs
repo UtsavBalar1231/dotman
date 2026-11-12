@@ -272,7 +272,7 @@ pub(crate) struct Item {
     /// H as the write path reads it again before renaming. It differs from the classified H only
     /// for an absolute link into `$HOME`, which classification compares in its relative form.
     raw: Home,
-    /// The repo's own mode, when `r` carries the stricter mode this machine keeps instead.
+    /// The repo's own mode, when `r` carries the mode this machine keeps instead.
     repo_mode: Option<u32>,
     /// The repo's mode when S was recorded, for a home key.
     basis: Option<u32>,
@@ -930,7 +930,7 @@ impl Run<'_> {
                         self.kept.push(key.clone());
                     }
                 }
-                // An edit to a file whose stricter mode is kept here travels as content only, so
+                // An edit to a file whose own mode is kept here travels as content only, so
                 // other machines keep the repo's mode.
                 let kept = item.kept().filter(|(mode, _)| *mode == h.mode);
                 if let (Some((mode, repo)), Some(entry), false) =
@@ -1811,7 +1811,7 @@ pub(crate) fn classify_key(
         .map(parse_mode)
         .transpose()?;
     let basis = kept_against.or_else(|| s.as_ref().map(|s| s.mode));
-    // A stricter mode kept here is this machine's, not a local change, while the repo's mode is
+    // A mode this machine keeps is its own, not a local change, while the repo's mode is
     // the one it was kept against.
     let mut repo_mode = None;
     if let (Some(entry), Some(s), Some(against)) = (r.as_mut(), s.as_ref(), kept_against)
