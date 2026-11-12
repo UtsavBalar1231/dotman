@@ -1389,7 +1389,8 @@ impl Run<'_> {
                 scan.held.len(),
             ));
             for (key, hold) in &scan.held {
-                output::warning(&format!("  {key} ({})", hold.listed()));
+                let path = add::pasteable(&self.ctx.paths.home, key);
+                output::warning(&format!("  {key} ({})", hold.listed(&path)));
             }
         }
     }

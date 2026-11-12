@@ -144,7 +144,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
                 .context("cannot write to stdout")?;
         }
     } else {
-        list_new(&mut out, &new, &held).context("cannot write to stdout")?;
+        list_new(&mut out, &ctx, &new, &held).context("cannot write to stdout")?;
         list_held_in_repo(&mut out, &ctx, &in_repo).context("cannot write to stdout")?;
         for note in &scan.notes {
             output::warning(note);
@@ -334,6 +334,7 @@ fn summarize(rows: &[(&str, String)], unrecorded: usize, [new, held, held_in_rep
 
 fn list_new(
     out: &mut impl Write,
+    ctx: &Context,
     new: &[&String],
     held: &[(&String, Hold)],
 ) -> std::io::Result<()> {
@@ -349,7 +350,13 @@ fn list_new(
             "\nheld back; an [ignore] pattern in .dotman.toml silences one:"
         )?;
         for (key, hold) in held {
-            writeln!(out, "  {} ({})", escape_line(key), hold.listed())?;
+            let path = add::pasteable(&ctx.paths.home, key);
+            writeln!(
+                out,
+                "  {} ({})",
+                escape_line(key),
+                escape_line(&hold.listed(&path))
+            )?;
         }
     }
     Ok(())

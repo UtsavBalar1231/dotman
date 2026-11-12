@@ -951,8 +951,8 @@ fn remote_objects(env: &TestEnv) -> String {
 
 /// A new file under `[dirs]` whose name matches `[guard] secret_names` and which holds a
 /// credential is listed by its finding. `status`, `sync --dry-run` and `sync` never offer
-/// `--allow-plain` for it, and running every command they print for it, as printed and with
-/// `<file>` filled in, then `sync`, never sends the token to the remote.
+/// `--allow-plain` for it, and running every command they print for it, as printed, then `sync`,
+/// never sends the token to the remote.
 #[test]
 fn a_secret_named_dirs_file_that_holds_a_credential_is_never_offered_allow_plain() {
     let env = TestEnv::new();
@@ -999,13 +999,9 @@ fn a_secret_named_dirs_file_that_holds_a_credential_is_never_offered_allow_plain
     }
     assert!(!printed.is_empty());
 
-    let path = env.home().join(secrets).to_string_lossy().into_owned();
-    let filled = printed
-        .iter()
-        .map(|command| command.replace("<file>", &shell_words::quote(&path)));
     // A sync after each, so no later command can hide what an earlier one let through.
-    for command in printed.iter().cloned().chain(filled) {
-        let words = shell_words::split(&command).expect("a pasteable command");
+    for command in &printed {
+        let words = shell_words::split(command).expect("a pasteable command");
         let args: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
         env.run(&args);
         env.run(&["sync"]);

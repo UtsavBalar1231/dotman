@@ -410,7 +410,13 @@ impl Guarded {
         let (verb, which) = match self.plain.as_slice() {
             [] => return,
             [one] => ("matches [guard] secret_names and is", pasteable(home, one)),
-            _ => ("match [guard] secret_names and are", "<file>".to_owned()),
+            many => (
+                "match [guard] secret_names and are",
+                many.iter()
+                    .map(|key| pasteable(home, key))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
         };
         let variant = conditions.map_or_else(String::new, |conditions| {
             format!("--for {} ", shell_words::quote(conditions))
@@ -985,16 +991,16 @@ impl Hold {
     }
 
     /// The reason, and what lets the file in, for the lists of held files; an `[ignore]` pattern
-    /// silences any of them.
-    pub(crate) fn listed(self) -> String {
+    /// silences any of them. `path` is the file as [`pasteable`] gives it.
+    pub(crate) fn listed(self, path: &str) -> String {
         let bin = name::bin();
         match self {
-            Self::Large | Self::Binary => format!("{}; `{bin} add <file>` adds it", self.reason()),
+            Self::Large | Self::Binary => format!("{}; `{bin} add {path}` adds it", self.reason()),
             Self::SecretName => format!(
-                "{}; `{bin} add --encrypt <file>` stores it encrypted, `{bin} add --allow-plain <file>` as it is",
+                "{}; `{bin} add --encrypt {path}` stores it encrypted, `{bin} add --allow-plain {path}` as it is",
                 self.reason()
             ),
-            Self::Content(found) => format!("{found}{}", found.remedy(Some("<file>"))),
+            Self::Content(found) => format!("{found}{}", found.remedy(Some(path))),
             Self::Unreadable => format!("{}; fix its permissions to add it", self.reason()),
             Self::Collision => format!("{}; rename one of them", self.reason()),
             Self::Special => self.reason(),

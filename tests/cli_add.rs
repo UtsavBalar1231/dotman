@@ -101,6 +101,35 @@ fn an_explicit_secret_named_file_is_added_with_one_warning() {
     assert!(!err.contains("secret_names"), "{err}");
 }
 
+/// Several explicit secret-named files get one warning whose command names each of them, and run
+/// as printed, on paths with a space, it stores them encrypted.
+#[test]
+fn the_warning_for_several_plain_secret_named_files_runs_as_printed() {
+    if !common::age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    let keys = [".config/my zsh/secrets.zsh", ".config/my zsh/tokens.zsh"];
+    for key in keys {
+        env.write(key, b"export X=1\n", 0o600);
+    }
+    let err = env.ok(&["add", keys[0], keys[1]]);
+    assert!(err.contains("are stored as plain text"), "{err}");
+    let out = common::run_hint(&env, &err, "add --encrypt");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for key in keys {
+        let sealed = key.replace(".zsh", "{age}.zsh");
+        assert!(env.repo().join(sealed).is_file(), "{key} is encrypted");
+        assert!(!env.repo().join(key).exists(), "{key} is not plain");
+    }
+}
+
 #[test]
 fn an_explicit_input_that_cannot_be_stored_exits_1_and_adds_nothing() {
     let env = TestEnv::new();

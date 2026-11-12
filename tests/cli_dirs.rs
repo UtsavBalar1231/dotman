@@ -104,15 +104,17 @@ fn big_binary_and_secret_named_files_are_held_and_sync_exits_3_but_pushes_the_re
     }
     assert!(status.contains(&("new".to_owned(), ".config/nvim/foo.lua".to_owned())));
     let human = String::from_utf8_lossy(&a.run(&["status"]).stdout).into_owned();
-    assert!(human.contains("dotman add <file>"), "{human}");
+    let home = a.home().display().to_string();
     assert!(
-        human.contains(
-            "hosts.yml (name matches [guard] secret_names; `dotman add --encrypt <file>`"
-        ),
+        human.contains(&format!(
+            ".config/gh/hosts.yml (name matches [guard] secret_names; `dotman add --encrypt {home}/.config/gh/hosts.yml`"
+        )),
         "{human}"
     );
     assert!(
-        human.contains("big.dat (over 1 MiB; `dotman add <file>` adds it)"),
+        human.contains(&format!(
+            ".config/nvim/big.dat (over 1 MiB; `dotman add {home}/.config/nvim/big.dat` adds it)"
+        )),
         "{human}"
     );
     assert!(human.contains("blob.bin (binary"), "{human}");
@@ -134,6 +136,72 @@ fn big_binary_and_secret_named_files_are_held_and_sync_exits_3_but_pushes_the_re
         assert!(!tree.contains(&key.to_owned()), "{key} was pushed");
     }
     assert_eq!(exits(&a, 3, &["sync"]).matches("held back").count(), 1);
+}
+
+/// The line of `text` that lists `key` with its hints.
+fn listing<'a>(text: &'a str, key: &str) -> &'a str {
+    let found = text
+        .lines()
+        .find(|line| line.trim_start().starts_with(key) && line.contains('`'));
+    assert!(found.is_some(), "no listing of {key} in: {text}");
+    found.unwrap_or_default()
+}
+
+/// The commands that `status` and `sync` print for held files run as printed, on paths with a
+/// space, and each lets its file in the way it says.
+#[test]
+fn the_printed_commands_for_held_files_run_as_printed_on_paths_with_a_space() {
+    if !common::age_installed() {
+        return;
+    }
+    let a = device();
+    a.ok(&["key", "init"]);
+    let dir = ".config/nvim/my files";
+    let (big, env, rclone, creds) = (
+        format!("{dir}/big.dat"),
+        format!("{dir}/.env"),
+        format!("{dir}/rclone.conf"),
+        format!("{dir}/api.conf"),
+    );
+    a.write(&big, &vec![b'x'; TWO_MIB], 0o644);
+    a.write(&env, b"A=1\n", 0o600);
+    a.write(&rclone, b"[remote]\n", 0o600);
+    let token = format!("ghp_{}", "a1B2".repeat(9));
+    a.write(&creds, format!("export GH={token}\n").as_bytes(), 0o600);
+
+    let status = String::from_utf8_lossy(&a.run(&["status"]).stdout).into_owned();
+    let synced = exits(&a, 3, &["sync"]);
+    let runs = [
+        (&big, "add "),
+        (&env, "add --encrypt"),
+        (&rclone, "add --allow-plain"),
+        (&creds, "add --encrypt"),
+    ];
+    for (key, prefix) in runs {
+        let (listed, held) = (listing(&status, key), listing(&synced, key));
+        assert_eq!(listed, held, "status and sync list {key} alike");
+        assert!(
+            listed.contains(&format!("'{}/{key}'", a.home().display())),
+            "{listed}"
+        );
+        let out = common::run_hint(&a, listed, prefix);
+        assert!(
+            out.status.success(),
+            "{listed}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(a.token_of("status", key).as_deref(), Some("clean"), "{key}");
+    }
+    exits(&a, 0, &["sync"]);
+    let tree = remote_tree(&a);
+    for stored in [
+        format!("{dir}/big.dat"),
+        format!("{dir}/rclone.conf"),
+        format!("{dir}/.env{{age}}"),
+        format!("{dir}/api{{age}}.conf"),
+    ] {
+        assert!(tree.contains(&stored), "{stored} in {tree:?}");
+    }
 }
 
 #[test]
