@@ -1297,6 +1297,55 @@ fn an_import_of_a_repo_without_commits_is_refused() {
     assert!(!env.repo().exists(), "nothing is left behind");
 }
 
+/// A source whose HEAD names a branch git refuses, which a clone skips, or one under `HEAD/`,
+/// which a clone cannot make, is not called empty: the error names the branch, and the way out
+/// it prints, run as printed, lets the import through, whether or not `main` is left beside the
+/// refused branch, at the same commit.
+#[test]
+fn a_head_branch_git_refuses_or_cannot_clone_is_named_with_a_way_out() {
+    let cases = ["a/.b", "a.lock/b", "a.", "a@{x}", "HEAD/x"]
+        .into_iter()
+        .flat_map(|branch| [(branch, false), (branch, true)]);
+    for (branch, keep_main) in cases {
+        let env = TestEnv::new();
+        let work = work_tree(&env, "my dots", &[(".bashrc", "x\n", false)], None);
+        let oid = git_in(&env, &work, &["rev-parse", "HEAD"]);
+        let git_dir = work.join(".git");
+        env.write(
+            git_dir.join("refs/heads").join(branch),
+            oid.as_bytes(),
+            0o644,
+        );
+        let head = format!("ref: refs/heads/{branch}\n");
+        env.write(git_dir.join("HEAD"), head.as_bytes(), 0o644);
+        if !keep_main {
+            fs::remove_file(git_dir.join("refs/heads/main")).expect("drop main");
+        }
+        let source = Source::new(work.clone());
+        let src = work.to_string_lossy().into_owned();
+
+        let err = env.fails(&["import", "--yes", &src]);
+        assert!(
+            err.contains(&format!("HEAD names the branch `{branch}`")),
+            "{branch}: {err}"
+        );
+        assert!(!err.contains("has no commits"), "{err}");
+        assert!(!env.repo().exists(), "{branch}: nothing is left behind");
+        source.check();
+        let way_out = err
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .find(|quoted| quoted.starts_with("git -C "))
+            .unwrap_or_default();
+        let fixed = paste(&env, way_out);
+        assert!(fixed.status.success(), "{branch}: {way_out}: {fixed:?}");
+        source.seal();
+        let err = env.ok(&["import", "--yes", &src]);
+        assert!(err.contains("imported 2 commits"), "{branch}: {err}");
+    }
+}
+
 /// A staging directory a killed import left beside the repo is swept once it is stale, by the
 /// next import and by `apply`: one named with a dead PID, or with none as older versions named it.
 /// One whose PID is alive, or that was touched in the last ten minutes, stays. An import names its

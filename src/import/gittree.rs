@@ -279,14 +279,89 @@ impl Staging {
     }
 
     fn clone_source(&self, source: &Source) -> Result<()> {
-        self.git.clone_head_from(&source.git_arg()?)?;
-        ensure!(
-            self.git.head()?.is_some(),
-            "{} has no commits",
-            source.display()
-        );
-        Ok(())
+        let cloned = self.git.clone_head_from(&source.git_arg()?);
+        if cloned.is_ok() && self.git.head()?.is_some() {
+            return Ok(());
+        }
+        if let Source::Path(path) = source
+            && let Some(why) = unclonable_branch(&self.git, path, cloned.is_err())
+        {
+            bail!(why);
+        }
+        cloned?;
+        bail!("{} has no commits", source.display())
     }
+}
+
+/// Why a clone of the local `source` took no commit, when the branch its `HEAD` names is the
+/// reason, with the way out. Git skips a branch whose name it refuses, such as `a/.b` or `a.`, as
+/// if it were not there, and no git command can rename one, so the way out names its commit. A
+/// clone also fails on a branch under `HEAD/`, which clashes with the `origin/HEAD` it makes. A
+/// `main` at another commit gets no command, since either branch may be the one to keep.
+fn unclonable_branch(git: &Git, source: &Path, clone_failed: bool) -> Option<String> {
+    let git_dir = if source.join(".git").is_dir() {
+        source.join(".git")
+    } else if is_git_dir(source) {
+        source.to_path_buf()
+    } else {
+        return None;
+    };
+    let head = small_file(&git_dir.join("HEAD"))?;
+    let branch = head.trim_end().strip_prefix("ref: refs/heads/")?;
+    let shown = output::escape_line(branch);
+    let src = source.display();
+    let quoted = shell_words::quote(&source.to_string_lossy()).into_owned();
+    let full = format!("refs/heads/{branch}");
+    let why = if clone_failed {
+        if !branch.starts_with("HEAD/") {
+            return None;
+        }
+        "which git cannot clone, as a clone makes `origin/HEAD`"
+    } else if git_stdout(git, &["check-ref-format", &full], None).is_ok() {
+        return None;
+    } else {
+        "whose name git refuses, so the clone took none of its commits; no git command can rename it"
+    };
+    let refused = format!("{src}'s HEAD names the branch `{shown}`, {why}");
+    // A component `..` would leave `refs/heads`; git never writes one there anyway.
+    let commit = Path::new(branch)
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+        .then(|| small_file(&git_dir.join(&full)))
+        .flatten()
+        .map(|text| text.trim().to_owned())
+        .filter(|oid| is_oid(oid));
+    let main = small_file(&git_dir.join("refs/heads/main")).map(|text| text.trim().to_owned());
+    let point = format!("git -C {quoted} symbolic-ref HEAD refs/heads/main");
+    // The empty old value makes `update-ref` refuse to move a `main` that a packed ref holds.
+    Some(match (commit, main) {
+        (Some(_), None) if clone_failed => format!(
+            "{refused}; rename it in the source, for example with `git -C {quoted} branch -m main`, and import again"
+        ),
+        (Some(oid), None) => format!(
+            "{refused}, so give its commit a branch git takes and point HEAD at it, for example with `git -C {quoted} update-ref refs/heads/main {oid} '' && {point}`, and import again"
+        ),
+        (Some(oid), Some(main)) if oid == main => format!(
+            "{refused}; main holds the same commit, so point HEAD at it with `{point}`, and import again"
+        ),
+        _ => format!(
+            "{refused}, so give its commit a branch git takes and point HEAD at it, and import again"
+        ),
+    })
+}
+
+/// The start of the regular file at `path`, not followed through a symlink.
+fn small_file(path: &Path) -> Option<String> {
+    if !fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    File::open(path)
+        .ok()?
+        .take(4096)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
 }
 
 /// An entry that stays in the repo.
