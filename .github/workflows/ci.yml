@@ -559,7 +559,7 @@ jobs:
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Check the scripts
-        run: shellcheck e2e/*.sh e2e/journeys/*.sh
+        run: shellcheck e2e/*.sh e2e/*/*.sh
 
       - name: Build release
         run: cargo build --release --locked
