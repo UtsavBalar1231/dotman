@@ -80,8 +80,9 @@ e2e_on_exit() {
     if [[ ${E2E_KEEP:-0} == 1 ]]; then
         printf 'kept  [%s] %s\n' "$E2E_NAME" "$E2E_ROOT"
     elif [[ -n $E2E_ROOT && -d $E2E_ROOT ]]; then
-        # git writes its objects read-only.
-        chmod -R u+rwX "$E2E_ROOT" 2>/dev/null || true
+        # Removing a file needs write access to its directory only. Never chmod files: one
+        # hardlinked from outside the root, as a local git clone makes, shares its mode.
+        find "$E2E_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null || true
         rm -rf -- "$E2E_ROOT"
     fi
 }
