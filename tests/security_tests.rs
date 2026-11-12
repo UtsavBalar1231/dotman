@@ -166,6 +166,32 @@ fn an_upstream_name_with_a_c1_control_is_never_applied() {
     assert_eq!(names(&b.home().join(".config/app")), ["ok.conf"]);
 }
 
+/// The reason given for a refused upstream name shows each backtick in it escaped, as the name
+/// at the head of the line does, so a name with a control character and backticks can neither
+/// close the reason's quotes nor open a code span of its own.
+#[test]
+fn a_refused_name_s_backticks_never_reach_its_reason_raw() {
+    let a = TestEnv::new();
+    a.ok(&["init"]);
+    a.write_repo(".config/app/ok.conf", b"ok\n");
+    a.write_repo("ctl\u{1}`then `run this`", b"planted\n");
+    a.push_repo();
+
+    let b = a.second_device();
+    let err = exits(&b.run(&["init", &a.remote_url(), "--take-repo"]), 3);
+    let (why, _) = err
+        .lines()
+        .find_map(|line| line.split_once("never applied or captured here: "))
+        .and_then(|(_, rest)| rest.split_once(". If no machine needs it"))
+        .expect("a refused line");
+    assert!(!why.contains('`'), "{why}");
+    assert!(
+        why.contains("ctl\\u{1}\\u{60}then \\u{60}run this\\u{60}"),
+        "{why}"
+    );
+    assert_eq!(b.read(".config/app/ok.conf"), b"ok\n");
+}
+
 /// The backticked spans of `text` that start with `start`, character for character.
 fn printed<'a>(text: &'a str, start: &str) -> Vec<&'a str> {
     text.split('`')

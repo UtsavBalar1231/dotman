@@ -228,8 +228,9 @@ impl Context {
         self.warn_once(
             &format!("refused\0{path}"),
             &format!(
-                "{}: in the repo, but never applied or captured here: {why:#}. If no machine needs it, remove it from the repo with `{}`, then `{bin} sync`",
+                "{}: in the repo, but never applied or captured here: {}. If no machine needs it, remove it from the repo with `{}`, then `{bin} sync`",
                 shown_key(path),
+                shown_key(&format!("{why:#}")),
                 remove_command(path)
             ),
         );
