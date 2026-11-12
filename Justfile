@@ -58,6 +58,20 @@ lint-strict:
         -W clippy::pedantic \
         -W clippy::unwrap_used
 
+# The e2e scenarios in e2e/, against a release build or the binary DOTMAN_BIN names.
+e2e *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${DOTMAN_BIN:-}" ]]; then
+        cargo build --release --locked
+        DOTMAN_BIN="$(realpath "${CARGO_TARGET_DIR:-target}")/release/dotman"
+    fi
+    DOTMAN_BIN="$DOTMAN_BIN" e2e/run.sh {{ args }}
+
+# The same, keeping each scenario's temp root for debugging.
+e2e-keep *args:
+    E2E_KEEP=1 just e2e {{ args }}
+
 fix:
     cargo fix --allow-dirty --allow-staged --all-features
 
