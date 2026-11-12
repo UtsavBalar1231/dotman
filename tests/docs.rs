@@ -411,6 +411,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         &[
             "keep_history_imports_a_credential_history_with_a_warning",
             "a_history_that_holds_a_credential_is_squashed_into_its_current_tree",
+            "an_import_squashes_a_history_that_once_held_a_credential_in_a_name",
         ],
     ),
     (
@@ -551,6 +552,23 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit",
             "the_staging_guard_holds_a_credential_in_a_repo_name_or_link_target",
             "a_credential_in_a_name_or_a_link_target_never_reaches_the_remote",
+        ],
+    ),
+    (
+        "The guard holds a credential in the name or link target of every file dotman writes",
+        &[
+            "a_credential_in_a_name_or_a_link_target_never_reaches_the_remote",
+            "the_staging_guard_holds_a_credential_in_a_repo_name_or_link_target",
+            "a_committed_name_with_a_credential_is_held_until_forgotten",
+            "imports_leave_out_a_credential_in_a_name_or_a_link_target",
+            "add_refuses_a_for_value_that_holds_a_credential",
+        ],
+    ),
+    (
+        "also checks the name of every path in any commit of the history it takes",
+        &[
+            "an_import_squashes_a_history_that_once_held_a_credential_in_a_name",
+            "imports_leave_out_a_credential_in_a_name_or_a_link_target",
         ],
     ),
     (

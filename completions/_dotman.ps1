@@ -236,7 +236,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             [CompletionResult]::new('--include-missing', '--include-missing', [CompletionResultType]::ParameterName, 'With `--overlay`, add the files the repo lacks without asking')
             [CompletionResult]::new('--render-templates', '--render-templates', [CompletionResultType]::ParameterName, 'For a chezmoi source, run its templates and import this host''s rendering')
             [CompletionResult]::new('--swap', '--swap', [CompletionResultType]::ParameterName, 'Replace the symlinks of an imported farm with real files holding the same bytes')
-            [CompletionResult]::new('--keep-history', '--keep-history', [CompletionResultType]::ParameterName, 'For a git source whose history holds a credential or an age secret key, import every commit instead of one commit of the current tree')
+            [CompletionResult]::new('--keep-history', '--keep-history', [CompletionResultType]::ParameterName, 'For a git source whose history holds a credential or an age secret key in a file, a file''s name or a commit, import every commit, and with them what the guard found, instead of one commit of the current tree')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'Do not ask before writing')
             [CompletionResult]::new('--no-bootstrap', '--no-bootstrap', [CompletionResultType]::ParameterName, 'Do not write install.sh, the script that sets up `dotman` in a container')
             [CompletionResult]::new('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Show the report and change nothing')
