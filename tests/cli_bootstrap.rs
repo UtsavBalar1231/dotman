@@ -13,6 +13,7 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 use xxhash_rust::xxh3::xxh3_128;
 
 const SCRIPT: &str = include_str!("../src/bootstrap/install.sh.in");
@@ -327,6 +328,46 @@ fn a_rerun_with_approve_hooks_approves_a_table_that_changed_since_it_was_shown()
         state.hooks.approved.as_deref(),
         Some(approved.as_str()),
         "{said}"
+    );
+    Ok(())
+}
+
+/// A hook that leaves a process running, as `foo-daemon &` does, does not hold the script until it
+/// exits: dotman's stderr, which the hook inherits, is not a pipe the script reads to its end.
+#[test]
+fn a_hooks_background_process_does_not_hold_the_script() -> R {
+    if !curl_available() {
+        return Ok(());
+    }
+    let setup = Setup::new()?;
+    let author = &setup.author;
+    let base = fs::read_to_string(author.repo().join(".dotman.toml"))?;
+    let pid = setup.machine.root().join("sleep.pid");
+    let hook = format!(
+        "[hooks]\n\".bashrc\" = \"sleep 60 & echo $! > '{}'\"\n",
+        pid.display()
+    );
+    author.write_repo(
+        ".dotman.toml",
+        base.replacen("[hooks]\n", &hook, 1).as_bytes(),
+    );
+    author.ok(&["sync"]);
+    let dotfiles = setup.dotfiles.to_string_lossy().into_owned();
+    setup.machine.git(&["-C", &dotfiles, "pull", "-q"]);
+
+    let start = Instant::now();
+    let out = setup
+        .command(&release()?, &[])
+        .env("DOTMAN_APPROVE_HOOKS", "1")
+        .output()?;
+    let took = start.elapsed();
+    let sleeper = fs::read_to_string(&pid)?;
+    Command::new("kill").arg(sleeper.trim()).status()?;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(setup.applied(), "{}", text(&out));
+    assert!(
+        took < Duration::from_secs(30),
+        "install.sh waited {took:?} for the hook's background process"
     );
     Ok(())
 }

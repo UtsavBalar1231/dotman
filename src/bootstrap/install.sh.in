@@ -169,12 +169,16 @@ else
 fi
 
 # Sets code. With DOTMAN_APPROVE_HOOKS=1 it adds --approve-hooks and holds dotman's stderr in said
-# until dotman exits, so the script can read whether the approval approved nothing.
+# until dotman exits, so the script can read whether the approval approved nothing. The stderr goes
+# to a file, not a pipe: a hook's background process inherits it and would hold a pipe open.
 run_dotman() {
     code=0
     said=
     if [ "${DOTMAN_APPROVE_HOOKS:-}" = 1 ]; then
-        said=$("$dotman" "$@" --approve-hooks 2>&1 >&3) || code=$?
+        said_file=$(mktemp) || die "cannot create a temp file"
+        "$dotman" "$@" --approve-hooks 2>"$said_file" || code=$?
+        said=$(cat "$said_file")
+        rm -f "$said_file"
         [ -z "$said" ] || printf '%s\n' "$said" >&2
     else
         "$dotman" "$@" || code=$?
@@ -189,7 +193,6 @@ approved_nothing() {
     esac
 }
 
-exec 3>&1
 run_dotman "$@"
 # DOTMAN_APPROVE_HOOKS=1 trusts the repo's hooks. When the table changed since this machine last
 # showed one, the first run only shows and records the current table, and a second approves it.
