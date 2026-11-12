@@ -2054,9 +2054,10 @@ fn legacy_store(env: &TestEnv, keys: &[&str]) -> PathBuf {
     legacy_chain(env, &[("initial", "legacyuser")], keys)
 }
 
-/// The id of the `n`th commit, from 0, of a [`legacy_chain`].
+/// The id of the `n`th commit, from 0, of a [`legacy_chain`]; ids differ in their first 12
+/// characters, which a warning shows.
 fn legacy_id(n: usize) -> String {
-    format!("{:032x}", n.saturating_add(1))
+    format!("{:02x}", n.saturating_add(1)).repeat(16)
 }
 
 /// A legacy store whose commits, a `(message, author)` each, form a chain, oldest first, and each
