@@ -4,8 +4,8 @@
 mod common;
 
 use common::{
-    File, ODD_ORIGINS, Source, TestEnv, accounting, bare, check_origin_hint, git_in, tree_checksum,
-    work_tree, yadm_fixture, yadm_repo,
+    File, ODD_ORIGINS, Source, TestEnv, accounting, bare, check_origin_hint, git_in, hint_line,
+    paste, tree_checksum, work_tree, yadm_fixture, yadm_repo,
 };
 use dotman::config::Config;
 use std::fs;
@@ -593,6 +593,33 @@ fn the_hint_for_the_sources_own_origin_runs_as_printed_whatever_the_url_holds() 
         let err = env.ok(&["import", &source.to_string_lossy(), "--no-bootstrap"]);
         check_origin_hint(&env, &err, origin);
     }
+}
+
+/// git resolves a relative origin against the repo that holds it, so the hint names the path it
+/// reaches from the source, and pasted in `$HOME` it sets an origin that reaches the same repo.
+#[test]
+fn the_hint_for_a_relative_origin_names_the_repo_it_reaches_from_the_source() {
+    let env = TestEnv::new();
+    let work = work_tree(&env, "o", &[(".vimrc", "v\n", false)], None);
+    let source = bare(&env, &work, &env.root().join("src/dots.git"), None);
+    let remote = env.root().join("src/remotes/dots.git");
+    env.git(&["init", "-q", "--bare", &remote.to_string_lossy()]);
+    git_in(
+        &env,
+        &source,
+        &["config", "remote.origin.url", "../remotes/dots.git"],
+    );
+    source.seal();
+    let err = env.ok(&["import", &source.to_string_lossy(), "--no-bootstrap"]);
+    let line = hint_line(&err, "init --remote");
+    let out = paste(&env, &line);
+    assert!(out.status.success(), "{line}: {}", stderr(&out));
+    let set = git_in(&env, &env.repo(), &["config", "remote.origin.url"]);
+    assert_eq!(
+        Path::new(set.trim()),
+        fs::canonicalize(&remote).expect("canonical remote")
+    );
+    git_in(&env, &env.repo(), &["ls-remote", "origin"]);
 }
 
 /// git would read such an origin as an option, so the import neither copies it nor offers a

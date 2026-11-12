@@ -101,14 +101,6 @@ pub fn run(args: &InitArgs) -> Result<Outcome> {
         bootstrap::write(repo, false)?;
     }
     wizard.apply(&answers)?;
-    if let Some(url) = &args.remote
-        && origin.as_deref() == Some(url.as_str())
-    {
-        output::info(&format!(
-            "origin is already {}",
-            crate::git::redact_credentials(url)
-        ));
-    }
     Ok(Outcome::Done)
 }
 
@@ -398,7 +390,8 @@ fn offer_import(
                 shell_words::quote(&path.to_string_lossy())
             ));
         }
-        if let Some(url) = &args.remote {
+        let url = args.remote.as_deref().map(wizard::origin_url).transpose()?;
+        if let Some(url) = &url {
             output::info(&format!(
                 "then run `{} init --remote {}`",
                 name::bin(),
@@ -406,7 +399,7 @@ fn offer_import(
             ));
         }
         output::info("or start a fresh repo with:");
-        let remote = args.remote.as_ref().map_or_else(String::new, |url| {
+        let remote = url.as_ref().map_or_else(String::new, |url| {
             format!(" --remote {}", shell_words::quote(url))
         });
         output::info(&format!("  {} init --no-import{remote}", name::bin()));

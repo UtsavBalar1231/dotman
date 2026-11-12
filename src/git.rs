@@ -531,7 +531,7 @@ impl Git {
     ///
     /// Attributes are written before checkout so a tracked `.gitattributes` cannot transform
     /// content. A local `src` with an `origin` remote passes that URL on as the clone's `origin`,
-    /// unless it is not a [`usable_remote`].
+    /// a relative path made absolute against `src`, unless it is not a [`usable_remote`].
     pub fn clone_from(&self, src: &str) -> Result<()> {
         self.clone_with(src, &[])
     }
@@ -564,7 +564,7 @@ impl Git {
         self.run_with(self.base(), &args)?;
         self.write_metadata()?;
         if let Some(url) = src_origin.filter(|url| usable_remote(url)) {
-            self.set_remote_url("origin", &url)?;
+            self.set_remote_url("origin", &absolute_remote(&url, Path::new(src))?)?;
         }
         if self.head()?.is_some() {
             self.checkout_head()?;
@@ -1222,6 +1222,25 @@ impl Git {
         self.optional(&["config", "--get", &format!("remote.{name}.url")])
     }
 
+    /// [`Git::remote_url`] as git reads it here: a relative local path made absolute against the
+    /// directory git runs in, the top of the work tree or else the repo path itself.
+    pub fn remote_target(&self, name: &str) -> Result<Option<String>> {
+        let Some(url) = self.remote_url(name)? else {
+            return Ok(None);
+        };
+        if !relative_path_remote(&url) {
+            return Ok(Some(url));
+        }
+        let out = self.probe_bounded(self.command(), &["rev-parse", "--show-toplevel"])?;
+        let top = out.stdout.trim_ascii_end();
+        let dir = if out.status.success() && !top.is_empty() {
+            path_from(top)
+        } else {
+            self.repo.clone()
+        };
+        absolute_remote(&url, &dir).map(Some)
+    }
+
     /// Points remote `name` at `url`, adding the remote if needed.
     pub fn set_remote_url(&self, name: &str, url: &str) -> Result<()> {
         let verb = if self.remote_url(name)?.is_some() {
@@ -1354,6 +1373,33 @@ fn parse_ident_email(ident: &str) -> Option<String> {
 /// nothing or as an option wherever it passes the URL on.
 pub fn usable_remote(url: &str) -> bool {
     !url.is_empty() && !url.starts_with('-')
+}
+
+/// Whether git reads `url` as a local path: it does unless a `:` comes before the first `/`, as in
+/// `scheme://...` and the ssh forms `host:path` and `user@host:path`.
+pub fn local_path_remote(url: &str) -> bool {
+    url.find(':')
+        .is_none_or(|colon| url.find('/').is_some_and(|slash| slash < colon))
+}
+
+fn relative_path_remote(url: &str) -> bool {
+    usable_remote(url) && local_path_remote(url) && Path::new(url).is_relative()
+}
+
+/// `url` as git reads it when it runs in `dir`: a relative local path made absolute, through the
+/// real directory when the path exists. Anything else comes back as it is.
+pub fn absolute_remote(url: &str, dir: &Path) -> Result<String> {
+    if !relative_path_remote(url) {
+        return Ok(url.to_owned());
+    }
+    let joined = dir.join(url);
+    let resolved = fs::canonicalize(&joined)
+        .or_else(|_| std::path::absolute(&joined))
+        .with_context(|| format!("cannot make {} absolute", joined.display()))?;
+    resolved
+        .into_os_string()
+        .into_string()
+        .map_err(|path| anyhow!("{} is not valid UTF-8", Path::new(&path).display()))
 }
 
 /// Hides `user:password@` in URLs so tokens do not reach error messages.
@@ -2008,6 +2054,49 @@ mod tests {
             Some(utf8(a.repo()))
         );
         c.remove_remote("origin").expect("remove");
+    }
+
+    #[test]
+    fn a_relative_local_origin_is_made_absolute_where_git_reads_it() {
+        for (url, local) in [
+            ("../x.git", true),
+            ("/srv/x.git", true),
+            ("./host:x.git", true),
+            ("host:x.git", false),
+            ("git@host:me/x.git", false),
+            ("file:///srv/x.git", false),
+        ] {
+            assert_eq!(local_path_remote(url), local, "{url}");
+        }
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let real = fs::canonicalize(&remote).expect("canonical remote");
+        let a = sb.git("a");
+        a.init().expect("init");
+        commit_file(&a, "f", b"f", "one");
+        a.set_remote_url("origin", "../remote.git")
+            .expect("relative");
+        assert_eq!(
+            a.remote_target("origin").expect("target").as_deref(),
+            Some(utf8(&real))
+        );
+        let bare = Git::new(&remote, "test").with_env(sb.env());
+        bare.set_remote_url("origin", "../gone.git")
+            .expect("relative");
+        assert_eq!(
+            bare.remote_target("origin").expect("target").as_deref(),
+            Some(utf8(&sb.dir.path().join("remote.git/../gone.git")))
+        );
+        for url in ["host:x.git", "--push", "/srv/x.git"] {
+            assert_eq!(absolute_remote(url, sb.dir.path()).expect("as is"), url);
+        }
+
+        let b = sb.git("b");
+        b.clone_from(utf8(a.repo())).expect("clone");
+        assert_eq!(
+            b.remote_url("origin").expect("url").as_deref(),
+            Some(utf8(&real))
+        );
     }
 
     #[test]

@@ -666,6 +666,41 @@ fn published() -> TestEnv {
     a
 }
 
+/// git resolves a relative remote against the repo, so `--remote` stores a local path made absolute
+/// against the directory it was typed in; an ssh form, with a colon before any `/`, stays as typed.
+#[test]
+fn a_relative_remote_is_stored_absolute_and_reaches_the_remote() {
+    let env = TestEnv::new();
+    let remote = fs::canonicalize(env.remote_path()).expect("canonical remote");
+    let up: PathBuf = env.home().components().skip(1).map(|_| "..").collect();
+    let relative = up.join(remote.strip_prefix("/").expect("an absolute remote"));
+    let relative = relative.to_string_lossy().into_owned();
+    let stored = remote.to_string_lossy().into_owned();
+    env.ok(&["init", "--no-import", "--remote", &relative]);
+    assert_eq!(
+        repo_git(&env, &["config", "remote.origin.url"]).trim(),
+        stored
+    );
+    repo_git(&env, &["ls-remote", "origin"]);
+    let again = env.ok(&["init", "--remote", &relative]);
+    assert!(
+        again.contains(&format!("origin is already {stored}")),
+        "{again}"
+    );
+
+    let home = fs::canonicalize(env.home()).expect("canonical home");
+    let dry = env.ok(&["init", "--remote", "elsewhere.git", "--dry-run"]);
+    let would = format!(
+        "would set origin to {}",
+        home.join("elsewhere.git").display()
+    );
+    assert!(dry.contains(&would), "{dry}");
+    for url in ["gh:me/dotfiles.git", SSH_URL] {
+        env.ok(&["init", "--remote", url]);
+        assert_eq!(repo_git(&env, &["config", "remote.origin.url"]).trim(), url);
+    }
+}
+
 /// git stores a relative source made absolute, so the rerun of the same command line compares the
 /// directories, not the text.
 #[test]

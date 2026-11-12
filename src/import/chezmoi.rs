@@ -1249,7 +1249,7 @@ fn notes(
 ) -> Vec<String> {
     let mut notes = Vec::new();
     let origin = Git::new(source, "import")
-        .remote_url("origin")
+        .remote_target("origin")
         .ok()
         .flatten();
     notes.push(format!(

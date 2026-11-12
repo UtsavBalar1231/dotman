@@ -182,7 +182,7 @@ impl Wizard<'_> {
     fn remote(&self, origin: Option<&str>) -> Result<Remote> {
         let args = self.args;
         if let Some(url) = &args.remote {
-            return Ok(Remote::Set(url.clone()));
+            return Ok(Remote::Set(origin_url(url)?));
         }
         if let Some(slug) = &args.create_github {
             return if valid_slug(slug) {
@@ -566,13 +566,21 @@ impl GitIdentity {
     }
 }
 
+/// What `origin` is set to for `url` typed in the working directory. git resolves a relative
+/// path against the repo, not against where it was typed, so one is stored absolute.
+pub fn origin_url(url: &str) -> Result<String> {
+    let cwd = std::env::current_dir().context("cannot read the working directory")?;
+    crate::git::absolute_remote(url, &cwd)
+}
+
 pub fn set_origin(ctx: &Context, url: &str) -> Result<()> {
-    if ctx.git.remote_url("origin")?.as_deref() != Some(url) {
-        ctx.git.set_remote_url("origin", url)?;
-        output::success(&format!(
-            "origin is {}",
-            crate::git::redact_credentials(url)
-        ));
+    let url = origin_url(url)?;
+    let shown = crate::git::redact_credentials(&url);
+    if ctx.git.remote_url("origin")?.as_deref() == Some(url.as_str()) {
+        output::info(&format!("origin is already {shown}"));
+    } else {
+        ctx.git.set_remote_url("origin", &url)?;
+        output::success(&format!("origin is {shown}"));
     }
     Ok(())
 }

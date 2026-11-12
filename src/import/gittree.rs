@@ -1670,7 +1670,7 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     let edited = EditedConfig::find(ctx)?;
     let staging = Staging::new(ctx, !args.dry_run)?;
     let source_origin = match source {
-        Source::Path(path) => git_at(path).remote_url("origin")?,
+        Source::Path(path) => git_at(path).remote_target("origin")?,
         Source::Url(_) => None,
     };
     staging.clone_source(source)?;

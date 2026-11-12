@@ -863,7 +863,10 @@ fn farm_remote(root: &Path) -> Option<String> {
         .ancestors()
         .find(|dir| dir.join(".git").exists())?
         .to_path_buf();
-    Git::new(repo, "import").remote_url("origin").ok().flatten()
+    Git::new(repo, "import")
+        .remote_target("origin")
+        .ok()
+        .flatten()
 }
 
 /// The parent directories' modes are those of the directories the files are deployed through.
