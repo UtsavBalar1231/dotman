@@ -5,7 +5,7 @@ use crate::cli::{Decisions, ImportArgs, InitArgs};
 use crate::commands::wizard::{self, Ask, Wizard};
 use crate::commands::{Outcome, apply};
 use crate::context::{Context, is_real_dir};
-use crate::git::Git;
+use crate::git::{Git, local_path_remote};
 use crate::hooks::Policy;
 use crate::import;
 use crate::name;
@@ -206,7 +206,7 @@ fn refuse_another_repo(ctx: &Context, source: &str) -> Result<()> {
         && ctx
             .git
             .remote_url("origin")?
-            .is_some_and(|origin| same_source(&origin, source));
+            .is_some_and(|origin| same_source(&origin, &ctx.paths.repo, source));
     ensure!(
         ours,
         "a repo already exists at {}; `{} apply` applies it",
@@ -216,23 +216,23 @@ fn refuse_another_repo(ctx: &Context, source: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether `origin` is what a clone of `source` stores. git stores a local path made absolute
-/// against the working directory, so a local path matches that form, or a path that resolves to
-/// the same directory; a URL matches only itself.
-fn same_source(origin: &str, source: &str) -> bool {
-    if origin == source {
-        return true;
+/// Whether `origin`, the URL stored in `repo`, is what a clone of `source` stores. A URL matches
+/// only itself. A local path names a directory: git resolves a relative origin against `repo`,
+/// and `source` was typed in the working directory. They match when the origin is the absolute
+/// form git stores for `source`, or both resolve to the same directory.
+fn same_source(origin: &str, repo: &Path, source: &str) -> bool {
+    if !local_path_remote(origin) || !local_path_remote(source) {
+        return origin == source;
     }
-    if import::is_url(origin) || import::is_url(source) {
+    let origin = repo.join(origin);
+    let Ok(source) = std::path::absolute(source) else {
         return false;
-    }
-    if std::path::absolute(source).is_ok_and(|source| source.as_os_str() == origin) {
-        return true;
-    }
-    matches!(
-        (fs::canonicalize(origin), fs::canonicalize(source)),
-        (Ok(origin), Ok(source)) if origin == source
-    )
+    };
+    origin == source
+        || matches!(
+            (fs::canonicalize(&origin), fs::canonicalize(&source)),
+            (Ok(origin), Ok(source)) if origin == source
+        )
 }
 
 const STAGING_PREFIX: &str = ".dotman-init-";

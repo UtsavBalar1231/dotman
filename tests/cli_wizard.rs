@@ -745,6 +745,48 @@ fn a_rerun_refuses_a_source_that_only_resembles_the_origin() {
     assert_ne!(machine_config(&b).identity.host.as_deref(), Some("box"));
 }
 
+/// An origin stored relative, by hand or by an older dotman, names what git reads from the repo,
+/// and the source what it names from the working directory: the same text typed where it names
+/// another repo is refused, and any spelling of the origin's directory is accepted.
+#[test]
+fn a_rerun_compares_a_relative_origin_by_the_directory_it_names() {
+    let b = published().second_device();
+    b.ok(&["init", &b.remote_url()]);
+    // Three levels up from the repo, xdg/data/dotman, is the test root.
+    let root = b.root();
+    std::os::unix::fs::symlink(b.remote_path(), root.join("a.git")).expect("link to A");
+    repo_git(&b, &["remote", "set-url", "origin", "../../../a.git"]);
+    let elsewhere = root.join("z/p/q/r");
+    fs::create_dir_all(&elsewhere).expect("create the other cwd");
+    b.git(&[
+        "init",
+        "-q",
+        "--bare",
+        &root.join("z/a.git").to_string_lossy(),
+    ]);
+    let rerun = |cwd: &Path, source: &str| {
+        b.dot()
+            .current_dir(cwd)
+            .args(["init", source, "--host", "box"])
+            .output()
+            .expect("run dot")
+    };
+
+    let err = exits(&rerun(&elsewhere, "../../../a.git"), 1);
+    assert!(err.contains("a repo already exists"), "{err}");
+    assert_ne!(machine_config(&b).identity.host.as_deref(), Some("box"));
+
+    let err = exits(&rerun(&b.home(), "../a.git"), 0);
+    assert!(err.contains("already holds the clone"), "{err}");
+    assert_eq!(machine_config(&b).identity.host.as_deref(), Some("box"));
+
+    // git reads a colon before any `/` as ssh, so that origin matches only itself.
+    repo_git(&b, &["remote", "set-url", "origin", "gh:me/dots.git"]);
+    exits(&b.run(&["init", "gh:me/dots.git", "--dry-run"]), 0);
+    let err = exits(&b.run(&["init", "./gh:me/dots.git", "--dry-run"]), 1);
+    assert!(err.contains("a repo already exists"), "{err}");
+}
+
 #[test]
 fn init_never_prints_the_credentials_in_its_source() {
     let a = published();
