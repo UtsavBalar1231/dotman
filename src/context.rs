@@ -2,7 +2,7 @@
 
 use crate::commands::add::Ignore;
 use crate::config::Config;
-use crate::git::{Git, Operation, StatusKind};
+use crate::git::{Git, Operation, StatusKind, UnusableBranch};
 use crate::identity;
 use crate::lock::Lock;
 use crate::paths::{Env, Paths, derive_key, find_collisions, is_reserved_root_name, validate_key};
@@ -35,8 +35,9 @@ pub struct InProgress {
     repo: PathBuf,
     /// Lock files a killed git left, which make the recovery commands fail until removed.
     locks: Vec<PathBuf>,
-    /// The branch a rebase started from, which its recovery checks out again.
-    branch: Option<String>,
+    /// The branch a rebase started from, which its recovery checks out again; a name dotman does
+    /// not use is never printed, and the recovery puts the commits on `main` instead.
+    branch: Result<Option<String>, UnusableBranch>,
 }
 
 #[derive(Debug)]
@@ -79,10 +80,18 @@ impl fmt::Display for InProgress {
             "\ngit left lock files behind, so those commands fail until they are removed. If no git is running in the repo, recover with:\n  1. rm {locks}"
         )?;
         if matches!(self.unfinished, Unfinished::Operation(Operation::Rebase)) {
-            let branch = self.branch.as_deref().unwrap_or("main");
+            let back = self.branch.as_ref().map_or_else(
+                |_| format!("{bin} git checkout -f -b main ORIG_HEAD"),
+                |branch| {
+                    format!(
+                        "{bin} git checkout -f {} && {bin} git reset --hard ORIG_HEAD",
+                        shell_words::quote(branch.as_deref().unwrap_or("main"))
+                    )
+                },
+            );
             write!(
                 f,
-                "\n  2. {bin} git rebase --abort\n  3. if that fails: {bin} git rebase --quit && {bin} git checkout -f {branch} && {bin} git reset --hard ORIG_HEAD\n  4. {bin} sync"
+                "\n  2. {bin} git rebase --abort\n  3. if that fails: {bin} git rebase --quit && {back}\n  4. {bin} sync"
             )?;
         }
         Ok(())

@@ -5,7 +5,7 @@ use crate::bootstrap::{self, Found};
 use crate::cli::DoctorArgs;
 use crate::commands::sync;
 use crate::context::Context;
-use crate::git::{Git, Operation};
+use crate::git::{Git, Operation, UnusableBranch};
 use crate::hooks::{self, Standing};
 use crate::import::count;
 use crate::lock::Lock;
@@ -137,6 +137,7 @@ fn collect(online: bool) -> Vec<Check> {
         } else if repo_exists {
             if git_ok {
                 checks.push(remote(&git, online));
+                checks.extend(branch(&git));
                 checks.push(objects(ctx));
             }
             checks.extend(repo_health(ctx));
@@ -395,6 +396,15 @@ fn remote(git: &Git, online: bool) -> Check {
         ),
         Err(e) => fail("remote", &format!("cannot run git: {e}"), "install git"),
     }
+}
+
+/// A branch name that sync and status refuse.
+fn branch(git: &Git) -> Option<Check> {
+    let err = git.branch().err()?;
+    err.is::<UnusableBranch>().then(|| Check {
+        level: Level::Fail,
+        line: format!("branch: {err}"),
+    })
 }
 
 /// Ownership and modes of the dotman directories; the repo passes only when `repo_whole`, so an

@@ -880,9 +880,20 @@ impl Git {
         self.optional(&["rev-parse", "--verify", "-q", "HEAD"])
     }
 
-    /// The branch `HEAD` points at, also when it is unborn; `None` when `HEAD` is detached.
+    /// The branch `HEAD` points at, also when it is unborn; `None` when `HEAD` is detached. Fails
+    /// with [`UnusableBranch`] on a name [`checked_branch`] refuses.
     pub fn branch(&self) -> Result<Option<String>> {
-        self.optional(&["symbolic-ref", "--short", "-q", "HEAD"])
+        let Some(name) = self.optional(&["symbolic-ref", "-q", "HEAD"])? else {
+            return Ok(None);
+        };
+        let short = name.strip_prefix("refs/heads/").unwrap_or(&name);
+        match checked_branch(short) {
+            Ok(branch) => Ok(Some(branch)),
+            Err(mut unusable) => {
+                unusable.unborn = self.head()?.is_none();
+                Err(unusable.into())
+            }
+        }
     }
 
     /// Raw bytes of `path` as stored in `rev`, with no filters or text conversion.
@@ -961,7 +972,8 @@ impl Git {
     pub fn pull_rebase(&self, remote: &str, branch: &str) -> Result<PullOutcome> {
         let stash = ["rev-parse", "-q", "--verify", "refs/stash"];
         let stashed_before = self.optional(&stash)?;
-        let args = ["pull", "--rebase", "--autostash", remote, branch];
+        let refname = full_ref(branch);
+        let args = ["pull", "--rebase", "--autostash", remote, &refname];
         let out = self.probe(&args)?;
         if out.status.success() {
             // git exits 0 when putting the autostash back conflicts, and keeps it in the stash.
@@ -1088,14 +1100,15 @@ impl Git {
         found
     }
 
-    /// The branch an unfinished rebase started from, such as `main`.
-    #[must_use]
-    pub fn rebase_branch(&self) -> Option<String> {
-        ["rebase-merge", "rebase-apply"].iter().find_map(|dir| {
+    /// The branch an unfinished rebase started from, such as `main`; `None` when no `head-name`
+    /// names one. Fails with [`UnusableBranch`] on a name [`checked_branch`] refuses.
+    pub fn rebase_branch(&self) -> Result<Option<String>, UnusableBranch> {
+        let name = ["rebase-merge", "rebase-apply"].iter().find_map(|dir| {
             let name =
                 fs::read_to_string(self.repo.join(".git").join(dir).join("head-name")).ok()?;
             Some(name.trim().strip_prefix("refs/heads/")?.to_owned())
-        })
+        });
+        name.map(|name| checked_branch(&name)).transpose()
     }
 
     /// Whether [`Git::operation`] finds an unfinished operation.
@@ -1106,12 +1119,13 @@ impl Git {
 
     /// Fetches `branch` from `remote` into `FETCH_HEAD`.
     pub fn fetch(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run_remote(&["fetch", "-q", remote, branch]).map(drop)
+        self.run_remote(&["fetch", "-q", remote, &full_ref(branch)])
+            .map(drop)
     }
 
     /// Like [`Git::fetch`], and fetches the history a shallow clone left out.
     pub fn unshallow(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run_remote(&["fetch", "-q", "--unshallow", remote, branch])
+        self.run_remote(&["fetch", "-q", "--unshallow", remote, &full_ref(branch)])
             .map(drop)
     }
 
@@ -1128,13 +1142,15 @@ impl Git {
 
     /// Fails if the remote has commits `branch` lacks; pull first.
     pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run_remote(&["push", remote, branch]).map(drop)
+        self.run_remote(&["push", remote, &push_refspec(branch)])
+            .map(drop)
     }
 
     /// Like [`Git::push`], and records `remote` as the upstream of `branch`, so that a bare
     /// `git pull --rebase` works.
     pub fn push_set_upstream(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run_remote(&["push", "-u", remote, branch]).map(drop)
+        self.run_remote(&["push", "-u", remote, &push_refspec(branch)])
+            .map(drop)
     }
 
     /// How many commits `tip` has that `base` lacks; every commit of `tip` when `base` is `None`.
@@ -1149,7 +1165,7 @@ impl Git {
     /// Whether `remote` has `branch`. Asks the remote and writes nothing locally. Its failure is
     /// [`RemoteFailure::Unreachable`] whatever git's message says, since ls-remote only reads.
     pub fn remote_has_branch(&self, remote: &str, branch: &str) -> Result<bool> {
-        let pattern = format!("refs/heads/{branch}");
+        let pattern = full_ref(branch);
         let args = ["ls-remote", "--exit-code", remote, pattern.as_str()];
         let out = self.probe(&args)?;
         match out.status.code() {
@@ -1367,6 +1383,101 @@ fn parse_ident_email(ident: &str) -> Option<String> {
     let after = ident.rsplit_once('<')?.1;
     let email = after.split_once('>')?.0;
     (!email.is_empty()).then(|| email.to_owned())
+}
+
+/// A branch name that [`checked_branch`] refuses. It is shown escaped, or not at all when it holds a
+/// credential, and the way out it prints renames the branch without naming it.
+#[derive(Debug)]
+pub struct UnusableBranch {
+    shown: Option<String>,
+    why: String,
+    unborn: bool,
+}
+
+impl UnusableBranch {
+    /// Why the name is refused, without the name, to follow "whose".
+    #[must_use]
+    pub fn why(&self) -> &str {
+        &self.why
+    }
+
+    /// The git arguments that put `HEAD` on `main` without naming the branch. An unborn branch
+    /// has no ref for `branch -m` to rename, so `HEAD` is pointed at `main` instead.
+    #[must_use]
+    pub const fn way_out(&self) -> [&'static str; 3] {
+        if self.unborn {
+            ["symbolic-ref", "HEAD", "refs/heads/main"]
+        } else {
+            ["branch", "-m", "main"]
+        }
+    }
+}
+
+impl fmt::Display for UnusableBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.shown {
+            Some(name) => write!(f, "the repo's branch {name} is one whose {}", self.why)?,
+            None => write!(f, "the repo's branch is one whose {}", self.why)?,
+        }
+        write!(
+            f,
+            ", so dotman does not pass it to git; put the repo on main with `{} git {}` and run this again",
+            crate::name::bin(),
+            self.way_out().join(" ")
+        )
+    }
+}
+
+impl std::error::Error for UnusableBranch {}
+
+/// `name` when dotman passes it to git as a branch. Besides `git check-ref-format --branch`, which
+/// refuses a leading `-`, it takes only ASCII letters, digits, `.`, `_`, `-` and `/`: git allows
+/// `+`, which a refspec reads as a forced push, and characters a shell expands or splits. A name
+/// that holds a credential would reach the remote as a ref name.
+pub fn checked_branch(name: &str) -> Result<String, UnusableBranch> {
+    if let Some(found) = crate::secrets::held_name(name) {
+        return Err(UnusableBranch {
+            shown: None,
+            why: format!(
+                "name holds a credential the content guard finds ({})",
+                found.rule
+            ),
+            unborn: false,
+        });
+    }
+    let why = if name.starts_with('-') {
+        "name starts with a dash, which git reads as an option"
+    } else if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+    {
+        "name holds a character other than an ASCII letter, a digit, a dot, an underscore, a dash and a slash"
+    } else if name == "HEAD"
+        || name.contains("..")
+        || name.ends_with('.')
+        || name.split('/').any(|part| {
+            part.is_empty() || part.starts_with('.') || part.as_bytes().ends_with(b".lock")
+        })
+    {
+        "name breaks git's rules for a branch name"
+    } else {
+        return Ok(name.to_owned());
+    };
+    Err(UnusableBranch {
+        shown: Some(crate::output::escape_line(name).into_owned()),
+        why: why.to_owned(),
+        unborn: false,
+    })
+}
+
+/// A branch as a full refname, which git never reads as an option.
+fn full_ref(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
+fn push_refspec(branch: &str) -> String {
+    let refname = full_ref(branch);
+    format!("{refname}:{refname}")
 }
 
 /// Whether `url` can be a remote's URL: git would read an empty one or one starting with `-` as
@@ -1700,7 +1811,10 @@ mod tests {
         commit_file(&git, "a", b"a", "one");
         let err = git.push("nope", "main").expect_err("no such remote");
         let msg = format!("{err:#}");
-        assert!(msg.contains("git push nope main failed"), "{msg}");
+        assert!(
+            msg.contains("git push nope refs/heads/main:refs/heads/main failed"),
+            "{msg}"
+        );
         assert!(msg.contains("'nope' does not appear"), "{msg}");
         assert_eq!(
             err.downcast_ref::<RemoteFailure>(),
@@ -2213,6 +2327,55 @@ mod tests {
         a.set_remote_url("origin", utf8(&sb.dir.path().join("none")))
             .expect("set-url");
         assert!(a.remote_has_branch("origin", "main").is_err());
+    }
+
+    /// Every name dotman takes is one `git check-ref-format --branch` takes too; `+main` shows why
+    /// git's own rules are not enough.
+    #[test]
+    fn checked_branch_takes_a_subset_of_what_git_takes() {
+        let sb = Sandbox::new();
+        let token = format!("ghp_{}", "a".repeat(36));
+        let accepted = ["main", "feature/x", "v1.2_rc-3", "a/b/c"];
+        let refused = [
+            "-x",
+            "--mirror",
+            "--upload-pack=touch${IFS}x;true",
+            "HEAD",
+            "",
+            "a..b",
+            "a/.b",
+            ".a",
+            "a.lock",
+            "a/",
+            "/a",
+            "a//b",
+            "a.",
+            "a b",
+            "a:b",
+            "+main",
+            "a=b",
+            "a{b",
+            "a`b",
+            "ä",
+            "a\u{1b}b",
+            &format!("wip-{token}"),
+        ];
+        for name in accepted {
+            assert_eq!(checked_branch(name).ok().as_deref(), Some(name));
+            sb.raw_ok(sb.dir.path(), &["check-ref-format", "--branch", name]);
+        }
+        for name in refused {
+            let err = checked_branch(name).expect_err(name);
+            let shown = err.to_string();
+            assert!(!shown.contains('\u{1b}'), "{shown}");
+            assert!(!shown.contains(&token), "{shown}");
+            assert!(shown.contains("`dotman git branch -m main`"), "{shown}");
+        }
+        assert!(
+            sb.raw(sb.dir.path(), &["check-ref-format", "--branch", "+main"])
+                .status
+                .success()
+        );
     }
 
     #[test]

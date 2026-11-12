@@ -643,8 +643,9 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
         || "<url>".to_owned(),
         |url| shell_words::quote(&url).into_owned(),
     );
+    let quoted = shell_words::quote(branch);
     bail!(
-        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has, which --include-missing adds:\n  mv {here} {old}\n  {bin} import {url}\n  {bin} import --overlay {old} --include-missing\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {branch}`, then `{bin} sync`"
+        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. To start over from the remote and keep what only this repo has, which --include-missing adds:\n  mv {here} {old}\n  {bin} import {url}\n  {bin} import --overlay {old} --include-missing\nTo merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {quoted}`, then `{bin} sync`"
     )
 }
 
@@ -748,7 +749,10 @@ fn report_conflict(ctx: &Context, branch: &str, paths: &[PathBuf]) {
     output::warning(
         "the pull conflicts with your changes. It was aborted, and your files and commits are as they were. To resolve it:",
     );
-    let mut steps = vec![vec![format!("{bin} git pull --rebase {REMOTE} {branch}")]];
+    let mut steps = vec![vec![format!(
+        "{bin} git pull --rebase {REMOTE} {}",
+        shell_words::quote(branch)
+    )]];
     if !plain.is_empty() || sealed.is_empty() {
         steps.push(vec![format!(
             "Edit the conflicting {}files under {}.",

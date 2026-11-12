@@ -13,7 +13,7 @@ mod common;
 
 use common::{
     LEGACY_REPO, R, Setup, TestEnv, age_installed, archive_name, curl_available, files_containing,
-    have_chezmoi, legacy_fixture, mode_of, overlay_source, plan_entry, plan_json, release,
+    git_in, have_chezmoi, legacy_fixture, mode_of, overlay_source, plan_entry, plan_json, release,
     source_tree, stow, stub_chezmoi, system_setup, system_setup_none, system_write, text,
     tree_checksum, write_plan, yadm_fixture,
 };
@@ -3191,4 +3191,271 @@ fn status_escapes_the_keys_it_prints() {
     for text in [shown.as_ref(), err.as_str()] {
         assert!(!text.contains('\u{1b}'), "{text:?}");
     }
+}
+
+// Branch names a remote or an import source picks
+
+/// Renames `repo`'s current branch to `name` with `update-ref`, as a hostile source makes it, since
+/// `git branch` refuses such names. An unborn HEAD stays unborn.
+fn put_on_branch(env: &TestEnv, repo: &Path, name: &str) {
+    let refname = format!("refs/heads/{name}");
+    let old = git_in(env, repo, &["symbolic-ref", "HEAD"]);
+    if env
+        .git_raw(&[
+            "-C",
+            &repo.to_string_lossy(),
+            "rev-parse",
+            "-q",
+            "--verify",
+            "HEAD",
+        ])
+        .status
+        .success()
+    {
+        git_in(env, repo, &["update-ref", &refname, "HEAD"]);
+        git_in(env, repo, &["update-ref", "-d", old.trim()]);
+    }
+    git_in(env, repo, &["symbolic-ref", "HEAD", &refname]);
+}
+
+/// Whether a file named `name` is anywhere under `dir`.
+fn found_under(dir: &Path, name: &str) -> bool {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry.file_name() == name
+                || (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && found_under(&entry.path(), name))
+        })
+}
+
+/// A remote whose HEAD names a branch, made with `update-ref`, that git would read as an option is
+/// cloned, and then sync, status and doctor refuse the branch before git sees it: no command in
+/// the name runs, and `--mirror` deletes no branch of the remote. The way out, run as printed,
+/// renames the branch to `main`, and sync then pushes it and nothing else.
+#[test]
+fn a_branch_name_that_reads_as_an_option_never_reaches_git() {
+    for name in [
+        "--upload-pack=touch${IFS}pwned;true",
+        "--receive-pack=touch${IFS}pwned;true",
+        "--mirror",
+    ] {
+        let a = TestEnv::new();
+        let work = common::work_tree(&a, "src", &[(".bashrc", "# rc\n", false)], None);
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let refname = format!("refs/heads/{name}");
+        let push = format!("HEAD:{refname}");
+        git_in(
+            &a,
+            &work,
+            &["push", "-q", &remote, &push, "HEAD:refs/heads/keep"],
+        );
+        a.git(&["--git-dir", &remote, "symbolic-ref", "HEAD", &refname]);
+        let b = a.second_device();
+        exits(&b.run(&["init", &a.remote_url()]), 0);
+        assert_eq!(
+            git_in(&b, &b.repo(), &["symbolic-ref", "HEAD"]).trim(),
+            refname
+        );
+
+        let err = exits(&b.run(&["sync"]), 1);
+        let why = "name starts with a dash, which git reads as an option";
+        assert!(err.contains(why), "{err}");
+        assert!(err.contains("`dotman git branch -m main`"), "{err}");
+        assert!(exits(&b.run(&["status"]), 1).contains(why));
+        let doctor = b.run(&["doctor"]);
+        let report = String::from_utf8_lossy(&doctor.stdout);
+        assert!(!doctor.status.success(), "{report}");
+        assert!(
+            report
+                .lines()
+                .any(|line| line.starts_with("fail  branch: ") && line.contains(why)),
+            "{report}"
+        );
+        assert!(!found_under(a.root(), "pwned") && !found_under(b.root(), "pwned"));
+
+        let out = common::run_hint(&b, &err, "git branch -m");
+        assert!(out.status.success(), "{}", stderr(&out));
+        exits(&b.run(&["sync"]), 0);
+        let refs = a.remote_refs();
+        for kept in ["refs/heads/keep", "refs/heads/main", &refname] {
+            assert!(refs.contains(kept), "{kept}: {refs}");
+        }
+        assert!(!found_under(a.root(), "pwned") && !found_under(b.root(), "pwned"));
+    }
+}
+
+/// A branch whose name holds a credential never reaches the remote as a ref: sync refuses it
+/// without printing the name, and pushes `main` once the way out, run as printed, renames it.
+#[test]
+fn a_branch_name_that_holds_a_credential_never_reaches_the_remote() {
+    let token = format!("ghp_{}", "x".repeat(36));
+    let env = TestEnv::new();
+    env.write(".bashrc", b"x\n", 0o644);
+    env.ok(&["init"]);
+    env.ok(&["add", ".bashrc"]);
+    env.ok(&["sync"]);
+    put_on_branch(&env, &env.repo(), &format!("wip-{token}"));
+    env.ok(&["init", "--remote", &env.remote_url()]);
+
+    let err = exits(&env.run(&["sync", "--dry-run"]), 1);
+    assert!(err.contains("(github-token)"), "{err}");
+    let err = exits(&env.run(&["sync"]), 1);
+    assert!(!err.contains(&token), "{err}");
+    assert_eq!(env.remote_refs(), "");
+    let out = common::run_hint(&env, &err, "git branch -m");
+    assert!(out.status.success(), "{}", stderr(&out));
+    exits(&env.run(&["sync"]), 0);
+    let refs = env.remote_refs();
+    assert!(
+        refs.contains("refs/heads/main") && !refs.contains(&token),
+        "{refs}"
+    );
+}
+
+/// An unborn branch has no ref to rename, so the way out doctor prints for one points `HEAD` at
+/// `main` instead, and run as printed it ends the refusal.
+#[test]
+fn the_way_out_for_an_unborn_branch_dotman_refuses_runs_as_printed() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    put_on_branch(&env, &env.repo(), "--mirror");
+    let doctor = env.run(&["doctor"]);
+    let report = String::from_utf8_lossy(&doctor.stdout).into_owned();
+    assert!(report.contains("fail  branch: "), "{report}");
+    let out = common::run_hint(&env, &report, "git symbolic-ref HEAD refs/heads/main");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report = String::from_utf8_lossy(&env.run(&["doctor"]).stdout).into_owned();
+    assert!(!report.contains("fail  branch"), "{report}");
+}
+
+/// An import whose source's HEAD names a branch dotman refuses, by path or by URL, puts the commit
+/// on `main` with a note that names the rule, not the credential, keeps no ref with the name, and,
+/// by URL, sets no origin, as for a detached HEAD.
+#[test]
+fn an_import_puts_a_source_branch_dotman_refuses_on_main() {
+    let token = format!("ghp_{}", "y".repeat(36));
+    for name in [
+        format!("wip-{token}"),
+        "--upload-pack=touch${IFS}pwned;true".to_owned(),
+    ] {
+        for by_url in [false, true] {
+            let env = TestEnv::new();
+            let work = common::work_tree(&env, "src", &[(".bashrc", "# rc\n", false)], None);
+            put_on_branch(&env, &work, &name);
+            let source = if by_url {
+                format!("file://{}", work.display())
+            } else {
+                work.to_string_lossy().into_owned()
+            };
+            let err = env.ok(&["import", "--yes", &source]);
+            assert!(
+                err.contains("so the import puts its commit on a new branch, main"),
+                "{err}"
+            );
+            assert!(!err.contains(&token), "{err}");
+            let repo = env.repo();
+            assert_eq!(
+                git_in(&env, &repo, &["symbolic-ref", "HEAD"]).trim(),
+                "refs/heads/main"
+            );
+            let refs = git_in(&env, &repo, &["for-each-ref", "--format=%(refname)"]);
+            assert_eq!(refs.trim(), "refs/heads/main", "{err}");
+            assert_eq!(git_in(&env, &repo, &["remote"]), "", "{err}");
+            env.ok(&["init", "--remote", &env.remote_url()]);
+            exits(&env.run(&["sync"]), 0);
+            let pushed = env.remote_refs();
+            assert!(
+                !pushed.contains(&token) && !pushed.contains("--"),
+                "{pushed}"
+            );
+            assert!(!found_under(env.root(), "pwned"));
+        }
+    }
+}
+
+/// A rebase stopped on a branch whose name dotman refuses, with a lock file git left behind: the
+/// recovery never prints the name, and its steps, run as printed, put the commits it had on `main`.
+#[test]
+fn the_rebase_recovery_never_prints_a_branch_dotman_refuses() {
+    let env = TestEnv::new();
+    env.write(".a", b"base\n", 0o644);
+    env.ok(&["init"]);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    let repo = env.repo();
+    put_on_branch(&env, &repo, "--mirror");
+    env.write_repo(".a", b"mine\n");
+    git_in(&env, &repo, &["commit", "-q", "-am", "mine"]);
+    let tip = git_in(&env, &repo, &["rev-parse", "HEAD"]);
+    git_in(&env, &repo, &["update-ref", "refs/heads/up", "HEAD~1"]);
+    git_in(&env, &repo, &["checkout", "-q", "up"]);
+    env.write_repo(".a", b"theirs\n");
+    git_in(&env, &repo, &["commit", "-q", "-am", "theirs"]);
+    git_in(
+        &env,
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/--mirror"],
+    );
+    git_in(&env, &repo, &["reset", "-q", "--hard"]);
+    let rebase = env.git_raw(&["-C", &repo.to_string_lossy(), "rebase", "up"]);
+    assert!(!rebase.status.success(), "the rebase should stop");
+    fs::write(repo.join(".git/index.lock"), b"").unwrap();
+
+    let err = exits(&env.run(&["status"]), 4);
+    assert!(!err.contains("--mirror"), "{err}");
+    let rm = err
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("1. "))
+        .unwrap();
+    let back = "dotman git rebase --quit && dotman git checkout -f -b main ORIG_HEAD";
+    assert!(err.contains(&format!("3. if that fails: {back}")), "{err}");
+    for line in [rm, back] {
+        let out = common::paste(&env, line);
+        assert!(out.status.success(), "{line}: {}", stderr(&out));
+    }
+    assert_eq!(
+        git_in(&env, &repo, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/main"
+    );
+    assert_eq!(git_in(&env, &repo, &["rev-parse", "HEAD"]), tip);
+    exits(&env.run(&["status"]), 0);
+}
+
+/// The conflict recipe names a branch other than `main` as the repo has it, and its pull, run as
+/// printed on a branch with a slash and a dot, reaches the conflict: a full refname passed to git
+/// pulls the same branch.
+#[test]
+fn the_printed_pull_reaches_a_branch_other_than_main() {
+    let a = TestEnv::new();
+    a.ok(&["init"]);
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".a", b"base\n", 0o644);
+    a.ok(&["add", ".a"]);
+    a.ok(&["sync"]);
+    a.ok(&["git", "branch", "-m", "topic/a.b"]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/topic/a.b",
+    ]);
+    let b = a.second_device();
+    b.ok(&["init", &a.remote_url()]);
+    a.write(".a", b"from a\n", 0o644);
+    a.ok(&["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+
+    let err = exits(&b.run(&["sync"]), 4);
+    let pull = "dotman git pull --rebase origin topic/a.b";
+    assert!(err.contains(&format!("1. {pull}")), "{err}");
+    let out = common::paste(&b, pull);
+    assert!(!out.status.success(), "the pull stops on the conflict");
+    let merged = fs::read_to_string(b.repo().join(".a")).unwrap();
+    assert!(merged.contains("<<<<<<<"), "{merged}");
 }

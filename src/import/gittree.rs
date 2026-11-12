@@ -23,7 +23,7 @@ use crate::commands::add::ensure_worktree_parents;
 use crate::config::{Allow, Config, TemplateConfig};
 use crate::context::{Context, is_real_dir};
 use crate::engine::{Node, read_node};
-use crate::git::{Git, TreeEntry, redact_credentials};
+use crate::git::{Git, TreeEntry, UnusableBranch, redact_credentials};
 use crate::identity;
 use crate::name;
 use crate::output;
@@ -1627,7 +1627,7 @@ fn remote_notes(
     source_origin: Option<&str>,
     found: &Analysis,
     squash: bool,
-    detached: bool,
+    branched: Option<&str>,
 ) -> Vec<String> {
     let mut notes = vec![format!("imported from {}", source.display())];
     match source {
@@ -1649,8 +1649,9 @@ fn remote_notes(
                 "the new repo has no remote, as a local path is no use as one; {advice}"
             ));
         }
-        Source::Url(_) if detached => notes.push(format!(
-            "the new repo has no remote, and the source cannot be one: its HEAD is detached, so sync would pull the source's own main, which this import did not take, and push to it. Set a new, empty repo as the remote with `{} init --remote <url>`",
+        Source::Url(_) if branched.is_some() => notes.push(format!(
+            "the new repo has no remote, and the source cannot be one: its HEAD {}, so sync would pull the source's own main, which this import did not take, and push to it. Set a new, empty repo as the remote with `{} init --remote <url>`",
+            branched.unwrap_or_default(),
             name::bin()
         )),
         Source::Url(_) => notes.push(format!(
@@ -1767,8 +1768,9 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
     };
     staging.clone_source(source)?;
     let branched = branch_detached(&staging.git)?;
-    // A local path is no use as a remote. A detached HEAD names no branch of the source, and sync
-    // would pull the source's own `main`, which the import did not take, and push to it.
+    // A local path is no use as a remote. A detached HEAD names no branch of the source, nor does
+    // one renamed to `main`, and sync would pull the source's own `main`, which the import did not
+    // take, and push to it.
     if matches!(source, Source::Path(_)) || branched.is_some() {
         drop_origin(&staging.git)?;
     }
@@ -1794,15 +1796,16 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         Some(Err(_)) => SourceConfig::Broken,
     };
     let mut report = tally(&found, !squash);
-    let detached = branched.is_some();
-    report.notes.extend(branched);
+    report.notes.extend(branched.as_ref().map(|head| {
+        format!("the source's HEAD {head}, so the import puts its commit on a new branch, main")
+    }));
     report.notes.extend(home_modes_notes(&modes, config));
     report.notes.extend(remote_notes(
         source,
         source_origin.as_deref(),
         &found,
         squash,
-        detached,
+        branched.as_deref(),
     ));
     report.notes.extend(setup.notes(ctx, &found, args.dry_run));
     if let Source::Path(path) = source {
@@ -1883,19 +1886,27 @@ fn drop_origin(git: &Git) -> Result<()> {
 }
 
 /// Puts a clone whose HEAD is detached on a new branch, `main`, at that commit, since sync pushes
-/// a branch; returns the note that says so. A detached HEAD names no branch, and the clone of one
-/// brings no other, so there is no default branch to take instead.
+/// a branch, and renames a branch whose name sync refuses to `main`; returns what the source's
+/// HEAD was, as the notes say it. A detached HEAD names no branch, and the clone of one brings no
+/// other, so there is no default branch to take instead.
 fn branch_detached(git: &Git) -> Result<Option<String>> {
-    if git.branch()?.is_some() {
-        return Ok(None);
+    match git.branch() {
+        Ok(Some(_)) => Ok(None),
+        Ok(None) => {
+            // The empty old value refuses to move a `main` that exists.
+            git_stdout(git, &["update-ref", "refs/heads/main", "HEAD", ""], None)?;
+            git_stdout(git, &["symbolic-ref", "HEAD", "refs/heads/main"], None)?;
+            Ok(Some("is detached".to_owned()))
+        }
+        Err(err) => {
+            let Some(unusable) = err.downcast_ref::<UnusableBranch>() else {
+                return Err(err);
+            };
+            // A single-branch clone has no other branch, so no `main` is in the way.
+            git_stdout(git, &unusable.way_out(), None)?;
+            Ok(Some(format!("names a branch whose {}", unusable.why())))
+        }
     }
-    // The empty old value refuses to move a `main` that exists.
-    git_stdout(git, &["update-ref", "refs/heads/main", "HEAD", ""], None)?;
-    git_stdout(git, &["symbolic-ref", "HEAD", "refs/heads/main"], None)?;
-    Ok(Some(
-        "the source's HEAD is detached, so the import puts its commit on a new branch, main"
-            .to_owned(),
-    ))
 }
 
 fn same_dir(a: &Path, source: &Source) -> bool {
