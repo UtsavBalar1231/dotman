@@ -1236,7 +1236,7 @@ fn warn_before_rendering(tree: &Tree) {
         count(templates.len(), "template")
     ));
     for entry in templates {
-        output::warning(&format!("  {}", entry.detail()));
+        output::warning(&format!("  {}", output::escape_line(&entry.detail())));
     }
 }
 

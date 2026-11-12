@@ -1413,12 +1413,15 @@ fn restore_all(home: &Path, swaps: &[Swap]) -> (usize, usize) {
                 kept = kept.saturating_add(1);
                 output::warning(&format!(
                     "{}: left as it is; it is no longer what the swap wrote",
-                    swap.key
+                    output::escape_line(&swap.key)
                 ));
             }
             Err(e) => {
                 kept = kept.saturating_add(1);
-                output::warning(&format!("{}: cannot restore the link: {e:#}", swap.key));
+                output::warning(&format!(
+                    "{}: cannot restore the link: {e:#}",
+                    output::escape_line(&swap.key)
+                ));
             }
         }
     }

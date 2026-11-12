@@ -1155,7 +1155,7 @@ pub(super) fn add_missing(args: &ImportArgs, missing: &[String]) -> Result<bool>
     }
     output::warning("the repo lacks these files:");
     for key in missing {
-        output::warning(&format!("  {key}"));
+        output::warning(&format!("  {}", output::escape_line(key)));
     }
     prompt::confirm(&format!(
         "add {}? [y/N]",
