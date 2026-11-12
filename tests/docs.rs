@@ -836,8 +836,8 @@ const DELETIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/import/gittree.rs",
-        8,
-        "the import's scratch history, entries of its clone it leaves out or renames, and the repo it replaces",
+        9,
+        "the import's scratch history, a clone in its staging dir that took no commit, entries of its clone it leaves out or renames, and the repo it replaces",
     ),
     (
         "src/sys.rs",

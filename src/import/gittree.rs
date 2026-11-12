@@ -278,27 +278,71 @@ impl Staging {
         })
     }
 
-    fn clone_source(&self, source: &Source) -> Result<()> {
+    /// Clones `source`; when the branch the `HEAD` of a local one names keeps the clone from
+    /// taking its commit, fetches that commit onto `main` instead and returns what that `HEAD`
+    /// names, as the notes say it.
+    fn clone_source(&self, source: &Source) -> Result<Option<String>> {
         let cloned = self.git.clone_head_from(&source.git_arg()?);
         if cloned.is_ok() && self.git.head()?.is_some() {
-            return Ok(());
+            return Ok(None);
         }
         if let Source::Path(path) = source
-            && let Some(why) = unclonable_branch(&self.git, path, cloned.is_err())
+            && let Some((named, commit)) = unclonable_branch(&self.git, path, cloned.is_err())
         {
-            bail!(why);
+            let src = path.display();
+            let Some(oid) = commit else {
+                bail!(
+                    "{src}'s HEAD {named}, and its commit cannot be read from the source's refs; give that commit a branch whose name git takes in the source, point HEAD at it, and import again"
+                );
+            };
+            // Words alone: git's error names the fetch command, which run elsewhere moves a `main`.
+            if self.fetch_commit(&source.git_arg()?, &oid).is_err() {
+                bail!(
+                    "{src}'s HEAD {named}, and its commit {oid} could not be fetched from the source and checked out; give that commit a branch whose name git takes in the source, point HEAD at it, and import again"
+                );
+            }
+            return Ok(Some(named));
         }
         cloned?;
         bail!("{} has no commits", source.display())
     }
+
+    /// Puts the commit `oid` of `src` on `main` in a new repo, through git's transport as a clone
+    /// would. Protocol v2 serves a commit that no ref advertises without the source's
+    /// `uploadpack.allowAnySHA1InWant`, which git 2.25 does not use by default.
+    fn fetch_commit(&self, src: &str, oid: &str) -> Result<()> {
+        if fs::symlink_metadata(&self.repo).is_ok() {
+            fs::remove_dir_all(&self.repo)
+                .with_context(|| format!("cannot remove {}", self.repo.display()))?;
+        }
+        self.git.init()?;
+        let refspec = format!("+{oid}:refs/heads/main");
+        let args = [
+            "-c",
+            "protocol.version=2",
+            "fetch",
+            "-q",
+            "--no-tags",
+            "--update-head-ok",
+            "--",
+            src,
+            &refspec,
+        ];
+        git_stdout(&self.git, &args, None)?;
+        self.git.checkout_head()
+    }
 }
 
-/// Why a clone of the local `source` took no commit, when the branch its `HEAD` names is the
-/// reason, with the way out. Git skips a branch whose name it refuses, such as `a/.b` or `a.`, as
-/// if it were not there, and no git command can rename one, so the way out names its commit. A
-/// clone also fails on a branch under `HEAD/`, which clashes with the `origin/HEAD` it makes. A
-/// `main` at another commit gets no command, since either branch may be the one to keep.
-fn unclonable_branch(git: &Git, source: &Path, clone_failed: bool) -> Option<String> {
+/// What the `HEAD` of the local `source` names, as a note says it, when that branch is why a
+/// clone took no commit, with the branch's commit as the source's ref files hold it. Git skips a
+/// branch whose name it refuses, such as `a/.b` or `a.`, as if it were not there, and a clone
+/// fails on one under `HEAD/`, which clashes with the `origin/HEAD` it makes. No git runs in the
+/// source: its hooks and config would run with it.
+fn unclonable_branch(
+    git: &Git,
+    source: &Path,
+    clone_failed: bool,
+) -> Option<(String, Option<String>)> {
     let git_dir = if source.join(".git").is_dir() {
         source.join(".git")
     } else if is_git_dir(source) {
@@ -308,8 +352,6 @@ fn unclonable_branch(git: &Git, source: &Path, clone_failed: bool) -> Option<Str
     };
     let head = small_file(&git_dir.join("HEAD"))?;
     let branch = head.trim_end().strip_prefix("ref: refs/heads/")?;
-    let src = source.display();
-    let quoted = shell_words::quote(&source.to_string_lossy()).into_owned();
     let full = format!("refs/heads/{branch}");
     let why = if clone_failed {
         if !branch.starts_with("HEAD/") {
@@ -319,41 +361,48 @@ fn unclonable_branch(git: &Git, source: &Path, clone_failed: bool) -> Option<Str
     } else if git_stdout(git, &["check-ref-format", &full], None).is_ok() {
         return None;
     } else {
-        "whose name git refuses, so the clone took none of its commits; no git command can rename it"
+        "whose name git refuses"
     };
     // A backtick in the name would close the span and open one of its own.
-    let refused = if branch.contains('`') {
-        format!("{src}'s HEAD names a branch, not shown as its name holds a backtick, {why}")
+    let named = if branch.contains('`') {
+        format!("names a branch, not shown as its name holds a backtick, {why}")
     } else {
-        format!(
-            "{src}'s HEAD names the branch `{}`, {why}",
-            output::escape_line(branch)
-        )
+        format!("names the branch `{}`, {why}", output::escape_line(branch))
     };
-    // A component `..` would leave `refs/heads`; git never writes one there anyway.
-    let commit = Path::new(branch)
+    // A component `..` would leave `refs/heads`; git never writes one there anyway. A loose ref
+    // stands before a packed one, as in git.
+    let loose = Path::new(branch)
         .components()
         .all(|part| matches!(part, std::path::Component::Normal(_)))
         .then(|| small_file(&git_dir.join(&full)))
-        .flatten()
-        .map(|text| text.trim().to_owned())
+        .flatten();
+    let commit = loose
+        .map_or_else(
+            || packed_ref(&git_dir, &full),
+            |text| Some(text.trim().to_owned()),
+        )
         .filter(|oid| is_oid(oid));
-    let main = small_file(&git_dir.join("refs/heads/main")).map(|text| text.trim().to_owned());
-    let point = format!("git -C {quoted} symbolic-ref HEAD refs/heads/main");
-    // The empty old value makes `update-ref` refuse to move a `main` that a packed ref holds.
-    Some(match (commit, main) {
-        (Some(_), None) if clone_failed => format!(
-            "{refused}; rename it in the source, for example with `git -C {quoted} branch -m main`, and import again"
-        ),
-        (Some(oid), None) => format!(
-            "{refused}, so give its commit a branch git takes and point HEAD at it, for example with `git -C {quoted} update-ref refs/heads/main {oid} '' && {point}`, and import again"
-        ),
-        (Some(oid), Some(main)) if oid == main => format!(
-            "{refused}; main holds the same commit, so point HEAD at it with `{point}`, and import again"
-        ),
-        _ => format!(
-            "{refused}, so give its commit a branch git takes and point HEAD at it, and import again"
-        ),
+    Some((named, commit))
+}
+
+/// The packed-refs file of a repo is far smaller than this; one larger is read only this far.
+const PACKED_REFS_MAX: u64 = 64 * 1024 * 1024;
+
+/// The oid that the `packed-refs` file in `git_dir` gives the ref `full`, read as bytes.
+fn packed_ref(git_dir: &Path, full: &str) -> Option<String> {
+    let path = git_dir.join("packed-refs");
+    if !fs::symlink_metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    File::open(&path)
+        .ok()?
+        .take(PACKED_REFS_MAX)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    bytes.split(|b| *b == b'\n').find_map(|line| {
+        let (oid, name) = line.split_at_checked(line.iter().position(|b| *b == b' ')?)?;
+        (name.get(1..) == Some(full.as_bytes())).then(|| String::from_utf8_lossy(oid).into_owned())
     })
 }
 
@@ -1847,8 +1896,8 @@ pub(super) fn import(ctx: &Context, source: &Source, args: &ImportArgs) -> Resul
         Source::Path(path) => git_at(path).remote_target("origin")?,
         Source::Url(_) => None,
     };
-    staging.clone_source(source)?;
-    let branched = branch_detached(&staging.git)?;
+    let fetched = staging.clone_source(source)?;
+    let branched = fetched.map_or_else(|| branch_detached(&staging.git), |n| Ok(Some(n)))?;
     // A local path is no use as a remote. A detached HEAD names no branch of the source, nor does
     // one renamed to `main`, and sync would pull the source's own `main`, which the import did not
     // take, and push to it.
@@ -1959,6 +2008,10 @@ fn commit_count(git: &Git) -> Result<usize> {
 /// deletes only the branch the narrowed refspec names, which leaves `origin/HEAD` pointing at a
 /// deleted ref, and `git fsck` fails on it. `for-each-ref` skips such a ref, so it is named here.
 fn drop_origin(git: &Git) -> Result<()> {
+    // A commit fetched in place of a clone leaves no origin.
+    if git.remote_url("origin")?.is_none() {
+        return Ok(());
+    }
     git.remove_remote("origin")?;
     let listed = git_stdout(
         git,

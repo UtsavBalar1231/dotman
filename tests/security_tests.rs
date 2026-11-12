@@ -3208,6 +3208,58 @@ fn a_local_path_is_cloned_through_git_s_transport() {
     assert!(!every_object(&c, &c.repo().join(".git")).contains(marker));
 }
 
+/// The import of a source whose HEAD names a branch git refuses or cannot clone reads that
+/// branch's commit from the source's files and fetches it through git's transport: the source's
+/// hooks, `core.hooksPath` and `core.fsmonitor` run nothing, and what dotman prints holds no git
+/// command to run in the source.
+#[test]
+fn an_import_of_an_unclonable_head_runs_nothing_from_the_source() {
+    for branch in ["a/.b", "HEAD/x"] {
+        let env = TestEnv::new();
+        let work = common::work_tree(&env, "src", &[(".bashrc", "# rc\n", false)], None);
+        let marker = env.root().join("source-ran");
+        let script = format!("#!/bin/sh\ntouch '{}'\n", marker.display());
+        let git_dir = work.join(".git");
+        let hooks = env.root().join("source-hooks");
+        for hook in ["reference-transaction", "post-checkout", "pre-auto-gc"] {
+            env.write(git_dir.join("hooks").join(hook), script.as_bytes(), 0o755);
+            env.write(hooks.join(hook), script.as_bytes(), 0o755);
+        }
+        let monitor = env.write_script("source-fsmonitor", &script);
+        let config = [
+            ("core.hooksPath", hooks.to_string_lossy().into_owned()),
+            ("core.fsmonitor", monitor.to_string_lossy().into_owned()),
+        ];
+        for (key, value) in &config {
+            git_in(&env, &work, &["config", key, value]);
+        }
+        let oid = git_in(&env, &work, &["rev-parse", "HEAD"]);
+        env.write(
+            git_dir.join("refs/heads").join(branch),
+            oid.as_bytes(),
+            0o644,
+        );
+        let head = format!("ref: refs/heads/{branch}\n");
+        env.write(git_dir.join("HEAD"), head.as_bytes(), 0o644);
+        fs::remove_file(git_dir.join("refs/heads/main")).unwrap();
+        assert!(
+            !marker.exists(),
+            "{branch}: the setup ran the source's hooks"
+        );
+
+        let err = exits(&env.run(&["import", "--yes", &work.to_string_lossy()]), 0);
+        assert!(err.contains("imported 2 commits"), "{branch}: {err}");
+        assert!(!err.contains("git -C"), "{branch}: {err}");
+        assert!(!marker.exists(), "{branch}: {err}");
+        let work = work.to_string_lossy();
+        env.git_raw(&["-C", &work, "status"]);
+        assert!(
+            marker.exists(),
+            "{branch}: the source's fsmonitor is not live"
+        );
+    }
+}
+
 /// A local source whose origin names a git remote helper, such as `ext::`, which runs its address
 /// as a command, gives the new repo no such origin: `init <path>` keeps the source path as origin,
 /// and `import <path>` offers no command that sets it. Nothing runs even where the user allows the

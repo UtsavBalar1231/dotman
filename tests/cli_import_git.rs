@@ -1298,51 +1298,110 @@ fn an_import_of_a_repo_without_commits_is_refused() {
 }
 
 /// A source whose HEAD names a branch git refuses, which a clone skips, or one under `HEAD/`,
-/// which a clone cannot make, is not called empty: the error names the branch, and the way out
-/// it prints, run as printed, lets the import through, whether or not `main` is left beside the
-/// refused branch, at the same commit.
+/// which a clone cannot make, is imported all the same: its commit, read from the source's loose
+/// or packed ref and fetched, goes on a new `main`, with a note that names the branch, whether
+/// `main` is left beside it at the same commit, at another, or not at all. The source is left as
+/// it was, and no git command is printed.
 #[test]
-fn a_head_branch_git_refuses_or_cannot_clone_is_named_with_a_way_out() {
+fn a_head_branch_git_refuses_or_cannot_clone_is_imported_onto_main() {
     let cases = ["a/.b", "a.lock/b", "a.", "a@{x}", "HEAD/x"]
         .into_iter()
-        .flat_map(|branch| [(branch, false), (branch, true)]);
-    for (branch, keep_main) in cases {
+        .flat_map(|branch| {
+            [
+                (branch, Some(false), false),
+                (branch, Some(true), false),
+                (branch, None, false),
+                (branch, None, true),
+            ]
+        });
+    for (branch, same_main, packed) in cases {
         let env = TestEnv::new();
         let work = work_tree(&env, "my dots", &[(".bashrc", "x\n", false)], None);
         let oid = git_in(&env, &work, &["rev-parse", "HEAD"]);
         let git_dir = work.join(".git");
-        env.write(
-            git_dir.join("refs/heads").join(branch),
-            oid.as_bytes(),
-            0o644,
-        );
+        if packed {
+            let line = format!("{} refs/heads/{branch}\n", oid.trim());
+            env.write(git_dir.join("packed-refs"), line.as_bytes(), 0o644);
+        } else {
+            env.write(
+                git_dir.join("refs/heads").join(branch),
+                oid.as_bytes(),
+                0o644,
+            );
+        }
         let head = format!("ref: refs/heads/{branch}\n");
         env.write(git_dir.join("HEAD"), head.as_bytes(), 0o644);
-        if !keep_main {
-            fs::remove_file(git_dir.join("refs/heads/main")).expect("drop main");
+        match same_main {
+            Some(true) => {}
+            Some(false) => {
+                let parent = format!("{}~1", oid.trim());
+                git_in(&env, &work, &["update-ref", "refs/heads/main", &parent]);
+            }
+            None => fs::remove_file(git_dir.join("refs/heads/main")).expect("drop main"),
         }
         let source = Source::new(work.clone());
-        let src = work.to_string_lossy().into_owned();
 
-        let err = env.fails(&["import", "--yes", &src]);
+        let err = env.ok(&["import", "--yes", &work.to_string_lossy()]);
+        let label = format!("{branch} {same_main:?} {packed}");
         assert!(
-            err.contains(&format!("HEAD names the branch `{branch}`")),
-            "{branch}: {err}"
+            err.contains(&format!("the source's HEAD names the branch `{branch}`")),
+            "{label}: {err}"
         );
-        assert!(!err.contains("has no commits"), "{err}");
-        assert!(!env.repo().exists(), "{branch}: nothing is left behind");
+        assert!(
+            err.contains("so the import puts its commit on a new branch, main"),
+            "{label}: {err}"
+        );
+        assert!(err.contains("imported 2 commits"), "{label}: {err}");
+        assert!(!err.contains("git -C"), "{label}: {err}");
+        let repo = env.repo();
+        git_in(
+            &env,
+            &repo,
+            &["merge-base", "--is-ancestor", oid.trim(), "HEAD"],
+        );
+        assert_eq!(
+            git_in(&env, &repo, &["symbolic-ref", "HEAD"]).trim(),
+            "refs/heads/main"
+        );
+        assert_eq!(git_in(&env, &repo, &["remote"]).trim(), "", "{label}");
+        assert_eq!(fs::read(repo.join(".bashrc")).expect("read"), b"x\n");
         source.check();
-        let way_out = err
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .find(|quoted| quoted.starts_with("git -C "))
-            .unwrap_or_default();
-        let fixed = paste(&env, way_out);
-        assert!(fixed.status.success(), "{branch}: {way_out}: {fixed:?}");
-        source.seal();
-        let err = env.ok(&["import", "--yes", &src]);
-        assert!(err.contains("imported 2 commits"), "{branch}: {err}");
+    }
+}
+
+/// When the commit of a HEAD branch git refuses cannot be read from the source's refs, or cannot
+/// be fetched, as it names no object or a blob, the import stops with words alone: no git command,
+/// since one that runs git in the source would run its hooks and config.
+#[test]
+fn a_refused_head_branch_without_a_usable_commit_gets_no_command() {
+    let env = TestEnv::new();
+    let work = work_tree(&env, "my dots", &[(".bashrc", "x\n", false)], None);
+    let blob = git_in(&env, &work, &["rev-parse", "HEAD:.bashrc"]);
+    let cases = [
+        (
+            "ref: refs/heads/main\n".to_owned(),
+            "cannot be read from the source's refs",
+        ),
+        (format!("{}\n", "1".repeat(40)), "could not be fetched"),
+        (blob, "could not be fetched"),
+    ];
+    let git_dir = work.join(".git");
+    env.write(git_dir.join("HEAD"), b"ref: refs/heads/a.\n", 0o644);
+    for (target, why) in cases {
+        env.write(git_dir.join("refs/heads/a."), target.as_bytes(), 0o644);
+        let source = Source::new(work.clone());
+        let err = env.fails(&["import", "--yes", &work.to_string_lossy()]);
+        assert!(
+            err.contains("HEAD names the branch `a.`, whose name git refuses, and its commit")
+                && err.contains(why),
+            "{err}"
+        );
+        assert!(
+            !err.contains("`git ") && !err.contains("has no commits"),
+            "{err}"
+        );
+        assert!(!env.repo().exists());
+        source.check();
     }
 }
 
