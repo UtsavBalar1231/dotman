@@ -15,7 +15,7 @@ use super::{
 };
 use crate::cli::ImportArgs;
 use crate::commands::Outcome;
-use crate::commands::add::ensure_worktree_parents;
+use crate::commands::add::{ensure_worktree_parents, record_mode, shareable_mode};
 use crate::commands::sync::identity_fix;
 use crate::context::Context;
 use crate::engine::{Node, read_node, recorded_mode};
@@ -653,9 +653,7 @@ fn plan(
             let tally = tallies.entry(file.source.clone()).or_default();
             tally.commits = tally.commits.saturating_add(1);
             tally.imported_as.get_or_insert_with(|| file.key.clone());
-            if file.mode != default_mode(file.mode) {
-                modes.insert(file.key.clone(), format!("{:04o}", file.mode));
-            }
+            record_mode(&mut modes, &file.key, file.mode, default_mode(file.mode))?;
         }
         for (source, why) in dropped {
             let tally = tallies.entry(source).or_default();
@@ -933,6 +931,7 @@ fn mode_change(
     on_disk: u32,
     legacy: u32,
 ) -> Result<ModeChange> {
+    let legacy = shareable_mode(modes, key, legacy)?;
     if let Some(recorded) = recorded_mode(modes, key)? {
         return Ok(if recorded == legacy {
             ModeChange::Keep
@@ -1161,16 +1160,14 @@ pub(super) fn overlay(ctx: &Context, root: &Path, args: &ImportArgs) -> Result<O
             make_executable(&repo.join(&fix.key))?;
         }
         if let Some(mode) = fix.record {
-            config.modes.insert(fix.key, format!("{mode:04o}"));
+            record_mode(&mut config.modes, &fix.key, mode, default_mode(mode))?;
         }
     }
     for file in files {
         ensure_worktree_parents(repo, &file.key)?;
         let stored = default_mode(file.mode);
         write_atomic(&repo.join(&file.key), &file.bytes, stored)?;
-        if file.mode != stored {
-            config.modes.insert(file.key, format!("{:04o}", file.mode));
-        }
+        record_mode(&mut config.modes, &file.key, file.mode, stored)?;
     }
     config.save(&ctx.repo_config_file(), false)?;
     ctx.git.stage_all()?;
@@ -1646,6 +1643,35 @@ mod tests {
         assert!(matches!(
             change(&[("f", "0640")], 0o644, 0o755),
             ModeChange::Differs(_)
+        ));
+    }
+
+    #[test]
+    fn group_and_other_write_bits_are_never_recorded() {
+        let history = [snapshot(
+            "c1",
+            &[],
+            &[("shared", 0o664), ("team", 0o660), ("tool", 0o775)],
+        )];
+        let plan = planned(&history, &[]);
+        let commit = plan.commits.first().unwrap();
+        let config = RepoConfig::parse(&commit.config).unwrap();
+        let expected = BTreeMap::from([("team".to_owned(), "0640".to_owned())]);
+        assert_eq!(config.modes, expected);
+
+        assert!(matches!(change(&[], 0o644, 0o664), ModeChange::Keep));
+        assert!(matches!(change(&[], 0o644, 0o660), ModeChange::Set(0o640)));
+        assert!(matches!(
+            change(&[], 0o644, 0o775),
+            ModeChange::Executable(0o755)
+        ));
+        assert!(matches!(
+            change(&[("f", "0640")], 0o644, 0o660),
+            ModeChange::Keep
+        ));
+        assert!(matches!(
+            change(&[("f", "0664")], 0o644, 0o664),
+            ModeChange::Keep
         ));
     }
 

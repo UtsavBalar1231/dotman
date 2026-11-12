@@ -891,22 +891,23 @@ const fn stored_mode(mode: u32) -> u32 {
     if mode & 0o111 == 0 { 0o644 } else { 0o755 }
 }
 
-fn repo_config(ctx: &Context, planner: &Planner<'_>) -> RepoConfig {
+fn repo_config(ctx: &Context, planner: &Planner<'_>) -> Result<RepoConfig> {
     let mut config = RepoConfig::default();
     for (link, _) in &planner.folds {
         config.dirs.paths.push(link.clone());
     }
     config.dirs.paths.sort();
+    let modes = &mut config.modes;
     for write in &planner.writes {
         if matches!(write.body, Body::Bytes(_)) {
-            record_mode(&mut config, &write.key, write.mode, stored_mode(write.mode));
+            record_mode(modes, &write.key, write.mode, stored_mode(write.mode))?;
         }
         for parent in parents(&write.key) {
             let mode = dir_mode(ctx, &planner.folds, parent).unwrap_or(0o755);
-            record_mode(&mut config, &format!("{parent}/"), mode, 0o755);
+            record_mode(modes, &format!("{parent}/"), mode, 0o755)?;
         }
     }
-    config
+    Ok(config)
 }
 
 fn write_files(repo: &Path, writes: &[Write]) -> Result<()> {
@@ -975,7 +976,7 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
     for plan in &planner.previews {
         preview(plan);
     }
-    let config = repo_config(ctx, &planner);
+    let config = repo_config(ctx, &planner)?;
     let mut report = Report {
         converted: planner.writes.len(),
         needs_action: std::mem::take(&mut planner.items),

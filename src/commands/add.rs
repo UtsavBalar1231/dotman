@@ -1571,13 +1571,7 @@ fn record_ahead(
             keep_private(repo_config, key, source, safe_mode(mode))?;
         } else {
             let mode = safe_mode(mode);
-            // An entry that already holds the mode was written by hand, and stays.
-            let shared = if recorded_mode(&repo_config.modes, source)? == Some(mode) {
-                mode
-            } else {
-                mode & !SHARED_WRITE
-            };
-            record_mode(repo_config, source, shared, stored_mode(mode));
+            let shared = record_mode(&mut repo_config.modes, source, mode, stored_mode(mode))?;
             let narrowed = shared != mode && shared != stored_mode(mode);
             if narrowed && old.as_deref() != Some(format!("{shared:04o}").as_str()) {
                 output::warning(&format!(
@@ -1608,7 +1602,7 @@ fn keep_private(repo_config: &mut RepoConfig, key: &str, source: &str, mode: u32
             "{key} is {mode:04o}; this encrypted file applies at {applied:04o}, so this copy is tightened on the next apply; to keep {mode:04o}, set it for {source} in [modes] in .dotman.toml"
         ));
     } else {
-        record_mode(repo_config, source, mode, 0o600);
+        record_mode(&mut repo_config.modes, source, mode, 0o600)?;
     }
     Ok(())
 }
@@ -1634,8 +1628,22 @@ fn store_encrypted(
 }
 
 /// Group and other write bits, which a umask of 002 gives every new file and directory. A capture
-/// never records them, so no machine passes them on to the others.
+/// or an import never records them, so no machine passes them on to the others.
 const SHARED_WRITE: u32 = 0o022;
+
+/// `mode` as `[modes]` may hold it for `key`: without [`SHARED_WRITE`], unless the entry already
+/// holds exactly `mode`, which was written by hand and stays.
+pub(crate) fn shareable_mode(
+    modes: &BTreeMap<String, String>,
+    key: &str,
+    mode: u32,
+) -> Result<u32> {
+    Ok(if recorded_mode(modes, key)? == Some(mode) {
+        mode
+    } else {
+        mode & !SHARED_WRITE
+    })
+}
 
 /// Records the mode of each directory above `key` that `[modes]` has no entry for, and returns
 /// whether it added one. Machines differ in umask, so an entry, which may be another machine's, is
@@ -1652,8 +1660,12 @@ fn record_dirs(
         if repo_config.modes.contains_key(&entry) {
             continue;
         }
-        let mode = dir_mode(cache, home, parent)? & !SHARED_WRITE;
-        record_mode(repo_config, &entry, mode, 0o755);
+        let mode = record_mode(
+            &mut repo_config.modes,
+            &entry,
+            dir_mode(cache, home, parent)?,
+            0o755,
+        )?;
         added = added || mode != 0o755;
     }
     Ok(added)
@@ -1671,14 +1683,21 @@ fn dir_mode(cache: &mut BTreeMap<String, u32>, home: &Path, parent: &str) -> Res
     Ok(mode)
 }
 
-pub(crate) fn record_mode(repo_config: &mut RepoConfig, key: &str, mode: u32, default: u32) {
+/// Every capture and import writes `[modes]` through here. Records [`shareable_mode`] of `mode`
+/// for `key`, or removes the entry when that is `default`, and returns it.
+pub(crate) fn record_mode(
+    modes: &mut BTreeMap<String, String>,
+    key: &str,
+    mode: u32,
+    default: u32,
+) -> Result<u32> {
+    let mode = shareable_mode(modes, key, mode)?;
     if mode == default {
-        repo_config.modes.remove(key);
+        modes.remove(key);
     } else {
-        repo_config
-            .modes
-            .insert(key.to_owned(), format!("{mode:04o}"));
+        modes.insert(key.to_owned(), format!("{mode:04o}"));
     }
+    Ok(mode)
 }
 
 // A symlink in the worktree (a cloned repo can ship one) must not carry the write out of the repo.

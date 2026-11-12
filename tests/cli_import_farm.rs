@@ -279,6 +279,88 @@ fn swap_turns_every_link_into_a_regular_file_with_the_same_bytes() {
     assert!(err.contains("no links to replace"), "{err}");
 }
 
+/// A farm made under umask 002 holds 0664 files and 0775 directories. The import records no group
+/// or other write bit, as `add` does not: 0664 and 0775 record nothing, 0660 records 0640. The
+/// swap writes the repo's modes, so this machine is clean, and a second machine gets 0644 and 0755.
+#[test]
+fn a_farm_import_never_records_group_or_other_write_bits() {
+    let env = TestEnv::new();
+    let chmod = |rel: &str, mode: u32| {
+        fs::set_permissions(env.home().join(rel), fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    env.write("dotfiles/zsh/.zshrc", b"export A=1\n", 0o664);
+    env.write("dotfiles/nvim/.config/nvim/init.lua", b"vim\n", 0o664);
+    env.write(
+        "dotfiles/nvim/.config/nvim/lua/a.lua",
+        b"return {}\n",
+        0o664,
+    );
+    env.write("dotfiles/team/.config/team/x.conf", b"x\n", 0o660);
+    env.write("dotfiles/bin/.local/bin/tool", b"#!/bin/sh\n", 0o775);
+    for dir in [
+        "dotfiles/nvim/.config/nvim",
+        "dotfiles/nvim/.config/nvim/lua",
+        "dotfiles/bin/.local/bin",
+    ] {
+        chmod(dir, 0o775);
+    }
+    chmod("dotfiles/team/.config/team", 0o770);
+    env.symlink(".zshrc", "dotfiles/zsh/.zshrc");
+    env.symlink(".config/nvim", "../dotfiles/nvim/.config/nvim");
+    env.symlink(".config/team", "../dotfiles/team/.config/team");
+    env.symlink(".local/bin/tool", "../../dotfiles/bin/.local/bin/tool");
+    for dir in [".config", ".local", ".local/bin"] {
+        chmod(dir, 0o775);
+    }
+
+    env.ok(&["import"]);
+    let modes: Vec<(String, String)> = env.repo_config().modes.into_iter().collect();
+    let expected = [(".config/team/", "0750"), (".config/team/x.conf", "0640")]
+        .map(|(key, mode)| (key.to_owned(), mode.to_owned()));
+    assert_eq!(modes, expected);
+
+    env.ok(&["import", "--swap", "--yes"]);
+    let tokens = env.porcelain("status");
+    assert!(
+        tokens.iter().all(|(token, _)| token == "clean"),
+        "status is not clean: {tokens:?}"
+    );
+    assert_eq!(tokens.len(), 5);
+    for (key, mode) in [
+        (".zshrc", 0o644),
+        (".config/nvim", 0o755),
+        (".config/nvim/init.lua", 0o644),
+        (".config/team", 0o750),
+        (".config/team/x.conf", 0o640),
+        (".local/bin/tool", 0o755),
+    ] {
+        assert_eq!(mode_of(&env.home().join(key)), mode, "{key}");
+    }
+
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.ok(&["sync"]);
+    env.git(&[
+        "--git-dir",
+        &env.remote_path().to_string_lossy(),
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let other = env.second_device();
+    other.ok(&["init", &env.remote_url()]);
+    for (key, mode) in [
+        (".zshrc", 0o644),
+        (".config/nvim", 0o755),
+        (".config/nvim/lua", 0o755),
+        (".config/nvim/init.lua", 0o644),
+        (".config/team", 0o750),
+        (".config/team/x.conf", 0o640),
+        (".local/bin/tool", 0o755),
+    ] {
+        assert_eq!(mode_of(&other.home().join(key)), mode, "{key}");
+    }
+}
+
 #[test]
 fn a_dry_run_swap_leaves_all_four_trees_equal() {
     let env = TestEnv::new();

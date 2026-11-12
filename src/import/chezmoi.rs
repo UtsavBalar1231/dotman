@@ -1062,21 +1062,22 @@ const fn stored_mode(perm: u32) -> u32 {
 
 /// `.dotman.toml` for the import: the defaults plus the modes that differ from what dotman
 /// stores by itself.
-fn repo_config(writes: &[Write], dir_perms: &BTreeMap<String, u32>) -> RepoConfig {
+fn repo_config(writes: &[Write], dir_perms: &BTreeMap<String, u32>) -> Result<RepoConfig> {
     let mut config = RepoConfig::default();
+    let modes = &mut config.modes;
     for write in writes {
         if is_reserved_root_name(write.key.split('/').next().unwrap_or_default()) {
             continue;
         }
         if !matches!(write.content, Content::Link(_)) {
-            record_mode(&mut config, &write.key, write.perm, stored_mode(write.perm));
+            record_mode(modes, &write.key, write.perm, stored_mode(write.perm))?;
         }
         for parent in parents(&write.key) {
             let perm = dir_perms.get(parent).copied().unwrap_or(0o755);
-            record_mode(&mut config, &format!("{parent}/"), perm, 0o755);
+            record_mode(modes, &format!("{parent}/"), perm, 0o755)?;
         }
     }
-    config
+    Ok(config)
 }
 
 fn write_files(repo: &Path, writes: &[Write]) -> Result<()> {
@@ -1481,7 +1482,7 @@ pub(super) fn import(ctx: &Context, source: &Path, args: &ImportArgs) -> Result<
         &mut items,
         render,
     )?;
-    let mut plan = build_plan(ctx, &wanted, fetched, items);
+    let mut plan = build_plan(ctx, &wanted, fetched, items)?;
     plan.report.notes = notes(source, &tree, ignore.as_ref(), render, &plan);
     if args.render_templates && args.dry_run {
         plan.report.notes.push(
@@ -1535,7 +1536,12 @@ fn decode_prefix(rel_dir: &str) -> String {
         })
 }
 
-fn build_plan(ctx: &Context, wanted: &[&Entry], fetched: Fetched, mut items: Vec<Item>) -> Plan {
+fn build_plan(
+    ctx: &Context,
+    wanted: &[&Entry],
+    fetched: Fetched,
+    mut items: Vec<Item>,
+) -> Result<Plan> {
     let (writes, dir_perms) = settle(ctx, wanted, fetched, &mut items);
     let by_target: BTreeMap<&str, &Entry> = wanted
         .iter()
@@ -1555,20 +1561,20 @@ fn build_plan(ctx: &Context, wanted: &[&Entry], fetched: Fetched, mut items: Vec
         .iter()
         .filter(|write| is_reserved_root_name(write.key.split('/').next().unwrap_or_default()))
         .count();
-    let config = repo_config(&writes, &dir_perms);
+    let config = repo_config(&writes, &dir_perms)?;
     let report = Report {
         converted: writes.len(),
         needs_action: items,
         notes: Vec::new(),
     };
-    Plan {
+    Ok(Plan {
         writes,
         config,
         report,
         created,
         reserved,
         rendered,
-    }
+    })
 }
 
 #[cfg(test)]
