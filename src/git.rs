@@ -21,14 +21,18 @@ use xxhash_rust::xxh3::xxh3_128;
 /// `merge.<name>.driver` or `merge.default` says; either of those could join both sides of a
 /// conflict without a word. Not `merge=text`: git looks a driver named `text` up in the user's
 /// config first. Not `-merge`: unset means binary, which keeps one side. It must be the last line
-/// of `.git/info/attributes`, where a later line wins.
-const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding merge";
+/// of `.git/info/attributes`, where a later line wins. `merge` comes first: git reads a line from
+/// its last attribute back and keeps the first value it sets, and `merge` is the only one set to
+/// true, so a tracked `[attr]merge` macro expands, and its members finding the other four already
+/// set change nothing. Written last, the macro's `text` or `filter=...` would win.
+const ATTRIBUTES: &str = "* merge -text -filter -ident -working-tree-encoding";
 
 /// The lines older dotman versions wrote where [`ATTRIBUTES`] goes; a refresh drops them and keeps
 /// every line the user wrote.
-const OLD_ATTRIBUTES: [&str; 2] = [
+const OLD_ATTRIBUTES: [&str; 3] = [
     "* -text -filter -ident -working-tree-encoding",
     "* -text -filter -ident -working-tree-encoding merge=text",
+    "* -text -filter -ident -working-tree-encoding merge",
 ];
 
 /// What git says about an index it cannot parse. Not a bare "index file": a failed object write

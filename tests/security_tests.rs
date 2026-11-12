@@ -2046,15 +2046,110 @@ fn a_merge_driver_in_the_user_s_git_config_never_settles_a_conflict() {
     }
 }
 
+/// A clean and smudge filter and a merge driver in the user's git config, each leaving a marker
+/// file when git runs it.
+fn demo_drivers_in_git_config(env: &TestEnv) -> std::io::Result<PathBuf> {
+    let marker = env.root().join("ran");
+    let gitconfig = env.home().join(".gitconfig");
+    let mut config = fs::read_to_string(&gitconfig)?;
+    let touch = |what: &str| format!("echo {what} >> '{}'", marker.display());
+    write!(
+        config,
+        "[filter \"demo\"]\n\tsmudge = \"{}; cat\"\n\tclean = \"{}; cat\"\n[merge \"demo\"]\n\tdriver = \"{}; cat %B > %A\"\n",
+        touch("smudge"),
+        touch("clean"),
+        touch("driver"),
+    )
+    .map_err(std::io::Error::other)?;
+    fs::write(&gitconfig, config)?;
+    Ok(marker)
+}
+
+/// A tracked `.gitattributes` macro, named `merge` or after any attribute the pinned line sets or
+/// git reads for line endings, never brings back `text`, `eol`, `filter`, `ident`,
+/// `working-tree-encoding` or a merge driver: the clone, a sync of CRLF content with an expanded
+/// `$Id$`, and the pull back are byte-exact, no filter runs, and a conflicting sync stops (exit 4)
+/// with its printed pull stopping on conflict markers, not settled by the driver.
+#[test]
+fn a_tracked_attribute_macro_never_transforms_content_or_settles_a_conflict() {
+    let all = "text eol=crlf ident filter=demo working-tree-encoding=UTF-16 merge=demo";
+    let mut others = String::new();
+    for name in [
+        "text",
+        "filter",
+        "ident",
+        "working-tree-encoding",
+        "binary",
+        "diff",
+        "eol",
+        "crlf",
+    ] {
+        writeln!(others, "[attr]{name} {all}").unwrap();
+    }
+    others.push_str("* binary diff eol crlf\n");
+    let rounds = [
+        "[attr]merge text eol=crlf\n".to_owned(),
+        "[attr]merge filter=demo\n".to_owned(),
+        "[attr]merge ident\n".to_owned(),
+        "[attr]merge working-tree-encoding=UTF-16\n".to_owned(),
+        "[attr]merge merge=demo\n".to_owned(),
+        "[attr]merge merge=union\n".to_owned(),
+        others,
+    ];
+    let base: &[u8] = b"line1\nid=$Id$\nline3\n";
+    let crlf: &[u8] = b"line1\r\nid=$Id: 0123 $\r\nline3\r\n";
+    for attributes in rounds {
+        let a = device_with_a_symlink();
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let a_ran = demo_drivers_in_git_config(&a).unwrap();
+        a.write(".conf", base, 0o644);
+        a.write(".gitattributes", attributes.as_bytes(), 0o644);
+        a.ok(&["add", ".conf", ".gitattributes"]);
+        a.ok(&["sync"]);
+        let b = a.second_device();
+        let b_ran = demo_drivers_in_git_config(&b).unwrap();
+        exits(&b.run(&["init", &a.remote_url()]), 0);
+        assert_eq!(b.read(".conf"), base, "{attributes}");
+        assert_eq!(fs::read(b.repo().join(".conf")).unwrap(), base);
+
+        b.write(".conf", crlf, 0o644);
+        b.ok(&["sync"]);
+        let pushed = a.git_raw(&["--git-dir", &remote, "cat-file", "blob", "main:.conf"]);
+        assert_eq!(pushed.stdout, crlf, "{attributes}");
+        a.ok(&["sync"]);
+        assert_eq!(a.read(".conf"), crlf, "{attributes}");
+
+        a.write(".conf", b"line1\nid=$Id$\nFROM-A\n", 0o644);
+        a.ok(&["sync"]);
+        b.write(".conf", b"line1\nid=$Id$\nFROM-B\n", 0o644);
+        let err = exits(&b.run(&["sync"]), 4);
+        assert!(err.contains("conflicting paths:\n  .conf"), "{err}");
+        let pull = "dotman git pull --rebase origin main";
+        assert!(err.contains(pull), "{err}");
+        let args: Vec<&str> = pull.split(' ').skip(1).collect();
+        let out = b.run(&args);
+        assert!(!out.status.success(), "{}", stderr(&out));
+        let merged = fs::read_to_string(b.repo().join(".conf")).unwrap();
+        for marker in ["<<<<<<<", "FROM-A", "FROM-B", ">>>>>>>"] {
+            assert!(merged.contains(marker), "{attributes}{merged}");
+        }
+        for ran in [a_ran, b_ran] {
+            assert!(!ran.exists(), "{attributes}{:?}", fs::read_to_string(&ran));
+        }
+    }
+}
+
 /// A repo an older dotman made holds an attributes line without the bare `merge`: none, or
-/// `merge=text`, which the user's git config can redefine. A dry run leaves it; the next `apply`
+/// `merge=text`, which the user's git config can redefine; or with `merge` last, where a tracked
+/// `[attr]merge` macro wins over the rest of the line. A dry run leaves it; the next `apply`
 /// writes the pinned line, and so does `sync`, before its pull, so neither a tracked `merge=union`
 /// nor the user's drivers settle the conflict. A missing file is written too.
 #[test]
 fn an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write() {
     const OLD: &[u8] = b"* -text -filter -ident -working-tree-encoding\n";
     const NAMED: &[u8] = b"* -text -filter -ident -working-tree-encoding merge=text\n";
-    const PINNED: &[u8] = b"* -text -filter -ident -working-tree-encoding merge\n";
+    const PREVIOUS: &[u8] = b"* -text -filter -ident -working-tree-encoding merge\n";
+    const PINNED: &[u8] = b"* merge -text -filter -ident -working-tree-encoding\n";
     let a = device_with_a_symlink();
     a.write(".conf", b"line1\n", 0o644);
     a.write(".gitattributes", b"* merge=union\n", 0o644);
@@ -2080,7 +2175,10 @@ fn an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write()
     assert_eq!(fs::read(&attributes).unwrap(), PINNED);
     assert_eq!(mode_of(&attributes), 0o644);
 
-    for (round, stale) in [Some(OLD), Some(NAMED), None].into_iter().enumerate() {
+    for (round, stale) in [Some(OLD), Some(NAMED), Some(PREVIOUS), None]
+        .into_iter()
+        .enumerate()
+    {
         let (b, attributes) = device();
         settle_conflicts_in_git_config(&b).unwrap();
         match stale {
@@ -2104,7 +2202,7 @@ fn an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write()
 #[test]
 fn the_attributes_refresh_keeps_user_lines_and_never_stops_a_command() {
     use std::os::unix::fs::PermissionsExt;
-    const PINNED: &str = "* -text -filter -ident -working-tree-encoding merge\n";
+    const PINNED: &str = "* merge -text -filter -ident -working-tree-encoding\n";
     let env = TestEnv::new();
     env.ok(&["init", "--remote", &env.remote_url()]);
     env.write(".conf", b"one\n", 0o644);

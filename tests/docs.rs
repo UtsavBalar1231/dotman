@@ -462,6 +462,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "ignored_crlf_and_text_auto_content_survives_commit_and_clone",
             "a_tracked_merge_driver_never_joins_a_conflict",
             "a_merge_driver_in_the_user_s_git_config_never_settles_a_conflict",
+            "a_tracked_attribute_macro_never_transforms_content_or_settles_a_conflict",
         ],
     ),
     (
@@ -469,6 +470,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         &[
             "a_merge_driver_in_the_user_s_git_config_never_settles_a_conflict",
             "a_tracked_merge_driver_never_joins_a_conflict",
+            "a_tracked_attribute_macro_never_transforms_content_or_settles_a_conflict",
         ],
     ),
     (

@@ -131,10 +131,10 @@ fn a_stale_git_lock_fails_with_the_removal_step_that_works() {
     assert_eq!(code, Some(0), "{out}");
 }
 
-const PINNED: &str = "* -text -filter -ident -working-tree-encoding merge\n";
+const PINNED: &str = "* merge -text -filter -ident -working-tree-encoding\n";
 
-/// The attributes lines of older dotman versions, without `merge` or with `merge=text`, and a
-/// pinned line that is not last, are flagged before any command writes. The step doctor prints,
+/// The attributes lines of older dotman versions, without `merge`, with `merge=text` or with
+/// `merge` last, and a pinned line that is not last, are flagged before any command writes. The step doctor prints,
 /// run as printed, puts the pinned line last, keeps the user's lines, and leaves a pending change
 /// out of `$HOME`. A user's line above the pinned one passes.
 #[test]
@@ -149,6 +149,7 @@ fn an_attributes_file_without_the_pinned_line_last_warns_with_a_step_that_works(
     for old in [
         "* -text -filter -ident -working-tree-encoding\n*.age diff=age\n".to_owned(),
         "* -text -filter -ident -working-tree-encoding merge=text\n".to_owned(),
+        "* -text -filter -ident -working-tree-encoding merge\n".to_owned(),
         format!("{PINNED}*.age diff=age\n"),
     ] {
         fs::write(&attributes, &old).expect("age it");
