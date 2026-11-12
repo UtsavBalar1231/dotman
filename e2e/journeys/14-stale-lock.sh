@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# A stale .git/*.lock left by a killed git: sync and doctor stop with the `rm` recovery, which
-# works as printed.
+# A stale .git/*.lock: sync and doctor stop, and the printed rm recovery works.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

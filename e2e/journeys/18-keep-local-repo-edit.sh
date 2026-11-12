@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Keeping $HOME's version over an uncommitted repo edit saves that edit under .dotman/repo/ in
-# the backups first, and forget does the same for a repo edit it removes.
+# Keep-local and forget save an uncommitted repo edit under .dotman/repo/ in the backups first.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

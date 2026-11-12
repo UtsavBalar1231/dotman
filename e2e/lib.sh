@@ -107,7 +107,9 @@ e2e_remote_url() { printf 'file://%s' "$(e2e_remote)"; }
 
 # Creates the shared bare remote, empty, on branch main.
 e2e_make_remote() {
-    e2e_tool git init -q --bare --template= --initial-branch=main "$(e2e_remote)" >/dev/null
+    # symbolic-ref, not --initial-branch, which needs git 2.28 where the floor is 2.25.
+    e2e_tool git init -q --bare --template= "$(e2e_remote)" >/dev/null
+    e2e_tool git --git-dir="$(e2e_remote)" symbolic-ref HEAD refs/heads/main
 }
 
 # Creates machine M with its own HOME, XDG dirs, bin dir and git identity "Machine M".

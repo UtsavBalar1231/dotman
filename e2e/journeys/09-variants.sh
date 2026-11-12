@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Variants and templates: the printed `--for host=` hints keep a plain and an encrypted file to
-# one machine, and a {tmpl} file renders per host.
+# Variants and templates: the printed --for host= hints, for a plain and an {age} file; {tmpl} per host.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

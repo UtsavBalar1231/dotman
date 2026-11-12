@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Mass delete: a broken checkout is refused and restored, and the printed forget-then-allow way
-# out stops managing a directory while $HOME keeps its files.
+# Mass delete: a broken checkout is refused and restored; forget-then-allow stops managing a dir.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# A remote that cannot be reached: the commit stays local, status counts it, and the next sync
-# pushes it.
+# An unreachable remote: the commit stays local and the next sync pushes it.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

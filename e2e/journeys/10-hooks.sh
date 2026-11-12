@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Hooks: an unapproved table is held back and runs once on approval; a table swapped since the
-# warning is refused until it is shown and approved again.
+# Hooks: held back until approved and run once; a table swapped since the warning is refused.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

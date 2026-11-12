@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Modes: a 0600 file stays 0600 everywhere, a stricter local mode is kept on this machine only
-# (M5), and an explicit [modes] entry applies on every machine.
+# Modes: 0600 stays 0600, a stricter local mode is kept here only (M5), [modes] applies everywhere.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -46,6 +45,7 @@ e2e_mode_is a .profile 644
 # An explicit [modes] entry is meant for every machine, so it applies over b's kept mode.
 e2e_write_repo a .dotman.toml "$(sed 's|^\[modes\]$|[modes]\n".profile" = "0640"|' "$(e2e_repo a)/.dotman.toml")
 "
+e2e_inv_modes
 e2e_mode_uncap .profile
 e2e_dm_rc 0 a sync
 e2e_mode_is a .profile 640

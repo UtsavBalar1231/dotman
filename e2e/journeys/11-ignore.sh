@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# [ignore] and a tracked .gitignore in a managed dir: junk is never committed, a credential in a
-# file the .gitignore matches is held, and a file added by name is committed.
+# [ignore] and a tracked .gitignore: junk stays out, a credential is held, a file added by name is kept.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -52,8 +51,15 @@ e2e_dm_rc 0 a sync
 e2e_remote_tracks .config/nvim/cache.json
 e2e_remote_lacks .config/nvim/.init.lua.swp
 
+# So is a file the tracked .gitignore matches.
+e2e_write a .config/nvim/keep.log $'kept on purpose\n'
+e2e_dm_rc 0 a add .config/nvim/keep.log
+e2e_dm_rc 0 a sync
+e2e_remote_tracks .config/nvim/keep.log
+
 e2e_join b beta
 e2e_file_is b .config/nvim/cache.json '{}'
+e2e_file_is b .config/nvim/keep.log $'kept on purpose\n'
 e2e_file_is b .config/nvim/lua/opts.lua $'vim.o.wrap = false\n'
 e2e_absent b .config/nvim/.init.lua.swp
 e2e_absent b .config/nvim/node_modules

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Symlinks: a managed link reaches the other machine as a link, and a link retargeted upstream
-# replaces the old one with its target recorded in the backup.
+# Symlinks: a managed link reaches the other machine, and a retargeted link is replaced and backed up.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

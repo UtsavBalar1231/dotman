@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# e2e/run.sh: runs the e2e scenarios against $DOTMAN_BIN and prints a summary.
-#
-# Usage: DOTMAN_BIN=<path> e2e/run.sh [SUITE | SCENARIO]...
-# With no arguments it runs every suite directory under e2e/. An argument names a suite, such as
-# journeys, or one scenario, by path or by name, such as 02-conflict. E2E_KEEP=1 keeps the temp
-# roots for debugging.
+# e2e/run.sh [SUITE | SCENARIO]...: runs every suite, or those named, against $DOTMAN_BIN.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

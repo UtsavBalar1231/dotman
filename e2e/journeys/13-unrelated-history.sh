@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Unrelated remote history: sync refuses with exit 1, and the printed start-over recipe keeps
-# what only this repo had.
+# Unrelated remote history: sync refuses (exit 1) and the printed start-over recipe keeps local files.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

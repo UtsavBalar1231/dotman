@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# A repo edit holding a credential stops sync before the pull with exit 3, and the printed remedy
-# keeps the edit.
+# A credential in a repo edit stops sync before the pull (exit 3); the printed remedy keeps the edit.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

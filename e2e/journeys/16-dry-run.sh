@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Dry runs are pure: every --dry-run form leaves every HOME, repo, state, config and the remote
-# unchanged, where the same command without it would change them.
+# Dry runs are pure: no --dry-run form changes any HOME, repo, state, config or the remote.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"

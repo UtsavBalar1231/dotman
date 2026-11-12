@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# A secret-named file and a credential are held; no credential hint offers --allow-plain, and the
-# printed `add --encrypt` resolves both holds.
+# Held secret-named and credential files: hints never offer --allow-plain; add --encrypt resolves them.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
