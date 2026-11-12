@@ -1214,7 +1214,7 @@ impl Git {
 
     /// Removes remote `name` and its remote-tracking refs.
     pub fn remove_remote(&self, name: &str) -> Result<()> {
-        self.run(&["remote", "remove", "--", name]).map(drop)
+        self.run(&["remote", "remove", name]).map(drop)
     }
 
     /// The URL of remote `name` exactly as written in the config, without `insteadOf` rewriting.
