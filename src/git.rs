@@ -1245,6 +1245,34 @@ impl Git {
             .context("git rev-list printed a bad count")
     }
 
+    /// The paths `tip` holds that differ from `base` or that `base` lacks; every path of `tip`
+    /// when `base` is `None`. A path that moved counts as added.
+    pub fn changed_paths(&self, base: Option<&str>, tip: &str) -> Result<Vec<PathBuf>> {
+        let Some(base) = base else {
+            return Ok(self
+                .ls_tree(tip)?
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect());
+        };
+        let out = self.run(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=d",
+            base,
+            tip,
+        ])?;
+        Ok(out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(OsStr::from_bytes(path)))
+            .collect())
+    }
+
     /// Whether `remote` has `branch`. Asks the remote and writes nothing locally. Its failure is
     /// [`RemoteFailure::Unreachable`] whatever git's message says, since ls-remote only reads.
     pub fn remote_has_branch(&self, remote: &str, branch: &str) -> Result<bool> {

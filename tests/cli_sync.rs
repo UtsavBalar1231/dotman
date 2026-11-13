@@ -3143,3 +3143,40 @@ fn sync_needs_no_usable_tmpdir() {
     assert!(err.contains("pushed 1 commit to origin/main"), "{err}");
     assert_eq!(remote_file(&env, ".a"), "three\n");
 }
+
+/// A pending home edit with template syntax merges into the template another machine made of the
+/// file, and the merge does not render: sync keeps it local and prints a way out that works.
+#[test]
+fn sync_never_pushes_a_template_that_does_not_render_and_the_way_out_runs_as_printed() {
+    let plain: &[u8] = b"line1\nline2\nline3\nline4\nline5\n";
+    let (a, b) = pair(&[(".rc", plain, 0o644)]);
+    b.write(
+        ".rc",
+        b"line1\nline2\nline3\nline4\nline5\n{{ hostname }}\n",
+        0o644,
+    );
+    exits(&a, 0, &["add", "--template", ".rc"]);
+    exits(&a, 0, &["sync"]);
+    let before = a.remote_refs();
+
+    let err = exits(&b, 1, &["sync"]);
+    assert!(
+        err.contains(".rc{tmpl} does not render after the pull"),
+        "{err}"
+    );
+    assert!(!err.contains("pushed"), "{err}");
+    assert_eq!(a.remote_refs(), before);
+
+    let fixer = b.write_script(
+        "fix-editor.sh",
+        "#!/bin/sh\nfor f; do :; done\nprintf 'line1\\nline2\\nline3\\nline4\\nline5\\nfixed\\n' > \"$f\"\n",
+    );
+    let fixer = fixer.to_string_lossy().into_owned();
+    let args = common::hint(&err, "edit");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let edited = b.run_with(&[("EDITOR", &fixer), ("VISUAL", "")], &args);
+    assert_eq!(edited.status.code(), Some(0), "{}", stderr(&edited));
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("pushed 2 commits to origin/main"), "{err}");
+    assert_ne!(a.remote_refs(), before);
+}

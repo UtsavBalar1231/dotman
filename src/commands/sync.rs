@@ -17,9 +17,11 @@ use crate::hooks::{self, Policy};
 use crate::import::{OriginArg, clone_arg};
 use crate::name;
 use crate::output;
+use crate::paths::shown_key;
 use crate::prompt;
 use crate::remote;
 use crate::secrets::{self, Finding};
+use crate::template;
 use crate::variant::{Flag, Sources};
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
@@ -164,29 +166,65 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     let hooked = hooks::run(&ctx, &second.written, policy);
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured), uncaptured);
 
-    push(&ctx, &branch, pulled).map_err(reached)?;
+    attention |= !push(&ctx, &branch, pulled).map_err(reached)?;
     let hooked = failed.and(reencrypted).and(hooked)?;
     Ok(finish(attention || hooked == Outcome::Attention, false))
 }
 
-/// Pushes `branch` and says how many commits went out. `pulled` means the pull left the remote's
-/// tip in `FETCH_HEAD`, which a remote-tracking ref matches only when the remote has a fetch
-/// refspec.
-fn push(ctx: &Context, branch: &str, pulled: bool) -> Result<()> {
+/// Pushes `branch` and says how many commits went out, unless a `{tmpl}` source the push would
+/// publish does not render here; then nothing is pushed, the way out is printed, and this gives
+/// `false`. `pulled` means the pull left the remote's tip in `FETCH_HEAD`, which a remote-tracking
+/// ref matches only when the remote has a fetch refspec.
+fn push(ctx: &Context, branch: &str, pulled: bool) -> Result<bool> {
     // A repo with no commit has nothing to push.
     if ctx.git.head()?.is_none() {
-        return Ok(());
+        return Ok(true);
     }
-    let pushed = ctx
-        .git
-        .count_commits(pulled.then_some("FETCH_HEAD"), "HEAD")?;
+    let base = pulled.then_some("FETCH_HEAD");
+    if !renders(ctx, base)? {
+        return Ok(false);
+    }
+    let pushed = ctx.git.count_commits(base, "HEAD")?;
     ctx.git.push_set_upstream(REMOTE, branch)?;
     output::success(&match pushed {
         0 => format!("{REMOTE}/{branch} is up to date"),
         1 => format!("pushed 1 commit to {REMOTE}/{branch}"),
         n => format!("pushed {n} commits to {REMOTE}/{branch}"),
     });
-    Ok(())
+    Ok(true)
+}
+
+/// Whether every `{tmpl}` source that `HEAD` changed since `base` renders on this machine, as apply
+/// renders it; warns for each one that does not.
+fn renders(ctx: &Context, base: Option<&str>) -> Result<bool> {
+    let mut all = true;
+    for path in ctx.git.changed_paths(base, "HEAD")? {
+        let Some(source) = path.to_str() else {
+            continue;
+        };
+        let sources = Sources::group([source]);
+        let Some(key) = sources.keys().next() else {
+            continue;
+        };
+        if sources.flag(key, source) != Flag::Tmpl {
+            continue;
+        }
+        let blob = ctx.git.show_blob("HEAD", &path)?;
+        let failure = std::str::from_utf8(&blob).map_or_else(
+            |_| Some(anyhow!("{source} is not valid UTF-8")),
+            |text| template::render(source, text, ctx.template_vars()).err(),
+        );
+        if let Some(err) = failure {
+            let bin = name::bin();
+            output::warning(&format!(
+                "{} does not render after the pull: {err:#}; fix it with `{bin} edit {}` and run `{bin} sync` again",
+                shown_key(source),
+                add::pasteable(&ctx.paths.home, key)
+            ));
+            all = false;
+        }
+    }
+    Ok(all)
 }
 
 /// Pulls `branch` when the remote has it, and says whether it did; `None` when the pull stopped,
