@@ -3,7 +3,7 @@
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
 
 use crate::paths::write_atomic;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -564,7 +564,8 @@ impl Git {
     /// remote's other branches arrive as `refs/remotes/origin/*`. Puts `HEAD` on the one such
     /// branch, or on `main` among several, and checks it out; `None` when `HEAD` is born or the
     /// remote has no branch. Refuses several branches without `main`, and a branch name
-    /// [`checked_branch`] refuses, before it changes anything. Reads only the local refs.
+    /// [`checked_branch`] refuses, and a repo with changes that are not committed, before it
+    /// changes anything: the checkout overwrites. Reads only the local refs.
     pub fn adopt_unborn_head(&self, src: &str) -> Result<Option<Adopted>> {
         if self.head()?.is_some() {
             return Ok(None);
@@ -599,6 +600,12 @@ impl Git {
                 branch_names(several)
             ),
         };
+        let dirty = self.run(&["status", "--porcelain", "-z", "--untracked-files=all"])?;
+        ensure!(
+            dirty.stdout.is_empty(),
+            "{} has changes that are not committed, so dotman does not check out {branch} over them; commit or move them, then run this again",
+            self.repo.display()
+        );
         let full = full_ref(&branch);
         self.run(&[
             "update-ref",

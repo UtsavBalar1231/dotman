@@ -222,6 +222,7 @@ fn a_rerun_of_init_url_heals_a_clone_left_on_an_unborn_branch() {
     let repo = b.repo().to_string_lossy().into_owned();
     b.git(&["-C", &repo, "symbolic-ref", "HEAD", "refs/heads/master"]);
     b.git(&["-C", &repo, "update-ref", "-d", "refs/heads/main"]);
+    b.git(&["-C", &repo, "rm", "-rfq", "."]);
     let born = b.git_raw(&["-C", &repo, "rev-parse", "-q", "--verify", "HEAD"]);
     assert!(!born.status.success());
 
@@ -237,4 +238,38 @@ fn a_rerun_of_init_url_heals_a_clone_left_on_an_unborn_branch() {
     );
     assert_eq!(b.git(&["-C", &repo, "status", "--porcelain"]), "");
     assert!(b.repo().join(".bashrc").is_file());
+}
+
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+#[test]
+fn a_rerun_of_init_url_leaves_uncommitted_repo_work_alone() {
+    let a = remote_with_unborn_head();
+    point_head_at(&a, "main");
+    let b = a.second_device();
+    b.ok(&["init", &a.remote_url()]);
+    let repo = b.repo().to_string_lossy().into_owned();
+    b.git(&["-C", &repo, "symbolic-ref", "HEAD", "refs/heads/master"]);
+    b.git(&["-C", &repo, "update-ref", "-d", "refs/heads/main"]);
+    b.git(&["-C", &repo, "read-tree", "--empty"]);
+    fs::write(b.repo().join(".bashrc"), "mine, uncommitted\n").expect("write");
+    fs::write(b.repo().join(".other"), "untracked\n").expect("write");
+
+    let err = b.fails(&["init", &a.remote_url()]);
+    assert!(
+        err.contains("has changes that are not committed, so dotman does not check out main over them; commit or move them, then run this again"),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read(b.repo().join(".bashrc")).expect("read"),
+        b"mine, uncommitted\n"
+    );
+    assert_eq!(
+        fs::read(b.repo().join(".other")).expect("read"),
+        b"untracked\n"
+    );
+    assert_eq!(
+        b.git(&["-C", &repo, "symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/master"
+    );
 }
