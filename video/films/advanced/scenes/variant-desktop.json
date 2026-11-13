@@ -1,0 +1,13 @@
+{
+  "on": "desktop",
+  "cols": 100,
+  "rows": 24,
+  "steps": [
+    {"say": "# desktop: pull the repo"},
+    {"run": "dotman sync"},
+    {"run": "dotman git ls-files .config"},
+    {"say": "# in the repo, but not applied here"},
+    {"run": "ls ~/.config/monitors.conf", "status": 1},
+    {"wait": 1}
+  ]
+}

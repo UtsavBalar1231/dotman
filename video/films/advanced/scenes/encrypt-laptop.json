@@ -1,0 +1,15 @@
+{
+  "on": "laptop",
+  "cols": 100,
+  "rows": 24,
+  "steps": [
+    {"hidden": "mkdir -m 700 ~/.ssh && printf 'Host work\\n  HostName 10.0.4.12\\n  User alex\\n' > ~/.ssh/config && chmod 600 ~/.ssh/config"},
+    {"say": "# laptop: make an age key, then add a file encrypted"},
+    {"run": "dotman key init"},
+    {"run": "dotman add --encrypt ~/.ssh/config"},
+    {"run": "head -3 ~/.local/share/dotman/.ssh/config{age}"},
+    {"run": "dotman sync"},
+    {"hidden": "cp ~/.config/dotman/age-identity.txt /srv/age-key.txt"},
+    {"wait": 1}
+  ]
+}

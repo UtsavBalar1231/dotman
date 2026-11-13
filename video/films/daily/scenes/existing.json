@@ -1,0 +1,13 @@
+{
+  "on": "desktop",
+  "cols": 100,
+  "rows": 24,
+  "steps": [
+    {"say": "# on the desktop: it has its own ~/.tmux.conf"},
+    {"run": "dotman sync", "answers": [["[s] skip", "d\r"], ["[s] skip", "t\r"]]},
+    {"wait": 1.5},
+    {"run": "cat ~/.tmux.conf"},
+    {"run": "cat ~/.local/state/dotman/backups/*/.tmux.conf"},
+    {"wait": 2}
+  ]
+}

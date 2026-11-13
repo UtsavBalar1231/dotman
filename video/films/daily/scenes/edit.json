@@ -1,0 +1,15 @@
+{
+  "on": "laptop",
+  "cols": 100,
+  "rows": 24,
+  "steps": [
+    {"say": "# on the laptop: add an alias"},
+    {"run": "echo 'alias gs=\"git status\"' >> ~/.zshrc"},
+    {"run": "dotman status"},
+    {"wait": 1.5},
+    {"run": "dotman diff"},
+    {"wait": 2},
+    {"run": "dotman sync"},
+    {"wait": 1.5}
+  ]
+}

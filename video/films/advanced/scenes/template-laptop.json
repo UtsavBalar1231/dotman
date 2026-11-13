@@ -1,0 +1,13 @@
+{
+  "on": "laptop",
+  "cols": 100,
+  "rows": 24,
+  "steps": [
+    {"hidden": "printf '[main]\\nfont=monospace:size={{ 14 if host == \"laptop\" else 11 }}\\n' > ~/.local/share/dotman/.config/foot.ini{tmpl}"},
+    {"say": "# laptop: a template, written in the repo"},
+    {"run": "cat ~/.local/share/dotman/.config/foot.ini{tmpl}"},
+    {"run": "dotman sync"},
+    {"run": "cat ~/.config/foot.ini"},
+    {"wait": 1}
+  ]
+}

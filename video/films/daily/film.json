@@ -1,0 +1,22 @@
+{
+  "machines": ["laptop", "desktop"],
+  "prepare": [
+    {"on": "laptop", "run": "git init -q --bare -b main /srv/dotfiles.git"},
+    {"on": "laptop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && git config --global core.pager cat"},
+    {"on": "desktop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && git config --global core.pager cat"},
+    {"on": "laptop", "run": "printf 'export EDITOR=nvim\\nalias ll=\"ls -l\"\\n' > ~/.zshrc && printf 'set -g mouse on\\n' > ~/.tmux.conf"},
+    {"on": "laptop", "run": "dotman init --no-import --remote file:///srv/dotfiles.git --host laptop --no-system --no-key && dotman add ~/.zshrc && dotman sync"},
+    {"on": "desktop", "run": "dotman init file:///srv/dotfiles.git --host desktop && printf 'set -g prefix C-a\\n' > ~/.tmux.conf"}
+  ],
+  "fade": 0.4,
+  "shots": [
+    {"clip": "clips/title.json"},
+    {"clip": "clips/three-sides.json"},
+    {"scene": "scenes/edit.json"},
+    {"scene": "scenes/arrive.json"},
+    {"clip": "clips/both-have-it.json"},
+    {"scene": "scenes/share.json"},
+    {"scene": "scenes/existing.json"},
+    {"clip": "clips/end.json"}
+  ]
+}

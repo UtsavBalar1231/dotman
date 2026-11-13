@@ -1,0 +1,25 @@
+{
+  "machines": ["laptop", "desktop"],
+  "fade": 0.4,
+  "prepare": [
+    {"on": "laptop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && git init -q --bare -b main /srv/dotfiles.git"},
+    {"on": "laptop", "run": "dotman init --remote file:///srv/dotfiles.git --no-system --no-key"},
+    {"on": "laptop", "run": "printf 'export EDITOR=nvim\\nexport PATH=$HOME/.local/bin:$PATH\\n' > ~/.profile && dotman add ~/.profile && dotman sync"},
+    {"on": "desktop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && dotman init file:///srv/dotfiles.git"}
+  ],
+  "shots": [
+    {"clip": "clips/title.json"},
+    {"clip": "clips/variants.json"},
+    {"scene": "scenes/variant-laptop.json"},
+    {"scene": "scenes/variant-desktop.json"},
+    {"clip": "clips/templates.json"},
+    {"scene": "scenes/template-laptop.json"},
+    {"scene": "scenes/template-desktop.json"},
+    {"clip": "clips/encrypt.json"},
+    {"scene": "scenes/encrypt-laptop.json"},
+    {"scene": "scenes/encrypt-desktop.json"},
+    {"clip": "clips/guard.json"},
+    {"scene": "scenes/guard-laptop.json"},
+    {"clip": "clips/end.json"}
+  ]
+}

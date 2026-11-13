@@ -1,0 +1,8 @@
+{
+  "grammar": "y5_kinetic_type", "duration": 3.5, "fps": 30, "width": 1920, "height": 1080,
+  "theme": {"bg": "#11111b", "surface": "#1e1e2e", "ink": "#cdd6f4", "sub": "#a6adc8", "accent": "#a6e3a1", "accent2": "#11111b"},
+  "cues": [
+    {"at": 0.3, "kind": "title", "text": "dotman"},
+    {"at": 1.4, "kind": "point", "text": "each machine", "sub": "variants, templates and secrets", "data": {"label": "one repo, made to fit", "key": "each machine"}}
+  ]
+}

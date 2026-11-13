@@ -1,0 +1,53 @@
+{
+  "grammar": "y3_whiteboard",
+  "duration": 6.5,
+  "fps": 30,
+  "width": 1920,
+  "height": 1080,
+  "theme": {
+    "bg": "#11111b",
+    "surface": "#1e1e2e",
+    "ink": "#cdd6f4",
+    "sub": "#a6adc8",
+    "accent": "#a6e3a1",
+    "accent2": "#89b4fa"
+  },
+  "cues": [
+    {
+      "at": 0.0,
+      "kind": "title",
+      "text": "Which side changed?"
+    },
+    {
+      "at": 0.9,
+      "kind": "point",
+      "text": "dotman compares three sides"
+    },
+    {
+      "at": 1.8,
+      "kind": "draw",
+      "text": "the repo",
+      "data": {
+        "icon": "doc"
+      }
+    },
+    {
+      "at": 2.6,
+      "kind": "draw",
+      "text": "$HOME",
+      "data": {
+        "icon": "screen",
+        "arrow": false
+      }
+    },
+    {
+      "at": 3.4,
+      "kind": "draw",
+      "text": "what it last applied",
+      "data": {
+        "icon": "check",
+        "arrow": false
+      }
+    }
+  ]
+}

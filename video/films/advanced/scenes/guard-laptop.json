@@ -1,0 +1,13 @@
+{
+  "on": "laptop",
+  "cols": 100,
+  "rows": 24,
+  "steps": [
+    {"hidden": "printf 'export GH_TOKEN=%s%s\\n' 'gh''p_' \"$(printf 'a1B2%.0s' $(seq 9))\" >> ~/.profile"},
+    {"say": "# laptop: a GitHub token slipped into ~/.profile"},
+    {"run": "dotman sync", "status": 3},
+    {"wait": 2.5},
+    {"run": "dotman status"},
+    {"wait": 1.5}
+  ]
+}
