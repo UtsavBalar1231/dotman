@@ -14,7 +14,7 @@ use crate::engine::{
 use crate::name;
 use crate::output;
 use crate::paths::{
-    OwnPath, absolute_input, find_collisions, refuse_non_nfc, validate_key, write_atomic,
+    OwnPath, absolute_input, find_collisions, refuse_non_nfc, shown_key, validate_key, write_atomic,
 };
 use crate::prompt;
 use crate::remote;
@@ -269,10 +269,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     let settled = drop_unchanged(&ctx, &repo_config, &state, &targets.sources, &mut plan);
     let content = guard_content(&ctx, &mut plan, &targets, args)?;
     guarded.warn(&ctx, public, args.for_conditions.as_deref());
-    for (key, found) in &content.held {
-        let path = pasteable(&ctx.paths.home, key);
-        output::warning(&format!("held {key}: {found}{}", found.remedy(Some(&path))));
-    }
+    warn_content_held(&ctx, &content.held);
     let specials = warn_held(&ctx, &plan, &targets.sources);
     for dir in &plan.dirs {
         warn_still_ignored(&ctx.paths.home, &dir.still_ignored);
@@ -394,6 +391,16 @@ fn adopt_dirs(
     Ok(())
 }
 
+fn warn_content_held(ctx: &Context, held: &[(String, Finding)]) {
+    for (key, found) in held {
+        let (name, path) = (shown_key(key), pasteable(&ctx.paths.home, key));
+        output::warning(&format!(
+            "held {name}: {found}{}",
+            found.remedy(Some(&path))
+        ));
+    }
+}
+
 /// Lists the sockets, FIFOs, devices and unreadable entries the directories hold back, which
 /// `[dirs]` would hold at every sync too. Returns how many. An `[ignore]` pattern keeps a managed
 /// file managed, so for one of those the way out is `forget`.
@@ -405,7 +412,11 @@ fn warn_held(ctx: &Context, plan: &Plan, sources: &Sources) -> usize {
         } else {
             "an [ignore] pattern in .dotman.toml silences it".to_owned()
         };
-        output::warning(&format!("held {key}: {}; {way_out}", hold.reason()));
+        output::warning(&format!(
+            "held {}: {}; {way_out}",
+            shown_key(key),
+            hold.reason()
+        ));
         held = held.saturating_add(1);
     }
     held
@@ -492,7 +503,8 @@ impl Guarded {
                 ),
             };
             output::warning(&format!(
-                "held {key}: name matches [guard] secret_names{hint}"
+                "held {}: name matches [guard] secret_names{hint}",
+                shown_key(key)
             ));
         }
         let (verb, which) = match self.plain.as_slice() {
@@ -511,7 +523,11 @@ impl Guarded {
         });
         output::warning(&format!(
             "{} {verb} stored as plain text; `{bin} add --encrypt {variant}{which}` stores it encrypted instead",
-            self.plain.join(", ")
+            self.plain
+                .iter()
+                .map(|key| shown_key(key))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 }
@@ -905,7 +921,8 @@ impl Targets<'_> {
                         output::action("add", &shown(key, &source));
                         if self.template {
                             output::info(&format!(
-                                "{key} is now a template; `{} edit {}` opens it",
+                                "{} is now a template; `{} edit {}` opens it",
+                                shown_key(key),
                                 name::bin(),
                                 pasteable(home, key)
                             ));

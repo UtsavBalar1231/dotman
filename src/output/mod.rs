@@ -129,7 +129,8 @@ fn fit(message: &str) -> Cow<'_, str> {
 /// Breaks each line of `text` that starts with a non-space and is longer than `columns` at spaces
 /// outside backtick spans, so a pasted command never holds a newline. A continuation line is
 /// indented by two spaces. An indented line is a list item or a bare command and is kept as it
-/// is, and so is a token longer than a line. Wide characters count as one column.
+/// is, and so is a token longer than a line, and a line with an odd number of backticks, whose
+/// spans cannot be told. Wide characters count as one column.
 fn wrap(text: &str, columns: usize) -> String {
     let mut out = String::with_capacity(text.len());
     for (i, line) in text.split('\n').enumerate() {
@@ -137,7 +138,8 @@ fn wrap(text: &str, columns: usize) -> String {
             out.push('\n');
         }
         let long = line.chars().nth(columns).is_some();
-        if long && !line.starts_with(char::is_whitespace) {
+        let paired = line.matches('`').count() % 2 == 0;
+        if long && paired && !line.starts_with(char::is_whitespace) {
             wrap_line(line, columns, &mut out);
         } else {
             out.push_str(line);
@@ -343,6 +345,16 @@ mod tests {
     }
 
     #[test]
+    fn a_line_with_an_odd_number_of_backticks_is_kept() {
+        let line = format!("{LONG} and a name with a ` in it");
+        assert_eq!(wrap(&line, 40), line);
+        assert_eq!(
+            wrap(&format!("{line}\n{LONG}"), 60),
+            format!("{line}\n{}", wrap(LONG, 60))
+        );
+    }
+
+    #[test]
     fn each_line_of_a_message_wraps_on_its_own() {
         let wrapped = wrap(&format!("{LONG}\n  {LONG}\n{LONG}"), 80);
         let lines: Vec<&str> = wrapped.split('\n').collect();
@@ -371,7 +383,7 @@ mod tests {
                     proptest::prop_assert!(line.starts_with("  "));
                     proptest::prop_assert!(!line.starts_with("   "));
                 }
-                if line.chars().count() > columns {
+                if line.chars().count() > columns && text.matches('`').count() % 2 == 0 {
                     let body = line.trim_start();
                     proptest::prop_assert_eq!(tokens(body).count(), 1, "{:?}", line);
                 }

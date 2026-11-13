@@ -560,6 +560,17 @@ fn the_edit_hint_after_add_template_runs_as_printed() {
 }
 
 #[test]
+fn a_backtick_in_the_name_is_escaped_in_the_note_after_add_template() {
+    let env = adding();
+    env.write(".tick`x", b"x\n", 0o644);
+    let err = exits(&env.run(&["add", "--template", ".tick`x"]), 0);
+    assert!(
+        err.contains(".tick\\u{60}x is now a template; `dotman edit "),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_rerun_finishes_an_interrupted_add_template() {
     let env = adding();
     env.write(".p", b"name = alex\n", 0o644);

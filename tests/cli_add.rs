@@ -59,6 +59,21 @@ fn a_directory_holds_a_secret_named_file_without_a_remote() {
     assert!(managed(&env).contains(&".config/zsh/secrets.zsh".to_owned()));
 }
 
+/// A backtick in a held name is escaped in the prose, so the backticks that remain are the ones
+/// around the printed commands and the line wraps at their spaces only.
+#[test]
+fn a_held_name_with_a_backtick_is_shown_escaped() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/zsh/.zshrc", b"x\n", 0o644);
+    env.write(".config/zsh/secrets`x.zsh", b"export GH_TOKEN=x\n", 0o600);
+    let err = exits(&env, 3, &["add", ".config/zsh"]);
+    assert!(
+        err.contains("held .config/zsh/secrets\\u{60}x.zsh: name matches"),
+        "{err}"
+    );
+}
+
 #[test]
 fn another_host_s_encrypted_variant_does_not_let_a_plain_secret_in() {
     let env = TestEnv::new();
