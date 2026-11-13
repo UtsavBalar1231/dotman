@@ -64,8 +64,10 @@ e2e_write a .config/app/app.conf "theme=dark
 token = $token
 "
 e2e_dm_rc 0 a status
+# shellcheck disable=SC2016  # the literal text dotman prints
 e2e_out_has 'held in $HOME; `dotman sync` captures none of it:'
 e2e_out_has '.config/app/app.conf: line 2 holds a github-token'
+# shellcheck disable=SC2016  # the literal text dotman prints
 e2e_err_has '1 held in $HOME'
 e2e_run_printed a "$(e2e_printed '^dotman forget ')"
 e2e_dm_rc 0 a sync
