@@ -2112,7 +2112,6 @@ fn summarize(items: &[Item], locked: usize) {
     ));
 }
 
-/// The answers to `question`.
 fn menu(question: &Question, bulk: bool) -> String {
     let (local, repo) = if bulk {
         (question.local.all, question.repo.all)

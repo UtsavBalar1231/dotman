@@ -156,7 +156,6 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     Ok(())
 }
 
-/// The porcelain records after the rows, each kind in turn.
 fn write_records(
     out: &mut impl Write,
     new: &[&String],
