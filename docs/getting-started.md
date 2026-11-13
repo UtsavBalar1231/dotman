@@ -18,6 +18,8 @@ On a second machine:
 dotman init <url>
 ```
 
+When the remote's HEAD names a branch with no commits, as a bare repo made with git's default `master` does after dotman pushed `main`, `init` checks out the remote's branch: its only branch, or `main` when it has several.
+
 From then on, edit files where they are and run `dotman sync`. It captures local edits, commits, pulls, applies what arrived and pushes. `dotman status` shows what differs, and `dotman diff` shows how.
 
 A directory you add, such as `~/.config/nvim`, goes into `[dirs]` in `.dotman.toml`, and `sync` captures the new files that appear under it. Each machine approves a `[dirs]` entry before its own new files under it are captured: `add <dir>` approves the directory it adds, and on the second machine the first `sync` with new files under an entry from elsewhere asks, or with `--approve-dirs` approves without asking. Until then those files are held, and the run exits 3. The managed files under the entry apply and sync as usual meanwhile. The approval lives in this machine's `state.toml`, per entry; `forget <dir>` drops it, so an entry forgotten here and listed again later is asked about again. A state written by an older dotman approves the entries `.dotman.toml` lists when it is first read, because that machine was capturing under them already.
