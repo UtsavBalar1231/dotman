@@ -1,12 +1,15 @@
 //! Styled status output on stderr, gated by a global verbosity level.
 //!
 //! Every message is escaped before it is styled, so a file name or a command from the repo cannot
-//! move the cursor, retitle the terminal or overwrite a line already printed.
+//! move the cursor, retitle the terminal or overwrite a line already printed. On a terminal at
+//! least 40 columns wide, a long message is also wrapped at spaces outside backticks.
 
 mod progress;
 
 use colored::Colorize;
 use std::borrow::Cow;
+use std::fmt::Display;
+use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub use progress::Progress;
@@ -85,6 +88,97 @@ pub const fn is_hidden_format(c: char) -> bool {
     )
 }
 
+/// `n` with `noun` pluralised by an `s`: `1 file`, `2 files`.
+#[must_use]
+pub fn count<N>(n: N, noun: &str) -> String
+where
+    N: Copy + PartialEq + From<u8> + Display,
+{
+    format!("{n} {noun}{}", plural(n, "", "s"))
+}
+
+/// `one` when `n` is 1, `many` otherwise, for a word that agrees with a count.
+#[must_use]
+pub fn plural<'a, N>(n: N, one: &'a str, many: &'a str) -> &'a str
+where
+    N: Copy + PartialEq + From<u8>,
+{
+    if n == N::from(1) { one } else { many }
+}
+
+/// Narrower terminals are left to wrap by themselves.
+const MIN_WRAP_COLUMNS: usize = 40;
+
+fn terminal_columns() -> Option<usize> {
+    if !io::stderr().is_terminal() {
+        return None;
+    }
+    let columns = usize::from(crate::sys::stderr_columns()?);
+    (columns >= MIN_WRAP_COLUMNS).then_some(columns)
+}
+
+/// `message` escaped, and wrapped to the terminal when stderr is one.
+fn fit(message: &str) -> Cow<'_, str> {
+    let escaped = escape(message);
+    match terminal_columns() {
+        Some(columns) => Cow::Owned(wrap(&escaped, columns)),
+        None => escaped,
+    }
+}
+
+/// Breaks each line of `text` that starts with a non-space and is longer than `columns` at spaces
+/// outside backtick spans, so a pasted command never holds a newline. A continuation line is
+/// indented by two spaces. An indented line is a list item or a bare command and is kept as it
+/// is, and so is a token longer than a line. Wide characters count as one column.
+fn wrap(text: &str, columns: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let long = line.chars().nth(columns).is_some();
+        if long && !line.starts_with(char::is_whitespace) {
+            wrap_line(line, columns, &mut out);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn wrap_line(line: &str, columns: usize, out: &mut String) {
+    let mut width = 0usize;
+    let mut on_line = false;
+    for (i, token) in tokens(line).enumerate() {
+        let token_width = token.chars().count();
+        if i > 0 {
+            let overflows = width.saturating_add(1).saturating_add(token_width) > columns;
+            if on_line && !token.is_empty() && overflows {
+                out.push_str("\n  ");
+                width = 2;
+                on_line = false;
+            } else {
+                out.push(' ');
+                width = width.saturating_add(1);
+            }
+        }
+        out.push_str(token);
+        width = width.saturating_add(token_width);
+        on_line = on_line || !token.is_empty();
+    }
+}
+
+/// The pieces of `line` between spaces that lie outside a backtick span.
+fn tokens(line: &str) -> impl Iterator<Item = &str> {
+    let mut in_span = false;
+    line.split(move |c| {
+        if c == '`' {
+            in_span = !in_span;
+        }
+        c == ' ' && !in_span
+    })
+}
+
 fn escape_where(text: &str, unsafe_char: impl Fn(char) -> bool) -> Cow<'_, str> {
     if !text.chars().any(&unsafe_char) {
         return Cow::Borrowed(text);
@@ -107,17 +201,17 @@ pub fn success(message: &str) {
     if get_verbosity() == Verbosity::Quiet {
         return;
     }
-    eprintln!("{}", escape(message).green());
+    eprintln!("{}", fit(message).green());
 }
 
 /// Prints an error message in bold red (always shown).
 pub fn error(message: &str) {
-    eprintln!("{}", escape(message).red().bold());
+    eprintln!("{}", fit(message).red().bold());
 }
 
 /// Prints a warning message in bold yellow (always shown).
 pub fn warning(message: &str) {
-    eprintln!("{}", escape(message).yellow().bold());
+    eprintln!("{}", fit(message).yellow().bold());
 }
 
 /// Prints an informational message in dimmed color (respects quiet mode).
@@ -125,13 +219,13 @@ pub fn info(message: &str) {
     if get_verbosity() == Verbosity::Quiet {
         return;
     }
-    eprintln!("{}", escape(message).dimmed());
+    eprintln!("{}", fit(message).dimmed());
 }
 
 /// Prints what a question is about, in dimmed color. Always shown: `-q` must not hide what an
 /// answer approves.
 pub fn context(message: &str) {
-    eprintln!("{}", escape(message).dimmed());
+    eprintln!("{}", fit(message).dimmed());
 }
 
 /// Prints a verbose debug message (only in verbose mode).
@@ -139,7 +233,7 @@ pub fn verbose(message: &str) {
     if get_verbosity() != Verbosity::Verbose {
         return;
     }
-    eprintln!("{}", escape(message).dimmed());
+    eprintln!("{}", fit(message).dimmed());
 }
 
 /// Prints a git-style action message with dimmed verb and normal message, each kept on one line.
@@ -210,5 +304,86 @@ mod tests {
         assert!(matches!(escape_line("a/b \"c\" é"), Cow::Borrowed(_)));
         let once = escape_line("x\ny").into_owned();
         assert_eq!(escape(&once), once);
+    }
+
+    #[test]
+    fn a_count_agrees_with_its_noun() {
+        assert_eq!(count(0_usize, "file"), "0 files");
+        assert_eq!(count(1_usize, "file"), "1 file");
+        assert_eq!(count(2_usize, "file"), "2 files");
+        assert_eq!(count(0_u64, "file"), "0 files");
+        assert_eq!(count(1_u64, "file"), "1 file");
+        assert_eq!(count(2_u64, "file"), "2 files");
+        assert_eq!(plural(1_usize, "entry", "entries"), "entry");
+        assert_eq!(plural(0_u64, "needs", "need"), "need");
+        assert_eq!(plural(2_u64, "needs", "need"), "need");
+    }
+
+    const LONG: &str = "next: run `dotman apply --dry-run` to see what would change, then `dotman apply` to write it, or `dotman status` to look again";
+
+    #[test]
+    fn a_long_line_breaks_at_spaces_outside_backticks_and_indents_the_rest() {
+        assert_eq!(
+            wrap(LONG, 60),
+            "next: run `dotman apply --dry-run` to see what would change,\n  then `dotman apply` to write it, or `dotman status` to\n  look again"
+        );
+    }
+
+    #[test]
+    fn a_short_line_an_indented_line_and_an_overlong_token_are_kept() {
+        assert_eq!(wrap("short line", 40), "short line");
+        let indented = format!("  {LONG}");
+        assert_eq!(wrap(&indented, 40), indented);
+        let token = "x".repeat(60);
+        assert_eq!(
+            wrap(&format!("a {token} b"), 40),
+            format!("a\n  {token}\n  b")
+        );
+        assert_eq!(wrap("a\nb", 40), "a\nb");
+    }
+
+    #[test]
+    fn each_line_of_a_message_wraps_on_its_own() {
+        let wrapped = wrap(&format!("{LONG}\n  {LONG}\n{LONG}"), 80);
+        let lines: Vec<&str> = wrapped.split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.get(2), Some(&format!("  {LONG}").as_str()));
+        assert!(
+            lines
+                .iter()
+                .filter(|line| !line.starts_with("  "))
+                .all(|line| line.chars().count() <= 80)
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn wrapping_keeps_spans_and_order_and_the_width(
+            text in "[a-z`]{1,14}( [a-z`]{1,14}){0,30}",
+            columns in 40usize..120,
+        ) {
+            let wrapped = wrap(&text, columns);
+            proptest::prop_assert!(wrapped.replace("\n  ", " ") == text);
+            let spans = |s: &str| s.split('`').skip(1).step_by(2).map(str::to_owned).collect::<Vec<_>>();
+            proptest::prop_assert_eq!(spans(&wrapped), spans(&text));
+            for (i, line) in wrapped.split('\n').enumerate() {
+                if i > 0 {
+                    proptest::prop_assert!(line.starts_with("  "));
+                    proptest::prop_assert!(!line.starts_with("   "));
+                }
+                if line.chars().count() > columns {
+                    let body = line.trim_start();
+                    proptest::prop_assert_eq!(tokens(body).count(), 1, "{:?}", line);
+                }
+            }
+        }
+
+        #[test]
+        fn an_indented_line_is_untouched(
+            text in " {1,4}[a-z`]{1,14}( [a-z`]{1,14}){0,30}",
+            columns in 40usize..120,
+        ) {
+            proptest::prop_assert_eq!(wrap(&text, columns), text);
+        }
     }
 }

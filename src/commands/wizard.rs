@@ -339,13 +339,11 @@ impl Wizard<'_> {
         if ctx.age().has_key_source() {
             return Ok(None);
         }
-        let count = crate::secrets::encrypted_sources(ctx)?.len();
-        if count == 0 {
+        let encrypted = crate::secrets::encrypted_sources(ctx)?.len();
+        if encrypted == 0 {
             return Ok(None);
         }
-        output::context(&format!(
-            "{count} encrypted files need an age key, and this machine has none"
-        ));
+        output::context(&no_key_notice(encrypted));
         prompt::ask_parsed(
             "Paste the AGE-SECRET-KEY line, give the path of the file that holds it, or leave empty to skip:",
             |answer| self.read_key(answer),
@@ -777,9 +775,29 @@ fn ssh_url_of(json: &str) -> Result<String> {
     usable_url(url).map(str::to_owned).map_err(|e| anyhow!(e))
 }
 
+fn no_key_notice(encrypted: usize) -> String {
+    format!(
+        "{} {} an age key, and this machine has none",
+        output::count(encrypted, "encrypted file"),
+        output::plural(encrypted, "needs", "need"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_missing_key_notice_agrees_with_the_count() {
+        assert_eq!(
+            no_key_notice(1),
+            "1 encrypted file needs an age key, and this machine has none"
+        );
+        assert_eq!(
+            no_key_notice(2),
+            "2 encrypted files need an age key, and this machine has none"
+        );
+    }
 
     #[test]
     fn slugs_are_owner_slash_name() {

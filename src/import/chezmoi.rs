@@ -1271,7 +1271,7 @@ fn notes(
             if unusable == 0 {
                 String::new()
             } else {
-                format!(" ({unusable} patterns could not be read and were skipped)")
+                unusable_patterns(unusable)
             }
         ));
     }
@@ -1577,9 +1577,29 @@ fn build_plan(
     })
 }
 
+fn unusable_patterns(n: usize) -> String {
+    format!(
+        " ({} could not be read and {} skipped)",
+        output::count(n, "pattern"),
+        output::plural(n, "was", "were"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_ignore_patterns_are_counted_in_the_right_number() {
+        assert_eq!(
+            unusable_patterns(1),
+            " (1 pattern could not be read and was skipped)"
+        );
+        assert_eq!(
+            unusable_patterns(2),
+            " (2 patterns could not be read and were skipped)"
+        );
+    }
 
     fn decoded(name: &str) -> (Class, String) {
         let d = decode_file(name);

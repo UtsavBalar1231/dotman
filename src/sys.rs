@@ -72,6 +72,18 @@ pub fn geteuid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Columns of the terminal on stderr, or `None` when stderr is not a terminal or reports 0 columns.
+#[must_use]
+pub fn stderr_columns() -> Option<u16> {
+    let mut size = MaybeUninit::<libc::winsize>::zeroed();
+    // SAFETY: `TIOCGWINSZ` writes one `winsize` through the pointer, which is valid and outlives
+    // the call; the result is read only when the call succeeds.
+    let ok = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, size.as_mut_ptr()) } == 0;
+    // SAFETY: the struct was zero-initialised, and every bit pattern is a valid `winsize`.
+    let columns = ok.then(|| unsafe { size.assume_init() }.ws_col)?;
+    (columns > 0).then_some(columns)
+}
+
 /// Whether a process with id `pid` exists, as `kill(pid, 0)` tells: one owned by another user
 /// counts. A `pid` that cannot name a single process counts as alive, so nothing is ever taken
 /// from a live one.

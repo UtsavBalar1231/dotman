@@ -246,9 +246,17 @@ pub fn run(plan_path: &Path) -> Result<()> {
         }
     }
     if failed > 0 {
-        bail!("{failed} of {} files were not written", plan.entries.len());
+        bail!("{}", not_written(failed, plan.entries.len()));
     }
     Ok(())
+}
+
+fn not_written(failed: usize, total: usize) -> String {
+    format!(
+        "{failed} of {total} {} {} not written",
+        output::plural(total, "file", "files"),
+        output::plural(failed, "was", "were"),
+    )
 }
 
 fn list(roots: &BTreeSet<String>) -> String {
@@ -601,6 +609,13 @@ fn relabel(disk: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_failure_count_agrees_with_its_nouns_and_verb() {
+        assert_eq!(not_written(1, 1), "1 of 1 file was not written");
+        assert_eq!(not_written(1, 3), "1 of 3 files was not written");
+        assert_eq!(not_written(2, 3), "2 of 3 files were not written");
+    }
 
     #[test]
     fn a_prefix_never_reaches_root() {

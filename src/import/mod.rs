@@ -20,6 +20,7 @@ use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::git::{StatusEntry, redact_credentials};
 use crate::name;
 use crate::output;
+pub use crate::output::count;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
 use crate::secrets::{self, Finding};
@@ -74,16 +75,22 @@ impl Report {
     /// Each entry and note stays on one line, since it may name a source path that holds a
     /// newline.
     pub fn print(&self) {
-        output::info(&format!(
-            "{} entries: {} converted, {} need action",
-            self.total(),
-            self.converted,
-            self.needs_action.len()
-        ));
+        output::info(&self.summary());
         self.print_items();
         for note in &self.notes {
             output::info(&output::escape_line(note));
         }
+    }
+
+    fn summary(&self) -> String {
+        let needing = self.needs_action.len();
+        let total = self.total();
+        format!(
+            "{total} {}: {} converted, {needing} {} action",
+            output::plural(total, "entry", "entries"),
+            self.converted,
+            output::plural(needing, "needs", "need"),
+        )
     }
 
     /// Prints the entries that need action, grouped by reason.
@@ -141,11 +148,6 @@ pub fn held_item(key: &str, found: Finding) -> Item {
 pub fn print_next_steps() {
     let bin = name::bin();
     output::info(&format!("next: run `{bin} status`, then `{bin} apply`"));
-}
-
-/// `1 file`, `2 files`.
-pub fn count(n: usize, noun: &str) -> String {
-    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
 /// The legacy repo `dotman import` takes when no source is given.
@@ -581,13 +583,6 @@ mod tests {
     }
 
     #[test]
-    fn counts_are_pluralised() {
-        assert_eq!(count(0, "file"), "0 files");
-        assert_eq!(count(1, "file"), "1 file");
-        assert_eq!(count(2, "commit"), "2 commits");
-    }
-
-    #[test]
     fn the_report_counts_every_entry_once() {
         let mut report = Report {
             converted: 2,
@@ -600,5 +595,18 @@ mod tests {
         });
         assert_eq!(report.total(), 3);
         assert_eq!(report.outcome(), Outcome::Attention);
+    }
+
+    #[test]
+    fn the_summary_agrees_with_its_counts() {
+        let item = || Item {
+            reason: "why",
+            detail: "x".to_owned(),
+        };
+        let mut report = Report::default();
+        report.needs_action.push(item());
+        assert_eq!(report.summary(), "1 entry: 0 converted, 1 needs action");
+        report.needs_action.push(item());
+        assert_eq!(report.summary(), "2 entries: 0 converted, 2 need action");
     }
 }

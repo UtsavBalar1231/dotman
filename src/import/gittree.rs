@@ -847,7 +847,7 @@ fn tally(found: &Analysis, recover: bool) -> Report {
         report.notes.push(format!(
             "{} {} in the repo and never applied: {}",
             count(reserved.len(), "root file"),
-            if reserved.len() == 1 { "stays" } else { "stay" },
+            output::plural(reserved.len(), "stays", "stay"),
             shown(&reserved)
         ));
     }
@@ -1500,7 +1500,7 @@ fn home_modes_notes(modes: &BTreeMap<String, u32>, config: SourceConfig) -> Vec<
     let found = format!(
         "{} in $HOME {} the same bytes as the source and a stricter mode than git keeps",
         count(modes.len(), "file"),
-        if modes.len() == 1 { "has" } else { "have" }
+        output::plural(modes.len(), "has", "have")
     );
     if config == SourceConfig::None {
         let shown_modes: Vec<String> = modes

@@ -237,11 +237,8 @@ impl Tracked {
         let mut notes = Vec::new();
         let n = self.dirs.len();
         if n > 0 {
-            let (dirs, them) = if n == 1 {
-                ("1 directory".to_owned(), "it")
-            } else {
-                (format!("{n} directories"), "each one")
-            };
+            let dirs = format!("{n} {}", output::plural(n, "directory", "directories"));
+            let them = output::plural(n, "it", "each one");
             let left = if overlay {
                 "an overlay leaves [dirs] as it is"
             } else {
@@ -342,7 +339,7 @@ fn left_behind(ctx: &Context, root: &Path, imported: &dyn Fn(&str) -> bool) -> V
         notes.push(format!(
             "stash/ holds {}, which {} not imported",
             count(stashed, "stashed change"),
-            if stashed == 1 { "is" } else { "are" }
+            output::plural(stashed, "is", "are")
         ));
     }
     notes
@@ -723,11 +720,8 @@ fn account(tallies: BTreeMap<String, Tally>) -> Report {
     }
     if let Some((source, key)) = stripped.first() {
         let n = stripped.len();
-        let (verb, pronoun) = if n == 1 {
-            ("was", "its")
-        } else {
-            ("were", "their")
-        };
+        let verb = output::plural(n, "was", "were");
+        let pronoun = output::plural(n, "its", "their");
         report.notes.push(format!(
             "{} {verb} imported without {pronoun} home prefix, for example {source} as {key}",
             count(n, "absolute key")

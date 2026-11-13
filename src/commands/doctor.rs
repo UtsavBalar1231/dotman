@@ -1079,14 +1079,17 @@ fn backups(ctx: &Context) -> Vec<Check> {
         ),
     )];
     if decrypted > 0 {
-        checks.push(info(
-            "backups",
-            &format!(
-                "{decrypted} of them copy an encrypted file or an age identity, and hold it in plaintext; remove the runs you no longer need"
-            ),
-        ));
+        checks.push(info("backups", &plaintext_backups(decrypted)));
     }
     checks
+}
+
+fn plaintext_backups(decrypted: usize) -> String {
+    format!(
+        "{decrypted} of them {} an encrypted file or an age identity, and {} it in plaintext; remove the runs you no longer need",
+        output::plural(decrypted, "copies", "copy"),
+        output::plural(decrypted, "holds", "hold"),
+    )
 }
 
 /// The keys whose backups hold plaintext: encrypted files as `$HOME` has them, and the identity
@@ -1123,6 +1126,19 @@ fn size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_plaintext_backup_note_agrees_with_the_count() {
+        let one = plaintext_backups(1);
+        assert!(
+            one.starts_with("1 of them copies an encrypted file"),
+            "{one}"
+        );
+        assert!(one.contains("and holds it in plaintext"), "{one}");
+        let two = plaintext_backups(2);
+        assert!(two.starts_with("2 of them copy an encrypted file"), "{two}");
+        assert!(two.contains("and hold it in plaintext"), "{two}");
+    }
 
     /// A ref name can hold what a shell runs; the step quotes it, so a shell reads the name back.
     /// A backtick or a control character cannot be shown in the step, so no step names it.

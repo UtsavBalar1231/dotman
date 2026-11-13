@@ -592,14 +592,12 @@ fn walk(base: &Path, dir: &Path, map: &mut BTreeMap<String, Entry>) -> io::Resul
 
 /// `(entries, converted, need action)` from the summary line.
 pub fn accounting(stderr: &str) -> (usize, usize, usize) {
+    let summary = |line: &&str| line.contains(" entries: ") || line.contains(" entry: ");
     assert!(
-        stderr.contains(" entries: "),
+        stderr.lines().any(|line| summary(&line)),
         "no summary line in:\n{stderr}"
     );
-    let line = stderr
-        .lines()
-        .find(|line| line.contains(" entries: "))
-        .expect("a summary line");
+    let line = stderr.lines().find(summary).expect("a summary line");
     let numbers: Vec<usize> = line
         .split(|c: char| !c.is_ascii_digit())
         .filter(|part| !part.is_empty())
@@ -1304,6 +1302,28 @@ pub fn in_a_terminal(
     args: &[&str],
     input: &[u8],
 ) -> Option<String> {
+    in_a_terminal_sized(env, vars, args, input, None)
+}
+
+/// [`in_a_terminal`] on a terminal `cols` columns wide: the pty `script(1)` makes is 0 by 0 when
+/// its own stdin is a pipe, so dotman sees no width until `stty` sets one.
+pub fn in_a_terminal_cols(
+    env: &TestEnv,
+    vars: &[(&str, &str)],
+    args: &[&str],
+    input: &[u8],
+    cols: u16,
+) -> Option<String> {
+    in_a_terminal_sized(env, vars, args, input, Some(cols))
+}
+
+fn in_a_terminal_sized(
+    env: &TestEnv,
+    vars: &[(&str, &str)],
+    args: &[&str],
+    input: &[u8],
+    cols: Option<u16>,
+) -> Option<String> {
     use std::io::Write as _;
     use std::process::Stdio;
     if !cfg!(target_os = "linux") {
@@ -1313,7 +1333,8 @@ pub fn in_a_terminal(
         .map(|dir| dir.join("script"))
         .find(|path| path.is_file())?;
     let dot = env.dot_process();
-    let mut line = shell_words::quote(&dot.get_program().to_string_lossy()).into_owned();
+    let mut line = cols.map_or_else(String::new, |cols| format!("stty cols {cols}; "));
+    line.push_str(&shell_words::quote(&dot.get_program().to_string_lossy()));
     for arg in args {
         line.push(' ');
         line.push_str(&shell_words::quote(arg));

@@ -297,3 +297,58 @@ fn a_legacy_head_never_starts_a_line_of_an_error() {
         never_starts_a_line(&text(&out.stderr));
     }
 }
+
+/// An import note over 100 characters, with its command at the end.
+const LONG_HINT: &str = "the new repo has no remote, as a local path is no use as one; add one with `dotman init --remote <url>`";
+
+#[test]
+#[cfg(target_os = "linux")]
+fn on_a_100_column_terminal_no_line_breaks_inside_a_word_or_a_command() {
+    assert!(LONG_HINT.len() > 100);
+    let env = TestEnv::new();
+    let work = common::work_tree(&env, "cfg", &[(".vimrc", "v\n", false)], None);
+    let _dir = common::bare(&env, &work, &env.home().join(".cfg"), Some(&env.home()));
+    let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+    let Some(seen) = common::in_a_terminal_cols(&env, &plain, &["import"], b"y\n", 100) else {
+        return;
+    };
+    let seen = seen.replace("\r\n", "\n");
+
+    assert!(
+        !seen.contains(LONG_HINT),
+        "the line was not wrapped: {seen}"
+    );
+    assert!(
+        seen.replace("\n  ", " ").contains(LONG_HINT),
+        "a break fell inside a word or a command: {seen}"
+    );
+    let commands: Vec<&str> = seen
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| span.starts_with("dotman "))
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "dotman init --remote <url>",
+            "dotman status",
+            "dotman apply"
+        ],
+        "{seen}"
+    );
+
+    let remote = env.remote_url();
+    for command in commands {
+        let line = command.replace("<url>", &shell_words::quote(&remote));
+        let out = common::paste(&env, &line);
+        assert!(out.status.success(), "{line}: {}", text(&out.stderr));
+    }
+    let set = env.git(&[
+        "-C",
+        &env.repo().to_string_lossy(),
+        "config",
+        "remote.origin.url",
+    ]);
+    assert_eq!(set.trim(), remote);
+}
