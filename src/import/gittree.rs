@@ -1825,7 +1825,7 @@ fn vcsh_siblings(ctx: &Context, source: &Path) -> Option<String> {
         .filter(|path| !same(path, source))
         .map(|path| {
             format!(
-                "{} import --overlay {}",
+                "`{} import --overlay {}`",
                 name::bin(),
                 shell_words::quote(&path.to_string_lossy())
             )

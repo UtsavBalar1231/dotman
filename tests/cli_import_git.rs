@@ -462,11 +462,13 @@ fn another_vcsh_repo_is_reported_and_added_by_overlay_as_one_commit() {
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_eq!(accounting(&err), (2, 2, 0), "{err}");
     let command = format!("dotman import --overlay {}", vim.display());
-    assert!(err.contains(&command), "{err}");
+    assert!(err.contains(&format!("`{command}`")), "{err}");
 
     let repo = env.repo();
     let before = commits(&env, &repo);
-    let out = env.run(&["import", "--overlay", &vim.to_string_lossy()]);
+    let printed = common::hint(&err, "import --overlay");
+    let printed: Vec<&str> = printed.iter().map(String::as_str).collect();
+    let out = env.run(&printed);
     let err = stderr(&out);
     assert_eq!(
         out.status.code(),
