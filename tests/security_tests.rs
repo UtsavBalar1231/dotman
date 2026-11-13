@@ -370,6 +370,55 @@ fn a_dry_run_init_refuses_a_file_in_this_machine_s_repo_path() {
     assert_eq!(b.read(".profile"), b"a\n");
 }
 
+/// A remote whose `HEAD` names a branch with no commits and whose only branch is named like a
+/// git option is refused, whole: no checkout, no repo, no staging directory, no applied file.
+#[test]
+fn an_unborn_remote_head_never_checks_out_a_branch_git_reads_as_an_option() {
+    let a = TestEnv::new();
+    a.ok(&["init", "--remote", &a.remote_url()]);
+    a.write(".bashrc", b"bash\n", 0o644);
+    a.ok(&["add", ".bashrc"]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    let option = "refs/heads/--upload-pack=x";
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "update-ref",
+        option,
+        "refs/heads/main",
+    ]);
+    a.git(&["--git-dir", &remote, "update-ref", "-d", "refs/heads/main"]);
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/master",
+    ]);
+
+    let b = a.second_device();
+    for args in [
+        &["init", &a.remote_url(), "--dry-run"][..],
+        &["init", &a.remote_url()],
+    ] {
+        let err = exits(&b.run(args), 1);
+        assert!(
+            err.contains("its only branch is one whose name starts with a dash"),
+            "{err}"
+        );
+        assert!(err.contains("Nothing was cloned"), "{err}");
+        assert!(!b.repo().exists(), "{err}");
+        assert!(!b.home().join(".bashrc").exists(), "{err}");
+        assert!(
+            names(&b.xdg_data())
+                .iter()
+                .all(|name| !name.starts_with(".dotman-init-")),
+            "{err}"
+        );
+    }
+}
+
 /// dotman's own paths are this machine's: with its XDG dirs at `~/cfg`, `~/st` and `~/dat`, a
 /// pushed `cfg/dotman/config.toml` is refused while `.config/dotman/config.toml` is an ordinary
 /// file. A capture under `~/cfg`, `~/st` or `~/dat` skips dotman's own files, and `add`,

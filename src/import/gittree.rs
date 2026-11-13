@@ -313,6 +313,16 @@ impl Staging {
             return Ok(Some(named));
         }
         cloned?;
+        let others = source
+            .git_arg()
+            .and_then(|src| self.git.remote_has_any_branch(&src))
+            .unwrap_or(false);
+        if others {
+            bail!(
+                "{}'s HEAD names a branch with no commits, and an import takes only the branch HEAD names; make the branch that holds the dotfiles its default branch and import again",
+                source.display()
+            );
+        }
         bail!("{} has no commits", source.display())
     }
 

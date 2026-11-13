@@ -5,7 +5,7 @@ use crate::cli::{Decisions, ImportArgs, InitArgs};
 use crate::commands::wizard::{self, Ask, Wizard};
 use crate::commands::{Outcome, apply};
 use crate::context::{Context, is_real_dir};
-use crate::git::{Git, local_path_remote};
+use crate::git::{Adopted, Git, local_path_remote};
 use crate::hooks::Policy;
 use crate::import;
 use crate::name;
@@ -150,13 +150,15 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
     };
     if !dry_run {
         if let Some(place) = &place {
-            clone_into_place(ctx, place, source)?;
+            let adopted = clone_into_place(ctx, place, source)?;
             output::success(&format!("cloned {shown} into {}", repo.display()));
+            note_adopted(adopted.as_ref(), false);
         } else {
             output::info(&format!(
                 "{} already holds the clone of {shown}; setting up this machine",
                 repo.display()
             ));
+            note_adopted(ctx.git.adopt_unborn_head(source)?.as_ref(), false);
         }
         remote::note_origin(ctx, false);
         let ask = if prompt::interactive() {
@@ -180,8 +182,9 @@ fn clone_and_apply(ctx: &Context, source: &str, args: &InitArgs) -> Result<Outco
         let paths = ctx.paths.with_clone(tmp.path().join("repo"));
         _tmp = tmp;
         fresh = Context::new(paths, ctx.machine.clone(), "init");
-        fresh.git.clone_from(source)?;
+        let adopted = fresh.git.clone_from(source)?;
         output::info(&format!("would clone {shown} into {}", repo.display()));
+        note_adopted(adopted.as_ref(), true);
         &fresh
     } else {
         ctx
@@ -325,10 +328,29 @@ fn sweep_staging(parent: &Path) {
     }
 }
 
+fn note_adopted(adopted: Option<&Adopted>, dry_run: bool) {
+    let Some(Adopted { branch, of }) = adopted else {
+        return;
+    };
+    let verb = if dry_run {
+        "would check out"
+    } else {
+        "checked out"
+    };
+    let which = if *of > 1 {
+        format!("one of its {of} branches")
+    } else {
+        "the only branch it has".to_owned()
+    };
+    output::info(&format!(
+        "the remote's HEAD names a branch with no commits; {verb} {branch}, {which}"
+    ));
+}
+
 /// Clones `source` and moves the clone into place only once its checkout is complete.
-fn clone_into_place(ctx: &Context, place: &Place, source: &str) -> Result<()> {
+fn clone_into_place(ctx: &Context, place: &Place, source: &str) -> Result<Option<Adopted>> {
     let staging = Staging::new(&place.target)?;
-    staging.git.clone_from(source)?;
+    let adopted = staging.git.clone_from(source)?;
     // An empty remote leaves HEAD unborn, with nothing to check out.
     let complete = staging.git.head()?.is_none() || staging.git.status()?.is_empty();
     ensure!(
@@ -354,7 +376,8 @@ fn clone_into_place(ctx: &Context, place: &Place, source: &str) -> Result<()> {
     }
     // rename(2) replaces an empty directory in one step.
     fs::rename(staging.path(), target)
-        .with_context(|| format!("cannot move the clone to {}", target.display()))
+        .with_context(|| format!("cannot move the clone to {}", target.display()))?;
+    Ok(adopted)
 }
 
 /// Creates `.git` with its metadata, then moves it into the repo path, which may already hold files.

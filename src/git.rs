@@ -553,9 +553,65 @@ impl Git {
     ///
     /// Attributes are written before checkout so a tracked `.gitattributes` cannot transform
     /// content. A local `src` with an `origin` remote passes that URL on as the clone's `origin`,
-    /// as [`Git::remote_target`] reads it in `src`, unless it is not a [`usable_remote`].
-    pub fn clone_from(&self, src: &str) -> Result<()> {
-        self.clone_with(src, &[])
+    /// as [`Git::remote_target`] reads it in `src`, unless it is not a [`usable_remote`]. When
+    /// `src`'s `HEAD` names a branch with no commits, see [`Git::adopt_unborn_head`].
+    pub fn clone_from(&self, src: &str) -> Result<Option<Adopted>> {
+        self.clone_with(src, &[])?;
+        self.adopt_unborn_head(src)
+    }
+
+    /// The remote's `HEAD` names a branch with no commits, which a clone leaves unborn while the
+    /// remote's other branches arrive as `refs/remotes/origin/*`. Puts `HEAD` on the one such
+    /// branch, or on `main` among several, and checks it out; `None` when `HEAD` is born or the
+    /// remote has no branch. Refuses several branches without `main`, and a branch name
+    /// [`checked_branch`] refuses, before it changes anything. Reads only the local refs.
+    pub fn adopt_unborn_head(&self, src: &str) -> Result<Option<Adopted>> {
+        if self.head()?.is_some() {
+            return Ok(None);
+        }
+        let listed = self.run(&[
+            "for-each-ref",
+            "--format=%(refname)%00",
+            "refs/remotes/origin/",
+        ])?;
+        let branches: Vec<String> = listed
+            .stdout
+            .split(|b| *b == 0)
+            .filter_map(|name| {
+                let name = String::from_utf8_lossy(name);
+                let branch = name.trim().strip_prefix("refs/remotes/origin/")?;
+                (branch != "HEAD").then(|| branch.to_owned())
+            })
+            .collect();
+        let shown = redact_credentials(src);
+        let branch = match branches.as_slice() {
+            [] => return Ok(None),
+            [only] => checked_branch(only).map_err(|unusable| {
+                anyhow!(
+                    "{shown}'s HEAD names a branch with no commits, and its only branch is one whose {}, so dotman does not check it out. Nothing was cloned. Give its commits a branch named main in the remote and run this again",
+                    unusable.why()
+                )
+            })?,
+            several if several.iter().any(|name| name == "main") => "main".to_owned(),
+            several => bail!(
+                "{shown}'s HEAD names a branch with no commits, and none of its {} branches is main ({}), so nothing says which one holds your dotfiles. Nothing was cloned. Make that branch the remote's default branch and run this again",
+                several.len(),
+                branch_names(several)
+            ),
+        };
+        let full = full_ref(&branch);
+        self.run(&[
+            "update-ref",
+            full.as_str(),
+            &format!("refs/remotes/origin/{branch}"),
+            "",
+        ])?;
+        self.run(&["symbolic-ref", "HEAD", full.as_str()])?;
+        self.checkout_head()?;
+        Ok(Some(Adopted {
+            branch,
+            of: branches.len(),
+        }))
     }
 
     /// [`Git::clone_from`], bringing only the branch `src`'s `HEAD` names, with no tags: an
@@ -1197,6 +1253,12 @@ impl Git {
         }
     }
 
+    /// Whether `url` has any branch. Asks the remote and writes nothing locally.
+    pub fn remote_has_any_branch(&self, url: &str) -> Result<bool> {
+        let out = self.run_remote(&["ls-remote", "--heads", "--", url])?;
+        Ok(!out.stdout.is_empty())
+    }
+
     /// Every file, symlink and gitlink of `rev`, in git's order.
     pub fn ls_tree(&self, rev: &str) -> Result<Vec<TreeEntry>> {
         let out = self.run(&["ls-tree", "-r", "-z", rev])?;
@@ -1423,6 +1485,32 @@ fn parse_ident_email(ident: &str) -> Option<String> {
     let after = ident.rsplit_once('<')?.1;
     let email = after.split_once('>')?.0;
     (!email.is_empty()).then(|| email.to_owned())
+}
+
+/// The branch [`Git::adopt_unborn_head`] put `HEAD` on.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Adopted {
+    /// A name [`checked_branch`] takes.
+    pub branch: String,
+    /// How many branches the remote has, this one among them.
+    pub of: usize,
+}
+
+/// Up to eight of `names` for a message, each one [`checked_branch`] takes or a stand-in.
+fn branch_names(names: &[String]) -> String {
+    const SHOWN: usize = 8;
+    let mut shown: Vec<String> = names
+        .iter()
+        .take(SHOWN)
+        .map(|name| {
+            checked_branch(name).unwrap_or_else(|_| "a name dotman does not show".to_owned())
+        })
+        .collect();
+    let more = names.len().saturating_sub(SHOWN);
+    if more > 0 {
+        shown.push(format!("{more} more"));
+    }
+    shown.join(", ")
 }
 
 /// A branch name that [`checked_branch`] refuses. It is shown escaped, or not at all when it holds a
@@ -2329,6 +2417,86 @@ mod tests {
         dst.clone_from(utf8(&remote)).expect("clone");
         assert_eq!(dst.head().expect("head"), None);
         assert!(dst.repo().join(".git/dotman-id").exists());
+    }
+
+    /// A bare remote whose `HEAD` names `master`, with one commit on each of `branches`.
+    fn remote_with_unborn_head(sb: &Sandbox, branches: &[&str]) -> PathBuf {
+        let remote = sb.bare_remote();
+        sb.raw_ok(&remote, &["symbolic-ref", "HEAD", "refs/heads/master"]);
+        let src = sb.git("src");
+        src.init().expect("init");
+        commit_file(&src, "a.txt", b"a\n", "one");
+        for branch in branches {
+            let target = format!("HEAD:refs/heads/{branch}");
+            sb.raw_ok(src.repo(), &["push", "-q", utf8(&remote), &target]);
+        }
+        remote
+    }
+
+    #[test]
+    fn a_clone_checks_out_the_only_branch_when_the_remote_head_is_unborn() {
+        let sb = Sandbox::new();
+        let remote = remote_with_unborn_head(&sb, &["trunk"]);
+        let dst = sb.git("dst");
+        let adopted = dst.clone_from(utf8(&remote)).expect("clone");
+        assert_eq!(
+            adopted,
+            Some(Adopted {
+                branch: "trunk".to_owned(),
+                of: 1
+            })
+        );
+        assert!(dst.head().expect("head").is_some());
+        assert_eq!(dst.branch().expect("branch").as_deref(), Some("trunk"));
+        assert_eq!(fs::read(dst.repo().join("a.txt")).expect("read"), b"a\n");
+        assert_eq!(dst.status().expect("status"), Vec::new());
+        assert_eq!(dst.adopt_unborn_head(utf8(&remote)).expect("again"), None);
+    }
+
+    #[test]
+    fn a_clone_prefers_main_among_several_when_the_remote_head_is_unborn() {
+        let sb = Sandbox::new();
+        let remote = remote_with_unborn_head(&sb, &["dev", "main", "zed"]);
+        let dst = sb.git("dst");
+        let adopted = dst.clone_from(utf8(&remote)).expect("clone");
+        assert_eq!(
+            adopted,
+            Some(Adopted {
+                branch: "main".to_owned(),
+                of: 3
+            })
+        );
+        assert_eq!(dst.branch().expect("branch").as_deref(), Some("main"));
+        assert_eq!(dst.status().expect("status"), Vec::new());
+    }
+
+    #[test]
+    fn a_clone_refuses_several_branches_without_main_when_the_remote_head_is_unborn() {
+        let sb = Sandbox::new();
+        let remote = remote_with_unborn_head(&sb, &["dev", "zed"]);
+        let dst = sb.git("dst");
+        let err = dst.clone_from(utf8(&remote)).expect_err("refused");
+        assert!(
+            err.to_string()
+                .contains("none of its 2 branches is main (dev, zed)"),
+            "{err}"
+        );
+        assert_eq!(dst.head().expect("head"), None);
+        assert_eq!(sb.raw_ok(dst.repo(), &["for-each-ref", "refs/heads"]), "");
+    }
+
+    #[test]
+    fn clone_head_from_takes_nothing_from_an_unborn_head() {
+        let sb = Sandbox::new();
+        let remote = remote_with_unborn_head(&sb, &["main"]);
+        let dst = sb.git("dst");
+        dst.clone_head_from(utf8(&remote)).expect("clone");
+        assert_eq!(dst.head().expect("head"), None);
+        assert_eq!(sb.raw_ok(dst.repo(), &["for-each-ref"]), "");
+        assert!(
+            dst.remote_has_any_branch(utf8(&remote)).expect("ls-remote"),
+            "the remote has the branch the clone did not take"
+        );
     }
 
     #[test]
