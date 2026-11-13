@@ -34,6 +34,7 @@ src/bootstrap.rs        writes and refreshes the install.sh at the repo root
 src/bootstrap/          the install.sh template written by `init`
 tests/                  integration tests; tests/common is the harness
 e2e/                    multi-machine scenario suites in bash: lib.sh is the harness, run.sh the runner
+docs/                   user guide pages that README.md links to
 xtask/                  man page and completion generator
 man/                    generated man pages
 completions/            generated shell completions
@@ -82,7 +83,7 @@ scripts/                release helper scripts
 - Enforce each guarantee at one choke point that every path goes through, not at each caller.
 - Every command or recovery recipe that dotman prints is run, as printed, by a test.
 - A behaviour change that an `e2e/journeys` scenario covers updates that scenario in the same commit.
-- Every never, always or every claim in README.md and SECURITY.md has an entry in `tests/docs.rs`: `CLAIMS` names the tests that prove it, and `GAPS` holds the ones no test proves yet.
+- Every never, always or every claim in README.md, `docs/*.md` and SECURITY.md has an entry in `tests/docs.rs`: `CLAIMS` names the tests that prove it, and `GAPS` holds the ones no test proves yet.
 - Commits follow Conventional Commits with a scope, such as `feat(sync): ...`. Use `!` for breaking changes.
 - Commit through the pre-commit hook, with your own git identity, never with `git -c user.name=... -c user.email=...`.
 - Adding a command:

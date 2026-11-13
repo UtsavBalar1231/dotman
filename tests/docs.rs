@@ -1,5 +1,6 @@
-//! The README names only commands and flags that exist, AGENTS.md names only paths that exist, and
-//! every never, always or every claim in README.md and SECURITY.md names the tests that prove it.
+//! The README and the `docs/` pages name only commands and flags that exist, AGENTS.md names only
+//! paths that exist, and every never, always or every claim in README.md, `docs/*.md` and
+//! SECURITY.md names the tests that prove it.
 
 use clap::{Arg, Command, CommandFactory};
 use dotman::cli::Cli;
@@ -15,6 +16,32 @@ fn read(name: &str) -> Result<String, Box<dyn Error>> {
     Ok(fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join(name),
     )?)
+}
+
+/// README.md, then each `.md` file in `docs/` in name order, by path with its text.
+fn user_docs() -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let mut pages = Vec::new();
+    for entry in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs"))? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("a docs/ file name is not UTF-8")?;
+        pages.push(format!("docs/{name}"));
+    }
+    if pages.is_empty() {
+        return Err("docs/ has no .md page".into());
+    }
+    pages.sort();
+    let mut docs = vec![("README.md".to_owned(), read("README.md")?)];
+    for page in pages {
+        let text = read(&page)?;
+        docs.push((page, text));
+    }
+    Ok(docs)
 }
 
 /// The word after each `dotman ` or `dot ` in the code spans and fenced blocks of `text`.
@@ -47,19 +74,22 @@ fn commands_in(text: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn every_readme_command_exists() -> R {
+fn every_command_in_the_docs_exists() -> R {
     let known: BTreeSet<String> = Cli::command()
         .get_subcommands()
         .map(|c| c.get_name().to_owned())
         .collect();
-    let used = commands_in(&read("README.md")?);
-    assert!(used.len() > 10, "the extractor found only {used:?}");
-    for cmd in &used {
-        assert!(
-            known.contains(cmd),
-            "README names `dotman {cmd}`, which is not a subcommand"
-        );
+    let mut used = BTreeSet::new();
+    for (doc, text) in user_docs()? {
+        for cmd in commands_in(&text) {
+            assert!(
+                known.contains(&cmd),
+                "{doc} names `dotman {cmd}`, which is not a subcommand"
+            );
+            used.insert(cmd);
+        }
     }
+    assert!(used.len() > 10, "the extractor found only {used:?}");
     Ok(())
 }
 
@@ -196,61 +226,62 @@ fn all_longs(cmd: &Command) -> BTreeSet<String> {
     found
 }
 
-/// Every `--flag` in a code span of the README exists: after `dotman <command>`, or a span that
-/// starts with a command name, on that command; in a span of flags alone, on some command. Flags
-/// after `dotman git` are git's, and spans without a dotman command, such as the cargo install
-/// line, are someone else's.
+/// Every `--flag` in a code span of the README and the `docs/` pages exists: after
+/// `dotman <command>`, or a span that starts with a command name, on that command; in a span of
+/// flags alone, on some command. Flags after `dotman git` are git's, and spans without a dotman
+/// command, such as the cargo install line, are someone else's.
 #[test]
-fn every_flag_the_readme_names_exists() -> R {
+fn every_flag_the_docs_name_exists() -> R {
     let mut cli = Cli::command();
     cli.build();
     let anywhere = all_longs(&cli);
-    let readme = read("README.md")?;
     let mut checked = 0_usize;
-    for span in code_spans(&readme) {
-        let words: Vec<&str> = span.split_whitespace().collect();
-        let start = match words.first() {
-            Some(first) if first.starts_with("--") => {
-                for flag in words.iter().filter_map(|w| long_flag(w)) {
-                    assert!(
-                        anywhere.contains(flag),
-                        "README names `{flag}`, which no command has: `{span}`"
-                    );
-                    checked = checked.saturating_add(1);
+    for (doc, text) in user_docs()? {
+        for span in code_spans(&text) {
+            let words: Vec<&str> = span.split_whitespace().collect();
+            let start = match words.first() {
+                Some(first) if first.starts_with("--") => {
+                    for flag in words.iter().filter_map(|w| long_flag(w)) {
+                        assert!(
+                            anywhere.contains(flag),
+                            "{doc} names `{flag}`, which no command has: `{span}`"
+                        );
+                        checked = checked.saturating_add(1);
+                    }
+                    continue;
                 }
+                Some(first) if cli.find_subcommand(first).is_some() => 0,
+                _ => match words.iter().position(|w| matches!(*w, "dotman" | "dot")) {
+                    Some(at) => at.saturating_add(1),
+                    None => continue,
+                },
+            };
+            let mut scope = &cli;
+            let mut rest = words.iter().skip(start).peekable();
+            while let Some(sub) = rest.peek().and_then(|word| scope.find_subcommand(word)) {
+                scope = sub;
+                rest.next();
+            }
+            if scope.get_name() == "git" {
                 continue;
             }
-            Some(first) if cli.find_subcommand(first).is_some() => 0,
-            _ => match words.iter().position(|w| matches!(*w, "dotman" | "dot")) {
-                Some(at) => at.saturating_add(1),
-                None => continue,
-            },
-        };
-        let mut scope = &cli;
-        let mut rest = words.iter().skip(start).peekable();
-        while let Some(sub) = rest.peek().and_then(|word| scope.find_subcommand(word)) {
-            scope = sub;
-            rest.next();
-        }
-        if scope.get_name() == "git" {
-            continue;
-        }
-        let own = longs(scope);
-        for flag in rest.filter_map(|w| long_flag(w)) {
-            assert!(
-                own.contains(flag),
-                "README names `{flag}` for `{}`, which lacks it: `{span}`",
-                scope.get_name()
-            );
-            checked = checked.saturating_add(1);
+            let own = longs(scope);
+            for flag in rest.filter_map(|w| long_flag(w)) {
+                assert!(
+                    own.contains(flag),
+                    "{doc} names `{flag}` for `{}`, which lacks it: `{span}`",
+                    scope.get_name()
+                );
+                checked = checked.saturating_add(1);
+            }
         }
     }
     assert!(checked > 40, "only {checked} flags were checked");
     Ok(())
 }
 
-/// Each never, always or every claim in README.md and SECURITY.md, by a piece of its sentence that
-/// no other claim shares, with the tests that prove it.
+/// Each never, always or every claim in README.md, `docs/*.md` and SECURITY.md, by a piece of its
+/// sentence that no other claim shares, with the tests that prove it.
 const CLAIMS: &[(&str, &[&str])] = &[
     // README.md
     (
@@ -262,6 +293,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "a_template_cannot_run_a_command",
         ],
     ),
+    // docs/daily-use.md
     (
         "When `origin` has no branch yet",
         &[
@@ -297,6 +329,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "a_stricter_mode_kept_on_one_machine_stays_on_that_machine",
         ],
     ),
+    // docs/per-machine.md
     (
         "dotman never captures a local edit into a template",
         &["a_local_edit_is_template_drift_and_is_never_captured"],
@@ -308,6 +341,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "approving_runs_a_command_once_for_two_changed_files",
         ],
     ),
+    // docs/system-files.md
     (
         "Never allowed: `/`, `/proc`",
         &[
@@ -316,6 +350,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "a_root_of_slash_is_reported_by_doctor_and_never_used",
         ],
     ),
+    // docs/secrets.md
     (
         "encrypted to every recipient in `.dotman.toml`",
         &[
@@ -379,6 +414,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         "an entry another machine pushed never lets a credential out of this one",
         &["a_pushed_allow_entry_never_lets_a_credential_out_of_another_machine"],
     ),
+    // docs/migration.md
     (
         "It never modifies the source and reports every entry",
         &[
@@ -724,14 +760,16 @@ fn is_claim(sentence: &str) -> bool {
         .any(|word| word == "never" || word == "always" || word.starts_with("every"))
 }
 
-fn claims() -> Result<Vec<(&'static str, String)>, Box<dyn Error>> {
+fn claims() -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let mut docs = user_docs()?;
+    docs.push(("SECURITY.md".to_owned(), read("SECURITY.md")?));
     let mut found = Vec::new();
-    for doc in ["README.md", "SECURITY.md"] {
+    for (doc, text) in docs {
         found.extend(
-            sentences(&read(doc)?)
+            sentences(&text)
                 .into_iter()
                 .filter(|sentence| is_claim(sentence))
-                .map(|sentence| (doc, sentence)),
+                .map(|sentence| (doc.clone(), sentence)),
         );
     }
     Ok(found)
@@ -800,7 +838,7 @@ fn every_claim_in_the_docs_names_the_tests_that_prove_it() -> R {
             .count();
         assert!(
             hits > 0,
-            "`{key}` matches no claim in README.md or SECURITY.md"
+            "`{key}` matches no claim in README.md, docs/ or SECURITY.md"
         );
     }
     let tests = test_functions()?;
@@ -949,17 +987,24 @@ fn only_context_lock_takes_the_lock_to_write() -> R {
 }
 
 #[test]
-fn readme_installs_only_this_project() -> R {
-    let readme = read("README.md")?;
-    for line in readme.lines() {
-        if line.contains("cargo install dotman ") || line.trim_end() == "cargo install dotman" {
-            assert!(
-                line.contains("--git"),
-                "plain `cargo install dotman` installs another project: {line}"
-            );
+fn the_docs_install_only_this_project() -> R {
+    for (doc, text) in user_docs()? {
+        for line in text.lines() {
+            if line.contains("cargo install dotman ") || line.trim_end() == "cargo install dotman" {
+                assert!(
+                    line.contains("--git"),
+                    "{doc}: plain `cargo install dotman` installs another project: {line}"
+                );
+            }
         }
+        assert!(
+            !text.contains("yay -S dotman"),
+            "{doc} names `yay -S dotman`"
+        );
+        assert!(
+            !text.contains("SECURITY_MIGRATION"),
+            "{doc} names SECURITY_MIGRATION"
+        );
     }
-    assert!(!readme.contains("yay -S dotman"));
-    assert!(!readme.contains("SECURITY_MIGRATION"));
     Ok(())
 }
