@@ -365,6 +365,42 @@ fn key_import_reads_stdin_and_reports_a_recipient_that_is_not_listed() {
     assert!(err.contains("holds no age identity"), "{err}");
 }
 
+/// The refusal names the identity file, and the command it prints, run as printed, adds the
+/// recipient. Fed from stdin it names no file and prints no command to run.
+#[test]
+fn the_add_recipient_hint_runs_as_printed() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let other = other_key();
+    let file = identity_path(&other);
+
+    let err = exits(&env.run(&["key", "import", file.to_str().unwrap()]), 3);
+    assert!(
+        err.contains(&format!(
+            "`dotman key import --add-recipient {}` adds it",
+            file.display()
+        )),
+        "{err}"
+    );
+    let out = common::run_hint(&env, &err, "key import --add-recipient");
+    exits(&out, 0);
+    assert_eq!(
+        env.repo_config().age.recipients,
+        other.repo_config().age.recipients
+    );
+
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let err = exits(
+        &env.run_stdin(&[], identity(&other).as_bytes(), &["key", "import", "-"]),
+        3,
+    );
+    assert!(!err.contains("`dotman key import"), "{err}");
+}
+
 #[test]
 fn an_imported_recipient_can_decrypt_after_a_keyed_machine_syncs() {
     if !age_installed() {

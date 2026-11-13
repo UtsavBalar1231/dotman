@@ -5,12 +5,14 @@
 
 use crate::cli::{KeyArgs, KeyCommand, KeyImportArgs};
 use crate::commands::Outcome;
+use crate::commands::sync::REMOTE;
 use crate::context::{Context, TEMP_PREFIX};
 use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::name;
 use crate::output;
 use crate::paths::{create_private_dir, private_temp_dir, write_atomic};
 use crate::prompt;
+use crate::repo_config::RepoConfig;
 use crate::secrets;
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::fs::{self, File, OpenOptions, Permissions};
@@ -88,8 +90,10 @@ fn list_existing(ctx: &Context) -> Result<Outcome> {
 }
 
 fn advise_backup() {
+    output::info("Back the identity up now: keep it in a password manager plus one offline copy.");
+    output::info("Without it the encrypted files cannot be recovered.");
     output::info(&format!(
-        "Back the identity up now: keep it in a password manager plus one offline copy, because without it the encrypted files cannot be recovered. On a new machine, supply it with DOTMAN_AGE_KEY or `{} key import`.",
+        "On a new machine, supply it with DOTMAN_AGE_KEY or `{} key import`.",
         name::bin()
     ));
 }
@@ -147,12 +151,10 @@ fn generate_identity(ctx: &Context) -> Result<()> {
         identity.display()
     ));
     for recipient in &recipients {
-        let note = if added.contains(recipient) {
-            ", added to [age] recipients in .dotman.toml"
-        } else {
-            ""
-        };
-        output::info(&format!("  recipient {recipient}{note}"));
+        output::info(&format!("  recipient {recipient}"));
+        if added.contains(recipient) {
+            output::info("  added to [age] recipients in .dotman.toml");
+        }
     }
     advise_backup();
     Ok(())
@@ -177,6 +179,7 @@ fn import(ctx: &Context, args: &KeyImportArgs) -> Result<Outcome> {
 pub struct Incoming {
     text: String,
     recipients: Option<Vec<String>>,
+    shown: String,
 }
 
 /// Derives the recipients before anything is written, so a damaged key is refused and nothing
@@ -195,6 +198,7 @@ pub(crate) fn validate(ctx: &Context, text: &str, shown: &str) -> Result<Incomin
     Ok(Incoming {
         text: text.to_owned(),
         recipients,
+        shown: shown.to_owned(),
     })
 }
 
@@ -222,7 +226,11 @@ pub(crate) fn install(
     force: bool,
     add_recipient: bool,
 ) -> Result<Outcome> {
-    let Incoming { text, recipients } = incoming;
+    let Incoming {
+        text,
+        recipients,
+        shown,
+    } = incoming;
     let identity = &ctx.paths.age_identity;
     let write = match existing(identity)? {
         None => true,
@@ -251,7 +259,7 @@ pub(crate) fn install(
         write_atomic(identity, text.as_bytes(), 0o600)?;
         output::success(&format!("imported the identity to {}", identity.display()));
     }
-    check_recipients(ctx, recipients.clone(), add_recipient)
+    check_recipients(ctx, recipients.clone(), add_recipient, shown)
 }
 
 fn back_up_identity(ctx: &Context, old: &[u8]) -> Result<PathBuf> {
@@ -264,7 +272,12 @@ fn back_up_identity(ctx: &Context, old: &[u8]) -> Result<PathBuf> {
     back_up_bytes(&run, &format!(".dotman/{name}"), old)
 }
 
-fn check_recipients(ctx: &Context, recipients: Option<Vec<String>>, add: bool) -> Result<Outcome> {
+fn check_recipients(
+    ctx: &Context,
+    recipients: Option<Vec<String>>,
+    add: bool,
+    shown: &str,
+) -> Result<Outcome> {
     let Some(recipients) = recipients else {
         output::warning(
             "the recipient of a plugin identity cannot be derived here; check [age] recipients in .dotman.toml yourself",
@@ -280,9 +293,15 @@ fn check_recipients(ctx: &Context, recipients: Option<Vec<String>>, add: bool) -
         output::info("its recipient is in [age] recipients");
         return Ok(Outcome::Done);
     }
+    if origin_lists(ctx, &missing) {
+        output::info(&format!(
+            "origin already lists its recipient; `{} sync` brings the list here",
+            name::bin()
+        ));
+        return Ok(Outcome::Done);
+    }
     let named = missing.join(", ");
-    let question = format!("add {named} to [age] recipients in .dotman.toml? [y/N]");
-    if add || (prompt::interactive() && prompt::confirm(&question)?) {
+    if add || (prompt::interactive() && confirm_add(&missing)?) {
         add_recipients(ctx, &missing)?;
         output::success(&format!(
             "added {named} to [age] recipients; the next `{} sync` on a machine whose key reads the encrypted files re-encrypts them",
@@ -291,10 +310,56 @@ fn check_recipients(ctx: &Context, recipients: Option<Vec<String>>, add: bool) -
         return Ok(Outcome::Done);
     }
     output::warning(&format!(
-        "the recipient {named} of this identity is not in [age] recipients in .dotman.toml, so no file is encrypted to it; `{} key import --add-recipient` adds it",
-        name::bin()
+        "the recipient {named} of this identity is not in [age] recipients in .dotman.toml, so no file is encrypted to it"
     ));
+    if Path::new(shown).is_file() {
+        output::info(&format!(
+            "  `{} key import --add-recipient {}` adds it",
+            name::bin(),
+            shell_words::quote(shown)
+        ));
+    } else {
+        output::info("  importing it again with --add-recipient adds it");
+    }
     Ok(Outcome::Attention)
+}
+
+fn confirm_add(missing: &[String]) -> Result<bool> {
+    let n = missing.len();
+    output::context(&format!(
+        "this identity's {} not in [age] recipients in .dotman.toml:",
+        output::plural(n, "recipient is", "recipients are")
+    ));
+    for recipient in missing {
+        output::context(&format!("  {recipient}"));
+    }
+    prompt::confirm(&format!("add {}? [y/N]", output::plural(n, "it", "them")))
+}
+
+/// Whether the branch on origin already lists every recipient in `missing`. A clone that has not
+/// synced since another machine added its recipient reads a list that is as old as its last sync.
+/// Any failure to find out says no.
+fn origin_lists(ctx: &Context, missing: &[String]) -> bool {
+    let Ok(Some(_)) = ctx.git.remote_url(REMOTE) else {
+        return false;
+    };
+    let Ok(Some(branch)) = ctx.git.branch() else {
+        return false;
+    };
+    if ctx.git.fetch(REMOTE, &branch).is_err() {
+        return false;
+    }
+    let Ok(bytes) = ctx.git.show_blob("FETCH_HEAD", ".dotman.toml") else {
+        return false;
+    };
+    let Ok(config) = String::from_utf8(bytes)
+        .map_err(anyhow::Error::from)
+        .and_then(|text| RepoConfig::parse(&text))
+    else {
+        return false;
+    };
+    let upstream = secrets::recipient_set(&config.age.recipients);
+    missing.iter().all(|recipient| upstream.contains(recipient))
 }
 
 /// Appends the recipients not yet listed and returns them.

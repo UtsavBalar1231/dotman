@@ -161,3 +161,118 @@ fn key_init_lists_the_recipient_of_an_identity_a_killed_run_left_unlisted() {
     assert!(err.contains("already exists"), "{err}");
     assert_eq!(env.repo_config().age.recipients, recipients);
 }
+
+// reason: clippy.toml exempts expect only inside #[test] fns
+#[allow(clippy::expect_used)]
+/// A desktop that cloned before the laptop made its key, and the laptop, whose `sync` has since
+/// pushed its recipient and, with `second`, another one.
+fn stale_desktop(second: bool) -> (TestEnv, TestEnv) {
+    let laptop = TestEnv::new();
+    laptop.ok(&["init", "--remote", &laptop.remote_url()]);
+    laptop.write(".zshrc", b"export A=1\n", 0o644);
+    laptop.ok(&["add", ".zshrc"]);
+    laptop.ok(&["sync"]);
+    let remote = laptop.remote_path().to_string_lossy().into_owned();
+    laptop.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let desktop = laptop.second_device();
+    desktop.ok(&["init", &desktop.remote_url()]);
+    laptop.ok(&["key", "init"]);
+    if second {
+        let other = TestEnv::new();
+        other.ok(&["init"]);
+        other.ok(&["key", "init"]);
+        let mut config = laptop.repo_config();
+        config
+            .age
+            .recipients
+            .extend(other.repo_config().age.recipients);
+        config
+            .save(&laptop.repo().join(".dotman.toml"), false)
+            .expect("save .dotman.toml");
+    }
+    laptop.ok(&["sync"]);
+    (laptop, desktop)
+}
+
+fn identity_file(env: &TestEnv) -> String {
+    env.xdg_config()
+        .join("dotman/age-identity.txt")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn key_import_on_a_stale_clone_does_not_ask_when_origin_lists_the_recipient() {
+    if !age_installed() {
+        return;
+    }
+    let (laptop, desktop) = stale_desktop(false);
+    assert_eq!(desktop.repo_config().age.recipients, Vec::<String>::new());
+
+    let err = desktop.ok(&["key", "import", &identity_file(&laptop)]);
+    assert!(
+        err.contains("origin already lists its recipient; `dotman sync` brings the list here"),
+        "{err}"
+    );
+    assert!(!err.contains("is not in [age] recipients"), "{err}");
+    assert_eq!(desktop.repo_config().age.recipients, Vec::<String>::new());
+    let repo = desktop.repo().to_string_lossy().into_owned();
+    assert_eq!(desktop.git(&["-C", &repo, "status", "--porcelain"]), "");
+}
+
+#[test]
+fn key_import_on_a_stale_clone_does_not_ask_when_origin_lists_the_recipient_and_the_next_sync_has_no_conflict()
+ {
+    if !age_installed() {
+        return;
+    }
+    let (laptop, desktop) = stale_desktop(true);
+    assert_eq!(laptop.repo_config().age.recipients.len(), 2);
+
+    let err = desktop.ok(&["key", "import", "--add-recipient", &identity_file(&laptop)]);
+    assert!(err.contains("origin already lists its recipient"), "{err}");
+    assert_eq!(desktop.repo_config().age.recipients, Vec::<String>::new());
+
+    desktop.ok(&["sync"]);
+    assert_eq!(
+        desktop.repo_config().age.recipients,
+        laptop.repo_config().age.recipients
+    );
+}
+
+#[test]
+fn key_import_asks_when_origin_cannot_be_reached() {
+    if !age_installed() {
+        return;
+    }
+    let (laptop, desktop) = stale_desktop(false);
+    let repo = desktop.repo().to_string_lossy().into_owned();
+    desktop.git(&[
+        "-C",
+        &repo,
+        "remote",
+        "set-url",
+        "origin",
+        "file:///nonexistent/dots.git",
+    ]);
+
+    let file = identity_file(&laptop);
+    let out = desktop.run(&["key", "import", &file]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(!err.contains("origin already lists"), "{err}");
+    assert!(err.contains("is not in [age] recipients"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "`dotman key import --add-recipient {file}` adds it"
+        )),
+        "{err}"
+    );
+    assert_eq!(desktop.repo_config().age.recipients, Vec::<String>::new());
+}
