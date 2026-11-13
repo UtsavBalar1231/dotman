@@ -24,4 +24,6 @@ Each film lands in `target/video/<film>.mp4`, with `<film>-sheet.png`, 24 frames
 
 `build.py` starts one Alpine container per machine with no network, user `alex` and the machine's host name, sharing `/srv` for the remote. It records each scene through a pty, so prompts and colours are what a user sees. `render.mjs` draws every shot frame by frame in headless Chromium: `term.html` replays a recording, and huashu's `clip.html` draws a clip. The shots are then crossfaded into one file.
 
+Every shot is set in Departure Mono, from `fonts/` (SIL OFL 1.1, see `fonts/LICENSE.txt`); `render.mjs` swaps it in for the fonts huashu's grammars name.
+
 A scene fails when a command exits with a status it did not expect, or prints nothing for 15 seconds, which usually means a question with no answer; the error shows the last output.

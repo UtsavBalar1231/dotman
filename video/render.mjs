@@ -1,7 +1,9 @@
 // Renders one clip frame by frame through headless Chromium into an H.264 MP4, or a few stills.
 // usage: node render.mjs huashu|term SPEC.json OUT.mp4 [--stills 1.0,4.5]
 // `huashu` pages come from the huashu-art-motion engine (HUASHU_ENGINE), `term` replays a cast that
-// record.py made. CHROMIUM names the browser; Playwright's own download is not needed.
+// record.py made. Both set their text in fonts/departure-mono.woff: huashu's grammars name their
+// fonts in code, so the faces they use are pointed at it before the engine loads them.
+// CHROMIUM names the browser; Playwright's own download is not needed.
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -32,8 +34,10 @@ if (kind === 'term') {
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json' };
 const server = http.createServer((req, res) => {
   if (req.url === '/favicon.ico') return res.writeHead(204).end();
-  const file = path.join(root, decodeURIComponent(new URL(req.url, 'http://local').pathname));
-  if (!file.startsWith(root + path.sep)) return res.writeHead(403).end();
+  const url = decodeURIComponent(new URL(req.url, 'http://local').pathname);
+  const base = url.startsWith('/fonts/') ? here : root;
+  const file = path.join(base, url);
+  if (!file.startsWith(base + path.sep)) return res.writeHead(403).end();
   fs.readFile(file, (err, data) => {
     if (err) return res.writeHead(404).end();
     res.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream' }).end(data);
@@ -49,6 +53,13 @@ const errors = [];
 page.on('console', m => { if (m.type() === 'error') { errors.push(m.text()); console.error('[page]', m.text()); } });
 page.on('pageerror', e => { errors.push(String(e)); console.error('[pageerror]', String(e)); });
 await page.addInitScript(`window.CLIP_SPEC = ${JSON.stringify(spec)};`);
+await page.addInitScript(() => {
+  let faces;
+  Object.defineProperty(window, 'FONT_FACES', {
+    get: () => faces,
+    set: v => { faces = v.map(f => (/^(LXGWWenKai|PuHui)-/.test(f.family) ? { ...f, url: '/fonts/departure-mono.woff' } : f)); },
+  });
+});
 await page.goto(`http://127.0.0.1:${server.address().port}/${pageName}?render=1`);
 await page.waitForFunction('window.__ready === true || !!window.__bootFailed', null, { timeout: 120000 });
 const failed = await page.evaluate('window.__bootFailed || null');

@@ -1,18 +1,22 @@
 <!doctype html>
 <meta charset="utf-8">
-<style>html,body{margin:0;background:#11111b}canvas{display:block}</style>
+<style>@font-face{font-family:"Departure Mono";src:url(fonts/departure-mono.woff) format("woff")}
+html,body{margin:0;background:#11111b}canvas{display:block}</style>
 <canvas id="c"></canvas>
 <script>
 // Replays an asciicast v2 recording onto a canvas, with the same prepare/renderFrame contract as
 // huashu's clip.html so render.mjs drives both. Only the escape sequences dotman, git and bash
 // print are interpreted: SGR, erase, cursor moves, cursor visibility; OSC strings are dropped.
+// Departure Mono is a pixel font on an 11-pixel em: sizes that are multiples of 11 on integer
+// baselines keep its pixels sharp, and bold is the glyph drawn again one pixel to the right,
+// because the font has one weight and a synthesized bold smears the grid.
 const spec = window.CLIP_SPEC;
 const lines = spec.cast.trim().split('\n');
 const header = JSON.parse(lines[0]);
 const events = lines.slice(1).map(l => JSON.parse(l)).filter(e => e[1] === 'o');
 const COLS = header.width, ROWS = header.height;
-const FONT = spec.font || '"FiraCode Nerd Font Mono", "DejaVu Sans Mono", monospace';
-const SIZE = spec.fontSize || 26, LINE = Math.round(SIZE * 1.32), PAD = 28, BAR = 46;
+const FONT = '"Departure Mono", monospace';
+const SIZE = 22, LINE = 30, PAD = 28, BAR = 46;
 const BG = '#1e1e2e', FG = '#cdd6f4';
 const PALETTE = ['#45475a', '#f38ba8', '#a6e3a1', '#f9e2af', '#89b4fa', '#f5c2e7', '#94e2d5', '#bac2de',
   '#585b70', '#f38ba8', '#a6e3a1', '#f9e2af', '#89b4fa', '#f5c2e7', '#94e2d5', '#a6adc8'];
@@ -134,7 +138,7 @@ window.renderFrame = t => {
   ['#f38ba8', '#f9e2af', '#a6e3a1'].forEach((col, i) => {
     g.beginPath(); g.arc(x0 + 26 + i * 24, y0 + BAR / 2, 7, 0, Math.PI * 2); g.fillStyle = col; g.fill();
   });
-  g.font = `${Math.round(SIZE * 0.7)}px ${FONT}`; g.fillStyle = '#7f849c'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `${SIZE}px ${FONT}`; g.fillStyle = '#7f849c'; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillText(spec.title || '', x0 + W / 2, y0 + BAR / 2);
   g.textAlign = 'left'; g.textBaseline = 'alphabetic';
   const tx = x0 + PAD, ty = y0 + BAR + PAD;
@@ -146,10 +150,11 @@ window.renderFrame = t => {
       if (a.inverse) [fg, bg] = [bg || BG, fg];
       if (bg) { g.fillStyle = bg; g.fillRect(tx + c * cw, base, cw + 0.5, LINE); }
       if (ch === ' ') continue;
-      g.font = `${a.bold ? 'bold ' : ''}${SIZE}px ${FONT}`;
+      g.font = `${SIZE}px ${FONT}`;
       g.globalAlpha = a.dim ? 0.55 : 1;
       g.fillStyle = fg;
-      g.fillText(ch, tx + c * cw, base + LINE * 0.76);
+      g.fillText(ch, tx + c * cw, base + SIZE);
+      if (a.bold) g.fillText(ch, tx + c * cw + 1, base + SIZE);
       g.globalAlpha = 1;
     }
   }
