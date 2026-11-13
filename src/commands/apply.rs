@@ -1757,13 +1757,17 @@ impl Run<'_> {
             if self.opts.in_place || h.kind != r.tuple.kind || h.hash != r.tuple.hash);
         // A change of mode alone keeps the bytes, so only the mode they had is recorded.
         let mut mode_record = None;
+        let mut old_mode = 0;
         if let Home::Present(h) = &item.raw
             && !replaces
             && h.kind == Kind::File
             && h.mode != mode
         {
             match record_mode(&self.backups, key, h.mode, self.opts.dry_run) {
-                Ok(path) => mode_record = Some(path),
+                Ok(path) => {
+                    mode_record = Some(path);
+                    old_mode = h.mode;
+                }
                 Err(e) => {
                     self.failed = self.failed.saturating_add(1);
                     output::warning(&format!("{key}: not written, the backup failed: {e:#}"));
@@ -1791,13 +1795,29 @@ impl Run<'_> {
         match outcome {
             Ok(WriteOutcome::Written(written)) => {
                 self.written.insert(key.clone());
-                if r.encrypted {
-                    self.announce("apply", &format!("{key} (decrypted)"));
-                } else {
-                    self.announce("apply", key);
-                }
-                if let Some(backup) = written.backup.as_ref().or(mode_record.as_ref()) {
-                    self.backed_up(backup);
+                match (&written.backup, &mode_record) {
+                    (None, Some(record)) => {
+                        self.announce(
+                            "apply",
+                            &format!("{key} (mode {old_mode:04o} to {mode:04o})"),
+                        );
+                        let verb = if self.opts.dry_run {
+                            "would record the old mode in"
+                        } else {
+                            "the old mode is recorded in"
+                        };
+                        output::info(&format!("  {verb} {}", record.display()));
+                    }
+                    (backup, _) => {
+                        if r.encrypted {
+                            self.announce("apply", &format!("{key} (decrypted)"));
+                        } else {
+                            self.announce("apply", key);
+                        }
+                        if let Some(backup) = backup {
+                            self.backed_up(backup);
+                        }
+                    }
                 }
                 let repo = item.repo_mode.unwrap_or(r.tuple.mode);
                 if mode != repo && mode != r.tuple.mode {

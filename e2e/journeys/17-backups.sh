@@ -53,6 +53,8 @@ e2e_dm_rc 0 a sync
 seen=$(runs)
 e2e_dm_rc 0 b sync
 e2e_mode_is b .local/bin/tool 700
+e2e_err_has 'apply .local/bin/tool (mode 0755 to 0700)'
+e2e_err_has 'the old mode is recorded in '
 run=$(new_run "$seen")
 e2e_check "the mode-only run records the old mode" grep -qP '^\.local/bin/tool\t0755$' "$run/.dotman/modes.txt"
 e2e_check "the mode-only run copies nothing" test ! -e "$run/.local/bin/tool"

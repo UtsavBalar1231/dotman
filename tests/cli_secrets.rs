@@ -577,6 +577,32 @@ fn without_a_remote_sync_re_encrypts_after_its_apply() {
     assert!(!err.contains("re-encrypt"), "{err}");
 }
 
+/// The sync after `add --encrypt` of a 0644 file tightens it to 0600 without a copy, and says
+/// so: the mode it had, the mode it has, and where the old one is recorded.
+#[test]
+fn sync_after_add_encrypt_of_a_loose_file_reports_a_mode_change() {
+    if !age_installed() {
+        return;
+    }
+    let env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.ok(&["key", "init"]);
+    env.write(HOSTS, PLAIN, 0o644);
+    env.ok(&["add", "--encrypt", HOSTS]);
+    let err = env.ok(&["sync"]);
+    assert!(
+        err.lines()
+            .any(|line| line == format!("apply {HOSTS} (mode 0644 to 0600)")),
+        "{err}"
+    );
+    assert!(
+        err.contains("\n  the old mode is recorded in ") && err.contains("/.dotman/modes.txt\n"),
+        "{err}"
+    );
+    assert!(!err.contains("backed up to"), "{err}");
+    assert_eq!(mode_of(&env.home().join(HOSTS)), 0o600);
+}
+
 #[test]
 fn a_shared_mode_is_not_recorded_for_an_encrypted_file_and_a_stricter_one_is() {
     if !age_installed() {
