@@ -23,6 +23,9 @@ e2e_err_has 'held .config/app/remote.conf: line 2 holds a github-token'
 e2e_err_line_lacks remote.conf --allow-plain
 e2e_err_lacks "$token"
 e2e_dm_rc 3 a sync
+e2e_check "sync ends on the line that says something is left" test \
+    "$(tail -n 1 "$E2E_ROOT/last.err")" = \
+    'not everything was synced; the warnings above say what is left and what to run'
 e2e_remote_tracks .config/app/app.conf
 e2e_remote_lacks .config/app/.env
 e2e_remote_lacks .config/app/remote.conf

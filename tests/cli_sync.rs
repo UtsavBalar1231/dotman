@@ -868,6 +868,39 @@ fn a_skipped_path_exits_3_and_everything_else_is_still_pushed() {
     assert_eq!(a.token_of("status", ".d").as_deref(), Some("clean"));
 }
 
+const LEFT: &str = "not everything was synced; the warnings above say what is left and what to run";
+
+fn last_line(err: &str) -> &str {
+    err.lines().last().unwrap_or_default()
+}
+
+/// Whatever a sync left for the user, its last line says so, in a real run, in a dry run and with
+/// `-q`, which still prints warnings.
+#[test]
+fn a_sync_that_exits_3_ends_on_the_attention_line() {
+    let (a, _b) = pair(&[(".a", b"a\n", 0o644), (".d", b"d\n", 0o644)]);
+    fs::remove_file(a.home().join(".d")).expect("delete .d");
+    let err = exits(&a, 3, &["sync"]);
+    assert_eq!(last_line(&err), LEFT, "{err}");
+    let err = exits(&a, 3, &["-q", "sync"]);
+    assert_eq!(last_line(&err), LEFT, "{err}");
+    let err = exits(&a, 3, &["sync", "--dry-run"]);
+    assert_eq!(
+        last_line(&err),
+        "a real run would not sync everything; the warnings above say what would be left",
+        "{err}"
+    );
+
+    let held = TestEnv::new();
+    held.ok(&["init"]);
+    held.write(".a", b"a\n", 0o644);
+    held.ok(&["add", ".a"]);
+    held.ok(&["sync"]);
+    held.write_repo(".a", format!("{AGE_KEY}\n").as_bytes());
+    let err = exits(&held, 3, &["sync"]);
+    assert_eq!(last_line(&err), LEFT, "{err}");
+}
+
 #[test]
 fn status_counts_the_commits_to_push_and_pull_and_the_printed_sync_settles_them() {
     let (a, b) = pair(&[(".a", b"a\n", 0o644)]);

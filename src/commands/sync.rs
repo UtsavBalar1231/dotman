@@ -75,7 +75,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         ctx.sweep_temp_files()?;
     }
     if holds_back_the_pull(&ctx)? {
-        return Ok(Outcome::Attention);
+        return Ok(finish(true, dry_run));
     }
 
     let first = apply::apply(
@@ -135,7 +135,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         let hooked = apply::check_failed(first_failed, uncaptured)
             .and(hooked)
             .and_then(|hooked| refused(committed.refusal).map(|()| hooked))?;
-        return Ok(finish(attention || hooked == Outcome::Attention));
+        return Ok(finish(attention || hooked == Outcome::Attention, true));
     }
 
     let reached = |err| remote_error(err, committed.new_commit);
@@ -166,7 +166,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
 
     push(&ctx, &branch, pulled).map_err(reached)?;
     let hooked = failed.and(reencrypted).and(hooked)?;
-    Ok(finish(attention || hooked == Outcome::Attention))
+    Ok(finish(attention || hooked == Outcome::Attention, false))
 }
 
 /// Pushes `branch` and says how many commits went out. `pulled` means the pull left the remote's
@@ -253,7 +253,7 @@ fn without_remote(
     let outcome = apply::finish(ctx, &second, policy);
     reencrypted?;
     let attention = held || first.outcome == Outcome::Attention || outcome? == Outcome::Attention;
-    Ok(finish(attention))
+    Ok(finish(attention, dry_run))
 }
 
 /// Commits a re-encryption with the generated message, whatever `-m` said.
@@ -264,12 +264,18 @@ fn reencrypt(ctx: &Context, args: &SyncArgs, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-const fn finish(attention: bool) -> Outcome {
-    if attention {
-        Outcome::Attention
-    } else {
-        Outcome::Done
+/// A sync that left something for the user ends on this line, so the last thing printed says so
+/// even when what it left was reported higher up.
+fn finish(attention: bool, dry_run: bool) -> Outcome {
+    if !attention {
+        return Outcome::Done;
     }
+    output::warning(if dry_run {
+        "a real run would not sync everything; the warnings above say what would be left"
+    } else {
+        "not everything was synced; the warnings above say what is left and what to run"
+    });
+    Outcome::Attention
 }
 
 struct Committed {
