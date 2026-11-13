@@ -1206,6 +1206,26 @@ impl Git {
             .map(drop)
     }
 
+    /// Like [`Git::fetch`], killing git after `timeout`, which fails like any other fetch that
+    /// could not reach the remote.
+    pub fn fetch_within(&self, remote: &str, branch: &str, timeout: Duration) -> Result<()> {
+        self.check_version()?;
+        let args = ["fetch", "-q", remote, &full_ref(branch)];
+        let mut cmd = self.command();
+        cmd.args(args);
+        let out = crate::proc::output_within(&mut cmd, timeout)
+            .map_err(|err| self.spawn_error(err))?
+            .ok_or_else(|| {
+                anyhow!("`git fetch` did not finish within {} s", timeout.as_secs())
+                    .context(RemoteFailure::Unreachable)
+            })?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(self.remote_failure(&args, &out))
+        }
+    }
+
     /// Like [`Git::fetch`], and fetches the history a shallow clone left out.
     pub fn unshallow(&self, remote: &str, branch: &str) -> Result<()> {
         self.run_remote(&["fetch", "-q", "--unshallow", remote, &full_ref(branch)])
@@ -2688,6 +2708,31 @@ mod tests {
                 .status
                 .success()
         );
+    }
+
+    #[test]
+    fn a_fetch_that_outlasts_its_timeout_is_killed_and_fails_as_unreachable() {
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        commit_file(&a, "f", b"f", "one");
+        a.set_remote_url("origin", utf8(&remote)).expect("add");
+        a.push_set_upstream("origin", "main").expect("push");
+        a.fetch_within("origin", "main", Duration::from_secs(30))
+            .expect("a quick fetch");
+
+        let slow = sb.dir.path().join("slow-upload-pack");
+        fs::write(&slow, "#!/bin/sh\nexec sleep 20\n").expect("write");
+        fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).expect("chmod");
+        a.set_config("remote.origin.uploadpack", utf8(&slow), false)
+            .expect("config");
+        let started = std::time::Instant::now();
+        let err = a
+            .fetch_within("origin", "main", Duration::from_millis(500))
+            .expect_err("a slow remote");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(err.downcast_ref(), Some(&RemoteFailure::Unreachable));
     }
 
     #[test]

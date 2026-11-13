@@ -246,6 +246,36 @@ fn key_import_on_a_stale_clone_does_not_ask_when_origin_lists_the_recipient_and_
     );
 }
 
+/// An origin that accepts the fetch and never answers costs `key import` ten seconds, not the
+/// time the origin takes.
+#[test]
+fn key_import_asks_when_origin_does_not_answer() {
+    if !age_installed() {
+        return;
+    }
+    let (laptop, desktop) = stale_desktop(false);
+    let repo = desktop.repo().to_string_lossy().into_owned();
+    let slow = desktop.write_script("slow-upload-pack", "#!/bin/sh\nexec sleep 20\n");
+    desktop.git(&[
+        "-C",
+        &repo,
+        "config",
+        "remote.origin.uploadpack",
+        &slow.to_string_lossy(),
+    ]);
+
+    let started = std::time::Instant::now();
+    let out = desktop.run(&["key", "import", &identity_file(&laptop)]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(18),
+        "{err}"
+    );
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(!err.contains("origin already lists"), "{err}");
+    assert!(err.contains("is not in [age] recipients"), "{err}");
+}
+
 #[test]
 fn key_import_asks_when_origin_cannot_be_reached() {
     if !age_installed() {

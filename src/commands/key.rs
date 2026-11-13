@@ -19,7 +19,7 @@ use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, IsTerminal, Read};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Runs `dotman key`.
 ///
@@ -336,9 +336,12 @@ fn confirm_add(missing: &[String]) -> Result<bool> {
     prompt::confirm(&format!("add {}? [y/N]", output::plural(n, "it", "them")))
 }
 
+/// How long `key import` waits for origin before it asks instead; the command works offline.
+const ORIGIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Whether the branch on origin already lists every recipient in `missing`. A clone that has not
 /// synced since another machine added its recipient reads a list that is as old as its last sync.
-/// Any failure to find out says no.
+/// Any failure to find out, a slow origin included, says no.
 fn origin_lists(ctx: &Context, missing: &[String]) -> bool {
     let Ok(Some(_)) = ctx.git.remote_url(REMOTE) else {
         return false;
@@ -346,7 +349,11 @@ fn origin_lists(ctx: &Context, missing: &[String]) -> bool {
     let Ok(Some(branch)) = ctx.git.branch() else {
         return false;
     };
-    if ctx.git.fetch(REMOTE, &branch).is_err() {
+    if ctx
+        .git
+        .fetch_within(REMOTE, &branch, ORIGIN_TIMEOUT)
+        .is_err()
+    {
         return false;
     }
     let Ok(bytes) = ctx.git.show_blob("FETCH_HEAD", ".dotman.toml") else {
