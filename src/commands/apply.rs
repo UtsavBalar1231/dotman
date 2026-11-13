@@ -336,6 +336,16 @@ struct Ready {
 }
 
 impl Item {
+    /// What the content guard would hold if `sync` captured this key's edit, which only a
+    /// `changed-locally` row of a home key is. `status` reports it; the capture enforces it.
+    pub(crate) fn capture_hold(&self, ctx: &Context) -> Option<Finding> {
+        let r = self
+            .r
+            .as_ref()
+            .filter(|_| self.row == Row::ChangedLocally && !self.system)?;
+        add::capture_hold(ctx, &self.key, &r.source, r.encrypted)
+    }
+
     /// The row, before any identity change is accepted.
     pub(crate) const fn row(&self) -> Row {
         self.row
@@ -1511,12 +1521,7 @@ impl Run<'_> {
         let managed = self.sources.contains(key) || state.files.contains_key(key);
         if self.opts.dry_run {
             // Only a dry run reads H here; a real capture checks what it is about to store.
-            let found = if encrypted {
-                secrets::held_name(source)
-            } else {
-                add::holds_key(&self.ctx.paths.home, key, &self.ctx.machine.guard.allow)
-            };
-            if let Some(found) = found {
+            if let Some(found) = add::capture_hold(self.ctx, key, source, encrypted) {
                 self.held_key(key, found, managed);
                 return false;
             }

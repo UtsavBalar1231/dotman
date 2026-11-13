@@ -59,4 +59,16 @@ e2e_join b beta --age-key-file "$(e2e_config a)/age-identity.txt"
 e2e_file_has b .config/app/remote.conf "$token"
 e2e_mode_is b .config/app/remote.conf 600
 
+# A token put into a managed file: status names the hold, and the printed `forget` ends it.
+e2e_write a .config/app/app.conf "theme=dark
+token = $token
+"
+e2e_dm_rc 0 a status
+e2e_out_has 'held in $HOME; `dotman sync` captures none of it:'
+e2e_out_has '.config/app/app.conf: line 2 holds a github-token'
+e2e_err_has '1 held in $HOME'
+e2e_run_printed a "$(e2e_printed '^dotman forget ')"
+e2e_dm_rc 0 a sync
+e2e_remote_lacks .config/app/app.conf
+
 e2e_finish

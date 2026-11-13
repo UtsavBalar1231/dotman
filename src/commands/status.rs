@@ -13,6 +13,7 @@ use crate::repo_config::RepoConfig;
 use crate::secrets::Finding;
 use crate::state::State;
 use crate::system::{self, Verdict};
+use crate::variant::Sources;
 use anyhow::{Context as _, Result};
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -84,11 +85,14 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     let mut rows = Vec::new();
     // Clean rows whose S lags, as after a run killed before it saved the state.
     let mut unrecorded = 0_usize;
+    let mut in_home = Vec::new();
     for key in keys {
         if !in_scope(&key) {
             continue;
         }
-        if let Some(label) = home_label(&ctx, &variants, &state, &key, &mut unrecorded) {
+        if let Some(label) =
+            home_label(&ctx, &variants, &state, &key, &mut unrecorded, &mut in_home)
+        {
             rows.push((label, key));
         }
     }
@@ -132,25 +136,45 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         .context("cannot write to stdout")?;
     }
     if args.porcelain {
-        for key in &new {
-            write!(out, "new\t{key}\0").context("cannot write to stdout")?;
-        }
-        for (key, _) in &held {
-            write!(out, "held\t{key}\0").context("cannot write to stdout")?;
-        }
-        for (entry, _) in &in_repo {
-            write!(out, "held-in-repo\t{}\0", entry.path.to_string_lossy())
-                .context("cannot write to stdout")?;
-        }
+        write_records(&mut out, &new, &held, &in_home, &in_repo)
+            .context("cannot write to stdout")?;
     } else {
         list_new(&mut out, &ctx, &new, &held).context("cannot write to stdout")?;
+        list_held_in_home(&mut out, &ctx, &sources, &in_home).context("cannot write to stdout")?;
         list_still_ignored(&mut out, &ctx, &scan, in_scope).context("cannot write to stdout")?;
         list_held_in_repo(&mut out, &ctx, &in_repo).context("cannot write to stdout")?;
         for note in &scan.notes {
             output::warning(note);
         }
-        summarize(&rows, unrecorded, [new.len(), held.len(), in_repo.len()]);
+        summarize(
+            &rows,
+            unrecorded,
+            [new.len(), held.len(), in_home.len(), in_repo.len()],
+        );
         report_remote(&ctx)?;
+    }
+    Ok(())
+}
+
+/// The porcelain records after the rows, each kind in turn.
+fn write_records(
+    out: &mut impl Write,
+    new: &[&String],
+    held: &[(&String, Hold)],
+    in_home: &[(String, Finding)],
+    in_repo: &[(&StatusEntry, Finding)],
+) -> std::io::Result<()> {
+    for key in new {
+        write!(out, "new\t{key}\0")?;
+    }
+    for (key, _) in held {
+        write!(out, "held\t{key}\0")?;
+    }
+    for (key, _) in in_home {
+        write!(out, "held-in-home\t{key}\0")?;
+    }
+    for (entry, _) in in_repo {
+        write!(out, "held-in-repo\t{}\0", entry.path.to_string_lossy())?;
     }
     Ok(())
 }
@@ -275,10 +299,14 @@ fn home_label(
     state: &State,
     key: &str,
     unrecorded: &mut usize,
+    in_home: &mut Vec<(String, Finding)>,
 ) -> Option<&'static str> {
     Some(match classify_key(ctx, variants, state, key) {
         Ok(Classified::Unmanaged) => return None,
         Ok(Classified::Item(item)) => {
+            if let Some(found) = item.capture_hold(ctx) {
+                in_home.push((key.to_owned(), found));
+            }
             if item.token() == "clean" && item.row() == (Row::Clean { update_state: true }) {
                 *unrecorded = unrecorded.saturating_add(1);
             }
@@ -305,11 +333,20 @@ fn home_label(
 
 /// New files are under `[dirs]`, which sync captures, so they count as managed. Held files are
 /// not managed, as `list` shows, but they count as to look at.
-fn summarize(rows: &[(&str, String)], unrecorded: usize, [new, held, held_in_repo]: [usize; 3]) {
+fn summarize(
+    rows: &[(&str, String)],
+    unrecorded: usize,
+    [new, held, held_in_home, held_in_repo]: [usize; 4],
+) {
     let clean = rows.iter().filter(|(label, _)| *label == "clean").count();
     let managed = rows.len().saturating_add(new);
     let breakdown = if new > 0 || held > 0 {
         format!(" ({new} new, {held} held back)")
+    } else {
+        String::new()
+    };
+    let in_home = if held_in_home > 0 {
+        format!(", {held_in_home} held in $HOME")
     } else {
         String::new()
     };
@@ -319,7 +356,7 @@ fn summarize(rows: &[(&str, String)], unrecorded: usize, [new, held, held_in_rep
         String::new()
     };
     output::info(&format!(
-        "{managed} managed, {clean} clean, {} to look at{breakdown}{in_repo}",
+        "{managed} managed, {clean} clean, {} to look at{breakdown}{in_home}{in_repo}",
         managed.saturating_sub(clean).saturating_add(held)
     ));
     if unrecorded > 0 {
@@ -400,6 +437,35 @@ fn list_still_ignored(
             if entry.is_dir { "/" } else { "" },
             escape_line(&entry.listed(&path))
         )?;
+    }
+    Ok(())
+}
+
+/// The managed files whose edit in `$HOME` the guard would hold, which keep their
+/// `changed-locally` row: `sync` captures none of them.
+fn list_held_in_home(
+    out: &mut impl Write,
+    ctx: &Context,
+    sources: &Sources,
+    held: &[(String, Finding)],
+) -> std::io::Result<()> {
+    if held.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "\nheld in $HOME; `{} sync` captures none of it:",
+        name::bin()
+    )?;
+    for (key, found) in held {
+        writeln!(out, "  {}: {found}", escape_line(key))?;
+        let path = add::pasteable(&ctx.paths.home, key);
+        let mut ways = found.ways(Some(&path));
+        ways.push(add::forget_hint(&ctx.paths.home, sources, key));
+        for (i, way) in ways.iter().enumerate() {
+            let or = if i == 0 { "" } else { "or " };
+            writeln!(out, "    {or}{}", escape_line(way))?;
+        }
     }
     Ok(())
 }

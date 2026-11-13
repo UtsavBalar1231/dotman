@@ -1700,6 +1700,35 @@ fn printable(text: &str) -> String {
     })
 }
 
+/// What the content guard holds when H of `key` is captured into `source`: [`commit_one`]'s check,
+/// which a dry run and `status` ask without capturing. An unreadable H is not held here.
+pub(crate) fn capture_hold(
+    ctx: &Context,
+    key: &str,
+    source: &str,
+    encrypted: bool,
+) -> Option<Finding> {
+    let node = read_node(&ctx.paths.home, key).ok()?;
+    node_hold(ctx, &node, key, source, encrypted)
+}
+
+fn node_hold(
+    ctx: &Context,
+    node: &Node,
+    key: &str,
+    source: &str,
+    encrypted: bool,
+) -> Option<Finding> {
+    let found = match node {
+        Node::File { bytes, .. } if !encrypted => {
+            secrets::held(bytes, key, &ctx.machine.guard.allow)
+        }
+        Node::Symlink(target) => secrets::held_link(target.as_os_str().as_bytes(), key),
+        _ => None,
+    };
+    found.or_else(|| secrets::held_name(source))
+}
+
 /// What the content guard holds in H of `key`, a file or a symlink. An unreadable file is not held
 /// here; capturing it fails and is reported then.
 pub(crate) fn holds_key(home: &Path, key: &str, allow: &[Allow]) -> Option<Finding> {
@@ -1829,14 +1858,7 @@ fn commit_stored(
         return Err(OwnPath::new(key, what).into());
     }
     let node = read_node(home, key)?;
-    let found = match &node {
-        Node::File { bytes, .. } if !encrypted => {
-            secrets::held(bytes, key, &ctx.machine.guard.allow)
-        }
-        Node::Symlink(target) => secrets::held_link(target.as_os_str().as_bytes(), key),
-        _ => None,
-    };
-    if let Some(found) = found.or_else(|| secrets::held_name(source)) {
+    if let Some(found) = node_hold(ctx, &node, key, source, encrypted) {
         return Err(Held(found).into());
     }
     ensure_worktree_parents(repo, source)?;

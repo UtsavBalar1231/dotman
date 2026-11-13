@@ -810,3 +810,107 @@ fn a_git_that_hangs_on_a_short_probe_is_given_up_on() {
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(30));
 }
+
+/// A GitHub token shape, built here so no token-shaped literal sits in the source.
+fn github_token() -> String {
+    format!("ghp_{}", "Zq7".repeat(12))
+}
+
+/// `.profile` managed, then edited in `$HOME` to hold a token, which `sync` would not capture.
+fn held_in_home() -> TestEnv {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".profile", b"export A=1\n", 0o644);
+    env.write(".kept", b"kept\n", 0o644);
+    env.ok(&["add", ".profile", ".kept"]);
+    env.write(
+        ".profile",
+        format!("export A=1\nexport T={}\n", github_token()).as_bytes(),
+        0o644,
+    );
+    env
+}
+
+/// A managed file the guard holds keeps its `changed-locally` row, and `status` says that `sync`
+/// captures none of it, and what to do about it. It only reports: the repo is as it was.
+#[test]
+fn status_names_a_managed_file_the_guard_holds() {
+    let env = held_in_home();
+    let repo = tree_checksum(&env.repo());
+    let out = env.run(&["status"]);
+    let (stdout, err) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    assert!(out.status.success(), "{err}");
+    assert!(
+        stdout.contains(&format!("{:<26}.profile\n", "changed-locally")),
+        "{stdout}"
+    );
+    let home = env.home().join(".profile").to_string_lossy().into_owned();
+    let section = format!(
+        "\nheld in $HOME; `dotman sync` captures none of it:\n  .profile: line 2 holds a github-token\n    `dotman add --encrypt {home}` stores it encrypted\n    or remove the secret from the file\n    or `dotman forget {home}` stops managing it\n"
+    );
+    assert!(stdout.contains(&section), "{stdout}");
+    assert!(
+        err.contains("2 managed, 1 clean, 1 to look at, 1 held in $HOME"),
+        "{err}"
+    );
+    assert_eq!(tree_checksum(&env.repo()), repo, "status captured nothing");
+}
+
+#[test]
+fn status_porcelain_has_a_held_in_home_record() {
+    let env = held_in_home();
+    let records = env.porcelain("status");
+    assert!(
+        records.contains(&("held-in-home".to_owned(), ".profile".to_owned())),
+        "{records:?}"
+    );
+    assert!(
+        records.contains(&("changed-locally".to_owned(), ".profile".to_owned())),
+        "{records:?}"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|(token, key)| token == "held-in-home" && key == ".kept"),
+        "{records:?}"
+    );
+}
+
+/// The two commands the section prints, run as printed, one environment each: afterwards `sync`
+/// captures what is left and `status` names no hold.
+#[test]
+fn the_commands_status_prints_for_a_held_file_run_as_printed() {
+    let section = |env: &TestEnv| {
+        let out = env.run(&["status"]);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    if common::age_installed() {
+        let env = held_in_home();
+        env.ok(&["key", "init"]);
+        let out = common::run_hint(&env, &section(&env), "add --encrypt");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        env.ok(&["sync"]);
+        assert!(!section(&env).contains("held in $HOME"));
+        assert_eq!(env.token_of("status", ".profile").as_deref(), Some("clean"));
+        assert!(String::from_utf8_lossy(&env.read(".profile")).contains(&github_token()));
+    }
+
+    let env = held_in_home();
+    let out = common::run_hint(&env, &section(&env), "forget");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    env.ok(&["sync"]);
+    assert!(!section(&env).contains("held in $HOME"));
+    assert_eq!(env.token_of("status", ".profile"), None);
+    assert!(String::from_utf8_lossy(&env.read(".profile")).contains(&github_token()));
+}
