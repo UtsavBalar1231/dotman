@@ -527,6 +527,35 @@ fn add_template_stores_text_with_template_syntax_so_that_it_renders_to_itself() 
         "{err}"
     );
     assert!(!env.repo().join(".end{tmpl}").exists());
+
+    // The way out runs as printed: add it plainly, rename it, write the template by hand.
+    for prefix in ["add", "sync", "git mv"] {
+        let args = common::hint(&err, prefix);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        exits(&env.run(&args), 0);
+    }
+    assert!(!env.repo().join(".end").exists());
+    let editor = env.write_script(
+        "tmpl-editor.sh",
+        "#!/bin/sh\nfor f; do :; done\nprintf 'size {{ vars.font }}\\n' > \"$f\"\n",
+    );
+    let editor = editor.to_string_lossy().into_owned();
+    let args = common::hint(&err, "edit");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    exits(&env.run_with(&[("EDITOR", &editor)], &args), 0);
+    assert_eq!(env.read(".end"), b"size 14\n");
+    assert_eq!(token(&env, ".end").as_deref(), Some("clean"));
+}
+
+#[test]
+fn a_rerun_of_add_template_says_the_file_is_already_a_template() {
+    let env = adding();
+    env.write(".p", b"name = alex\n", 0o644);
+    let first = exits(&env.run(&["add", "--template", ".p"]), 0);
+    assert!(first.contains(".p is now a template"), "{first}");
+    let again = exits(&env.run(&["add", "--template", ".p"]), 0);
+    assert!(again.contains(".p is already a template"), "{again}");
+    assert!(!again.contains("is now a template"), "{again}");
 }
 
 #[test]

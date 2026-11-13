@@ -796,6 +796,17 @@ impl Targets<'_> {
         renders_to(ctx, source, bytes)
     }
 
+    /// Whether `key` already has the template source `--template` would store, with no plain
+    /// source left to replace, and it renders to what H holds.
+    fn is_template_of_h(&self, ctx: &Context, key: &str) -> bool {
+        let Ok(source) = self.source_for(key) else {
+            return false;
+        };
+        self.replaced(key, &source).is_none()
+            && matches!(read_node(&ctx.paths.home, key), Ok(Node::File { bytes, .. })
+                if renders_to(ctx, &source, &bytes))
+    }
+
     fn check(&self, ctx: &Context, repo_config: &RepoConfig, plan: &Plan) -> Result<()> {
         if self.template {
             if !plan.dirs.is_empty() {
@@ -914,12 +925,15 @@ impl Targets<'_> {
                 output::warning(&format!("{key}: rendered from a template; skipped"));
                 continue;
             }
+            let already = self.template && self.is_template_of_h(ctx, key);
             match self.commit(ctx, repo_config, state, &mut dir_modes, key, leaf.kind()) {
                 Ok(source) => {
                     added = added.saturating_add(1);
                     if announced.contains(key) {
                         output::action("add", &shown(key, &source));
-                        if self.template {
+                        if already {
+                            output::info(&format!("{} is already a template", shown_key(key)));
+                        } else if self.template {
                             output::info(&format!(
                                 "{} is now a template; `{} edit {}` opens it",
                                 shown_key(key),
@@ -1987,8 +2001,13 @@ fn template_text(
     }
     let wrapped = format!("{{% raw %}}{text}{{% endraw %}}");
     if !renders(&wrapped) {
+        let (bin, path) = (name::bin(), pasteable(&ctx.paths.home, key));
+        let quote = |name: &str| format!("'{}'", name.replace('\'', r"'\''"));
         bail!(
-            "{key} holds text that a template reads as its own syntax, and it cannot be stored between {{% raw %}} and {{% endraw %}}"
+            "{} holds text that a template reads as its own syntax, and it cannot be stored between {{% raw %}} and {{% endraw %}}; keep it a plain file with `{bin} add {path}`; to make it a template anyway, add it plainly, run `{bin} sync`, rename it with `{bin} git mv {} {}`, and put the expressions in with `{bin} edit {path}`",
+            shown_key(key),
+            quote(key),
+            quote(source)
         );
     }
     output::warning(&format!(
