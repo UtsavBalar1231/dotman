@@ -584,6 +584,46 @@ fn the_push_line_counts_the_commits_sent() {
     assert_eq!(remote_file(&a, ".b"), "b\n");
 }
 
+/// The pull is reported with the commits it brought, before the apply lines, whether or not they
+/// changed a file here, and a sync that pulled nothing prints no pull line.
+#[test]
+fn sync_says_how_many_commits_it_pulled() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+
+    // A commit that no file here follows: a variant for another host.
+    a.write(".v", b"for elsewhere\n", 0o644);
+    a.ok(&["add", "--for", "host=elsewhere", ".v"]);
+    exits(&a, 0, &["sync"]);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("pulled 1 commit from origin/main\n"), "{err}");
+    assert!(!b.home().join(".v").exists());
+
+    // Two commits that apply.
+    a.write(".a", b"a2\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    a.write(".a", b"a3\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    let err = exits(&b, 0, &["sync"]);
+    let pulled = err.find("pulled 2 commits from origin/main\n");
+    let applied = err.find("apply .a");
+    assert!(pulled.is_some() && pulled < applied, "{err}");
+    assert_eq!(b.read(".a"), b"a3\n");
+
+    // Both directions.
+    a.write(".a", b"a4\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".b", b"b\n", 0o644);
+    b.ok(&["add", ".b"]);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("pulled 1 commit from origin/main\n"), "{err}");
+    assert!(err.contains("pushed 1 commit to origin/main\n"), "{err}");
+
+    // Nothing arrived.
+    let err = exits(&b, 0, &["sync"]);
+    assert!(!err.contains("pulled"), "{err}");
+    assert!(err.contains("origin/main is up to date"), "{err}");
+}
+
 #[test]
 fn commit_messages_name_three_paths_and_count_the_rest() {
     let files: Vec<(String, &[u8], u32)> = ["a", "b", "c", "d", "e"]

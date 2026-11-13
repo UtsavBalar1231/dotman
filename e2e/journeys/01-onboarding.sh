@@ -29,6 +29,7 @@ e2e_write b .config/app/themes/new.conf $'bg=grey\n'
 e2e_dm_rc 0 a sync
 # A's `add` put .config/app in [dirs], which B never approved: its new file waits for B to.
 e2e_dm_rc 3 b sync
+e2e_err_has 'pulled 1 commit from origin/main'
 e2e_err_has 'lists .config/app (1 new file), which this machine has not approved'
 e2e_remote_lacks .config/app/themes/new.conf
 e2e_run_printed b "$(e2e_printed '^dotman sync --approve-dirs$')"

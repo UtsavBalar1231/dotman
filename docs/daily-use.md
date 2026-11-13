@@ -41,7 +41,7 @@ Exit codes: 0 success; 1 an error; 2 a command line that cannot be parsed; 3 the
 
 ## Sync
 
-`dotman sync` captures local edits, commits them, pulls with rebase, applies what arrived and pushes, then says how many commits it pushed.
+`dotman sync` captures local edits, commits them, pulls with rebase, applies what arrived and pushes. It says how many commits it pulled, before it applies them, and how many it pushed.
 
 - Before the pull it fetches the branch, one fetch more than the pull alone, and refuses (exit 1) when the remote shares no commit with the repo: its history was replaced, or it is another repo. The message prints the commands that start over from the remote and keep what only this repo has.
 - A pull that conflicts is aborted, nothing it brought reaches `$HOME`, and the run exits 4 with numbered steps to paste: pull again, resolve the files under the repo, `dotman git add`, `dotman git -c core.editor=true rebase --continue`, `dotman sync`. An encrypted file cannot be merged, so its steps keep one side whole.

@@ -197,8 +197,18 @@ fn pull(ctx: &Context, branch: &str) -> Result<Option<bool>> {
         return Ok(Some(false));
     }
     refuse_unrelated(ctx, branch)?;
+    let before = ctx.git.head()?;
     match ctx.git.pull_rebase(REMOTE, branch)? {
-        PullOutcome::Ok => Ok(Some(true)),
+        PullOutcome::Ok => {
+            let arrived = ctx.git.count_commits(before.as_deref(), "FETCH_HEAD")?;
+            if arrived > 0 {
+                output::success(&format!(
+                    "pulled {} from {REMOTE}/{branch}",
+                    output::count(arrived, "commit")
+                ));
+            }
+            Ok(Some(true))
+        }
         PullOutcome::Conflict { paths } => {
             report_conflict(ctx, branch, &paths);
             Ok(None)
