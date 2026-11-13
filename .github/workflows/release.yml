@@ -83,9 +83,9 @@ jobs:
           COPYFILE_DISABLE: 1
         run: |
           mkdir -p stage dist
-          cp "target/${TARGET}/release/dotman" LICENSE README.md stage/
+          cp -R "target/${TARGET}/release/dotman" LICENSE README.md docs stage/
           chmod 0755 stage/dotman
-          tar -czf "dist/dotman-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C stage dotman LICENSE README.md
+          tar -czf "dist/dotman-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C stage dotman LICENSE README.md docs
 
       - name: Upload tarball
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
