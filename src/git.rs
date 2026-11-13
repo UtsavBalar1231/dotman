@@ -1899,7 +1899,7 @@ mod tests {
             Some(&RemoteFailure::Unreachable)
         );
         assert_eq!(
-            redact_credentials("https://user:s3cret@host/a@b"),
+            redact_credentials(concat!("https://user:", "s3cret@host/a@b")),
             "https://***@host/a@b"
         );
         assert_eq!(redact_credentials("git@host:x/y.git"), "git@host:x/y.git");

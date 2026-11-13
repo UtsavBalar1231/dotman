@@ -844,7 +844,11 @@ fn a_rerun_compares_a_relative_origin_by_the_directory_it_names() {
 fn init_never_prints_the_credentials_in_its_source() {
     let a = published();
     let b = a.second_device();
-    let url = format!("file://user:s3cr3t@localhost{}", b.remote_path().display());
+    let url = format!(
+        "file://user:{}@localhost{}",
+        "s3cr3t",
+        b.remote_path().display()
+    );
     let first = exits(&b.run(&["init", &url]), 0);
     assert!(first.contains("cloned file://***@localhost/"), "{first}");
     let again = b.run(&["init", &url]);

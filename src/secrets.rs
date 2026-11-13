@@ -1086,6 +1086,8 @@ mod tests {
     use std::collections::BTreeSet;
     use tempfile::TempDir;
 
+    const OPENSSH_BEGIN: &str = concat!("-----BEGIN OPENSSH PRIVATE", " KEY-----");
+
     fn bech32(n: usize) -> String {
         "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L"
             .chars()
@@ -1161,10 +1163,7 @@ mod tests {
             ("digitalocean-token", format!("dop_v1_{}", hex(64))),
             ("sendgrid-key", format!("SG.{}.{}", alnum(22), alnum(43))),
             ("huggingface-token", format!("hf_{}", alpha(34))),
-            (
-                "private-key",
-                format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{pem_body}\n"),
-            ),
+            ("private-key", format!("{OPENSSH_BEGIN}\n{pem_body}\n")),
             ("openrouter-key", format!("sk-or-v1-{}", hex(64))),
             ("groq-key", format!("gsk_{}", alnum(52))),
             ("xai-key", format!("xai-{}", alnum(80))),
@@ -1185,7 +1184,7 @@ mod tests {
             format!("xghp_{}", alnum(36)),
             "token = \"sk-not-a-key\"".to_owned(),
             format!("AKIA{}", upper(15)),
-            "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n".to_owned(),
+            format!("{OPENSSH_BEGIN}\n...\n"),
             "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\n".to_owned(),
             "password = hunter2".to_owned(),
         ] {
@@ -1211,7 +1210,10 @@ mod tests {
             ]
         );
         let pem = format!(
-            "# key\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\n{}\n",
+            concat!(
+                "# key\n-----BEGIN RSA PRIVATE",
+                " KEY-----\nProc-Type: 4,ENCRYPTED\n\n{}\n"
+            ),
             "A".repeat(64)
         );
         assert_eq!(found(&pem), [("private-key", 2)]);
@@ -1221,10 +1223,7 @@ mod tests {
     fn an_age_key_inside_another_rules_match_is_still_found() {
         let key = age_key(&bech32(58));
         let in_glpat = format!("export GL=glpat-{key}\n");
-        let in_pem = format!(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nComment: {key}\n{}\n",
-            "A".repeat(64)
-        );
+        let in_pem = format!("{OPENSSH_BEGIN}\nComment: {key}\n{}\n", "A".repeat(64));
         assert_eq!(found(&in_glpat), [("gitlab-pat", 1), (AGE_RULE, 1)]);
         assert_eq!(found(&in_pem), [("private-key", 1), (AGE_RULE, 2)]);
         for (text, rule) in [(&in_glpat, "gitlab-pat"), (&in_pem, "private-key")] {

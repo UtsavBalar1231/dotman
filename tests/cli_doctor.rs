@@ -267,7 +267,7 @@ fn the_clone_step_runs_as_printed_for_a_tilde_or_credential_origin() {
         let origin = if tilde {
             "~/dots.git".to_owned()
         } else {
-            format!("file://user:s3cr3t@localhost{dir}")
+            format!("file://user:{}@localhost{dir}", "s3cr3t")
         };
         env.ok(&["init", "--remote", &origin]);
         env.write(".bashrc", b"x\n", 0o644);

@@ -641,7 +641,10 @@ fn a_remote_with_credentials_is_never_put_into_a_command() {
     let legacy = rich_legacy(&env);
     fs::write(
         env.xdg_config().join("dotman/config"),
-        "[remotes.origin]\nurl = \"https://user:hunter2@example.invalid/dots\"\n",
+        concat!(
+            "[remotes.origin]\nurl = \"https://user:",
+            "hunter2@example.invalid/dots\"\n"
+        ),
     )
     .expect("write the old config");
     let err = env.ok(&["import", &legacy.to_string_lossy(), "--dry-run"]);

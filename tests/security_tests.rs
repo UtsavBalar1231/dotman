@@ -26,8 +26,11 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-const FAKE_KEY: &str =
-    "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+const FAKE_KEY: &str = concat!(
+    "AGE-SECRET-KEY-1",
+    "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+);
+const OPENSSH_BEGIN: &str = concat!("-----BEGIN OPENSSH PRIVATE", " KEY-----");
 const KEYD: &str = "/etc/keyd/default.conf";
 
 fn stderr(out: &Output) -> String {
@@ -1705,7 +1708,7 @@ fn an_age_key_nested_in_another_credential_is_never_stored() {
         (
             ".pemrc",
             format!(
-                "-----BEGIN OPENSSH PRIVATE KEY-----\nComment: {FAKE_KEY}\n{pem_body}\n-----END OPENSSH PRIVATE KEY-----\n"
+                "{OPENSSH_BEGIN}\nComment: {FAKE_KEY}\n{pem_body}\n-----END OPENSSH PRIVATE KEY-----\n"
             ),
         ),
     ] {

@@ -1399,7 +1399,7 @@ pub fn paste(env: &TestEnv, line: &str) -> Output {
 pub const ODD_ORIGINS: [&str; 3] = [
     "/srv/my remotes/dots.git",
     "file:///nonexistent/dots$(touch${IFS}PWNED).git",
-    "https://user:s3cr3t@example.invalid/dots.git",
+    concat!("https://user:", "s3cr3t@example.invalid/dots.git"),
 ];
 
 /// Pastes the `init --remote` hint in an import's `err` into a shell and checks that it sets

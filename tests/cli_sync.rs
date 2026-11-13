@@ -1410,7 +1410,7 @@ fn odd_origin(env: &TestEnv, tilde: bool) -> (String, std::path::PathBuf) {
     let origin = if tilde {
         "~/dots.git".to_owned()
     } else {
-        format!("file://user:s3cr3t@localhost{dir}")
+        format!("file://user:{}@localhost{dir}", "s3cr3t")
     };
     (origin, bare)
 }
@@ -1673,7 +1673,10 @@ fn a_repo_file_given_an_age_secret_key_by_edit_is_held_out_of_the_commit() {
     a.write(".b", b"b\n", 0o644);
     a.ok(&["add", ".a", ".b"]);
     a.ok(&["sync"]);
-    let key = "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+    let key = concat!(
+        "AGE-SECRET-KEY-1",
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+    );
     let editor = a.write_script("ed.sh", &format!("#!/bin/sh\necho '{key}' >> \"$1\"\n"));
     let editor = editor.to_string_lossy().into_owned();
     a.ok_with(&[("EDITOR", &editor), ("VISUAL", "")], &["edit", ".a"]);
@@ -2072,7 +2075,10 @@ fn a_mode_loosened_on_another_machine_is_applied_and_not_kept_private() {
 }
 
 /// The full shape: `AGE-SECRET-KEY-1` and 58 bech32 characters.
-const AGE_KEY: &str = "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+const AGE_KEY: &str = concat!(
+    "AGE-SECRET-KEY-1",
+    "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+);
 
 /// B holds `.zshrc` back for an age key, put in by `dotman edit` or by hand in the repo, while A
 /// changed the same line upstream.

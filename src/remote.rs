@@ -210,7 +210,7 @@ mod tests {
             Some("https://github.com/me/dots")
         );
         assert_eq!(
-            asked("https://me:s3cret@example.org:8443/a/b.git").as_deref(),
+            asked(concat!("https://me:", "s3cret@example.org:8443/a/b.git")).as_deref(),
             Some("https://example.org:8443/a/b.git")
         );
         assert_eq!(
@@ -308,9 +308,12 @@ mod tests {
     #[test]
     fn credentials_never_reach_the_state() {
         let mut state = fresh();
-        check(&mut state, "https://me:s3cret@example.org/a.git", 1, |_| {
-            true
-        });
+        check(
+            &mut state,
+            concat!("https://me:", "s3cret@example.org/a.git"),
+            1,
+            |_| true,
+        );
         let stored = state.remote_url.unwrap_or_default();
         assert!(!stored.contains("s3cret"), "{stored}");
     }

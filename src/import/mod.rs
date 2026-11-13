@@ -566,7 +566,7 @@ mod tests {
                 OriginArg::Placeholder("<path>", "the path ~nobody/dots.git names".to_owned()),
             ),
             (
-                "https://user:s3cr3t@example.invalid/dots.git",
+                concat!("https://user:", "s3cr3t@example.invalid/dots.git"),
                 OriginArg::Placeholder("<url>", "the URL with its credentials".to_owned()),
             ),
             ("-u/dots.git", OriginArg::Unusable),

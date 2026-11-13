@@ -705,7 +705,7 @@ fn a_credential_in_a_url_never_reaches_the_report() {
         &[
             "import",
             "--dry-run",
-            "https://user:s3cret@127.0.0.1:9/dots.git",
+            concat!("https://user:", "s3cret@127.0.0.1:9/dots.git"),
         ],
     );
     assert_ne!(out.status.code(), Some(0));

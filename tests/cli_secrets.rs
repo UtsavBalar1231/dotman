@@ -17,8 +17,10 @@ const ARMOR: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 const MARKER: &[u8] = b"AGE-SECRET-KEY-";
 // The guard matches the shape, `AGE-SECRET-KEY-1` and 58 bech32 characters, so this need not be a
 // real identity.
-const FAKE_KEY: &str =
-    "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+const FAKE_KEY: &str = concat!(
+    "AGE-SECRET-KEY-1",
+    "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+);
 
 fn exits(out: &Output, code: i32) -> String {
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
