@@ -415,8 +415,8 @@ struct Question {
 
 const KEEP: Answer = Answer {
     letter: "k",
-    all: "keep all local (capture them into the repo for every machine)",
-    one: "keep local (capture it into the repo for every machine)",
+    all: "keep all local",
+    one: "keep local",
 };
 const TAKE: Answer = Answer {
     letter: "t",
@@ -520,18 +520,6 @@ impl Keeping<'_> {
 
     const fn them(&self) -> &'static str {
         if self.shared.len() == 1 { "it" } else { "them" }
-    }
-
-    /// The keep answer's text, when it captures some keys into sources of their own.
-    const fn label(&self, bulk: bool) -> Option<&'static str> {
-        match (self.own.is_empty(), self.shared.is_empty(), bulk) {
-            (true, _, _) => None,
-            (false, true, false) => Some("keep local (capture it into this machine's own variant)"),
-            (false, true, true) => {
-                Some("keep all local (capture them into this machine's own variants)")
-            }
-            (false, false, _) => Some("keep all local (capture them into the repo)"),
-        }
     }
 }
 
@@ -742,14 +730,14 @@ impl Run<'_> {
                 for item in &undecided {
                     output::warning(&format!("  {}", item.key));
                 }
-                if let Some(keeping) = self.keep_here(question, &undecided) {
-                    if let Some(own) = keeping.own() {
-                        output::warning(&format!("{local} captures {own}"));
+                if let Some(keeping) = self.keeping_items(question, &undecided) {
+                    if let Some(own) = self.own_effect(&keeping, local) {
+                        output::warning(&own);
                     }
                     if let Some(add) = self.for_host(&keeping.shared) {
                         output::warning(&format!(
-                            "{local} captures this machine's version{} into the repo for every machine; {add} instead keeps {} to this machine",
-                            keeping.of(),
+                            "{}; {add} instead keeps {} to this machine",
+                            self.shared_effect(&keeping, local, "version"),
                             keeping.them()
                         ));
                     }
@@ -867,11 +855,10 @@ impl Run<'_> {
         for item in items {
             output::context(&format!("  {:<26}{}", token(item.row), item.key));
         }
-        let keeping = self.keeping_items(question, items);
-        let letter = question.local.letter;
-        if let Some(keeping) = keeping.as_ref().filter(|_| self.opts.pass == Pass::Capture) {
-            if let Some(own) = keeping.own() {
-                output::context(&format!("[{letter}] captures {own}"));
+        if let Some(keeping) = self.keeping_items(question, items) {
+            let answer = format!("[{}]", question.local.letter);
+            if let Some(own) = self.own_effect(&keeping, &answer) {
+                output::context(&own);
             }
             if let Some(add) = self.for_host(&keeping.shared) {
                 let version = if keeping.shared.len() == 1 {
@@ -879,16 +866,15 @@ impl Run<'_> {
                 } else {
                     "versions"
                 };
+                output::context(&self.shared_effect(&keeping, &answer, version));
                 output::context(&format!(
-                    "[{letter}] captures this machine's {version}{} into the repo for every machine; to keep {} to this machine only, answer [s] and run {add}",
-                    keeping.of(),
+                    "to keep {} to this machine only, answer [s] and run {add}",
                     keeping.them()
                 ));
             }
         }
-        let label = keeping.and_then(|keeping| keeping.label(true));
         loop {
-            match parse_reply(question, &prompt::ask(&menu(question, true, label))?, true) {
+            match parse_reply(question, &prompt::ask(&menu(question, true))?, true) {
                 Some(Reply::Choose(choice)) => return Ok(vec![choice; items.len()]),
                 Some(Reply::Diffs) => self.show_diffs(items),
                 Some(Reply::PerFile) => {
@@ -903,11 +889,8 @@ impl Run<'_> {
     }
 
     fn decide_one(&self, question: &Question, item: &Item) -> Result<Choice> {
-        let label = self
-            .keeping_items(question, &[item])
-            .and_then(|keeping| keeping.label(false));
         loop {
-            let asked = format!("{} {}", item.key, menu(question, false, label));
+            let asked = format!("{} {}", item.key, menu(question, false));
             match parse_reply(question, &prompt::ask(&asked)?, false) {
                 Some(Reply::Choose(choice)) => return Ok(choice),
                 Some(Reply::Diffs) => self.show_diffs(&[item]),
@@ -1676,14 +1659,35 @@ impl Run<'_> {
         output::info(&said.join("; "));
     }
 
-    /// In `sync`'s capture pass, where keeping H captures it at once, where `items` would go; the
-    /// `add --for` that keeps the shared ones to this machine instead only works while they are
-    /// left undecided.
-    fn keep_here<'i>(&self, question: &Question, items: &[&'i Item]) -> Option<Keeping<'i>> {
-        if self.opts.pass != Pass::Capture {
-            return None;
+    /// What `answer` does with the keys that go to a variant of their own. In `sync`'s capture
+    /// pass it captures them at once; after the pull it keeps them, and the next `sync` captures.
+    fn own_effect(&self, keeping: &Keeping, answer: &str) -> Option<String> {
+        let own = keeping.own()?;
+        if self.opts.pass == Pass::Capture {
+            return Some(format!("{answer} captures {own}"));
         }
-        self.keeping_items(question, items)
+        let keys: Vec<&str> = keeping.own.iter().map(|(key, _)| *key).collect();
+        Some(format!(
+            "{answer} keeps {}; the next `{} sync` captures {own}",
+            keys.join(", "),
+            name::bin()
+        ))
+    }
+
+    /// The same for the keys that go into the repo for every machine.
+    fn shared_effect(&self, keeping: &Keeping, answer: &str, version: &str) -> String {
+        let of = keeping.of();
+        if self.opts.pass == Pass::Capture {
+            format!(
+                "{answer} captures this machine's {version}{of} into the repo for every machine"
+            )
+        } else {
+            format!(
+                "{answer} keeps this machine's {version}{of}; the next `{} sync` captures {} for every machine",
+                name::bin(),
+                keeping.them()
+            )
+        }
     }
 
     /// Where keeping `$HOME`'s version of `items` puts them, for a question whose local answer
@@ -2100,14 +2104,13 @@ fn summarize(items: &[Item], locked: usize) {
     ));
 }
 
-/// The answers to `question`; `label` replaces the local answer's text.
-fn menu(question: &Question, bulk: bool, label: Option<&str>) -> String {
+/// The answers to `question`.
+fn menu(question: &Question, bulk: bool) -> String {
     let (local, repo) = if bulk {
         (question.local.all, question.repo.all)
     } else {
         (question.local.one, question.repo.one)
     };
-    let local = label.unwrap_or(local);
     let mut answers = vec![
         format!("[{}] {local}", question.local.letter),
         format!("[{}] {repo}", question.repo.letter),
@@ -2178,17 +2181,14 @@ mod tests {
             );
         }
         assert_eq!(
-            menu(conflicts, true, None),
-            "[k] keep all local (capture them into the repo for every machine)  [t] take all from repo  [d] show diffs  [p] decide per file  [s] skip:"
+            menu(conflicts, true),
+            "[k] keep all local  [t] take all from repo  [d] show diffs  [p] decide per file  [s] skip:"
         );
         assert_eq!(
-            menu(conflicts, false, None),
-            "[k] keep local (capture it into the repo for every machine)  [t] take from repo  [d] show diff  [s] skip:"
+            menu(conflicts, false),
+            "[k] keep local  [t] take from repo  [d] show diff  [s] skip:"
         );
-        assert_eq!(
-            menu(deletions, false, None),
-            "[f] forget  [r] restore  [s] skip:"
-        );
+        assert_eq!(menu(deletions, false), "[f] forget  [r] restore  [s] skip:");
     }
 
     #[test]

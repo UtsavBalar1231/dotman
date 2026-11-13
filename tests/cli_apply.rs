@@ -501,7 +501,7 @@ fn the_conflicts_are_listed_before_the_question_even_with_quiet() {
         "{seen}"
     );
     assert!(
-        seen.contains("[k] keep all local (capture them into the repo for every machine)"),
+        seen.contains("[k] keep all local  [t] take all from repo  [d] show diffs"),
         "{seen}"
     );
     assert_eq!(env.read(".bashrc"), b"mine\n");

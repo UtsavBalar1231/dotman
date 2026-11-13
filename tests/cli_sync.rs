@@ -1239,11 +1239,13 @@ fn the_way_to_keep_a_conflict_to_this_machine_is_offered_before_the_capture_and_
         assert_eq!(a.token_of("status", key).as_deref(), Some("clean"));
     }
 
-    let Some(seen) = common::in_a_terminal(&kept_pair().1, &[], &["sync"], b"s\n") else {
+    let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+    let Some(seen) = common::in_a_terminal(&kept_pair().1, &plain, &["sync"], b"s\n") else {
         return;
     };
+    let seen = seen.replace('\r', "");
     assert!(
-        seen.contains("[k] captures this machine's versions into the repo for every machine; to keep them to this machine only, answer [s] and run `dotman add --for host=box "),
+        seen.contains("\n[k] captures this machine's versions into the repo for every machine\nto keep them to this machine only, answer [s] and run `dotman add --for host=box "),
         "{seen}"
     );
 }
@@ -1328,9 +1330,11 @@ fn apply_keep_local_of_a_file_whose_winner_names_this_host_says_where_the_next_s
     );
     assert_eq!(common::hint(&err, "add --for host=box").len(), 4, "{err}");
 
-    let Some(seen) = common::in_a_terminal(&own_variant_pair().1, &[], &["sync"], b"s\n") else {
+    let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+    let Some(seen) = common::in_a_terminal(&own_variant_pair().1, &plain, &["sync"], b"s\n") else {
         return;
     };
+    let seen = seen.replace('\r', "");
     assert!(
         seen.contains(&format!(
             "[k] captures .a into {OWN}, which only this machine applies"
@@ -1338,26 +1342,111 @@ fn apply_keep_local_of_a_file_whose_winner_names_this_host_says_where_the_next_s
         "{seen}"
     );
     assert!(
-        seen.contains("[k] captures this machine's version of .b into the repo for every machine; to keep it to this machine only, answer [s] and run `dotman add --for host=box "),
+        seen.contains("\n[k] captures this machine's version of .b into the repo for every machine\nto keep it to this machine only, answer [s] and run `dotman add --for host=box "),
         "{seen}"
     );
-    assert!(
-        seen.contains("[k] keep all local (capture them into the repo)  [t]"),
-        "{seen}"
-    );
+    assert!(seen.contains("[k] keep all local  [t]"), "{seen}");
 
     let Some(seen) = common::in_a_terminal(&own_variant_pair().1, &[], &["sync"], b"p\ns\ns\n")
     else {
         return;
     };
+    for key in [".a", ".b"] {
+        assert!(
+            seen.contains(&format!("{key} [k] keep local  [t] take from repo")),
+            "{seen}"
+        );
+    }
+}
+
+/// B has a `.tmux.conf` of its own that A then adds, so B's `sync` finds it only after the pull.
+fn existing_after_the_pull() -> (TestEnv, TestEnv) {
+    let a = first_device(&[(".a", b"a\n", 0o644)]);
+    let b = a.second_device();
+    b.write_machine_config("[identity]\nhost = \"box\"\n");
+    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    b.write(".tmux.conf", b"mine\n", 0o644);
+    a.write(".tmux.conf", b"from a\n", 0o644);
+    a.ok(&["add", ".tmux.conf"]);
+    exits(&a, 0, &["sync"]);
+    (a, b)
+}
+
+/// After the pull the answer `[k]` keeps the file and the next sync captures it, and the question
+/// says so, with the `add --for` that keeps it to this machine, before it asks.
+#[test]
+fn the_question_after_the_pull_prints_the_for_command_before_the_answer_and_it_works() {
+    let (a, b) = existing_after_the_pull();
+    let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+    let Some(seen) = common::in_a_terminal(&b, &plain, &["sync"], b"s\n") else {
+        return;
+    };
+    let seen = seen.replace('\r', "");
+    assert!(seen.contains("\n1 existing file:\n"), "{seen}");
     assert!(
-        seen.contains(".a [k] keep local (capture it into this machine's own variant)  [t]"),
+        seen.contains("\n[k] keeps this machine's version; the next `dotman sync` captures it for every machine\nto keep it to this machine only, answer [s] and run `dotman add --for host=box "),
         "{seen}"
     );
     assert!(
-        seen.contains(".b [k] keep local (capture it into the repo for every machine)  [t]"),
+        seen.contains("\n[k] keep all local  [t] take all from repo  [d] show diffs  [p] decide per file  [s] skip: "),
         "{seen}"
     );
+    assert!(!seen.contains("(capture"), "{seen}");
+    assert_eq!(b.read(".tmux.conf"), b"mine\n");
+
+    let out = common::run_hint(&b, &seen, "add --for host=box");
+    assert!(out.status.success(), "{}", stderr(&out));
+    exits(&b, 0, &["sync"]);
+    exits(&a, 0, &["sync"]);
+    assert_eq!(remote_file(&b, ".tmux.conf"), "from a\n");
+    assert_eq!(remote_file(&b, ".tmux{host=box}.conf"), "mine\n");
+    assert_eq!(b.read(".tmux.conf"), b"mine\n");
+    assert_eq!(a.read(".tmux.conf"), b"from a\n");
+}
+
+#[test]
+fn keep_local_after_the_pull_keeps_the_file_and_the_next_sync_captures_it() {
+    let (a, b) = existing_after_the_pull();
+    let err = exits(&b, 0, &["sync", "--keep-local"]);
+    assert!(
+        err.contains("kept; the next `dotman sync` captures it into the repo for every machine"),
+        "{err}"
+    );
+    assert_eq!(b.read(".tmux.conf"), b"mine\n");
+    assert_eq!(
+        remote_file(&b, ".tmux.conf"),
+        "from a\n",
+        "not captured yet"
+    );
+
+    let err = exits(&b, 0, &["sync"]);
+    assert!(err.contains("capture .tmux.conf"), "{err}");
+    assert_eq!(remote_file(&b, ".tmux.conf"), "mine\n");
+    exits(&a, 0, &["sync"]);
+    assert_eq!(a.read(".tmux.conf"), b"mine\n");
+}
+
+#[test]
+fn a_sync_that_cannot_ask_after_the_pull_prints_the_for_command() {
+    let (a, b) = existing_after_the_pull();
+    let err = exits(&b, 3, &["sync"]);
+    assert!(err.contains("existing files left undecided (1)"), "{err}");
+    assert!(
+        err.contains("--keep-local keeps this machine's version; the next `dotman sync` captures it for every machine; `dotman add --for host=box "),
+        "{err}"
+    );
+    assert!(
+        !err.contains("captures this machine's version into"),
+        "{err}"
+    );
+    assert_eq!(b.read(".tmux.conf"), b"mine\n");
+
+    let out = common::run_hint(&b, &err, "add --for host=box");
+    assert!(out.status.success(), "{}", stderr(&out));
+    exits(&b, 0, &["sync"]);
+    exits(&a, 0, &["sync"]);
+    assert_eq!(remote_file(&b, ".tmux.conf"), "from a\n");
+    assert_eq!(remote_file(&b, ".tmux{host=box}.conf"), "mine\n");
 }
 
 #[test]
