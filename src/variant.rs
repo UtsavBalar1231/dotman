@@ -219,6 +219,19 @@ pub fn with_block(key: &str, block: &str) -> Result<String> {
 /// `source` with the `age` flag: `a{host=x}.conf` gives `a{host=x+age}.conf`, and a name with no
 /// block gets `{age}` where `--for` would put its block.
 pub fn with_age(source: &str) -> Result<String> {
+    with_flag(source, Flag::Age)
+}
+
+/// `source` with the `tmpl` flag, placed as [`with_age`] places `age`.
+pub fn with_tmpl(source: &str) -> Result<String> {
+    with_flag(source, Flag::Tmpl)
+}
+
+fn with_flag(source: &str, wanted: Flag) -> Result<String> {
+    let (term, clash) = match wanted {
+        Flag::Age => ("age", "a template, which cannot be encrypted"),
+        _ => ("tmpl", "encrypted, which cannot be a template"),
+    };
     let (dir, name) = split_name(source);
     for (open, _) in name.match_indices('{') {
         let (Some(head), Some(after)) = (
@@ -232,15 +245,15 @@ pub fn with_age(source: &str) -> Result<String> {
         };
         match parse_block(inner) {
             None => {}
-            Some(Ok((_, Flag::Age))) => return Ok(source.to_owned()),
+            Some(Ok((_, flag))) if flag == wanted => return Ok(source.to_owned()),
             Some(Ok((_, Flag::Plain))) => {
-                return Ok(join_name(dir, &format!("{head}{{{inner}+age}}{tail}")));
+                return Ok(join_name(dir, &format!("{head}{{{inner}+{term}}}{tail}")));
             }
-            Some(Ok((_, Flag::Tmpl))) => bail!("{source} is a template, which cannot be encrypted"),
+            Some(Ok(_)) => bail!("{source} is {clash}"),
             Some(Err(reason)) => bail!("{source}: {reason}"),
         }
     }
-    Ok(insert_block(source, "age"))
+    Ok(insert_block(source, term))
 }
 
 fn split_name(path: &str) -> (Option<&str>, &str) {
@@ -786,7 +799,34 @@ mod tests {
         assert_eq!(sources.flag("a.conf", "a{host=x+age}.conf"), Flag::Age);
     }
 
+    #[test]
+    fn the_tmpl_flag_joins_an_existing_block_or_gets_its_own() {
+        let template = |source: &str| with_tmpl(source).unwrap();
+        assert_eq!(template(".gitconfig"), ".gitconfig{tmpl}");
+        assert_eq!(template("a/kitty.conf"), "a/kitty{tmpl}.conf");
+        assert_eq!(template("a{host=x}.conf"), "a{host=x+tmpl}.conf");
+        assert_eq!(template("a{host=x+tmpl}.conf"), "a{host=x+tmpl}.conf");
+        assert!(with_tmpl("a{age}.conf").is_err());
+        assert!(with_tmpl("a{host=x+age}.conf").is_err());
+    }
+
     proptest! {
+        #[test]
+        fn with_tmpl_names_the_same_key_as_a_template(
+            key in "(\\.?[a-z]{1,6}/)?\\.?[a-z]{1,6}(\\.[a-z]{1,3})?",
+            host in proptest::option::of("[a-z]{1,4}"),
+        ) {
+            let source = host.as_ref().map_or_else(
+                || key.clone(),
+                |host| variant_source(&key, &format!("host={host}")).unwrap(),
+            );
+            let template = with_tmpl(&source).unwrap();
+            let sources = Sources::group([template.as_str()]);
+            prop_assert_eq!(sources.keys().collect::<Vec<_>>(), [key.as_str()]);
+            prop_assert_eq!(sources.flag(&key, &template), Flag::Tmpl);
+            prop_assert_eq!(with_tmpl(&template).unwrap(), template);
+        }
+
         #[test]
         fn parsing_never_panics_and_brace_free_names_stay_literal(
             name in prop_oneof![

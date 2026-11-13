@@ -18,6 +18,8 @@ A `{tmpl}` file is rendered with minijinja in strict mode: an undefined variable
 
 Variables: `host`, `user`, `distro`, `os`, `arch`, `home`; the lists `profiles` and `like`; `vars` (the `[vars]` table of the machine config); and `env`, which holds only the names listed in `[template] env` of the machine config. The allowlist is empty by default.
 
+`dotman add --template <file>` stores a file you already have as a template: `.gitconfig` becomes `.gitconfig{tmpl}`, and a plain source of the same file is removed. The stored text renders back to the file's bytes on this machine, so the file stays clean, and `dotman edit <path>` is where you put the expressions in. Text that a template would read as its own syntax, such as `${#array[@]}` in a shell script, is stored between `{% raw %}` and `{% endraw %}`; move those markers as you edit. `--for host=laptop --template` stores it as `name{host=laptop+tmpl}`. `--template` takes text files only: it refuses directories, symlinks, binary files and a file with an `{age}` source.
+
 dotman never captures a local edit into a template. A local edit to a rendered file is reported as template drift, and the run exits 3. Fix it with `dotman edit <path>`, which writes the new rendering over the file when the source changed, or discard the local change with `dotman apply --take-repo <path>`.
 
 ## Hooks

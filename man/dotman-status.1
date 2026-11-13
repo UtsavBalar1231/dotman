@@ -27,6 +27,10 @@ files under a managed directory that sync would capture, or holds
 .TP
 \fBheld\-in\-repo\fR
 an uncommitted repo edit that sync holds; its key is the repo path
+.TP
+\fBheld\-in\-home\fR
+a managed file with a local change that the content guard stops sync
+from capturing; its key is the path in $HOME
 .SH OPTIONS
 .TP
 \fB\-\-porcelain\fR

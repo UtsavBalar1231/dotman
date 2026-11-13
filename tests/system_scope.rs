@@ -75,7 +75,7 @@ fn add_works_once_the_root_is_configured() {
     let env = setup(&["/etc"]);
     env.write_system(KEYD, b"[ids]\n*\n", 0o644);
     let err = env.ok(&["add", "--system", KEYD]);
-    assert!(err.contains("added 1 system files"), "{err}");
+    assert!(err.contains("added 1 system file"), "{err}");
 
     let source = env.repo().join(".dotman/system/etc/keyd/default.conf");
     assert_eq!(fs::read(source).expect("source"), b"[ids]\n*\n");

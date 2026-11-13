@@ -72,6 +72,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--for=[Add the files as variants that apply only where these \`+\`-joined conditions hold, such as \`host=laptop+os!=macos\`]:CONDITIONS:_default' \
 '--encrypt[Store the files encrypted to the \`\[age\] recipients\` in .dotman.toml]' \
+'(--encrypt --system)--template[Store the files as templates, which each machine renders; put the expressions in with \`dotman edit\`]' \
 '(--encrypt)--allow-plain[Store in plain text what the guard holds back\: files whose names match \`\[guard\] secret_names\`, and credentials in files named here, not ones found in a directory; never an age secret key]' \
 '--yes[Do not ask before adding directories]' \
 '--dry-run[Show what would be added and change nothing]' \

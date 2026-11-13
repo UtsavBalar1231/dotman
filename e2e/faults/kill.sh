@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Faults: SIGKILL sync, apply, add <dir>, import, init <url> and key init at random points, then recover as printed.
+# Faults: SIGKILL sync, apply, add <dir>, add --template, import, init <url> and key init at random points, then recover as printed.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -15,7 +15,7 @@ e2e_begin faults/kill timeout
 printf 'seed %s (E2E_KILL_SEED), %s kills per operation (E2E_KILL_ITERS), operations: %s\n' \
     "$seed" "$iters" "${ops[*]}"
 
-declare -A versions=() latest=() span=()
+declare -A versions=() latest=() span=() stored=()
 killed=0
 finished=0
 # Every plaintext of the {age} file holds this; no repo object may.
@@ -105,7 +105,7 @@ fk_age() {
 fk_whole() {
     local m=$1 rel path bad=0
     for rel in "${!latest[@]}"; do
-        for path in "$(e2e_home "$m")/$rel" "$(e2e_repo "$m")/$rel"; do
+        for path in "$(e2e_home "$m")/$rel" "$(e2e_repo "$m")/${stored[$rel]:-$rel}"; do
             [[ -e $path || -L $path ]] || continue
             if [[ ! -f $path || -L $path ]]; then
                 bad=1
@@ -190,7 +190,7 @@ fk_converge() {
             e2e_tool age -d -i "$key_a" -o "$E2E_ROOT/plain" "$E2E_ROOT/blob" 2>/dev/null || : >"$E2E_ROOT/plain"
             got=$(fk_sum "$E2E_ROOT/plain")
         else
-            got=$(e2e_tool git --git-dir="$(e2e_remote)" show "main:$rel" 2>/dev/null | sha256sum | cut -d' ' -f1)
+            got=$(e2e_tool git --git-dir="$(e2e_remote)" show "main:${stored[$rel]:-$rel}" 2>/dev/null | sha256sum | cut -d' ' -f1)
         fi
         if [[ $got != "${latest[$rel]}" ]]; then
             stale=1
@@ -282,7 +282,7 @@ op_apply() {
 }
 
 op_add() {
-    local n=$1 i dir=.config/new$1
+    local n=$1 i dir=.config/new$1 tpl=.config/tpl$1.conf
     for i in 1 2 3 4; do fk_write a "$dir/n$i" "new $n file $i
 "; done
     fk_kill a 120 add "$dir"
@@ -290,6 +290,14 @@ op_add() {
     # The retry sees the killed run's temp files while they are young, so it must leave them out
     # of what it commits; once they are old, the next run sweeps them.
     fk_retry a '' add "$dir"
+    fk_age a
+    # Text with no template syntax, so the stored template holds the file's bytes.
+    fk_write a "$tpl" "template $n file
+"
+    stored[$tpl]=.config/tpl$n'{tmpl}'.conf
+    fk_kill a 120 add --template "$tpl"
+    fk_whole a
+    fk_retry a '' add --template "$tpl"
     fk_age a
     fk_converge a b a
 }

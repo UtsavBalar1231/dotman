@@ -4,7 +4,7 @@
 .SH NAME
 dotman\-add \- Start managing files or directories
 .SH SYNOPSIS
-\fBdotman add\fR [\fB\-\-for\fR] [\fB\-\-encrypt\fR] [\fB\-\-allow\-plain\fR] [\fB\-\-yes\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-package\-owned\fR] [\fB\-\-add\-root\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIPATHS\fR>
+\fBdotman add\fR [\fB\-\-for\fR] [\fB\-\-encrypt\fR] [\fB\-\-template\fR] [\fB\-\-allow\-plain\fR] [\fB\-\-yes\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-package\-owned\fR] [\fB\-\-add\-root\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIPATHS\fR>
 .SH DESCRIPTION
 Start managing files or directories
 .SH OPTIONS
@@ -14,6 +14,9 @@ Add the files as variants that apply only where these `+`\-joined conditions hol
 .TP
 \fB\-\-encrypt\fR
 Store the files encrypted to the `[age] recipients` in .dotman.toml
+.TP
+\fB\-\-template\fR
+Store the files as templates, which each machine renders; put the expressions in with `dotman edit`
 .TP
 \fB\-\-allow\-plain\fR
 Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key

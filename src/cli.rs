@@ -86,7 +86,10 @@ With --porcelain, each record is `<token>\\t<key>\\0`. The tokens:
   new, held
       files under a managed directory that sync would capture, or holds
   held-in-repo
-      an uncommitted repo edit that sync holds; its key is the repo path";
+      an uncommitted repo edit that sync holds; its key is the repo path
+  held-in-home
+      a managed file with a local change that the content guard stops sync
+      from capturing; its key is the path in $HOME";
 
 const SYNC_HELP: &str = "\
 Exit status:
@@ -419,6 +422,9 @@ pub struct AddArgs {
     /// Store the files encrypted to the `[age] recipients` in .dotman.toml
     #[arg(long)]
     pub encrypt: bool,
+    /// Store the files as templates, which each machine renders; put the expressions in with `dotman edit`
+    #[arg(long, conflicts_with_all = ["encrypt", "system"])]
+    pub template: bool,
     /// Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key
     #[arg(long, conflicts_with = "encrypt")]
     pub allow_plain: bool,

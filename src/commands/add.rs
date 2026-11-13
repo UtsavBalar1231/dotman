@@ -22,6 +22,7 @@ use crate::repo_config::RepoConfig;
 use crate::secrets::{self, Finding, Held};
 use crate::state::{Entry, IdentitySnapshot, Kind, State};
 use crate::system::{self, Ownership, Standing};
+use crate::template;
 use crate::variant::{self, Flag, Selection, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
 use glob::{MatchOptions, Pattern};
@@ -247,9 +248,10 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         home: &ctx.paths.home,
         conditions: args.for_conditions.as_deref(),
         encrypt: args.encrypt,
+        template: args.template,
         resumed: BTreeMap::new(),
     };
-    if args.encrypt {
+    if args.encrypt || args.template {
         targets.find_interrupted(&ctx, &plan);
     }
     refuse_collisions(&targets.sources, &plan)?;
@@ -285,18 +287,19 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         preview(dir);
     }
     let in_dirs: usize = plan.dirs.iter().map(|d| d.items.len()).sum();
+    let files = output::count(in_dirs, "file");
     if dry_run {
         let (items, announced) = plan.items();
         content.record(&mut ctx.machine, &ctx.paths.config_file, &items, true)?;
         let failed = targets.try_all(&ctx, &state, &items, &announced);
         if in_dirs > 0 {
-            output::info(&format!("would add {in_dirs} files from directories"));
+            output::info(&format!("would add {files} from directories"));
         }
         return finish(failed, items.len(), outcome);
     }
 
     if in_dirs > 0 && !args.yes && prompt::interactive() {
-        let question = format!("add {in_dirs} files? [y/N]");
+        let question = format!("add {files}? [y/N]");
         if !prompt::confirm(&question)? {
             output::info("directories not added");
             plan.dirs.clear();
@@ -711,37 +714,102 @@ struct Targets<'a> {
     home: &'a Path,
     conditions: Option<&'a str>,
     encrypt: bool,
-    /// Keys whose interrupted `add --encrypt` this run completes, and their `{age}` source.
+    template: bool,
+    /// Keys whose interrupted `add --encrypt` or `add --template` this run completes, and their
+    /// `{age}` or `{tmpl}` source.
     resumed: BTreeMap<String, String>,
 }
 
 impl Targets<'_> {
-    /// An interrupted `add --encrypt` leaves the plain source beside its `{age}` one. When the
-    /// ciphertext already holds what `$HOME` has, the rerun only has to remove the plain source.
+    /// An interrupted `add --encrypt` or `add --template` leaves the plain source beside its
+    /// `{age}` or `{tmpl}` one. When that one already holds what `$HOME` has, the rerun only has to
+    /// remove the plain source. A template that already renders to `$HOME` is finished too.
     fn find_interrupted(&mut self, ctx: &Context, plan: &Plan) {
         for key in plan.files.keys() {
-            let Selection::Ambiguous(tied) = self.sources.select(key, self.identity) else {
-                continue;
+            let tied = match self.sources.select(key, self.identity) {
+                Selection::Ambiguous(tied) => tied,
+                Selection::Winner(source)
+                    if self.template && self.sources.flag(key, source) == Flag::Tmpl =>
+                {
+                    if matches!(read_node(&ctx.paths.home, key), Ok(Node::File { bytes, .. })
+                        if self.holds(ctx, source, &bytes))
+                    {
+                        self.resumed.insert(key.clone(), source.to_owned());
+                    }
+                    continue;
+                }
+                _ => continue,
             };
             let [a, b] = tied.as_slice() else {
                 continue;
             };
-            let pair = [(a, b), (b, a)].into_iter().find(|(plain, age)| {
+            let pair = [(a, b), (b, a)].into_iter().find(|(plain, stored)| {
                 self.sources.flag(key, plain) == Flag::Plain
-                    && variant::with_age(plain).is_ok_and(|source| source == **age)
+                    && self
+                        .stored_form(plain)
+                        .is_ok_and(|source| source == **stored)
             });
-            let Some((_, age)) = pair else {
+            let Some((_, stored)) = pair else {
                 continue;
             };
             let done = matches!(read_node(&ctx.paths.home, key), Ok(Node::File { bytes, .. })
-                if ctx.age().decrypt(&ctx.paths.repo.join(age)).is_ok_and(|plain| plain == bytes));
+                if self.holds(ctx, stored, &bytes));
             if done {
-                self.resumed.insert(key.clone(), age.clone());
+                self.resumed.insert(key.clone(), stored.clone());
             }
         }
     }
 
+    /// `plain` as `--encrypt` or `--template` stores it.
+    fn stored_form(&self, plain: &str) -> Result<String> {
+        if self.encrypt {
+            variant::with_age(plain)
+        } else {
+            variant::with_tmpl(plain)
+        }
+    }
+
+    /// Whether the stored source `source` gives `bytes` back: decrypted, or rendered here.
+    fn holds(&self, ctx: &Context, source: &str, bytes: &[u8]) -> bool {
+        if self.encrypt {
+            return ctx
+                .age()
+                .decrypt(&ctx.paths.repo.join(source))
+                .is_ok_and(|plain| plain == bytes);
+        }
+        renders_to(ctx, source, bytes)
+    }
+
     fn check(&self, ctx: &Context, repo_config: &RepoConfig, plan: &Plan) -> Result<()> {
+        if self.template {
+            if !plan.dirs.is_empty() {
+                bail!("--template takes files, not directories");
+            }
+            for (key, leaf) in &plan.files {
+                match leaf {
+                    Leaf::Link => bail!("{key} is a symlink; --template takes regular files"),
+                    Leaf::File { binary: true, .. } => {
+                        bail!("{key} is not text, so it cannot be a template")
+                    }
+                    Leaf::File { .. } => {}
+                }
+                if matches!(read_node(&ctx.paths.home, key), Ok(Node::File { bytes, .. })
+                    if std::str::from_utf8(&bytes).is_err())
+                {
+                    bail!("{key} is not text, so it cannot be a template");
+                }
+                if let Some(encrypted) = self
+                    .sources
+                    .sources_of(key)
+                    .find(|source| self.sources.flag(key, source) == Flag::Age)
+                {
+                    bail!(
+                        "{encrypted} stores {key} encrypted, and a template is stored in plain text, so it cannot be a template"
+                    );
+                }
+                self.source_for(key)?;
+            }
+        }
         if self.encrypt {
             if !plan.dirs.is_empty() {
                 bail!("--encrypt takes files, not directories");
@@ -835,6 +903,13 @@ impl Targets<'_> {
                     added = added.saturating_add(1);
                     if announced.contains(key) {
                         output::action("add", &shown(key, &source));
+                        if self.template {
+                            output::info(&format!(
+                                "{key} is now a template; `{} edit {}` opens it",
+                                name::bin(),
+                                pasteable(home, key)
+                            ));
+                        }
                     }
                 }
                 Err(e) => {
@@ -870,13 +945,21 @@ impl Targets<'_> {
                     return Err(Held(found).into());
                 }
                 self.refuse_unsaved(ctx, state, key, &source)?;
+                if self.template
+                    && let Ok(Node::File { bytes, .. }) = read_node(&ctx.paths.home, key)
+                    && !renders_to(ctx, &source, &bytes)
+                {
+                    template_text(ctx, key, &source, &bytes, true)?;
+                }
                 worktree_parents(&ctx.paths.repo, &source, false)?;
                 Ok(source)
             });
             match checked {
                 Ok(source) if explicit => {
                     output::action("would add", &shown(key, &source));
-                    if let Some(plain) = self.replaced(key, &source) {
+                    if let Some(plain) = self.replaced(key, &source)
+                        && !self.template
+                    {
                         output::warning(&format!(
                             "{plain} holds {key} in plain text and would be removed, but git history would still have it"
                         ));
@@ -894,8 +977,8 @@ impl Targets<'_> {
 
     fn source_for(&self, key: &str) -> Result<String> {
         let source = self.plain_source_for(key)?;
-        if self.encrypt {
-            variant::with_age(&source)
+        if self.encrypt || self.template {
+            self.stored_form(&source)
         } else {
             Ok(source)
         }
@@ -960,9 +1043,15 @@ impl Targets<'_> {
         kind: Kind,
     ) -> Result<String> {
         let source = self.source_for(key)?;
-        let encrypted = self.encrypt || self.sources.flag(key, &source) == Flag::Age;
+        let store = if self.template {
+            Store::Template
+        } else if self.encrypt || self.sources.flag(key, &source) == Flag::Age {
+            Store::Encrypted
+        } else {
+            Store::Plain
+        };
         self.refuse_unsaved(ctx, state, key, &source)?;
-        let entry = commit_one(ctx, repo_config, dir_modes, key, &source, kind, encrypted)?;
+        let entry = commit_stored(ctx, repo_config, dir_modes, key, &source, kind, store)?;
         let replaced = self.replaced(key, &source);
         if let Some(plain) = &replaced {
             let path = ctx.paths.repo.join(plain);
@@ -973,10 +1062,12 @@ impl Targets<'_> {
                 _ => {}
             }
             repo_config.modes.remove(plain);
-            output::warning(&format!(
-                "{plain} held {key} in plain text and is removed, but git history still has it; to purge it, rewrite the history with a tool such as git filter-repo, run in the repo through `{} git`",
-                name::bin()
-            ));
+            if !self.template {
+                output::warning(&format!(
+                    "{plain} held {key} in plain text and is removed, but git history still has it; to purge it, rewrite the history with a tool such as git filter-repo, run in the repo through `{} git`",
+                    name::bin()
+                ));
+            }
         }
         if self.applies(key, &source, replaced.as_deref()) {
             state.files.insert(key.to_owned(), entry);
@@ -992,7 +1083,7 @@ impl Targets<'_> {
     /// nowhere else: not in HEAD, not in `$HOME`, and not what S recorded for the key. A hand
     /// edit in the repo leaves such a copy, and so does `dotman edit` once `$HOME` changes again.
     fn refuse_unsaved(&self, ctx: &Context, state: &State, key: &str, source: &str) -> Result<()> {
-        let plain = if self.encrypt {
+        let plain = if self.encrypt || self.template {
             self.replaced(key, source)
         } else {
             (self.sources.flag(key, source) != Flag::Age).then(|| source.to_owned())
@@ -1020,7 +1111,11 @@ impl Targets<'_> {
         let bin = name::bin();
         let copy = shell_words::quote(&ctx.paths.repo.join(&plain).to_string_lossy()).into_owned();
         let quoted = shell_words::quote(&plain).into_owned();
-        let verb = if self.encrypt { "remove" } else { "overwrite" };
+        let verb = if self.encrypt || self.template {
+            "remove"
+        } else {
+            "overwrite"
+        };
         if committed {
             bail!(
                 "{plain} in the repo has an edit that is neither committed nor in $HOME, and add would {verb} it; `{bin} git diff -- {quoted}` shows the edit. To keep it, copy {copy} elsewhere first; `{bin} git checkout -- {quoted}` then drops it from the repo, and add runs again"
@@ -1031,9 +1126,10 @@ impl Targets<'_> {
         )
     }
 
-    /// With `--encrypt`, the plain source that `source` encrypts, so the two never coexist.
+    /// With `--encrypt` or `--template`, the plain source that `source` stores encrypted or as a
+    /// template, so the two never coexist.
     fn replaced(&self, key: &str, source: &str) -> Option<String> {
-        if !self.encrypt {
+        if !self.encrypt && !self.template {
             return None;
         }
         self.sources
@@ -1041,7 +1137,7 @@ impl Targets<'_> {
             .find(|path| {
                 *path != source
                     && self.sources.flag(key, path) == Flag::Plain
-                    && variant::with_age(path).is_ok_and(|encrypted| encrypted == source)
+                    && self.stored_form(path).is_ok_and(|stored| stored == source)
             })
             .map(str::to_owned)
     }
@@ -1670,10 +1766,10 @@ pub(crate) fn preview(dir: &DirPlan) {
     // What the "add N files?" question approves, so `-q` does not hide it.
     output::context(&format!("{}/", dir.key));
     output::context(&format!("  files: {}", dir.items.len()));
-    output::context(&format!("  total size: {total} bytes"));
+    output::context(&format!("  total size: {}", output::count(total, "byte")));
     output::context("  largest:");
     for (size, key) in sized.iter().take(LARGEST_SHOWN) {
-        output::context(&format!("    {size} bytes  {key}"));
+        output::context(&format!("    {}  {key}", output::count(*size, "byte")));
     }
     output::context(&format!("  binary files: {binary}"));
     output::context(&format!("  files at mode 0600: {private}"));
@@ -1697,6 +1793,34 @@ pub(crate) fn commit_one(
     expected: Kind,
     encrypted: bool,
 ) -> Result<Entry> {
+    let store = if encrypted {
+        Store::Encrypted
+    } else {
+        Store::Plain
+    };
+    commit_stored(ctx, repo_config, dir_modes, key, source, expected, store)
+}
+
+/// How [`commit_stored`] puts the bytes of H in the repo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Store {
+    Plain,
+    Encrypted,
+    /// As text that renders back to the bytes, between `{% raw %}` and `{% endraw %}` when it
+    /// would not otherwise. The content guard still scans the bytes of H.
+    Template,
+}
+
+fn commit_stored(
+    ctx: &Context,
+    repo_config: &mut RepoConfig,
+    dir_modes: &mut BTreeMap<String, u32>,
+    key: &str,
+    source: &str,
+    expected: Kind,
+    store: Store,
+) -> Result<Entry> {
+    let encrypted = store == Store::Encrypted;
     validate_key(source)?;
     let home = &ctx.paths.home;
     let repo = &ctx.paths.repo;
@@ -1734,7 +1858,18 @@ pub(crate) fn commit_one(
     if changed {
         repo_config.save(&ctx.repo_config_file(), false)?;
     }
+    let mut rendered = None;
     let plaintext = match (expected, node) {
+        (Kind::File, Node::File { bytes, mode, .. }) if store == Store::Template => {
+            // A template that already renders to H stays, which keeps a rerun from replacing its
+            // expressions with their output.
+            if !renders_to(ctx, source, &bytes) {
+                let text = template_text(ctx, key, source, &bytes, false)?;
+                write_atomic(&target, &text, stored_mode(mode))?;
+            }
+            rendered = Some(bytes);
+            None
+        }
         (Kind::File, Node::File { bytes, mode, .. }) if encrypted => {
             store_encrypted(ctx, &repo_config.age.recipients, source, &bytes)?;
             Some(Tuple::of_file(&bytes, safe_mode(mode)).entry(source))
@@ -1764,6 +1899,11 @@ pub(crate) fn commit_one(
         .get(source)?
         .ok_or_else(|| anyhow!("{source} is not in the repo after being written"))?
         .tuple;
+    // S records what renders, which is H.
+    let written = rendered.map_or_else(
+        || written.clone(),
+        |bytes| Tuple::of_file(&bytes, written.mode),
+    );
     let mut entry = written.entry(source);
     // A mode `[modes]` leaves out stays this machine's: S holds it against the repo's, as for a
     // mode apply keeps, so the file stays clean here.
@@ -1775,6 +1915,52 @@ pub(crate) fn commit_one(
         entry.repo_mode = Some(format!("{:04o}", written.mode));
     }
     Ok(entry)
+}
+
+/// Whether the repo's template `source` renders to `bytes` on this machine.
+fn renders_to(ctx: &Context, source: &str, bytes: &[u8]) -> bool {
+    let Ok(Node::File { bytes: stored, .. }) = read_node(&ctx.paths.repo, source) else {
+        return false;
+    };
+    std::str::from_utf8(&stored).is_ok_and(|text| {
+        template::render(source, text, ctx.template_vars()).is_ok_and(|out| out.as_bytes() == bytes)
+    })
+}
+
+/// The text to store as the template `source` of `key` so that it renders to `bytes` on this
+/// machine: `bytes` themselves, or wrapped in a raw block when they hold syntax a template would
+/// read. `dry_run` only changes the wording of the note about the wrap.
+fn template_text(
+    ctx: &Context,
+    key: &str,
+    source: &str,
+    bytes: &[u8],
+    dry_run: bool,
+) -> Result<Vec<u8>> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        bail!("{key} is not text, so it cannot be a template");
+    };
+    let renders = |stored: &str| {
+        template::render(source, stored, ctx.template_vars()).is_ok_and(|out| out == text)
+    };
+    if renders(text) {
+        return Ok(bytes.to_vec());
+    }
+    let wrapped = format!("{{% raw %}}{text}{{% endraw %}}");
+    if !renders(&wrapped) {
+        bail!(
+            "{key} holds text that a template reads as its own syntax, and it cannot be stored between {{% raw %}} and {{% endraw %}}"
+        );
+    }
+    output::warning(&format!(
+        "{key} holds text a template reads as its own syntax, so it {} between {{% raw %}} and {{% endraw %}}; move those markers as you edit",
+        if dry_run {
+            "would be stored"
+        } else {
+            "is stored"
+        }
+    ));
+    Ok(wrapped.into_bytes())
 }
 
 const fn stored_mode(mode: u32) -> u32 {
@@ -2089,7 +2275,10 @@ fn add_system(ctx: &Context, args: &AddArgs) -> Result<Outcome> {
     }
     repo_config.save(&ctx.repo_config_file(), false)?;
     state.save(&ctx.paths.state_file(), false)?;
-    output::success(&format!("added {} system files", files.len()));
+    output::success(&format!(
+        "added {}",
+        output::count(files.len(), "system file")
+    ));
     Ok(Outcome::Done)
 }
 
@@ -2405,6 +2594,7 @@ mod tests {
             for_conditions: None,
             encrypt,
             allow_plain,
+            template: false,
             yes: false,
             dry_run: false,
             system: false,

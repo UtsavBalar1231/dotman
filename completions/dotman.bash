@@ -94,7 +94,7 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__add)
-            opts="-v -q -h --for --encrypt --allow-plain --yes --dry-run --system --package-owned --add-root --verbose --quiet --no-pager --allow-root --help"
+            opts="-v -q -h --for --encrypt --template --allow-plain --yes --dry-run --system --package-owned --add-root --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

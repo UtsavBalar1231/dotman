@@ -769,3 +769,14 @@ fn an_ignored_path_goes_in_only_when_named() {
         b"swap\n"
     );
 }
+
+#[test]
+fn a_directory_of_one_byte_is_counted_in_the_singular() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/one/a", b"x", 0o644);
+    let err = exits(&env, 0, &["add", "--dry-run", ".config/one"]);
+    assert!(err.contains("  total size: 1 byte\n"), "{err}");
+    assert!(err.contains("    1 byte  .config/one/a\n"), "{err}");
+    assert!(err.contains("would add 1 file from directories"), "{err}");
+}

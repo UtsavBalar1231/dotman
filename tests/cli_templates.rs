@@ -372,3 +372,224 @@ fn a_dry_run_sync_without_a_remote_previews_the_apply() {
     assert!(err.contains(KEY), "{err}");
     assert_eq!(env.four_trees(), before);
 }
+
+const HGRC: &str = ".hgrc";
+const HGRC_TMPL: &str = ".hgrc{tmpl}";
+
+fn adding() -> TestEnv {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_machine_config("[vars]\nfont = \"14\"\n");
+    env
+}
+
+#[test]
+fn add_template_stores_a_template_and_leaves_the_file_clean() {
+    let env = adding();
+    env.write(".p", b"name = alex\n", 0o644);
+    let err = exits(&env.run(&["add", "--template", ".p"]), 0);
+    assert!(err.contains("add .p as .p{tmpl}"), "{err}");
+    assert!(
+        err.contains(&format!(
+            ".p is now a template; `dotman edit {}/.p` opens it",
+            env.home().display()
+        )),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read(env.repo().join(".p{tmpl}")).unwrap(),
+        b"name = alex\n"
+    );
+    assert!(!env.repo().join(".p").exists());
+    assert_eq!(token(&env, ".p").as_deref(), Some("clean"));
+    assert_eq!(env.read(".p"), b"name = alex\n");
+    exits(&env.run(&["sync"]), 0);
+    assert_eq!(token(&env, ".p").as_deref(), Some("clean"));
+}
+
+#[test]
+fn add_template_replaces_the_plain_source_and_other_machines_stay_clean() {
+    let env = adding();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.write(HGRC, b"[core]\n\teditor = vi\n", 0o644);
+    exits(&env.run(&["add", HGRC]), 0);
+    exits(&env.run(&["sync"]), 0);
+    // A bare remote's HEAD names `master`, and a clone follows it.
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    env.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let err = exits(&env.run(&["add", "--template", HGRC]), 0);
+    assert!(err.contains(&format!("add {HGRC} as {HGRC_TMPL}")), "{err}");
+    assert!(
+        !err.contains("git history"),
+        "a template replaces the plain source without that warning: {err}"
+    );
+    assert!(!env.repo().join(HGRC).exists());
+    assert_eq!(token(&env, HGRC).as_deref(), Some("clean"));
+    exits(&env.run(&["sync"]), 0);
+
+    let other = env.second_device();
+    other.ok(&["init", &env.remote_url()]);
+    assert_eq!(token(&other, HGRC).as_deref(), Some("clean"));
+    assert_eq!(other.read(HGRC), b"[core]\n\teditor = vi\n");
+
+    let editor = env.write_script(
+        "tmpl-editor.sh",
+        "#!/bin/sh\nfor f; do :; done\nprintf 'font {{ vars.font }}\\n' > \"$f\"\n",
+    );
+    let editor = editor.to_string_lossy().into_owned();
+    exits(&env.run_with(&[("EDITOR", &editor)], &["edit", HGRC]), 0);
+    assert_eq!(env.read(HGRC), b"font 14\n");
+    exits(&env.run(&["sync"]), 0);
+    other.write_machine_config("[vars]\nfont = \"20\"\n");
+    exits(&other.run(&["sync"]), 0);
+    assert_eq!(other.read(HGRC), b"font 20\n");
+    assert_eq!(token(&other, HGRC).as_deref(), Some("clean"));
+    assert_eq!(token(&env, HGRC).as_deref(), Some("clean"));
+}
+
+#[test]
+fn add_template_with_for_makes_a_template_variant() {
+    let env = adding();
+    env.write(".p", b"base\n", 0o644);
+    exits(&env.run(&["add", ".p"]), 0);
+    env.write(".p", b"laptop\n", 0o644);
+    let err = exits(&env.run(&["add", "--for", "host=x", "--template", ".p"]), 0);
+    assert!(err.contains("add .p as .p{host=x+tmpl}"), "{err}");
+    assert!(env.repo().join(".p").exists(), "the plain source stays");
+    assert_eq!(
+        fs::read(env.repo().join(".p{host=x+tmpl}")).unwrap(),
+        b"laptop\n"
+    );
+}
+
+#[test]
+fn add_template_refuses_a_directory_a_symlink_a_binary_and_an_encrypted_key() {
+    let env = adding();
+    env.write("d/a", b"a\n", 0o644);
+    env.symlink("link", "d/a");
+    env.write("bin", b"a\0b\n", 0o644);
+    env.write("latin", &[b'c', 0xe9, b'\n'], 0o644);
+    let refuses = |path: &str, wanted: &str| {
+        let err = exits(&env.run(&["add", "--template", path]), 1);
+        assert!(err.contains(wanted), "{err}");
+    };
+    refuses("d", "--template takes files, not directories");
+    refuses("link", "link is a symlink; --template takes regular files");
+    refuses("bin", "bin is not text, so it cannot be a template");
+    refuses("latin", "latin is not text, so it cannot be a template");
+    assert!(!env.repo().join("bin{tmpl}").exists());
+
+    env.write_repo(".netrc{age}", b"age-encryption.org/v1\n");
+    env.write(".netrc", b"machine x\n", 0o600);
+    refuses(
+        ".netrc",
+        ".netrc{age} stores .netrc encrypted, and a template is stored in plain text, so it cannot be a template",
+    );
+    for flag in ["--encrypt", "--system"] {
+        exits(&env.run(&["add", "--template", flag, "d"]), 2);
+    }
+}
+
+#[test]
+fn add_template_stores_text_with_template_syntax_so_that_it_renders_to_itself() {
+    let env = adding();
+    let zshrc = b"count=${#a[@]}\nPROMPT='%{%F{red}%}x%{%f%}'\n# {# not a comment\nsecond {{ host }} {% if %}\n";
+    env.write(".zshrc", zshrc, 0o644);
+    let err = exits(&env.run(&["add", "--template", ".zshrc"]), 0);
+    assert!(
+        err.contains(".zshrc holds text a template reads as its own syntax, so it is stored between {% raw %} and {% endraw %}; move those markers as you edit"),
+        "{err}"
+    );
+    let stored = fs::read(env.repo().join(".zshrc{tmpl}")).unwrap();
+    assert_eq!(
+        stored,
+        [b"{% raw %}".as_slice(), zshrc, b"{% endraw %}"].concat()
+    );
+    assert_eq!(token(&env, ".zshrc").as_deref(), Some("clean"));
+    exits(&env.run(&["apply", "--take-repo", ".zshrc"]), 0);
+    assert_eq!(env.read(".zshrc"), zshrc);
+
+    env.write(".plain", b"x\n", 0o644);
+    let err = exits(&env.run(&["add", "--template", ".plain"]), 0);
+    assert!(!err.contains("{% raw %}"), "{err}");
+    assert_eq!(fs::read(env.repo().join(".plain{tmpl}")).unwrap(), b"x\n");
+
+    env.write(".end", b"${#a[@]}\n{% endraw %}\n", 0o644);
+    let err = exits(&env.run(&["add", "--template", ".end"]), 1);
+    assert!(
+        err.contains(".end holds text that a template reads"),
+        "{err}"
+    );
+    assert!(!env.repo().join(".end{tmpl}").exists());
+}
+
+#[test]
+fn add_template_holds_a_credential_as_a_plain_add_does() {
+    let env = adding();
+    let token = format!("ghp_{}", "Zq7".repeat(12));
+    let text = format!("a\nb\nexport T={token}\n");
+    env.write(".profile", text.as_bytes(), 0o644);
+    let err = exits(&env.run(&["add", "--template", ".profile"]), 1);
+    assert!(err.contains("github-token"), "{err}");
+    assert!(!env.repo().join(".profile{tmpl}").exists());
+    assert!(!env.repo().join(".profile").exists());
+    let dry = exits(&env.run(&["add", "--template", "--dry-run", ".profile"]), 1);
+    assert!(dry.contains("github-token"), "{dry}");
+}
+
+#[test]
+fn the_edit_hint_after_add_template_runs_as_printed() {
+    let env = adding();
+    env.write(".my p", b"x\n", 0o644);
+    let err = exits(&env.run(&["add", "--template", ".my p"]), 0);
+    let editor = stub_editor(&env, 0).to_string_lossy().into_owned();
+    let args = common::hint(&err, "edit");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    exits(&env.run_with(&[("EDITOR", &editor)], &args), 0);
+    assert_eq!(env.read(".my p"), b"x\n# edited\n");
+    assert_eq!(
+        fs::read(env.repo().join(".my p{tmpl}")).unwrap(),
+        b"x\n# edited\n"
+    );
+}
+
+#[test]
+fn a_rerun_finishes_an_interrupted_add_template() {
+    let env = adding();
+    env.write(".p", b"name = alex\n", 0o644);
+    exits(&env.run(&["add", "--template", ".p"]), 0);
+    // An interruption before the plain source is removed leaves both.
+    env.write_repo(".p", b"name = alex\n");
+    assert_eq!(token(&env, ".p").as_deref(), Some("ambiguous"));
+
+    let err = exits(&env.run(&["add", "--template", "--dry-run", ".p"]), 0);
+    assert!(err.contains("would add .p as .p{tmpl}"), "{err}");
+    assert!(env.repo().join(".p").exists());
+    exits(&env.run(&["add", "--template", ".p"]), 0);
+    assert!(!env.repo().join(".p").exists());
+    assert_eq!(token(&env, ".p").as_deref(), Some("clean"));
+
+    // A template that does not hold what $HOME has leaves the pair ambiguous.
+    env.write_repo(".p", b"name = alex\n");
+    env.write(".p", b"name = sam\n", 0o644);
+    let err = exits(&env.run(&["add", "--template", ".p"]), 1);
+    assert!(err.contains("equally specific"), "{err}");
+    assert!(env.repo().join(".p").exists());
+
+    // A template that already renders to $HOME is finished, and keeps its expressions.
+    exits(&env.run(&["forget", ".p"]), 0);
+    env.write_repo(".q{tmpl}", b"size {{ vars.font }}\n");
+    exits(&env.run(&["apply"]), 0);
+    exits(&env.run(&["add", "--template", ".q"]), 0);
+    assert_eq!(
+        fs::read(env.repo().join(".q{tmpl}")).unwrap(),
+        b"size {{ vars.font }}\n"
+    );
+    assert_eq!(token(&env, ".q").as_deref(), Some("clean"));
+}

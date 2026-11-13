@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Variants and templates: the printed --for host= hints, for a plain and an {age} file; {tmpl} per host.
+# Variants and templates: the printed --for host= hints, for a plain and an {age} file; add --template, edit and {tmpl} per host.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -16,10 +16,16 @@ key="$(e2e_config a)/age-identity.txt"
 e2e_identity_known "$key"
 e2e_dm_rc 0 a add .gitconfig.local
 e2e_dm_rc 0 a add --encrypt .netrc.local
-e2e_write_repo a '.prompt{tmpl}' $'PS1="{{ host }} ({{ os }}) $ "\n'
-e2e_dm_rc 0 a sync
-e2e_dm_rc 0 a apply --take-repo .prompt
+# A plain file becomes a template with add --template, and the expressions go in with edit.
+e2e_write a .prompt $'PS1="$ "\n'
+e2e_dm_rc 0 a add --template .prompt
+e2e_err_has 'add .prompt as .prompt{tmpl}'
+e2e_err_has '.prompt is now a template; `dotman edit '
+e2e_file_is a .prompt $'PS1="$ "\n'
+e2e_stub a vi $'#!/bin/sh\nfor f; do :; done\nprintf \'PS1="{{ host }} ({{ os }}) $ "\\n\' >"$f"\n'
+e2e_dm_rc 0 a edit .prompt
 e2e_file_is a .prompt $'PS1="alpha (linux) $ "\n'
+e2e_dm_rc 0 a sync
 
 # b has its own versions of both files before it joins.
 e2e_write b .gitconfig.local $'[user]\n\temail = me@work.invalid\n'

@@ -85,6 +85,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
         'dotman;add' {
             [CompletionResult]::new('--for', '--for', [CompletionResultType]::ParameterName, 'Add the files as variants that apply only where these `+`-joined conditions hold, such as `host=laptop+os!=macos`')
             [CompletionResult]::new('--encrypt', '--encrypt', [CompletionResultType]::ParameterName, 'Store the files encrypted to the `[age] recipients` in .dotman.toml')
+            [CompletionResult]::new('--template', '--template', [CompletionResultType]::ParameterName, 'Store the files as templates, which each machine renders; put the expressions in with `dotman edit`')
             [CompletionResult]::new('--allow-plain', '--allow-plain', [CompletionResultType]::ParameterName, 'Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'Do not ask before adding directories')
             [CompletionResult]::new('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Show what would be added and change nothing')
