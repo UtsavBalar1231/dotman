@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://img.shields.io/github/actions/workflow/status/UtsavBalar1231/dotman/ci.yml?branch=main)](https://github.com/UtsavBalar1231/dotman/actions)
 
-A dotfiles manager with no learning curve, safe by default, for Linux and macOS.
+A dotfiles manager with no learning curve, safe by default, for Linux.
 
 Your dotfiles live in an ordinary git repo. dotman copies them into `$HOME`, notices which side changed, and asks before it overwrites anything. A file it replaces in `$HOME` is backed up first. It never writes through a symlink, never runs a hook you have not approved, and never runs a template command.
 
@@ -12,7 +12,7 @@ Your dotfiles live in an ordinary git repo. dotman copies them into `$HOME`, not
 The binary is `dotman`. Installers also add a `dot` symlink, but only when no other `dot` is on `PATH`, because `/usr/bin/dot` is usually Graphviz.
 
 ```bash
-# release tarball, checksum-verified (Linux and macOS)
+# release tarball for Linux, checksum-verified
 curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash
 
 # from source (Rust 1.88 or newer)
@@ -22,7 +22,7 @@ cargo install --git https://github.com/UtsavBalar1231/dotman --locked dotman-cli
 cd packaging/arch && makepkg -si
 ```
 
-Release tarballs are on the [releases page](https://github.com/UtsavBalar1231/dotman/releases).
+Release tarballs are on the [releases page](https://github.com/UtsavBalar1231/dotman/releases). They are for Linux on x86_64 and aarch64: the glibc builds need glibc 2.39 or newer, and the static musl builds run on any Linux, which is why the installer picks them. There are no macOS binaries, so `install.sh` fails on macOS, and dotman has not been built or tested there. On a Mac, build from source: `cargo install --git https://github.com/UtsavBalar1231/dotman --tag v0.1.0 --locked dotman-cli`.
 
 ## Quick start
 
@@ -230,7 +230,7 @@ Every prompt has a flag, so unattended runs never guess. A run is non-interactiv
 - git 2.25 or newer, on `PATH`: every command but `completion` runs it.
 - age or rage, for encrypted files (optional). `key init` and `key import` also need `age-keygen` or `rage-keygen`.
 - Rust 1.88 or newer, to build from source.
-- Linux. macOS is the other target, but it has not been tested yet: there is no Mac to test on, and CI has not run on one. Native Windows is not supported; WSL counts as Linux.
+- Linux. macOS is the other target, but it has no release binaries and has not been built or tested yet: there is no Mac to test on, and CI has not run on one. Native Windows is not supported; WSL counts as Linux.
 - dotman refuses to run as root unless you pass `--allow-root` or set `DOTMAN_ALLOW_ROOT=1`.
 - Two managed files whose names differ only in case or Unicode form are refused: `status` reports them, and `apply` and `sync` stop before writing, because a macOS filesystem cannot hold both.
 - Some names cannot be managed, and `add` says why: a name that is not in Unicode NFC form, a name with a control character (C0, DEL or C1) or with a bidi control or an invisible format character (U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069, or such as U+200B, U+FEFF and U+00AD), a `.git` component in any spelling git refuses (`.GIT`, `.git` with trailing spaces or dots, `.git:stream`, `git~1`), a name that starts with `.dotman-tmp-`, which dotman uses for its own temp files, and the repo root names `.dotman.toml`, `.dotman`, `install.sh`, `README*` and `LICENSE*`. Nor can dotman's own files on this machine, whatever their case: the machine config, `$XDG_CONFIG_HOME/dotman`, the age identity, `$XDG_STATE_HOME/dotman` and the repo, a file or symlink above one of them, or a variant that targets one. These follow the machine's own XDG dirs, so a repo file at `.config/dotman/config.toml` is refused on a machine with the default `XDG_CONFIG_HOME`, wherever the machine that pushed it keeps its config.
@@ -243,6 +243,7 @@ Every prompt has a flag, so unattended runs never guess. A run is non-interactiv
 ## Limitations
 
 - Two machines with keys that re-encrypt at the same moment can hit a sync conflict. Syncing again resolves it.
+- macOS has not been built or tested; build from source there.
 - Windows is not supported.
 
 ## Contributing
