@@ -1507,17 +1507,36 @@ const RENDERED: &str = ".config/app/t.conf";
 
 #[test]
 fn a_path_that_fails_to_render_still_lets_sync_commit_and_push() {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write_machine_config("[vars]\nnewvar = \"1\"\n");
+    a.write_repo(BROKEN, b"v {{ vars.newvar }}\n");
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"changed\n", 0o644);
+    let before = b.remote_refs();
+
+    let err = exits(&b, 1, &["sync"]);
+    assert!(err.contains("t{tmpl}.conf"), "{err}");
+    assert!(err.contains("1 path could not be applied"), "{err}");
+    assert_ne!(b.remote_refs(), before, "{err}");
+    assert_eq!(remote_file(&b, ".a"), "changed\n");
+    assert!(!b.home().join(RENDERED).exists());
+}
+
+#[test]
+fn a_template_written_here_that_does_not_render_is_not_pushed_with_the_rest() {
     let env = first_device(&[(".a", b"base\n", 0o644)]);
     env.write_repo(BROKEN, b"x {{ vars.missing }}\n");
     env.write(".a", b"changed\n", 0o644);
     let before = env.remote_refs();
 
     let err = exits(&env, 1, &["sync"]);
-    assert!(err.contains("t{tmpl}.conf"), "{err}");
-    assert!(err.contains("1 path could not be applied"), "{err}");
-    assert_ne!(env.remote_refs(), before, "{err}");
-    assert_eq!(remote_file(&env, ".a"), "changed\n");
-    assert!(!env.home().join(RENDERED).exists());
+    assert!(
+        err.contains("t{tmpl}.conf does not render after the pull"),
+        "{err}"
+    );
+    assert!(err.contains("committed"), "{err}");
+    assert!(!err.contains("pushed"), "{err}");
+    assert_eq!(env.remote_refs(), before, "{err}");
 }
 
 #[test]
