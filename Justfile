@@ -157,14 +157,18 @@ clean:
 pre-commit: lint-strict
 
 # The container, MSRV, rage, chezmoi and cross jobs are not here; they need act or their own toolchains.
-# What CI's lint, test, freshness and e2e jobs and the security workflow check, run locally before a push.
-ci: fmt-check lint-strict docs-check test-workspace freshness deny shellcheck e2e
+# What CI's lint, test, freshness and e2e jobs and the security workflow check, plus a secret scan, run locally before a push.
+ci: fmt-check lint-strict docs-check test-workspace freshness deny shellcheck secrets e2e
 
 test-workspace:
     DOTMAN_REQUIRE_AGE=1 cargo test --locked --workspace --all-targets
 
 freshness: generate
     test -z "$(git status --porcelain man completions)"
+
+# gitleaks over the commits a push would publish; main's pushed history holds older, unsplit fake credentials.
+secrets:
+    gitleaks git --no-banner --redact --log-opts="origin/main..HEAD" .
 
 deny:
     cargo deny check

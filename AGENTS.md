@@ -77,6 +77,7 @@ scripts/                release helper scripts
 - Every child process starts from `proc::command`.
 - Hints print `name::bin()`, never a hard-coded `dotman` or `dot`; `tests/names.rs` guards it.
 - Every prompt has a flag that answers it. There is no hidden test switch.
+- A fake credential in a test is split with `concat!`, a const or a format argument, so no secret scanner sees it whole. `just secrets` runs gitleaks over the commits a push would publish.
 - Code that reads working-tree files for tracked paths must cope with one deleted from disk.
 - Enforce each guarantee at one choke point that every path goes through, not at each caller.
 - Every command or recovery recipe that dotman prints is run, as printed, by a test.
@@ -107,7 +108,7 @@ scripts/                release helper scripts
 ## Commands
 ```bash
 cargo test --workspace --all-targets          # the full suite; run before every commit
-just ci                                       # CI's lint, test, freshness, deny and e2e checks; run before a push
+just ci                                       # CI's lint, test, freshness, deny and e2e checks and a gitleaks scan; run before a push
 cargo test --test cli_sync                    # one test file
 just lint-strict                              # pre-commit clippy set
 cargo fmt --check
