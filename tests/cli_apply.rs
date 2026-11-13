@@ -495,7 +495,7 @@ fn the_conflicts_are_listed_before_the_question_even_with_quiet() {
         eprintln!("skipped: no script(1) to give dotman a terminal");
         return;
     };
-    assert!(seen.contains("1 conflicts:"), "{seen}");
+    assert!(seen.contains("\n1 conflict:"), "{seen}");
     assert!(
         seen.contains("  both-changed              .bashrc"),
         "{seen}"

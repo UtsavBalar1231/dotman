@@ -624,6 +624,26 @@ fn sync_says_how_many_commits_it_pulled() {
     assert!(err.contains("origin/main is up to date"), "{err}");
 }
 
+/// The summary an `init <url>` prints counts the paths with the right noun.
+#[test]
+fn the_summary_of_a_clone_says_one_managed_path_and_two_managed_paths() {
+    for (files, line) in [
+        (
+            vec![(".a", b"a\n" as &[u8], 0o644)],
+            "1 managed path: 1 not-applied",
+        ),
+        (
+            vec![(".a", b"a\n" as &[u8], 0o644), (".b", b"b\n", 0o644)],
+            "2 managed paths: 2 not-applied",
+        ),
+    ] {
+        let a = first_device(&files);
+        let b = a.second_device();
+        let err = b.ok(&["init", &b.remote_url(), "--take-repo"]);
+        assert!(err.contains(line), "{err}");
+    }
+}
+
 #[test]
 fn commit_messages_name_three_paths_and_count_the_rest() {
     let files: Vec<(String, &[u8], u32)> = ["a", "b", "c", "d", "e"]

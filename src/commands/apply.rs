@@ -401,6 +401,8 @@ struct Answer {
 
 struct Question {
     what: &'static str,
+    /// `what` for a count of one.
+    singular: &'static str,
     rows: fn(Row) -> bool,
     flag: fn(Decisions) -> Option<Choice>,
     local: Answer,
@@ -427,6 +429,7 @@ const TAKE: Answer = Answer {
 const QUESTIONS: [Question; 3] = [
     Question {
         what: "conflicts",
+        singular: "conflict",
         rows: |row| row == Row::BothChanged,
         flag: |d| choice(d.keep_local, d.take_repo),
         local: KEEP,
@@ -437,6 +440,7 @@ const QUESTIONS: [Question; 3] = [
     },
     Question {
         what: "existing files",
+        singular: "existing file",
         rows: |row| row == Row::Existing,
         flag: |d| choice(d.keep_local, d.take_repo),
         local: KEEP,
@@ -447,6 +451,7 @@ const QUESTIONS: [Question; 3] = [
     },
     Question {
         what: "local deletions",
+        singular: "local deletion",
         // Deleted here and changed upstream too: keeping "local" is forgetting it, and taking the
         // repo's is restoring it.
         rows: |row| matches!(row, Row::DeletedLocally | Row::DeletedChangedUpstream),
@@ -659,8 +664,8 @@ impl Run<'_> {
             false
         } else {
             output::context(&format!(
-                "the machine identity changed ({change}), which gives {} paths another source:",
-                pending.len()
+                "the machine identity changed ({change}), which gives {} another source:",
+                output::count(pending.len(), "path")
             ));
             for key in &pending {
                 output::context(&format!("  {key}"));
@@ -679,8 +684,8 @@ impl Run<'_> {
         }
         self.attention = true;
         output::warning(&format!(
-            "identity changed ({change}): {} paths left undecided; answer with `{} {} --accept-identity`:",
-            pending.len(),
+            "identity changed ({change}): {} left undecided; answer with `{} {} --accept-identity`:",
+            output::count(pending.len(), "path"),
             name::bin(),
             self.command()
         ));
@@ -854,7 +859,11 @@ impl Run<'_> {
         if self.opts.dry_run || !prompt::interactive() {
             return Ok(vec![Choice::Skip; items.len()]);
         }
-        output::context(&format!("{} {}:", items.len(), question.what));
+        output::context(&format!(
+            "{} {}:",
+            items.len(),
+            output::plural(items.len(), question.singular, question.what)
+        ));
         for item in items {
             output::context(&format!("  {:<26}{}", token(item.row), item.key));
         }
@@ -2081,8 +2090,8 @@ fn summarize(items: &[Item], locked: usize) {
     }
     let parts: Vec<String> = counts.iter().map(|(t, n)| format!("{n} {t}")).collect();
     output::info(&format!(
-        "{} managed paths: {}",
-        items.len().saturating_add(locked),
+        "{}: {}",
+        output::count(items.len().saturating_add(locked), "managed path"),
         if parts.is_empty() {
             "none".to_owned()
         } else {
