@@ -1,0 +1,9 @@
+{
+  "grammar": "y3_whiteboard", "duration": 4.5, "fps": 30, "width": 1920, "height": 1080, "theme": {"bg": "#11111b", "surface": "#1e1e2e", "ink": "#cdd6f4", "sub": "#a6adc8", "accent": "#a6e3a1", "accent2": "#89b4fa"},
+  "cues": [
+    { "at": 0.0, "kind": "title", "text": "A new machine" },
+    { "at": 0.9, "kind": "point", "text": "One command clones the repo and applies it" },
+    { "at": 1.8, "kind": "draw", "text": "desktop", "data": { "icon": "screen" } },
+    { "at": 2.8, "kind": "draw", "text": "files in place", "data": { "icon": "check", "arrow": true } }
+  ]
+}

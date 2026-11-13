@@ -7,3 +7,7 @@ flamegraph.svg
 perf.data
 perf.data.old
 target/
+
+# demo video renderer (video/README.md)
+/video/node_modules/
+/video/__pycache__/

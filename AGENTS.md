@@ -35,6 +35,7 @@ src/bootstrap/          the install.sh template written by `init`
 tests/                  integration tests; tests/common is the harness
 e2e/                    multi-machine scenario suites in bash: lib.sh is the harness, run.sh the runner
 docs/                   user guide pages that README.md links to
+video/                  demo films: scenes recorded from the real binary in containers, rendered by build.py
 xtask/                  man page and completion generator
 man/                    generated man pages
 completions/            generated shell completions
@@ -116,6 +117,7 @@ cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo run -p xtask -- generate                # man pages and completions
 just e2e                                      # e2e scenarios against a release build
+just video setup                              # render a demo film into target/video; video/README.md lists what it needs
 just e2e-keep 02-conflict                     # one scenario, keeping its temp root
 just release-prepare 0.2.0                    # bumps Cargo.toml, Cargo.lock, the PKGBUILD and install/install.sh
 ```

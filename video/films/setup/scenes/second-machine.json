@@ -1,0 +1,35 @@
+{
+  "on": "desktop",
+  "cols": 100,
+  "rows": 24,
+  "steps": [
+    {
+      "hidden": "git config --global user.name Alex && git config --global user.email alex@example.com"
+    },
+    {
+      "say": "# your desktop: one command"
+    },
+    {
+      "run": "dotman init file:///srv/dotfiles.git",
+      "answers": [
+        [
+          "Host name",
+          "\r"
+        ],
+        [
+          "Profiles",
+          "\r"
+        ]
+      ]
+    },
+    {
+      "run": "cat ~/.zshrc"
+    },
+    {
+      "run": "dotman status"
+    },
+    {
+      "wait": 1
+    }
+  ]
+}

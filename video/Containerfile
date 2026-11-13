@@ -1,0 +1,5 @@
+# The machines the demo scenes run on: no network, a fixed user and host name, and nothing from the recording host.
+FROM alpine:3.24
+RUN apk add --no-cache bash git age \
+ && adduser -D -s /bin/bash -g Alex alex \
+ && install -d -o alex -g alex /srv

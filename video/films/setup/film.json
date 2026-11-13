@@ -1,0 +1,12 @@
+{
+  "machines": ["laptop", "desktop"],
+  "fade": 0.4,
+  "shots": [
+    {"clip": "clips/title.json"},
+    {"clip": "clips/one-repo.json"},
+    {"scene": "scenes/first-machine.json"},
+    {"clip": "clips/second.json"},
+    {"scene": "scenes/second-machine.json"},
+    {"clip": "clips/end.json"}
+  ]
+}

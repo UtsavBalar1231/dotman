@@ -1,0 +1,8 @@
+{
+  "name": "dotman-video",
+  "private": true,
+  "description": "Renders dotman's demo videos; see video/README.md",
+  "dependencies": {
+    "playwright-core": "1.65.0-alpha-2026-10-30"
+  }
+}
