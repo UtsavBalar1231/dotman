@@ -1566,9 +1566,12 @@ impl Run<'_> {
         } else {
             "keep it out with an [ignore] pattern".to_owned()
         };
+        let mut ways = found.ways(Some(&path));
+        ways.push(keep_out);
         output::warning(&format!(
-            "{key}: held, {found}{}; or {keep_out}",
-            found.remedy(Some(&path))
+            "{key}: held, {found}{}; to sync it, one of:\n  {}",
+            found.caveat(),
+            ways.join("\n  ")
         ));
     }
 

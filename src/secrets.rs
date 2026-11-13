@@ -178,21 +178,38 @@ impl Finding {
     /// the credential, and offers `--encrypt` only for content.
     #[must_use]
     pub fn remedy(self, path: Option<&str>) -> String {
+        format!("{}; {}", self.caveat(), self.ways(path).join("; or "))
+    }
+
+    /// Said right after the finding when it can never be let through.
+    #[must_use]
+    pub fn caveat(self) -> &'static str {
+        if self.place == Place::Content && !self.overridable() {
+            ", which dotman never stores in plain text"
+        } else {
+            ""
+        }
+    }
+
+    /// The ways out of the hold that [`Finding::remedy`] joins, one per entry.
+    #[must_use]
+    pub fn ways(self, path: Option<&str>) -> Vec<String> {
         let bin = name::bin();
-        let never = ", which dotman never stores in plain text";
-        let remove = "; or remove the secret from the file";
-        match (self.place, path, self.overridable()) {
-            (Place::Name, ..) => "; encryption cannot hide a name, so rename it".to_owned(),
-            (Place::Target, ..) => {
-                "; --encrypt takes regular files only, so point the link elsewhere".to_owned()
+        match (self.place, path) {
+            (Place::Name, _) => vec!["encryption cannot hide a name, so rename it".to_owned()],
+            (Place::Target, _) => {
+                vec!["--encrypt takes regular files only, so point the link elsewhere".to_owned()]
             }
-            (Place::Content, None, true) => format!("; --encrypt stores it encrypted{remove}"),
-            (Place::Content, None, false) => format!("{never}; --encrypt stores it encrypted"),
-            (Place::Content, Some(path), true) => {
-                format!("; `{bin} add --encrypt {path}` stores it encrypted{remove}")
-            }
-            (Place::Content, Some(path), false) => {
-                format!("{never}; `{bin} add --encrypt {path}` stores it encrypted")
+            (Place::Content, path) => {
+                let encrypt = path.map_or_else(
+                    || "--encrypt stores it encrypted".to_owned(),
+                    |path| format!("`{bin} add --encrypt {path}` stores it encrypted"),
+                );
+                let mut ways = vec![encrypt];
+                if self.overridable() {
+                    ways.push("remove the secret from the file".to_owned());
+                }
+                ways
             }
         }
     }
@@ -1104,6 +1121,54 @@ mod tests {
         findings(text.as_bytes())
             .map(|found| (found.rule, found.line))
             .collect()
+    }
+
+    #[test]
+    fn remedy_is_the_ways_joined_for_all_six_cases() {
+        let finding = |rule, place| Finding {
+            rule,
+            line: 1,
+            place,
+        };
+        let token = finding("github-token", Place::Content);
+        let age = finding(AGE_RULE, Place::Content);
+        let never = ", which dotman never stores in plain text";
+        let cases = [
+            (
+                finding("github-token", Place::Name),
+                Some("p"),
+                "; encryption cannot hide a name, so rename it".to_owned(),
+            ),
+            (
+                finding("github-token", Place::Target),
+                Some("p"),
+                "; --encrypt takes regular files only, so point the link elsewhere".to_owned(),
+            ),
+            (
+                token,
+                None,
+                "; --encrypt stores it encrypted; or remove the secret from the file".to_owned(),
+            ),
+            (
+                age,
+                None,
+                format!("{never}; --encrypt stores it encrypted"),
+            ),
+            (
+                token,
+                Some("p"),
+                "; `dotman add --encrypt p` stores it encrypted; or remove the secret from the file"
+                    .to_owned(),
+            ),
+            (
+                age,
+                Some("p"),
+                format!("{never}; `dotman add --encrypt p` stores it encrypted"),
+            ),
+        ];
+        for (found, path, remedy) in cases {
+            assert_eq!(found.remedy(path), remedy);
+        }
     }
 
     #[test]

@@ -149,6 +149,19 @@ fn remote_file(env: &TestEnv, key: &str) -> String {
     env.git(&["--git-dir", &remote, "show", &format!("main:{key}")])
 }
 
+/// The hold message `sync` prints for `key`: its first line and the indented lines under it.
+fn hold(err: &str, key: &str) -> String {
+    let mut lines = err
+        .lines()
+        .skip_while(|line| !line.starts_with(&format!("{key}: held, ")));
+    let first = lines.next().unwrap_or_default();
+    let rest = lines.take_while(|line| line.starts_with("  "));
+    std::iter::once(first)
+        .chain(rest)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn repo_path(env: &TestEnv) -> String {
     env.repo().to_string_lossy().into_owned()
 }
@@ -188,6 +201,10 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
     b.ok(&["git", "branch", "--unset-upstream"]);
     b.write(".a", b"from b\n", 0o644);
     let err = exits(&b, 4, &["sync"]);
+    assert!(
+        err.contains("the pull conflicts with your changes. It was aborted, and your files and commits are as they were.\nTo resolve it:\n"),
+        "{err}"
+    );
     let [pull, edit, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
     assert_eq!(pull, "dotman git pull --rebase origin main");
     assert_eq!(
@@ -2394,6 +2411,28 @@ fn add_never_destroys_a_held_hand_edit_in_the_repo() {
     }
 }
 
+/// The ways out of a capture hold each stand on a line of their own, so a terminal never wraps a
+/// command, and the line that stays a one-liner is the finding.
+#[test]
+fn a_capture_hold_lists_each_way_out_on_its_own_line() {
+    let env = first_device(&[(".apprc", b"a=1\n", 0o644)]);
+    env.write(
+        ".apprc",
+        format!("a=1\ntoken = {}\n", github_token()).as_bytes(),
+        0o644,
+    );
+    let err = exits(&env, 3, &["sync"]);
+    let lines: Vec<String> = hold(&err, ".apprc").lines().map(str::to_owned).collect();
+    let home = env.home().join(".apprc").to_string_lossy().into_owned();
+    let expected = [
+        ".apprc: held, line 2 holds a github-token; to sync it, one of:".to_owned(),
+        format!("  `dotman add --encrypt {home}` stores it encrypted"),
+        "  remove the secret from the file".to_owned(),
+        format!("  `dotman forget {home}` stops managing it"),
+    ];
+    assert_eq!(lines, expected, "{err}");
+}
+
 /// An `[ignore]` pattern leaves a managed file managed, so a held edit to one is offered `forget`.
 /// Run as printed, it ends the hold for a plain key and for one under `[dirs]`, which the next
 /// sync does not capture again; the file stays in `$HOME` and the token never reaches the remote.
@@ -2411,12 +2450,9 @@ fn a_held_edit_to_a_managed_file_is_offered_forget_which_ends_the_hold() {
 
     let err = exits(&env, 3, &["sync"]);
     for key in [".apprc", ".config/app/one.conf"] {
-        let line = err
-            .lines()
-            .find(|line| line.starts_with(&format!("{key}: held, ")))
-            .unwrap_or_default();
+        let line = hold(&err, key);
         assert!(!line.contains("[ignore]"), "{err}");
-        let out = common::run_hint(&env, line, "forget");
+        let out = common::run_hint(&env, &line, "forget");
         assert_eq!(out.status.code(), Some(0), "{line}");
     }
     exits(&env, 0, &["sync"]);
@@ -2462,10 +2498,7 @@ fn the_forget_hint_for_a_key_with_variants_names_every_repo_file_it_removes() {
     );
 
     let err = exits(&a, 3, &["sync"]);
-    let line = err
-        .lines()
-        .find(|line| line.starts_with(".prof: held, "))
-        .unwrap_or_default();
+    let line = hold(&err, ".prof");
     let sources = [".prof", ".prof{host=alpha}", ".prof{host=beta}"];
     assert!(
         line.contains(&format!(
@@ -2474,7 +2507,7 @@ fn the_forget_hint_for_a_key_with_variants_names_every_repo_file_it_removes() {
         )),
         "{err}"
     );
-    let out = common::run_hint(&a, line, "forget");
+    let out = common::run_hint(&a, &line, "forget");
     assert_eq!(out.status.code(), Some(0), "{line}");
     exits(&a, 0, &["sync"]);
     let remote = a.remote_path().to_string_lossy().into_owned();

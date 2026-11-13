@@ -831,8 +831,9 @@ fn report_conflict(ctx: &Context, branch: &str, paths: &[PathBuf]) {
     let (sealed, plain): (Vec<&PathBuf>, Vec<&PathBuf>) =
         paths.iter().partition(|path| sealed_key(path).is_some());
     output::warning(
-        "the pull conflicts with your changes. It was aborted, and your files and commits are as they were. To resolve it:",
+        "the pull conflicts with your changes. It was aborted, and your files and commits are as they were.",
     );
+    output::warning("To resolve it:");
     let mut steps = vec![vec![format!(
         "{bin} git pull --rebase {REMOTE} {}",
         shell_words::quote(branch)
