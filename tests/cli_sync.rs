@@ -3867,7 +3867,7 @@ fn on_a_terminal_each_answer_to_one_file_does_what_its_line_says() {
             "{seen}"
         );
         assert!(
-            seen.contains(".a [k] keep mine  [t] take theirs  [e] edit  [d] diff  [s] stop: "),
+            seen.contains(".a [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [e] edit  [d] diff  [s] stop: "),
             "{seen}"
         );
         let merged = format!("1 from a\n2\n{line}\n4\n5 from b\n");
@@ -4036,8 +4036,10 @@ fn on_a_terminal_an_edit_that_is_refused_is_asked_again() {
         assert!(seen.contains(refusal), "{refusal}: {seen}");
     }
     assert_eq!(
-        seen.matches(".a [k] keep mine  [t] take theirs  [e] edit")
-            .count(),
+        seen.matches(
+            ".a [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [e] edit"
+        )
+        .count(),
         4,
         "{seen}"
     );
@@ -4112,7 +4114,7 @@ fn on_a_terminal_the_diff_of_an_encrypted_file_leaves_no_plaintext() {
         "{seen}"
     );
     assert!(
-        seen.contains("[k] keep mine  [t] take theirs  [d] diff  [s] stop: "),
+        seen.contains("[k] keep mine  [t] take theirs  [h] keep mine on this machine only  [e] edit  [d] diff  [s] stop: "),
         "{seen}"
     );
     assert!(
@@ -4259,7 +4261,13 @@ fn on_a_terminal_whole_versions_are_not_offered_an_edit() {
     for key in [".bin", ".l"] {
         assert!(
             seen.contains(&format!(
-                "\n[k] keeps this machine's version whole, for every machine\n[t] takes origin/main's version whole, and this machine's is saved first\n{key} [k] keep mine  [t] take theirs  [d] diff  [s] stop: "
+                "\n[k] keeps this machine's version whole, for every machine\n[t] takes origin/main's version whole, and this machine's is saved first\nthis machine keeps its version as {key}{{host="
+            )),
+            "{seen}"
+        );
+        assert!(
+            seen.contains(&format!(
+                "; every other machine takes origin/main's\n{key} [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [d] diff  [s] stop: "
             )),
             "{seen}"
         );
@@ -4288,7 +4296,7 @@ fn on_a_terminal_an_encrypted_file_without_the_key_offers_no_diff() {
     let before = outside_git(&b);
     let seen = sync_in_a_terminal(&b, &[], b"d\ns\n");
     assert!(
-        seen.contains(".config/app/s{age}.conf cannot be decrypted here, so it cannot be shown or edited\n.config/app/s{age}.conf [k] keep mine  [t] take theirs  [s] stop: "),
+        seen.contains(".config/app/s{age}.conf cannot be decrypted here, so it cannot be shown or edited\n.config/app/s{age}.conf [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [s] stop: "),
         "{seen}"
     );
     assert!(!seen.contains("marker_from"), "{seen}");

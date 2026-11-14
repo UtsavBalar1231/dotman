@@ -5023,6 +5023,281 @@ fn an_encrypted_conflict_leaves_no_plaintext_in_any_object() {
     }
 }
 
+const SEALED: &str = ".config/app/s.conf";
+const SEALED_SOURCE: &str = ".config/app/s{age}.conf";
+
+/// Machine `a` on host `alpha` and `b` on host `beta`, sharing a key, with [`SEALED`] synced
+/// encrypted, then edited on both and `a`'s edit synced; `b` has not synced its own.
+fn sealed_clash() -> (TestEnv, TestEnv) {
+    let a = TestEnv::new();
+    a.ok(&["init", "--host", "alpha", "--remote", &a.remote_url()]);
+    a.ok(&["key", "init"]);
+    a.write(SEALED, b"plain_marker_base\n", 0o600);
+    a.ok(&["add", "--encrypt", SEALED]);
+    a.ok(&["sync"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "--git-dir",
+        &remote,
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/main",
+    ]);
+    let b = a.second_device();
+    b.ok(&["init", &b.remote_url(), "--host", "beta"]);
+    let identity = a.xdg_config().join("dotman/age-identity.txt");
+    b.ok(&["key", "import", &identity.to_string_lossy()]);
+    b.ok(&["apply"]);
+    a.write(SEALED, b"plain_marker_from_a\n", 0o600);
+    (a, b)
+}
+
+/// `sync` on `env` in a terminal with `vars` and the typed `input`; fails when `script` is
+/// missing, since CI has it.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn sync_in_a_terminal(env: &TestEnv, vars: &[(&str, &str)], input: &[u8]) -> String {
+    let vars = [&[("NO_COLOR", "1"), ("TERM", "dumb")][..], vars].concat();
+    common::in_a_terminal(env, &vars, &["sync"], input)
+        .expect("script(1) runs")
+        .replace('\r', "")
+}
+
+/// A private `XDG_RUNTIME_DIR` inside the test root.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn runtime_dir(env: &TestEnv) -> PathBuf {
+    let dir = env.root().join("run");
+    fs::create_dir_all(&dir).expect("runtime dir");
+    fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).expect("chmod");
+    dir
+}
+
+/// The `.dotman-tmp-` entries left in `dir`.
+fn temp_left(dir: &Path) -> Vec<String> {
+    names(dir)
+        .into_iter()
+        .filter(|name| name.starts_with(".dotman-tmp-"))
+        .collect()
+}
+
+/// An editor that runs the shell `body` with the copy it opens as `$1`.
+fn editor(env: &TestEnv, body: &str) -> String {
+    env.write_script("editor", &format!("#!/bin/sh\n{body}\n"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Whether any object of `env`'s repo or of the remote holds `needle`, unreachable loose objects
+/// included.
+fn in_any_object(env: &TestEnv, needle: &[u8]) -> bool {
+    [env.repo().join(".git"), env.remote_path()]
+        .iter()
+        .any(|git_dir| {
+            let dir = git_dir.to_string_lossy().into_owned();
+            let objects = env.git_raw(&[
+                "--git-dir",
+                &dir,
+                "cat-file",
+                "--batch-all-objects",
+                "--batch",
+            ]);
+            assert!(objects.status.success());
+            objects.stdout.windows(needle.len()).any(|w| w == needle)
+        })
+}
+
+/// The plaintext of `ciphertext` under the identity file `identity`, decrypted by age or rage.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn decrypt_with(env: &TestEnv, identity: &Path, ciphertext: &[u8]) -> Vec<u8> {
+    let file = env.root().join("blob.age");
+    fs::write(&file, ciphertext).expect("write the ciphertext");
+    let program = ["age", "rage"]
+        .into_iter()
+        .find(|name| {
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .any(|dir| dir.join(name).is_file())
+        })
+        .expect("age or rage on PATH");
+    let out = std::process::Command::new(program)
+        .args(["-d", "-i"])
+        .arg(identity)
+        .arg(&file)
+        .output()
+        .expect("run age");
+    assert!(out.status.success(), "{}", stderr(&out));
+    out.stdout
+}
+
+/// `[e]` on an encrypted file opens the merged plaintext in a 0700 dir under `XDG_RUNTIME_DIR`
+/// and encrypts the edit to every recipient of the merged `.dotman.toml`, including one origin
+/// added in the same pull. The dir is gone afterwards, and no object holds a plaintext.
+#[test]
+fn an_encrypted_edit_is_encrypted_to_every_merged_recipient_and_leaves_no_plaintext() {
+    if !age_installed() {
+        return;
+    }
+    let (a, b) = sealed_clash();
+    let other = TestEnv::new();
+    other.ok(&["init"]);
+    other.ok(&["key", "init"]);
+    let config_file = a.repo().join(".dotman.toml");
+    let mut config = a.repo_config();
+    config
+        .age
+        .recipients
+        .extend(other.repo_config().age.recipients);
+    config.save(&config_file, false).unwrap();
+    a.ok(&["sync"]);
+    b.write(SEALED, b"plain_marker_from_b\n", 0o600);
+
+    let run = runtime_dir(&b);
+    let (log, opened) = (b.root().join("log"), b.root().join("opened"));
+    let editor = editor(
+        &b,
+        &format!(
+            "printf '%s\\n%s\\n' \"$1\" \"$(stat -c %a \"$(dirname \"$1\")\")\" > '{}'\ncp \"$1\" '{}'\nprintf 'plain_marker_edited\\n' > \"$1\"",
+            log.display(),
+            opened.display()
+        ),
+    );
+    let run_var = run.to_string_lossy().into_owned();
+    let vars = [
+        ("VISUAL", editor.as_str()),
+        ("XDG_RUNTIME_DIR", run_var.as_str()),
+    ];
+    let seen = sync_in_a_terminal(&b, &vars, b"e\n");
+    assert!(
+        seen.contains(&format!(
+            "{SEALED_SOURCE} [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [e] edit  [d] diff  [s] stop: "
+        )),
+        "{seen}"
+    );
+    assert!(
+        seen.contains(&format!("resolve {SEALED_SOURCE} (edited)")),
+        "{seen}"
+    );
+    assert!(!seen.contains("re-encrypt"), "{seen}");
+    let log = fs::read_to_string(&log).unwrap();
+    let mut lines = log.lines();
+    let copy = PathBuf::from(lines.next().unwrap());
+    assert_eq!(lines.next(), Some("700"), "{log}");
+    assert_eq!(copy.parent().and_then(Path::parent), Some(run.as_path()));
+    assert!(!copy.exists());
+    assert_eq!(temp_left(&run), Vec::<String>::new());
+    assert_eq!(temp_left(&b.state_dir()), Vec::<String>::new());
+    let opened = fs::read_to_string(&opened).unwrap();
+    assert!(
+        opened.contains("<<<<<<< this machine (beta)\nplain_marker_from_b\n=======\nplain_marker_from_a\n>>>>>>> origin/main\n"),
+        "{opened}"
+    );
+
+    assert_eq!(b.read(SEALED), b"plain_marker_edited\n");
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    let committed = a.git_raw(&[
+        "--git-dir",
+        &remote,
+        "show",
+        &format!("main:{SEALED_SOURCE}"),
+    ]);
+    assert!(committed.status.success());
+    assert_eq!(b.repo_config().age.recipients.len(), 2);
+    for env in [&a, &other] {
+        let identity = env.xdg_config().join("dotman/age-identity.txt");
+        assert_eq!(
+            decrypt_with(&b, &identity, &committed.stdout),
+            b"plain_marker_edited\n"
+        );
+    }
+    assert!(!in_any_object(&b, b"plain_marker"));
+    exits(&a.run(&["sync"]), 0);
+    assert_eq!(a.read(SEALED), b"plain_marker_edited\n");
+}
+
+/// The temp dir of an encrypted file's `[e]` is gone when the editor exits non-zero and when the
+/// edit is refused, and after `[s]` nothing changed and no object holds a plaintext. Without the
+/// key, `[e]` is not offered.
+#[test]
+fn an_encrypted_edit_that_is_not_taken_leaves_no_plaintext_and_needs_the_key() {
+    if !age_installed() {
+        return;
+    }
+    let (a, b) = sealed_clash();
+    a.ok(&["sync"]);
+    b.write(SEALED, b"plain_marker_from_b\n", 0o600);
+    exits(&b.run(&["sync"]), 4);
+    let run = runtime_dir(&b);
+    let run_var = run.to_string_lossy().into_owned();
+    let log = b.root().join("log");
+    for (body, refusal) in [
+        ("exit 1", "the editor exited with"),
+        (":", "the file was not changed"),
+    ] {
+        let editor = editor(&b, &format!("dirname \"$1\" > '{}'\n{body}", log.display()));
+        let vars = [
+            ("VISUAL", editor.as_str()),
+            ("XDG_RUNTIME_DIR", run_var.as_str()),
+        ];
+        let seen = sync_in_a_terminal(&b, &vars, b"e\ns\n");
+        assert!(
+            seen.contains(&format!("{SEALED_SOURCE}: {refusal}")),
+            "{seen}"
+        );
+        assert!(seen.contains("conflicting paths:"), "{seen}");
+        let dir = fs::read_to_string(&log).unwrap();
+        assert!(Path::new(dir.trim()).starts_with(&run), "{dir}");
+        assert!(!Path::new(dir.trim()).exists(), "{dir}");
+        assert_eq!(temp_left(&run), Vec::<String>::new());
+        assert_eq!(temp_left(&b.state_dir()), Vec::<String>::new());
+        assert_eq!(b.read(SEALED), b"plain_marker_from_b\n");
+        assert!(!in_any_object(&b, b"plain_marker"));
+    }
+
+    fs::remove_file(b.xdg_config().join("dotman/age-identity.txt")).unwrap();
+    let seen = sync_in_a_terminal(&b, &[], b"e\ns\n");
+    assert!(
+        seen.contains(&format!(
+            "{SEALED_SOURCE} [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [s] stop: "
+        )),
+        "{seen}"
+    );
+    assert!(seen.contains("not one of the listed answers"), "{seen}");
+}
+
+/// `[h]` on an encrypted file keeps this machine's ciphertext as its `{host=beta+age}` variant:
+/// the variant stays encrypted, this machine keeps its plaintext, and the other machine keeps
+/// origin's.
+#[test]
+fn keeping_an_encrypted_file_on_this_machine_only_keeps_it_encrypted() {
+    if !age_installed() {
+        return;
+    }
+    let (a, b) = sealed_clash();
+    a.ok(&["sync"]);
+    b.write(SEALED, b"plain_marker_from_b\n", 0o600);
+    let seen = sync_in_a_terminal(&b, &[], b"h\n");
+    let variant = ".config/app/s{host=beta+age}.conf";
+    assert!(
+        seen.contains(&format!(
+            "this machine keeps its version as {variant}; every other machine takes origin/main's\n"
+        )),
+        "{seen}"
+    );
+    assert_eq!(b.read(SEALED), b"plain_marker_from_b\n", "{seen}");
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    let stored = a.git(&["--git-dir", &remote, "show", &format!("main:{variant}")]);
+    assert!(
+        stored.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"),
+        "{stored}"
+    );
+    assert!(!in_any_object(&b, b"plain_marker"));
+    exits(&a.run(&["sync"]), 0);
+    assert_eq!(a.read(SEALED), b"plain_marker_from_a\n");
+    exits(&b.run(&["sync"]), 0);
+    assert_eq!(b.read(SEALED), b"plain_marker_from_b\n");
+}
+
 /// A resolution that git's rerere recorded never answers a conflict, with `rerere.enabled` and
 /// `rerere.autoupdate` in the user's git config: sync still stops on the conflict, a flag settles
 /// it by its own rule, and the recorded text reaches no commit that is pushed. The control: the

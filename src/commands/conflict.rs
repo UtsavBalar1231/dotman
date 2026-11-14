@@ -14,7 +14,7 @@ use crate::engine::write::{back_up_bytes, backup_run_dir};
 use crate::git::{Decision, Entry, Refusal, Replayed, Side, Stopped};
 use crate::name;
 use crate::output;
-use crate::paths::{private_temp_dir, validate_key};
+use crate::paths::{is_reserved_root_name, private_temp_dir, validate_key};
 use crate::proc;
 use crate::prompt;
 use crate::repo_config::{self, RepoConfig, Settled, Tie, Winner};
@@ -22,7 +22,7 @@ use crate::secrets;
 use crate::sys;
 use crate::system;
 use crate::template;
-use crate::variant::{Flag, Sources};
+use crate::variant::{self, Flag, Sources};
 use anyhow::{Context as _, Result, anyhow, bail};
 use libc::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,6 +108,7 @@ enum Item {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reply {
     Take(Answer),
+    Here,
     Edit,
     Diff,
     PerFile,
@@ -118,7 +119,7 @@ enum Reply {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Menu {
     Bulk { diff: bool },
-    One { edit: bool, diff: bool },
+    One { here: bool, edit: bool, diff: bool },
 }
 
 impl Menu {
@@ -131,9 +132,10 @@ impl Menu {
                 ("[p] per file", true),
                 ("[s] stop", true),
             ],
-            Self::One { edit, diff } => &[
+            Self::One { here, edit, diff } => &[
                 ("[k] keep mine", true),
                 ("[t] take theirs", true),
+                ("[h] keep mine on this machine only", here),
                 ("[e] edit", edit),
                 ("[d] diff", diff),
                 ("[s] stop", true),
@@ -149,14 +151,15 @@ impl Menu {
 
     /// An empty answer, which is also what end of input reads as, stops: the run never guesses.
     fn parse(self, answer: &str) -> Option<Reply> {
-        let (bulk, edit, diff) = match self {
-            Self::Bulk { diff } => (true, false, diff),
-            Self::One { edit, diff } => (false, edit, diff),
+        let (bulk, here, edit, diff) = match self {
+            Self::Bulk { diff } => (true, false, false, diff),
+            Self::One { here, edit, diff } => (false, here, edit, diff),
         };
         match answer.to_lowercase().as_str() {
             "" | "s" => Some(Reply::Stop),
             "k" => Some(Reply::Take(Answer::Mine)),
             "t" => Some(Reply::Take(Answer::Theirs)),
+            "h" if here => Some(Reply::Here),
             "e" if edit => Some(Reply::Edit),
             "d" if diff => Some(Reply::Diff),
             "p" if bulk => Some(Reply::PerFile),
@@ -282,6 +285,8 @@ struct Pull<'a> {
     theirs: BTreeMap<PathBuf, Entry>,
     decisions: BTreeMap<PathBuf, Decision>,
     winners: BTreeMap<String, Settled>,
+    /// Each source answered `[h]`, with the variant that keeps this machine's version.
+    host_copies: Vec<(String, String)>,
     /// `.dotman.toml` stopped with settings on every side.
     settings: bool,
     /// Every stopped path so far, for the git steps.
@@ -313,6 +318,7 @@ impl<'a> Pull<'a> {
             theirs: git.tree_entries(onto)?,
             decisions: BTreeMap::new(),
             winners: BTreeMap::new(),
+            host_copies: Vec::new(),
             settings: false,
             seen: Vec::new(),
             saved: BTreeSet::new(),
@@ -353,7 +359,7 @@ impl<'a> Pull<'a> {
             return Ok(false);
         }
         let Some(answer) = self.answer else {
-            let ties = match self.settings_merge()? {
+            let ties = match self.settings_merge() {
                 Ok(Some(sides)) if self.ties_answer.is_none() => sides.ties,
                 Ok(_) => Vec::new(),
                 Err(why) => {
@@ -595,9 +601,7 @@ impl<'a> Pull<'a> {
         if let Some(dir) = &self.temp {
             return Ok(dir.path().to_path_buf());
         }
-        // The PID in the name is what lets the temp sweep remove a killed run's copy.
-        let prefix = format!("{TEMP_PREFIX}{}-", std::process::id());
-        let dir = private_temp_dir(&prefix, &private_base(self.ctx)?)?;
+        let dir = private_dir(self.ctx)?;
         let path = dir.path().to_path_buf();
         self.temp = Some(dir);
         Ok(path)
@@ -664,17 +668,8 @@ impl<'a> Pull<'a> {
             Some(entry) => self.blob(entry)?,
             None => Vec::new(),
         };
-        let host = &self.ctx.identity().host;
-        let ours_label = format!("this machine ({host})");
-        let theirs_label = format!("{REMOTE}/{}", self.branch);
         let dir = self.temp_dir()?;
-        let [ours_bytes, theirs_bytes] = &sides;
-        let (merged, _) = self.ctx.git.merge_file(
-            &dir,
-            [ours_bytes, &base_bytes, theirs_bytes],
-            [&ours_label, "base", &theirs_label],
-            side,
-        )?;
+        let merged = self.merge_file(&dir, &sides, &base_bytes, side)?;
         Ok(TextMerge {
             merged,
             sides,
@@ -682,6 +677,28 @@ impl<'a> Pull<'a> {
             mine,
             theirs,
         })
+    }
+
+    /// `git merge-file` of this machine's and origin's bytes over `base`, its inputs written into
+    /// `dir`, with the labels the edited copy shows.
+    fn merge_file(
+        &self,
+        dir: &Path,
+        sides: &[Vec<u8>; 2],
+        base: &[u8],
+        side: Option<Side>,
+    ) -> Result<Vec<u8>> {
+        let host = &self.ctx.identity().host;
+        let ours_label = format!("this machine ({host})");
+        let theirs_label = format!("{REMOTE}/{}", self.branch);
+        let [ours, theirs] = sides;
+        let (merged, _) = self.ctx.git.merge_file(
+            dir,
+            [ours, base, theirs],
+            [&ours_label, "base", &theirs_label],
+            side,
+        )?;
+        Ok(merged)
     }
 
     /// Asks on the terminal about every question and tie of one stop, putting each answered
@@ -736,7 +753,9 @@ impl<'a> Pull<'a> {
                     return Ok(true);
                 }
                 Some(Reply::Stop) => return Ok(false),
-                Some(Reply::Edit) | None => output::warning("not one of the listed answers"),
+                Some(Reply::Here | Reply::Edit) | None => {
+                    output::warning("not one of the listed answers");
+                }
             }
         }
     }
@@ -749,17 +768,27 @@ impl<'a> Pull<'a> {
         settled: &mut BTreeMap<PathBuf, Content>,
     ) -> Result<bool> {
         let diff = self.diffable(item);
-        for line in self.explain(item, ties, diff) {
-            output::context(&line);
-        }
-        let (name, edit) = match item {
+        let (name, edit, here) = match item {
             Item::File(path, kind) => (
                 path.to_string_lossy().into_owned(),
-                matches!(kind, Kind::Text { .. }),
+                match kind {
+                    Kind::Text { .. } => true,
+                    // Both sides decrypt here, which is what the diff needs too.
+                    Kind::Whole(Whole::Encrypted) => diff,
+                    _ => false,
+                },
+                self.host_variant(path, *kind),
             ),
-            Item::Settings => (SETTINGS.to_owned(), false),
+            Item::Settings => (SETTINGS.to_owned(), false, None),
         };
-        let menu = Menu::One { edit, diff };
+        for line in self.explain(item, ties, diff, here.as_deref()) {
+            output::context(&line);
+        }
+        let menu = Menu::One {
+            here: here.is_some(),
+            edit,
+            diff,
+        };
         let question = format!("{name} {}", menu.text());
         loop {
             match menu.parse(&prompt::ask_menu(&question)?) {
@@ -768,16 +797,30 @@ impl<'a> Pull<'a> {
                         return Ok(true);
                     }
                 }
-                Some(Reply::Edit) => {
-                    if let Item::File(path, Kind::Text { template }) = item {
-                        match self.edit(path, *template)? {
-                            Ok(content) => {
-                                settled.insert(path.clone(), content);
-                                self.edited.insert(path.clone());
-                                return Ok(true);
-                            }
+                Some(Reply::Here) => {
+                    if let (Item::File(path, _), Some(variant)) = (item, &here) {
+                        match self.keep_here(path, variant, settled)? {
+                            Ok(()) => return Ok(true),
                             Err(why) => refusal(path, &why),
                         }
+                    }
+                }
+                Some(Reply::Edit) => {
+                    let Item::File(path, kind) = item else {
+                        continue;
+                    };
+                    let edited = match kind {
+                        Kind::Text { template } => self.edit(path, *template)?,
+                        Kind::Whole(Whole::Encrypted) => self.edit_encrypted(path)?,
+                        _ => continue,
+                    };
+                    match edited {
+                        Ok(content) => {
+                            settled.insert(path.clone(), content);
+                            self.edited.insert(path.clone());
+                            return Ok(true);
+                        }
+                        Err(why) => refusal(path, &why),
                     }
                 }
                 Some(Reply::Diff) => self.show(&[item]),
@@ -815,31 +858,188 @@ impl<'a> Pull<'a> {
     /// what it saves once that passes the marker-line and unchanged checks and [`accept`].
     fn edit(&mut self, path: &Path, template: bool) -> Result<Result<Content, String>> {
         let text = self.merge(path, None)?;
-        let opened = self
-            .drafts
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| text.merged.clone());
-        let edited = match self.run_editor(path, &opened)? {
+        let edited = match self.edited(path, &text.merged, &text.sides, template)? {
             Ok(edited) => edited,
             Err(why) => return Ok(Err(why)),
         };
-        self.drafts.insert(path.to_path_buf(), edited.clone());
-        if edited == text.merged {
-            return Ok(Err("the file was not changed".to_owned()));
-        }
-        if markers_left(&edited, &text.merged, &text.sides) {
-            return Ok(Err("the marker lines are still in the file".to_owned()));
-        }
-        if let Some(why) = accept(self.ctx, &source(path), &edited, &text.sides, template) {
-            return Ok(Err(why));
-        }
         let settled = self.settled(path, Winner::Merged, true);
         self.winners.insert(source(path), settled);
         Ok(Ok(Content::Bytes {
             mode: text.mode(Answer::Mine),
             bytes: edited,
         }))
+    }
+
+    /// `[e]` on an encrypted path whose sides both decrypt here: the merged plaintext is opened as
+    /// a text path's is, and what the editor saves is encrypted to every recipient of the merged
+    /// `.dotman.toml` before it becomes a blob. Plaintext is written only into private temp dirs
+    /// that are removed when this returns, whatever it returns.
+    fn edit_encrypted(&mut self, path: &Path) -> Result<Result<Content, String>> {
+        let (Some(mine), Some(theirs)) =
+            (self.mine.get(path).cloned(), self.theirs.get(path).cloned())
+        else {
+            bail!(
+                "{} is missing on one side, so it cannot be edited",
+                shown(path)
+            );
+        };
+        let base = self.base.get(path).cloned();
+        let sides = [
+            self.decrypt(&mine, "mine.age")?,
+            self.decrypt(&theirs, "theirs.age")?,
+        ];
+        if sides.iter().any(|side| side.contains(&0)) {
+            return Ok(Err(
+                "the decrypted file is not text, so it cannot be edited".to_owned(),
+            ));
+        }
+        // A base this machine cannot decrypt, encrypted to recipients since dropped, merges as
+        // an empty one: the whole file is then one clash.
+        let base_bytes = base.as_ref().map_or_else(Vec::new, |entry| {
+            self.decrypt(entry, "base.age").unwrap_or_default()
+        });
+        let recipients = match self.recipients() {
+            Ok(recipients) => recipients,
+            Err(why) => return Ok(Err(why)),
+        };
+        let work = private_dir(self.ctx)?;
+        let merged = self.merge_file(work.path(), &sides, &base_bytes, None)?;
+        let edited = match self.edited(path, &merged, &sides, false)? {
+            Ok(edited) => edited,
+            Err(why) => return Ok(Err(why)),
+        };
+        let ciphertext = match self.ctx.age().encrypt(&edited, &recipients) {
+            Ok(ciphertext) => ciphertext,
+            Err(e) => return Ok(Err(format!("cannot encrypt the edit: {e:#}"))),
+        };
+        let settled = self.settled(path, Winner::Merged, true);
+        self.winners.insert(source(path), settled);
+        Ok(Ok(Content::Bytes {
+            mode: merged_mode(base.as_ref(), &mine, &theirs, Answer::Mine),
+            bytes: ciphertext,
+        }))
+    }
+
+    /// Opens `merged`, or the last edit of `path`, in the user's editor, and gives what it saves
+    /// once that passes the marker-line and unchanged checks and [`accept`]; `sides` are the two
+    /// versions it was merged from.
+    fn edited(
+        &mut self,
+        path: &Path,
+        merged: &[u8],
+        sides: &[Vec<u8>],
+        template: bool,
+    ) -> Result<Result<Vec<u8>, String>> {
+        let opened = self
+            .drafts
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| merged.to_vec());
+        let edited = match self.run_editor(path, &opened)? {
+            Ok(edited) => edited,
+            Err(why) => return Ok(Err(why)),
+        };
+        self.drafts.insert(path.to_path_buf(), edited.clone());
+        if edited == merged {
+            return Ok(Err("the file was not changed".to_owned()));
+        }
+        if markers_left(&edited, merged, sides) {
+            return Ok(Err("the marker lines are still in the file".to_owned()));
+        }
+        if let Some(why) = accept(self.ctx, &source(path), &edited, sides, template) {
+            return Ok(Err(why));
+        }
+        Ok(Ok(edited))
+    }
+
+    /// The variant `[h]` keeps this machine's version of `path` as: what `add --for host=<host>`
+    /// names, with the shared source's flag. `None` where `[h]` does not apply: a path that was
+    /// not edited on both sides, a source with conditions, a reserved or system path, a host that
+    /// no condition can name, or a variant either side already has.
+    fn host_variant(&self, path: &Path, kind: Kind) -> Option<String> {
+        if !matches!(kind, Kind::Text { .. } | Kind::Whole(_)) {
+            return None;
+        }
+        let source = source(path);
+        let key = key_of(&source);
+        if is_reserved_root_name(key.split('/').next().unwrap_or(&key)) {
+            return None;
+        }
+        let flag = flag_of(path);
+        let flagged = |name: &str| match flag {
+            Flag::Age => variant::with_age(name).ok(),
+            Flag::Tmpl => variant::with_tmpl(name).ok(),
+            Flag::Plain => Some(name.to_owned()),
+        };
+        if flagged(&key)? != source {
+            return None;
+        }
+        let host = &self.ctx.identity().host;
+        let variant = flagged(&add::for_source(&key, &format!("host={host}")).ok()?)?;
+        let exists = [&self.mine, &self.theirs]
+            .iter()
+            .any(|tree| tree.contains_key(Path::new(&variant)));
+        (!exists && validate_key(&variant).is_ok()).then_some(variant)
+    }
+
+    /// `[h]`: origin's version of `path` for every machine, and this machine's committed version
+    /// kept as `variant`, once it passes the content guard `add` runs on what it stores.
+    fn keep_here(
+        &mut self,
+        path: &Path,
+        variant: &str,
+        settled: &mut BTreeMap<PathBuf, Content>,
+    ) -> Result<Result<(), String>> {
+        let (Some(mine), Some(theirs)) =
+            (self.mine.get(path).cloned(), self.theirs.get(path).cloned())
+        else {
+            bail!("{} is missing on one side", shown(path));
+        };
+        let source = source(path);
+        let bytes = self.blob(&mine)?;
+        let found = if mine.mode == SYMLINK {
+            secrets::held_link(&bytes, variant)
+        } else if flag_of(path) == Flag::Age {
+            secrets::held_name(variant)
+        } else {
+            secrets::held_name(variant)
+                .or_else(|| secrets::held(&bytes, &key_of(&source), &self.ctx.machine.guard.allow))
+        };
+        if let Some(found) = found {
+            return Ok(Err(format!(
+                "kept as {}, {found}",
+                output::escape_line(variant)
+            )));
+        }
+        let won = self.settled(path, Winner::Theirs, false);
+        self.winners.insert(source.clone(), won);
+        self.host_copies.push((source, variant.to_owned()));
+        settled.insert(path.to_path_buf(), Content::Entry(Some(theirs)));
+        settled.insert(PathBuf::from(variant), Content::Entry(Some(mine)));
+        Ok(Ok(()))
+    }
+
+    /// The `[age] recipients` of the `.dotman.toml` this pull ends with, or why it cannot be read.
+    /// A list merges with no tie, so the answers still to come do not change it.
+    fn recipients(&self) -> Result<Vec<String>, String> {
+        let [base, mine, theirs] = self.configs()?;
+        let (merged, _) =
+            repo_config::merge(&base, &mine, &theirs, &self.winners, &self.host_copies);
+        Ok(merged.age.recipients)
+    }
+
+    /// The base's, this machine's and origin's `.dotman.toml`, a missing or empty one as the
+    /// defaults; `Err` names a side that does not parse.
+    fn configs(&self) -> Result<[RepoConfig; 3], String> {
+        let mut configs: [RepoConfig; 3] = Default::default();
+        for (slot, rev) in configs.iter_mut().zip([Rev::Base, Rev::Mine, Rev::Theirs]) {
+            match self.config(rev) {
+                Config::Parsed(config) => *slot = config,
+                Config::Absent | Config::NoSettings => {}
+                Config::Unparsable(why) => return Err(why),
+            }
+        }
+        Ok(configs)
     }
 
     /// Runs the user's editor on a copy of `opened` named as `path`, in a 0700 temp dir that is
@@ -854,9 +1054,7 @@ impl<'a> Pull<'a> {
                 "no editor found: `{program}` is not on PATH; set $VISUAL or $EDITOR to the editor to use"
             )));
         }
-        // The PID in the name is what lets the temp sweep remove a killed run's copy.
-        let prefix = format!("{TEMP_PREFIX}{}-", std::process::id());
-        let dir = private_temp_dir(&prefix, &private_base(self.ctx)?)?;
+        let dir = private_dir(self.ctx)?;
         let copy = dir
             .path()
             .join(path.file_name().unwrap_or_else(|| OsStr::new("merged")));
@@ -976,7 +1174,7 @@ impl<'a> Pull<'a> {
     }
 
     /// What `[k]` and `[t]` do to an item, printed above its question.
-    fn explain(&self, item: &Item, ties: &[Tie], diff: bool) -> Vec<String> {
+    fn explain(&self, item: &Item, ties: &[Tie], diff: bool, here: Option<&str>) -> Vec<String> {
         let theirs = format!("{REMOTE}/{}", self.branch);
         let mut lines = match item {
             Item::File(_, Kind::Text { .. }) => vec![
@@ -1004,6 +1202,12 @@ impl<'a> Pull<'a> {
                 lines
             }
         };
+        if let Some(variant) = here {
+            lines.push(format!(
+                "this machine keeps its version as {}; every other machine takes {theirs}'s",
+                output::escape_line(variant)
+            ));
+        }
         if let (Item::File(path, _), false) = (item, diff)
             && flag_of(path) == Flag::Age
         {
@@ -1031,43 +1235,37 @@ impl<'a> Pull<'a> {
     /// The structured merge of `.dotman.toml` when it stopped, or when a settled file's
     /// `[modes]` entry or `[system]` table must follow its winner where git's merge would not;
     /// `Err` names a stopped side that does not parse.
-    fn settings_merge(&self) -> Result<Result<Option<Sides>, String>> {
+    fn settings_merge(&self) -> Result<Option<Sides>, String> {
         let decided_as_a_file = self.seen.iter().any(|seen| seen == Path::new(SETTINGS));
         if !self.settings && (self.winners.is_empty() || decided_as_a_file) {
-            return Ok(Ok(None));
+            return Ok(None);
         }
-        let mut configs = Vec::new();
-        for rev in [Rev::Base, Rev::Mine, Rev::Theirs] {
-            configs.push(match self.config(rev) {
-                Config::Parsed(config) => config,
-                Config::Absent | Config::NoSettings => RepoConfig::default(),
-                Config::Unparsable(why) if self.settings => return Ok(Err(why)),
-                // git merged it cleanly, and nothing here can read it to correct the result.
-                Config::Unparsable(_) => return Ok(Ok(None)),
-            });
-        }
-        let [base, mine, theirs]: [RepoConfig; 3] = configs
-            .try_into()
-            .map_err(|_| anyhow!("three sides of {SETTINGS}"))?;
-        let (merged, ties) = repo_config::merge(&base, &mine, &theirs, &self.winners, &[]);
+        let [base, mine, theirs] = match self.configs() {
+            Ok(configs) => configs,
+            Err(why) if self.settings => return Err(why),
+            // git merged it cleanly, and nothing here can read it to correct the result.
+            Err(_) => return Ok(None),
+        };
+        let (merged, ties) =
+            repo_config::merge(&base, &mine, &theirs, &self.winners, &self.host_copies);
         if !self.settings {
             let (plain, _) = repo_config::merge(&base, &mine, &theirs, &BTreeMap::new(), &[]);
             if plain == merged {
-                return Ok(Ok(None));
+                return Ok(None);
             }
         }
-        Ok(Ok(Some(Sides {
+        Ok(Some(Sides {
             merged,
             mine,
             theirs,
             ties,
-        })))
+        }))
     }
 
     /// The `.dotman.toml` content of [`Pull::settings_merge`], with each tie answered. A side's
     /// own blob is kept when the merge equals it, so nothing is rewritten for no change.
     fn settings_content(&self, answer: Option<Answer>) -> Result<Result<Option<Merged>, String>> {
-        let mut sides = match self.settings_merge()? {
+        let mut sides = match self.settings_merge() {
             Ok(Some(found)) => found,
             Ok(None) => return Ok(Ok(None)),
             Err(why) => return Ok(Err(why)),
@@ -1134,13 +1332,18 @@ impl<'a> Pull<'a> {
         Ok(())
     }
 
-    /// Saves each edit that was taken, for a replay that failed and so took none of them.
+    /// Saves each edit that was taken, for a replay that failed and so took none of them: an
+    /// encrypted one as the ciphertext that was taken.
     fn save_edits(&mut self) -> Result<()> {
-        let edits: Vec<(PathBuf, Vec<u8>)> = self
-            .edited
-            .iter()
-            .filter_map(|path| Some((path.clone(), self.drafts.get(path)?.clone())))
-            .collect();
+        let mut edits = Vec::new();
+        for path in &self.edited {
+            let taken = match self.decisions.get(path) {
+                Some(Decision::Set(entry)) if flag_of(path) == Flag::Age => Some(self.blob(entry)?),
+                _ if flag_of(path) == Flag::Age => None,
+                _ => self.drafts.get(path).cloned(),
+            };
+            edits.extend(taken.map(|bytes| (path.clone(), bytes)));
+        }
         for (path, bytes) in edits {
             let saved = self.back_up(&path, "edited", &bytes)?;
             output::warning(&format!(
@@ -1306,6 +1509,13 @@ impl TextMerge {
     }
 }
 
+/// A 0700 temp dir under `$XDG_RUNTIME_DIR` or the state dir, removed when dropped.
+fn private_dir(ctx: &Context) -> Result<TempDir> {
+    // The PID in the name is what lets the temp sweep remove a killed run's copy.
+    let prefix = format!("{TEMP_PREFIX}{}-", std::process::id());
+    private_temp_dir(&prefix, &private_base(ctx)?)
+}
+
 fn refusal(path: &Path, why: &str) {
     output::warning(&format!("{}: {why}; nothing was taken", shown(path)));
 }
@@ -1342,7 +1552,8 @@ fn flag_of(path: &Path) -> Flag {
 /// whole of `merged`, less what this machine's `[guard] allow` covers and less each finding
 /// (the same rule and the same text) already in either side's committed blob; then, for a
 /// template, the render. Whole versions skip it, having passed the guard on their own machine.
-/// `None` when it is accepted; otherwise why not.
+/// An `{age}` source's `merged` is the plaintext of an edit, which is encrypted before it becomes
+/// a blob, so the age rule is left out. `None` when it is accepted; otherwise why not.
 fn accept(
     ctx: &Context,
     source: &str,
@@ -1350,7 +1561,9 @@ fn accept(
     sides: &[Vec<u8>],
     template: bool,
 ) -> Option<String> {
-    if let Some(found) = new_finding(merged, sides, &key_of(source), &ctx.machine.guard.allow) {
+    let encrypted = flag_of(Path::new(source)) == Flag::Age;
+    let allow = &ctx.machine.guard.allow;
+    if let Some(found) = new_finding(merged, sides, &key_of(source), allow, encrypted) {
         return Some(format!("in the merged file, {found}"));
     }
     if !template {
@@ -1366,13 +1579,15 @@ fn accept(
     )
 }
 
-/// The guard's finding in `merged` that neither side's blob holds, an age key first. A rule that
-/// spans lines can match across lines the two sides each kept, so the whole file is scanned.
+/// The guard's finding in `merged` that neither side's blob holds, an age key first, unless
+/// `encrypted` leaves the age rule out. A rule that spans lines can match across lines the two
+/// sides each kept, so the whole file is scanned.
 fn new_finding(
     merged: &[u8],
     sides: &[Vec<u8>],
     key: &str,
     allow: &[crate::config::Allow],
+    encrypted: bool,
 ) -> Option<secrets::Finding> {
     let committed: Vec<(secrets::Finding, &[u8])> = sides
         .iter()
@@ -1380,6 +1595,7 @@ fn new_finding(
         .collect();
     secrets::findings_with_text(merged)
         .into_iter()
+        .filter(|(found, _)| !(encrypted && found.rule == secrets::AGE_RULE))
         .filter(|(found, _)| !found.allowed(key, allow))
         .filter(|(found, text)| {
             !committed
@@ -1515,14 +1731,16 @@ mod tests {
             "[k] all mine  [t] all theirs  [d] diffs  [p] per file  [s] stop:"
         );
         let one = Menu::One {
+            here: true,
             edit: true,
             diff: true,
         };
         assert_eq!(
             one.text(),
-            "[k] keep mine  [t] take theirs  [e] edit  [d] diff  [s] stop:"
+            "[k] keep mine  [t] take theirs  [h] keep mine on this machine only  [e] edit  [d] diff  [s] stop:"
         );
         let bare = Menu::One {
+            here: false,
             edit: false,
             diff: false,
         };
@@ -1533,6 +1751,9 @@ mod tests {
         assert_eq!(one.parse("p"), None);
         assert_eq!(bulk.parse("e"), None);
         assert_eq!(one.parse("e"), Some(Reply::Edit));
+        assert_eq!(one.parse("h"), Some(Reply::Here));
+        assert_eq!(bulk.parse("h"), None);
+        assert_eq!(bare.parse("h"), None);
         assert_eq!(bare.parse("e"), None);
         assert_eq!(bare.parse("d"), None);
         for stop in ["", "s", "S"] {
@@ -1592,15 +1813,27 @@ mod tests {
         let mine = format!("a\nx={token}\n").into_bytes();
         let theirs = b"a\nb\n".to_vec();
         let merged = format!("a\nb\nc\nx={token}\n");
-        let found = new_finding(merged.as_bytes(), std::slice::from_ref(&theirs), "k", &[]);
+        let found = new_finding(
+            merged.as_bytes(),
+            std::slice::from_ref(&theirs),
+            "k",
+            &[],
+            false,
+        );
         assert_eq!(found.map(|found| found.rule), Some("github-token"));
         let sides = [mine, theirs];
-        assert_eq!(new_finding(merged.as_bytes(), &sides, "k", &[]), None);
+        assert_eq!(
+            new_finding(merged.as_bytes(), &sides, "k", &[], false),
+            None
+        );
         let allow = [crate::config::Allow {
             path: "k".to_owned(),
             rule: "github-token".to_owned(),
         }];
-        assert_eq!(new_finding(merged.as_bytes(), &[], "k", &allow), None);
+        assert_eq!(
+            new_finding(merged.as_bytes(), &[], "k", &allow, false),
+            None
+        );
 
         let header = concat!("-----BEGIN PRIVATE", " KEY-----\n");
         let body = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB\n";
@@ -1609,9 +1842,25 @@ mod tests {
         let merged = format!("{header}Proc-Type: x\nComment: y\n{body}");
         let sides = [mine, theirs];
         for side in &sides {
-            assert_eq!(new_finding(side, &[], "k", &[]), None);
+            assert_eq!(new_finding(side, &[], "k", &[], false), None);
         }
-        let found = new_finding(merged.as_bytes(), &sides, "k", &[]);
+        let found = new_finding(merged.as_bytes(), &sides, "k", &[], false);
         assert_eq!(found.map(|found| found.rule), Some("private-key"));
+    }
+
+    #[test]
+    fn an_edit_that_is_encrypted_skips_only_the_age_rule() {
+        let age = concat!(
+            "AGE-SECRET-KEY-1",
+            "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+        );
+        let token = concat!("ghp_", "abcdefghijklmnopqrstuvwxyz0123456789");
+        let merged = format!("{age}\n");
+        let found = new_finding(merged.as_bytes(), &[], "k", &[], false);
+        assert_eq!(found.map(|found| found.rule), Some(secrets::AGE_RULE));
+        assert_eq!(new_finding(merged.as_bytes(), &[], "k", &[], true), None);
+        let merged = format!("{age}\nx={token}\n");
+        let found = new_finding(merged.as_bytes(), &[], "k", &[], true);
+        assert_eq!(found.map(|found| found.rule), Some("github-token"));
     }
 }

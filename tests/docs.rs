@@ -363,6 +363,9 @@ const CLAIMS: &[(&str, &[&str])] = &[
         &[
             "the_plaintext_of_an_encrypted_file_never_reaches_the_repo",
             "an_encrypted_conflict_leaves_no_plaintext_in_any_object",
+            "an_encrypted_edit_is_encrypted_to_every_merged_recipient_and_leaves_no_plaintext",
+            "an_encrypted_edit_that_is_not_taken_leaves_no_plaintext_and_needs_the_key",
+            "keeping_an_encrypted_file_on_this_machine_only_keeps_it_encrypted",
         ],
     ),
     (

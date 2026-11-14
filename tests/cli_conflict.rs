@@ -24,10 +24,10 @@ fn exits(env: &TestEnv, code: i32, args: &[&str]) -> String {
     stderr(&out)
 }
 
-/// A device with `files` added, `origin` set and the first sync done.
+/// A device on host `alpha` with `files` added, `origin` set and the first sync done.
 fn first_device(files: &[(&str, &[u8], u32)]) -> TestEnv {
     let env = TestEnv::new();
-    env.ok(&["init"]);
+    env.ok(&["init", "--host", "alpha"]);
     env.ok(&["init", "--remote", &env.remote_url()]);
     let mut args = vec!["add"];
     for (key, bytes, mode) in files {
@@ -48,11 +48,36 @@ fn first_device(files: &[(&str, &[u8], u32)]) -> TestEnv {
     env
 }
 
+/// [`first_device`] and a second device on host `beta`.
 fn pair(files: &[(&str, &[u8], u32)]) -> (TestEnv, TestEnv) {
     let a = first_device(files);
     let b = a.second_device();
-    b.ok(&["init", &b.remote_url(), "--take-repo"]);
+    b.ok(&["init", &b.remote_url(), "--take-repo", "--host", "beta"]);
     (a, b)
+}
+
+const PLAIN: [(&str, &str); 2] = [("NO_COLOR", "1"), ("TERM", "dumb")];
+
+/// `sync` on `env` in a terminal with the typed `input`; fails when `script` is missing, since CI
+/// has it.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn sync_in_a_terminal(env: &TestEnv, input: &[u8]) -> String {
+    common::in_a_terminal(env, &PLAIN, &["sync"], input)
+        .expect("script(1) runs")
+        .replace('\r', "")
+}
+
+fn remote_file(env: &TestEnv, source: &str) -> String {
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    env.git(&["--git-dir", &remote, "show", &format!("main:{source}")])
+}
+
+/// Commits `bytes` as the repo path `path` on `env`, as `dotman git` would.
+fn commit_in_repo(env: &TestEnv, path: &str, bytes: &[u8]) {
+    env.write_repo(path, bytes);
+    env.ok(&["git", "add", "--", path]);
+    env.ok(&["git", "commit", "-qm", path]);
 }
 
 fn no_replay_left(env: &TestEnv) {
@@ -353,6 +378,81 @@ fn a_rebase_started_by_hand_is_still_refused() {
     exits(&b, 0, &["sync", "--keep-local"]);
     exits(&a, 0, &["sync"]);
     common::assert_converged(&a, &b);
+}
+
+/// `[h]` keeps this machine's version as the variant `add --for host=beta` names, with this
+/// machine's `[modes]` entry; the shared source takes origin's version, so the other machine keeps
+/// origin's after it syncs. The report names no `add --for host=` step.
+#[test]
+fn on_a_terminal_keep_mine_here_only_keeps_this_machine_s_version_as_its_variant() {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o600);
+    let seen = sync_in_a_terminal(&b, b"h\n");
+    assert!(
+        seen.contains("this machine keeps its version as .a{host=beta}; every other machine takes origin/main's\n.a [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [e] edit  [d] diff  [s] stop: "),
+        "{seen}"
+    );
+    assert!(seen.contains("saved this machine's .a to "), "{seen}");
+    assert!(!seen.contains("--for host="), "{seen}");
+    no_replay_left(&b);
+    assert_eq!(b.read(".a"), b"from b\n", "{seen}");
+    assert_eq!(common::mode_of(&b.home().join(".a")), 0o600);
+    assert_eq!(remote_file(&b, ".a"), "from a\n");
+    assert_eq!(remote_file(&b, ".a{host=beta}"), "from b\n");
+    let modes = b.repo_config().modes;
+    assert_eq!(
+        modes.get(".a{host=beta}").map(String::as_str),
+        Some("0600"),
+        "{modes:?}"
+    );
+    assert_eq!(modes.get(".a"), None, "{modes:?}");
+
+    exits(&a, 0, &["sync"]);
+    assert_eq!(a.read(".a"), b"from a\n");
+    assert_eq!(common::mode_of(&a.home().join(".a")), 0o644);
+    exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".a"), b"from b\n");
+}
+
+/// `[h]` is not offered when origin already has the variant it would add, nor for a system
+/// source, and typing it is not taken as an answer.
+#[test]
+fn on_a_terminal_keep_mine_here_only_is_not_offered_for_an_existing_variant_or_a_system_file() {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    a.ok(&["add", "--for", "host=beta", ".a"]);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+    let seen = sync_in_a_terminal(&b, b"h\ns\n");
+    assert!(
+        seen.contains(".a [k] keep mine  [t] take theirs  [e] edit  [d] diff  [s] stop: "),
+        "{seen}"
+    );
+    assert!(!seen.contains("keep mine on this machine only"), "{seen}");
+    assert!(seen.contains("not one of the listed answers"), "{seen}");
+    assert_eq!(b.read(".a"), b"from b\n");
+    no_replay_left(&b);
+
+    let system = ".dotman/system/etc/app.conf";
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    commit_in_repo(&a, system, b"base\n");
+    exits(&a, 0, &["sync"]);
+    exits(&b, 0, &["sync"]);
+    commit_in_repo(&a, system, b"from a\n");
+    exits(&a, 0, &["sync"]);
+    commit_in_repo(&b, system, b"from b\n");
+    let seen = sync_in_a_terminal(&b, b"h\ns\n");
+    assert!(
+        seen.contains(&format!(
+            "{system} [k] keep mine  [t] take theirs  [e] edit  [d] diff  [s] stop: "
+        )),
+        "{seen}"
+    );
+    assert!(!seen.contains("keep mine on this machine only"), "{seen}");
+    assert!(seen.contains("not one of the listed answers"), "{seen}");
+    no_replay_left(&b);
 }
 
 /// The sweep removes a killed run's `.dotman-tmp-` dir from `$XDG_RUNTIME_DIR`, where the conflict

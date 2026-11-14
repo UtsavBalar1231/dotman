@@ -1018,16 +1018,7 @@ impl Targets<'_> {
     // Capture goes into the source this machine applies, which may be a variant.
     fn plain_source_for(&self, key: &str) -> Result<String> {
         if let Some(conditions) = self.conditions {
-            let source = variant::variant_source(key, conditions)?;
-            if secrets::held_name(key).is_none()
-                && let Some(found) = secrets::held_name(&source)
-            {
-                bail!(
-                    "the --for value holds a credential ({}), which would be in the repo's file name; give a different --for value",
-                    found.rule
-                );
-            }
-            return Ok(source);
+            return for_source(key, conditions);
         }
         if let Some(source) = self.resumed.get(key) {
             return Ok(source.clone());
@@ -1186,6 +1177,21 @@ impl Targets<'_> {
             .chain([source]);
         Sources::group(after).select(key, self.identity).winner() == Some(&source)
     }
+}
+
+/// The source `add --for <conditions>` stores `key` under, before `--encrypt` or `--template`
+/// adds its flag.
+pub(crate) fn for_source(key: &str, conditions: &str) -> Result<String> {
+    let source = variant::variant_source(key, conditions)?;
+    if secrets::held_name(key).is_none()
+        && let Some(found) = secrets::held_name(&source)
+    {
+        bail!(
+            "the --for value holds a credential ({}), which would be in the repo's file name; give a different --for value",
+            found.rule
+        );
+    }
+    Ok(source)
 }
 
 fn shown(key: &str, source: &str) -> String {
