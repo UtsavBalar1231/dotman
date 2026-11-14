@@ -4916,6 +4916,55 @@ fn a_hostile_modes_entry_does_not_widen_a_private_file_through_a_tie() {
     }
 }
 
+/// This machine drops a file's `[modes]` entry, so its side is git's 0644, while a hostile origin
+/// widens the entry to 0777 or 4777 and makes the file 100755 in git: the tie keeps an entry at
+/// the stricter 0644, since the merged tree carries origin's 100755.
+#[test]
+fn a_dropped_modes_entry_against_a_wider_one_on_an_executable_keeps_the_stricter_mode() {
+    for (wide, flag) in [
+        ("0777", "--keep-local"),
+        ("4777", "--keep-local"),
+        ("0777", "--take-repo"),
+    ] {
+        let (a, b) = two_machines();
+        let set_entry = |env: &TestEnv, entry: Option<&str>| {
+            let mut config = env.repo_config();
+            match entry {
+                Some(mode) => config.modes.insert(".x".to_owned(), mode.to_owned()),
+                None => config.modes.remove(".x"),
+            };
+            config
+                .save(&env.repo().join(".dotman.toml"), false)
+                .unwrap();
+        };
+        a.write_repo(".x", b"x\n");
+        set_entry(&a, Some("0600"));
+        a.push_repo();
+        b.ok(&["sync"]);
+        assert_eq!(mode_of(&b.home().join(".x")), 0o600);
+
+        set_entry(&a, Some(wide));
+        fs::set_permissions(
+            a.repo().join(".x"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        a.push_repo();
+        set_entry(&b, None);
+        let repo = b.repo().to_string_lossy().into_owned();
+        b.git(&["-C", &repo, "commit", "-qam", "drop the entry"]);
+
+        exits(&b.run(&["sync", flag]), 0);
+        let case = format!("{wide} {flag}");
+        assert_eq!(mode_of(&b.home().join(".x")), 0o644, "{case}");
+        let entry = b.repo_config().modes.get(".x").cloned();
+        assert_eq!(entry.as_deref(), Some("0644"), "{case}");
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let pushed = a.git(&["--git-dir", &remote, "show", "main:.dotman.toml"]);
+        assert!(pushed.contains("\".x\" = \"0644\""), "{case}: {pushed}");
+    }
+}
+
 /// Each side keeps half of a private key, which a merge of the two would join: the merged copy is
 /// refused under a flag, sync exits 4 naming the file and changes nothing, and the way out it
 /// prints works as printed. A credential that origin's own version holds is no reason to refuse:

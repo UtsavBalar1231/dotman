@@ -429,8 +429,9 @@ fn bits(entry: Option<&str>, git_mode: u32) -> u32 {
     entry.map_or(git_mode, |text| parse_mode(text).unwrap_or(0)) & 0o777
 }
 
-// A side with no entry counts as its git mode in `git`. The result is no entry when it equals
-// that git mode, since an entry would skip the narrowing a file at git's mode gets.
+// A side with no entry counts as its git mode in `git`. The result is no entry when a side has
+// none and both sides' git modes equal it, since an entry would skip the narrowing a file at
+// git's mode gets. Where the git modes differ, the merged tree can carry the wider one.
 fn stricter_entry(
     mine: Option<&String>,
     theirs: Option<&String>,
@@ -438,12 +439,8 @@ fn stricter_entry(
 ) -> Option<String> {
     let both =
         bits(mine.map(String::as_str), ours_git) & bits(theirs.map(String::as_str), theirs_git);
-    let git = match (mine, theirs) {
-        (None, _) => Some(ours_git & 0o777),
-        (_, None) => Some(theirs_git & 0o777),
-        _ => None,
-    };
-    (git != Some(both)).then(|| format!("{both:04o}"))
+    let git = (mine.is_none() || theirs.is_none()) && ours_git & 0o777 == theirs_git & 0o777;
+    (!git || ours_git & 0o777 != both).then(|| format!("{both:04o}"))
 }
 
 // Gives a `[system]` key both sides hold the stricter mode, with this machine's owner and group;
@@ -1044,6 +1041,24 @@ mode = "0644"
         let (merged, _) = merge(&base, &RepoConfig::default(), &theirs, &won, &[], &git);
         assert_eq!(mode_of(&merged, "run").as_deref(), Some("0644"));
         assert_eq!(mode_of(&merged, "none"), None);
+    }
+
+    /// A `[modes]` tie where one side has no entry keeps the stricter entry when the two sides'
+    /// git modes differ, since the merged tree can carry the wider git mode.
+    #[test]
+    fn a_modes_tie_keeps_the_entry_when_the_git_modes_differ() {
+        let base = cfg("[modes]\n\"x\" = \"0600\"\n");
+        let without = RepoConfig::default();
+        let git = |_: &str| (0o100_644, 0o100_755);
+        for wide in ["0777", "4777"] {
+            let theirs = cfg(&format!("[modes]\n\"x\" = \"{wide}\"\n"));
+            let (merged, ties) = merge(&base, &without, &theirs, &BTreeMap::new(), &[], &git);
+            assert_eq!(ties, []);
+            assert_eq!(mode_of(&merged, "x").as_deref(), Some("0644"), "{wide}");
+        }
+        let theirs = cfg("[modes]\n\"x\" = \"0755\"\n");
+        let (merged, _) = merge(&base, &theirs, &without, &BTreeMap::new(), &[], &git);
+        assert_eq!(mode_of(&merged, "x").as_deref(), Some("0755"));
     }
 
     #[test]
