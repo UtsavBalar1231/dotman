@@ -34,9 +34,13 @@ fn ask_on(err: &mut impl Write, input: &mut impl BufRead, question: &str) -> Res
     write!(err, "{} ", output::escape_line(question)).context("cannot write to stderr")?;
     err.flush().context("cannot write to stderr")?;
     let mut line = String::new();
-    input
+    let read = input
         .read_line(&mut line)
         .context("cannot read the answer")?;
+    // End of input echoes no newline, so what follows would continue the question's line.
+    if read == 0 {
+        writeln!(err).context("cannot write to stderr")?;
+    }
     Ok(line.trim().to_owned())
 }
 
@@ -138,6 +142,13 @@ mod tests {
             String::from_utf8(shown).unwrap(),
             "keep d/\\u{1b}]0;PWNED\\u{7}x\\r\\nforged? [y/N] "
         );
+    }
+
+    #[test]
+    fn the_end_of_input_ends_the_question_line() {
+        let mut shown = Vec::new();
+        assert_eq!(ask_on(&mut shown, &mut b"".as_slice(), "go?").unwrap(), "");
+        assert_eq!(String::from_utf8(shown).unwrap(), "go? \n");
     }
 
     #[test]
