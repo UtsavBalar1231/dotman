@@ -684,7 +684,8 @@ impl Context {
     }
 
     /// Removes the temp files and directories that killed runs left in the worktree, in dotman's
-    /// state and config directories and in the `$HOME` directories of managed keys; see
+    /// state and config directories, in `$XDG_RUNTIME_DIR` and in the `$HOME` directories of
+    /// managed keys; see
     /// [`is_leftover`] for what counts. The caller holds the lock.
     pub(crate) fn sweep_temp_files(&self) -> Result<()> {
         let repo = &self.paths.repo;
@@ -708,9 +709,11 @@ impl Context {
             }
         }
         let home = &self.paths.home;
-        // dotman's own directories hold the state and the age identity, both written atomically.
+        // dotman's own directories hold the state and the age identity, both written atomically;
+        // the runtime dir holds the conflict flow's private copies, decrypted ones included.
         let mut dirs: BTreeSet<PathBuf> = std::iter::once(self.paths.state_dir.clone())
             .chain(self.paths.config_file.parent().map(Path::to_path_buf))
+            .chain(runtime_dir())
             .collect();
         for key in self.sources()?.keys() {
             // Only real directories, so the sweep never reaches through a symlinked parent.
@@ -998,6 +1001,13 @@ fn sort_untracked(
         }
     }
     Ok((roots.into_iter().collect(), unnamed))
+}
+
+/// `$XDG_RUNTIME_DIR` when it is set to an absolute path.
+pub(crate) fn runtime_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
 }
 
 /// How long a leftover must be untouched before a sweep removes it. A live run in another PID

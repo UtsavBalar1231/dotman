@@ -354,3 +354,44 @@ fn a_rebase_started_by_hand_is_still_refused() {
     exits(&a, 0, &["sync"]);
     common::assert_converged(&a, &b);
 }
+
+/// The sweep removes a killed run's `.dotman-tmp-` dir from `$XDG_RUNTIME_DIR`, where the conflict
+/// flow puts its private copies, once it is old enough; a fresh one, which a live run may own, and
+/// a user's directory of a similar name stay.
+#[test]
+fn the_sweep_removes_an_old_temp_dir_from_the_runtime_dir_and_keeps_a_fresh_one() {
+    use std::os::unix::fs::DirBuilderExt;
+    let env = first_device(&[(".a", b"a\n", 0o644)]);
+    let run = env.root().join("run");
+    fs::create_dir(&run).expect("runtime dir");
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("chmod");
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead = child.id();
+    child.wait().expect("wait");
+    let old = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .expect("an hour ago");
+    let dir = |name: String, mode: u32, aged: bool| {
+        let path = run.join(name);
+        fs::DirBuilder::new()
+            .mode(mode)
+            .create(&path)
+            .expect("mkdir");
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+        fs::write(path.join("merged"), b"plaintext\n").expect("write");
+        if aged {
+            fs::File::open(&path)
+                .and_then(|dir| dir.set_modified(old))
+                .expect("age it");
+        }
+        path
+    };
+    let stale = dir(format!(".dotman-tmp-{dead}-a1B2c3"), 0o700, true);
+    let fresh = dir(format!(".dotman-tmp-{dead}-f1B2c3"), 0o700, false);
+    let users = dir(format!(".dotman-tmp-{dead}-u1B2c3"), 0o755, true);
+    let run_var = run.to_string_lossy().into_owned();
+    let err = env.ok_with(&[("XDG_RUNTIME_DIR", run_var.as_str())], &["sync"]);
+    assert!(!stale.exists(), "{err}");
+    assert!(fresh.exists(), "{err}");
+    assert!(users.exists(), "{err}");
+}

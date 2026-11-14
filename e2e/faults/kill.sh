@@ -410,12 +410,6 @@ op_key() {
     fk_converge "$m" a "$m"
 }
 
-# Clears machine M's XDG_RUNTIME_DIR of dotman temp dirs, as a logout would clear its tmpfs: the
-# conflict flow's private copies live there, and the sweep only reaches the state dir.
-fk_logout() {
-    rm -rf -- "$(e2e_mroot "$1")/run"/.dotman-tmp-*
-}
-
 # Writes a binary file REL holding TEXT and a NUL byte on machine M, at MODE (default 644).
 fk_write_bin() {
     local m=$1 rel=$2 path
@@ -480,7 +474,6 @@ s6
     fk_whole "$m" home
     fk_retry "$m" '' sync --keep-local
     fk_age "$m"
-    fk_logout "$m"
     fk_converge "$other" "$m" "$other"
 }
 
