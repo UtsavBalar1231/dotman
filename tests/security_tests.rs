@@ -4385,13 +4385,16 @@ fn the_printed_pull_reaches_a_branch_other_than_main() {
     b.ok(&["add", ".x"]);
 
     let err = exits(&b.run(&["sync"]), 4);
-    let pull = "dotman git pull --rebase -s ort origin topic/a.b";
+    let pull = format!(
+        "dotman git pull --rebase -s {} origin topic/a.b",
+        common::pull_strategy(&b)
+    );
     assert!(err.contains(&format!("1. {pull}")), "{err}");
     assert!(
         err.contains(".x is a file here and a directory in origin/topic/a.b"),
         "{err}"
     );
-    let out = common::paste(&b, pull);
+    let out = common::paste(&b, &pull);
     assert!(!out.status.success(), "the pull stops on the conflict");
     assert!(
         names(&b.repo()).iter().any(|name| name.starts_with(".x~")),

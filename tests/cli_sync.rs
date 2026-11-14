@@ -392,7 +392,13 @@ fn a_conflict_in_dotman_toml_is_aborted_with_junk_in_the_worktree() {
     no_replay_left(&b);
     exits(&b, 0, &["status"]);
     let [pull, edit, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
-    assert_eq!(pull, "dotman git pull --rebase -s ort origin main");
+    assert_eq!(
+        pull,
+        format!(
+            "dotman git pull --rebase -s {} origin main",
+            common::pull_strategy(&b)
+        )
+    );
     assert_eq!(
         edit,
         format!("Edit the conflicting files under {}.", repo_path(&b))
@@ -3402,11 +3408,20 @@ fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
         );
         let copy = printed_copy(&err, "this machine's", name);
         assert!(copy.starts_with(&format!("'{name}~")), "{err}");
+        // git with `ort` tracks the copy; git 2.25's `recursive` leaves it untracked.
+        let remove = if common::pull_strategy(&b) == "ort" {
+            format!("dotman git rm -q -f -- {copy}")
+        } else {
+            let bare = shell_words::split(&copy).expect("the copy as one word");
+            let [bare]: [String; 1] = bare.try_into().expect("one word");
+            let path = b.repo().join(bare).to_string_lossy().into_owned();
+            format!("rm -f -- {}", shell_words::quote(&path))
+        };
         let keep = steps(&err).get(2).cloned().unwrap_or_default();
         assert_eq!(
             keep,
             format!(
-                "dotman git checkout --no-overlay REBASE_HEAD -- {name}\ndotman git rm -q -f -- {copy}\ndotman git add -- .a {name}\ndotman git add -u"
+                "dotman git checkout --no-overlay REBASE_HEAD -- {name}\n{remove}\ndotman git add -- .a {name}\ndotman git add -u"
             )
         );
         no_replay_left(&b);

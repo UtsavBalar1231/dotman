@@ -657,6 +657,22 @@ pub fn curl_available() -> bool {
     found
 }
 
+/// The strategy a printed `git pull --rebase` names to pin git's merge backend: `recursive` before
+/// git 2.34, which added `ort`, and `ort` from then on.
+pub fn pull_strategy(env: &TestEnv) -> &'static str {
+    let version = env.git(&["--version"]);
+    let mut parts = version
+        .trim()
+        .trim_start_matches("git version ")
+        .split('.')
+        .map(|part| part.parse::<u32>().expect("a numeric git version"));
+    let at = (
+        parts.next().expect("a major version"),
+        parts.next().expect("a minor version"),
+    );
+    if at < (2, 34) { "recursive" } else { "ort" }
+}
+
 /// `git -C dir args`, asserting success; returns stdout.
 pub fn git_in(env: &TestEnv, dir: &Path, args: &[&str]) -> String {
     let dir = dir.to_string_lossy();
