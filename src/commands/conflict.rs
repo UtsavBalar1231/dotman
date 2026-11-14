@@ -1557,7 +1557,8 @@ fn flag_of(path: &Path) -> Flag {
 /// (the same rule and the same text) already in either side's committed blob; then, for a
 /// template, the render. Whole versions skip it, having passed the guard on their own machine.
 /// An `{age}` source's `merged` is the plaintext of an edit, which is encrypted before it becomes
-/// a blob, so the age rule is left out. `None` when it is accepted; otherwise why not.
+/// a blob, so the guard does not apply, as it does not to a capture of an encrypted file. `None`
+/// when it is accepted; otherwise why not.
 fn accept(
     ctx: &Context,
     source: &str,
@@ -1567,7 +1568,7 @@ fn accept(
 ) -> Option<String> {
     let encrypted = flag_of(Path::new(source)) == Flag::Age;
     let allow = &ctx.machine.guard.allow;
-    if let Some(found) = new_finding(merged, sides, &key_of(source), allow, encrypted) {
+    if !encrypted && let Some(found) = new_finding(merged, sides, &key_of(source), allow) {
         return Some(format!("in the merged file, {found}"));
     }
     if !template {
@@ -1583,15 +1584,13 @@ fn accept(
     )
 }
 
-/// The guard's finding in `merged` that neither side's blob holds, an age key first, unless
-/// `encrypted` leaves the age rule out. A rule that spans lines can match across lines the two
-/// sides each kept, so the whole file is scanned.
+/// The guard's finding in `merged` that neither side's blob holds, an age key first. A rule that
+/// spans lines can match across lines the two sides each kept, so the whole file is scanned.
 fn new_finding(
     merged: &[u8],
     sides: &[Vec<u8>],
     key: &str,
     allow: &[crate::config::Allow],
-    encrypted: bool,
 ) -> Option<secrets::Finding> {
     let committed: Vec<(secrets::Finding, &[u8])> = sides
         .iter()
@@ -1599,7 +1598,6 @@ fn new_finding(
         .collect();
     secrets::findings_with_text(merged)
         .into_iter()
-        .filter(|(found, _)| !(encrypted && found.rule == secrets::AGE_RULE))
         .filter(|(found, _)| !found.allowed(key, allow))
         .filter(|(found, text)| {
             !committed
@@ -1817,27 +1815,15 @@ mod tests {
         let mine = format!("a\nx={token}\n").into_bytes();
         let theirs = b"a\nb\n".to_vec();
         let merged = format!("a\nb\nc\nx={token}\n");
-        let found = new_finding(
-            merged.as_bytes(),
-            std::slice::from_ref(&theirs),
-            "k",
-            &[],
-            false,
-        );
+        let found = new_finding(merged.as_bytes(), std::slice::from_ref(&theirs), "k", &[]);
         assert_eq!(found.map(|found| found.rule), Some("github-token"));
         let sides = [mine, theirs];
-        assert_eq!(
-            new_finding(merged.as_bytes(), &sides, "k", &[], false),
-            None
-        );
+        assert_eq!(new_finding(merged.as_bytes(), &sides, "k", &[]), None);
         let allow = [crate::config::Allow {
             path: "k".to_owned(),
             rule: "github-token".to_owned(),
         }];
-        assert_eq!(
-            new_finding(merged.as_bytes(), &[], "k", &allow, false),
-            None
-        );
+        assert_eq!(new_finding(merged.as_bytes(), &[], "k", &allow), None);
 
         let header = concat!("-----BEGIN PRIVATE", " KEY-----\n");
         let body = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB\n";
@@ -1846,25 +1832,21 @@ mod tests {
         let merged = format!("{header}Proc-Type: x\nComment: y\n{body}");
         let sides = [mine, theirs];
         for side in &sides {
-            assert_eq!(new_finding(side, &[], "k", &[], false), None);
+            assert_eq!(new_finding(side, &[], "k", &[]), None);
         }
-        let found = new_finding(merged.as_bytes(), &sides, "k", &[], false);
+        let found = new_finding(merged.as_bytes(), &sides, "k", &[]);
         assert_eq!(found.map(|found| found.rule), Some("private-key"));
     }
 
     #[test]
-    fn an_edit_that_is_encrypted_skips_only_the_age_rule() {
+    fn an_age_key_is_found_before_another_finding() {
         let age = concat!(
             "AGE-SECRET-KEY-1",
             "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
         );
         let token = concat!("ghp_", "abcdefghijklmnopqrstuvwxyz0123456789");
-        let merged = format!("{age}\n");
-        let found = new_finding(merged.as_bytes(), &[], "k", &[], false);
+        let merged = format!("x={token}\n{age}\n");
+        let found = new_finding(merged.as_bytes(), &[], "k", &[]);
         assert_eq!(found.map(|found| found.rule), Some(secrets::AGE_RULE));
-        assert_eq!(new_finding(merged.as_bytes(), &[], "k", &[], true), None);
-        let merged = format!("{age}\nx={token}\n");
-        let found = new_finding(merged.as_bytes(), &[], "k", &[], true);
-        assert_eq!(found.map(|found| found.rule), Some("github-token"));
     }
 }

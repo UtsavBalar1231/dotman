@@ -5215,6 +5215,35 @@ fn an_encrypted_edit_is_encrypted_to_every_merged_recipient_and_leaves_no_plaint
     assert_eq!(a.read(SEALED), b"plain_marker_edited\n");
 }
 
+/// An encrypted file is where a credential belongs, so `[e]` takes an edit that adds one, as a
+/// capture of an encrypted file does, and the credential reaches the repo only as ciphertext.
+#[test]
+fn an_encrypted_edit_may_add_a_credential_and_it_is_committed_encrypted() {
+    if !age_installed() {
+        return;
+    }
+    let (a, b) = sealed_clash();
+    a.ok(&["sync"]);
+    b.write(SEALED, b"plain_marker_from_b\n", 0o600);
+    let token = concat!("ghp_", "abcdefghijklmnopqrstuvwxyz0123456789");
+    let editor = editor(&b, &format!("printf 'token={token}\\n' > \"$1\""));
+    let run = runtime_dir(&b).to_string_lossy().into_owned();
+    let vars = [
+        ("VISUAL", editor.as_str()),
+        ("XDG_RUNTIME_DIR", run.as_str()),
+    ];
+    let seen = sync_in_a_terminal(&b, &vars, b"e\n");
+    assert!(
+        seen.contains(&format!("resolve {SEALED_SOURCE} (edited)")),
+        "{seen}"
+    );
+    assert!(!seen.contains("nothing was taken"), "{seen}");
+    assert_eq!(b.read(SEALED), format!("token={token}\n").as_bytes());
+    assert!(!in_any_object(&b, token.as_bytes()));
+    exits(&a.run(&["sync"]), 0);
+    assert_eq!(a.read(SEALED), format!("token={token}\n").as_bytes());
+}
+
 /// The temp dir of an encrypted file's `[e]` is gone when the editor exits non-zero and when the
 /// edit is refused, and after `[s]` nothing changed and no object holds a plaintext. Without the
 /// key, `[e]` is not offered.
