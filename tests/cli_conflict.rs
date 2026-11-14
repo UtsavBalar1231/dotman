@@ -388,50 +388,138 @@ fn numbered_steps(err: &str) -> Vec<String> {
         .collect()
 }
 
-/// After a kill, the user edits a file the pull does not touch: recovery refuses, names it, and
-/// its printed steps copy it to a backup run before `checkout -f` drops it. Run as printed, they
-/// lead to a clean sync, and the edit survives in the copy.
-#[test]
-fn the_refusal_s_steps_save_an_uncommitted_edit_before_they_check_out() {
+const LINK: &str = ".cfg/the link";
+
+/// A pair whose first device committed each of `names` and the symlink [`LINK`] in the repo, with
+/// `b`'s sync of a `.t` clash then killed at `pattern`, and each name edited by hand in `b`'s repo
+/// and the link retargeted. A sync with a name that dotman reports exits `code`. Returns the
+/// hand edits by name, the link's new target last.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn killed_with_hand_edits(
+    pattern: &str,
+    names: &[&str],
+    code: i32,
+) -> (TestEnv, TestEnv, Vec<(String, Vec<u8>)>) {
+    let a = first_device(&[(".t", b"1\n2\n3\n", 0o644)]);
+    for name in names {
+        commit_in_repo(&a, name, b"base\n");
+    }
+    std::os::unix::fs::symlink("pq", a.repo().join(LINK)).expect("link");
+    a.ok(&["git", "add", "--", LINK]);
+    a.ok(&["git", "commit", "-qm", "link"]);
+    exits(&a, code, &["sync"]);
+    let mut b = a.second_device();
+    exits(
+        &b,
+        code,
+        &["init", &b.remote_url(), "--take-repo", "--host", "beta"],
+    );
+    a.write(".t", b"1\nfrom a\n3\n", 0o644);
+    exits(&a, code, &["sync"]);
+    b.write(".t", b"1\nfrom b\n3\n", 0o644);
+    let (pre, post) = kill_once(&b, pattern, true);
+    wrap_git(&mut b, &pre, &post);
+    let out = b.run(&["sync", "--keep-local"]);
+    assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+    let mut edits = Vec::new();
+    for (n, name) in names.iter().enumerate() {
+        let edit = format!("hand edit {n}\n").into_bytes();
+        fs::write(b.repo().join(name), &edit).expect("edit by hand");
+        edits.push(((*name).to_owned(), edit));
+    }
+    let link = b.repo().join(LINK);
+    fs::remove_file(&link).expect("unlink");
+    std::os::unix::fs::symlink("hand edit", &link).expect("retarget");
+    edits.push((LINK.to_owned(), b"hand edit".to_vec()));
+    (a, b, edits)
+}
+
+/// The refusal over a kill with hand edits of files the pull does not touch: a dry run writes
+/// nothing; the refusal changes nothing in `$HOME`, the repo or the remote, saves each edit to a
+/// backup run byte for byte, the symlink as a symlink, and says where on one line. No step names
+/// a path. The steps, run as printed, start at the checkout and end in a sync that exits `code`,
+/// and the copies outlast them.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn the_refusal_saves(names: &[&str], code: i32) {
     for pattern in [
         "*' update-ref '*",
         "*' rebase --continue'*|*' rebase --skip'*",
     ] {
-        let (a, mut b) = pair(&[(".t", b"1\n2\n3\n", 0o644), (".other", b"other\n", 0o644)]);
-        a.write(".t", b"1\nfrom a\n3\n", 0o644);
-        exits(&a, 0, &["sync"]);
-        b.write(".t", b"1\nfrom b\n3\n", 0o644);
-        let (pre, post) = kill_once(&b, pattern, true);
-        wrap_git(&mut b, &pre, &post);
-        let out = b.run(&["sync", "--keep-local"]);
-        assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
-        let edit = b"other\nby hand\n";
-        fs::write(b.repo().join(".other"), edit).expect("edit by hand");
+        let (a, b, edits) = killed_with_hand_edits(pattern, names, code);
+        let before = b.four_trees();
+        exits(&b, 4, &["sync", "--dry-run"]);
+        assert_eq!(b.four_trees(), before, "{pattern}: the dry run wrote");
 
+        let (trees, status) = outside_git(&b);
         let err = exits(&b, 4, &["sync", "--keep-local"]);
-        assert!(err.contains(".other has changes"), "{pattern}: {err}");
-        assert!(err.contains("after copying .other to "), "{pattern}: {err}");
-        let steps = numbered_steps(&err);
-        let checkout = steps
-            .iter()
-            .position(|step| step == "dotman git checkout -f main")
-            .expect("a checkout step");
-        let save = steps
-            .iter()
-            .position(|step| step.contains("cp -P -- "))
-            .expect("a save step");
-        assert!(save < checkout, "{err}");
-        for step in &steps {
-            let out = common::paste(&b, step);
-            let code = if step == "dotman sync" { 4 } else { 0 };
-            assert_eq!(out.status.code(), Some(code), "{step}: {}", stderr(&out));
+        let (after, status_after) = outside_git(&b);
+        for at in [0, 1, 3] {
+            assert_eq!(after.get(at), trees.get(at), "{pattern}: tree {at}: {err}");
         }
-        exits(&b, 0, &["sync", "--keep-local"]);
+        assert_eq!(status_after, status, "{pattern}: {err}");
+        assert!(err.contains("has changes that are not committed"), "{err}");
+        assert!(!err.contains('\u{1b}'), "{err}");
+        let dir = err
+            .lines()
+            .find_map(|line| line.strip_prefix("saved the uncommitted edits of the repo's "))
+            .and_then(|line| line.rsplit_once(" to "))
+            .map(|(_, dir)| std::path::PathBuf::from(dir))
+            .expect("a saved line");
+        assert!(dir.starts_with(b.state_dir().join("backups")), "{err}");
+        let steps = numbered_steps(&err);
+        let first = if pattern.contains("continue") {
+            "dotman git rebase --quit"
+        } else {
+            "dotman git checkout -f main"
+        };
+        assert_eq!(steps.first().map(String::as_str), Some(first), "{err}");
+        for step in &steps {
+            assert!(!step.contains(".cfg"), "{step}");
+            let out = common::paste(&b, step);
+            let want = if step == "dotman sync" { 4 } else { 0 };
+            assert_eq!(out.status.code(), Some(want), "{step}: {}", stderr(&out));
+        }
+        exits(&b, code, &["sync", "--keep-local"]);
         no_replay_left(&b);
-        let saved = common::files_containing(&b.state_dir().join("backups"), b"by hand");
-        assert_eq!(saved.len(), 1, "{pattern}: {saved:?}");
-        exits(&a, 0, &["sync"]);
+        for (name, edit) in &edits {
+            let copy = dir.join(name);
+            if name == LINK {
+                let target = fs::read_link(&copy).expect("the link is saved as a link");
+                assert_eq!(target.as_os_str().as_encoded_bytes(), edit.as_slice());
+            } else {
+                assert_eq!(&fs::read(&copy).expect("saved"), edit, "{name:?}");
+            }
+        }
+        assert!(!b.home().join(".config/autostart").exists(), "{pattern}");
+        exits(&a, code, &["sync"]);
     }
+}
+
+/// Names a shell reads as more than one word or expands, such as a brace list that bash would
+/// turn into a path in `$HOME`.
+#[test]
+fn the_refusal_saves_each_uncommitted_edit_itself_whatever_its_name() {
+    the_refusal_saves(
+        &[
+            ".other",
+            ".cfg/br{a,b}ce",
+            ".cfg/n{1..2}",
+            ".cfg/p/{,.}./{,.}./.config/{evil.desktop,autostart}",
+            ".cfg/dir one/it's \"q\".conf",
+            "-lead",
+            ".cfg/$(touch PWNED) *",
+            ".cfg/ünï 文/naïve.txt",
+        ],
+        0,
+    );
+}
+
+/// Names with an escape sequence and a newline, which dotman reports and never applies.
+#[test]
+fn the_refusal_saves_an_edit_whose_name_holds_a_control_character() {
+    the_refusal_saves(&[".cfg/esc\u{1b}[31mred", ".cfg/new\nline"], 3);
 }
 
 /// The branches of `env`'s repo and of the remote, one name per line.

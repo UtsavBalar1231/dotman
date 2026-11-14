@@ -2,8 +2,8 @@
 //!
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
 
-use crate::engine::write::{back_up_bytes, backup_run_dir};
-use crate::paths::{validate_key, write_atomic};
+use crate::engine::write::backup_run_dir;
+use crate::paths::write_atomic;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -11,7 +11,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -318,28 +318,15 @@ pub struct Refusal {
     rebase_dir: bool,
     /// Worktree files, repo-relative, that hold changes `checkout -f` would drop.
     dirty: Vec<PathBuf>,
-    /// Where the steps copy `dirty` first: the `.dotman/repo` directory of a new backup run, made
-    /// private with the parent of each copy. `None` when no backups directory is set or it could
-    /// not be made.
-    saves_to: Option<PathBuf>,
+    /// The `.dotman/repo` directory of the backup run that holds a copy of each of `dirty`, or
+    /// why they could not all be copied there. `None` when nothing is dirty or no step checks out.
+    saved: Option<Result<PathBuf, String>>,
 }
 
 impl Refusal {
-    /// The steps that save the dirty files, check out `branch` and go on. A symlink is copied as
-    /// one.
     fn checkout_steps(&self, branch: &str) -> Vec<String> {
         let bin = crate::name::bin();
-        let quote = |path: &Path| shell_words::quote(&path.to_string_lossy()).into_owned();
         let mut steps = Vec::new();
-        if let Some(dir) = &self.saves_to {
-            for path in &self.dirty {
-                steps.push(format!(
-                    "cp -P -- {} {}",
-                    quote(&self.repo.join(path)),
-                    quote(&dir.join(path))
-                ));
-            }
-        }
         if self.rebase_dir {
             steps.push(format!("{bin} git rebase --quit"));
         }
@@ -349,27 +336,11 @@ impl Refusal {
         ));
         steps
     }
-
-    /// What `checkout -f` drops, and where the steps save it first.
-    fn drops(&self) -> String {
-        let shown: Vec<String> = self
-            .dirty
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
-        match &self.saves_to {
-            Some(dir) if !shown.is_empty() => format!(
-                "which drops the changes that are not committed in the repo, after copying {} to {}",
-                shown.join(", "),
-                dir.display()
-            ),
-            _ => "which drops the changes that are not committed in the repo".to_owned(),
-        }
-    }
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const DROPS: &str = "which drops the changes that are not committed in the repo";
         let bin = crate::name::bin();
         let marker = self.repo.join(".git").join(PULL_MARKER);
         let marker = shell_words::quote(&marker.to_string_lossy()).into_owned();
@@ -379,26 +350,47 @@ impl fmt::Display for Refusal {
             self.repo.display(),
             self.why
         )?;
+        // Escaped for display only: no step names a dirty path, so none is pasted.
+        let shown = || {
+            self.dirty
+                .iter()
+                .map(|path| crate::output::escape_line(&path.to_string_lossy()).into_owned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match &self.saved {
+            Some(Ok(dir)) => write!(
+                f,
+                "\nsaved the uncommitted edits of the repo's {} to {}\n",
+                shown(),
+                crate::output::escape_line(&dir.to_string_lossy())
+            )?,
+            Some(Err(why)) => write!(
+                f,
+                "\ncould not save the uncommitted edits of the repo's {}: {}\n",
+                shown(),
+                crate::output::escape_line(why)
+            )?,
+            None => write!(f, " ")?,
+        }
         let head = self.head.as_deref().unwrap_or("no commit");
         let mut steps = match (&self.marker, &self.detached_from) {
             (Some((branch, old)), _) => {
                 write!(
                     f,
-                    " Before that pull, {branch} was at {old}; HEAD is now at {head}. To put the repo on {branch} as it is now, {}:",
-                    self.drops()
+                    "Before that pull, {branch} was at {old}; HEAD is now at {head}. To put the repo on {branch} as it is now, {DROPS}:"
                 )?;
                 self.checkout_steps(branch)
             }
             (None, Some(branch)) => {
                 write!(
                     f,
-                    " HEAD is detached at {head}. To put the repo on {branch} as it is now, {}, then remove the marker and sync:",
-                    self.drops()
+                    "HEAD is detached at {head}. To put the repo on {branch} as it is now, {DROPS}, then remove the marker and sync:"
                 )?;
                 self.checkout_steps(branch)
             }
             (None, None) => {
-                write!(f, " To go on, remove the marker and sync:")?;
+                write!(f, "To go on, remove the marker and sync:")?;
                 Vec::new()
             }
         };
@@ -528,6 +520,13 @@ fn checked_entry(mode: &[u8], oid: &[u8]) -> Option<Entry> {
         mode: mode.to_owned(),
         oid: oid.to_owned(),
     })
+}
+
+/// What a repo path holds in the worktree.
+enum Held {
+    File(Vec<u8>),
+    /// The target's bytes.
+    Link(Vec<u8>),
 }
 
 /// A repo path whose parent in the worktree is a symlink: git 2.25's `restore` and every
@@ -2162,23 +2161,26 @@ impl Git {
         let _ignored = crate::sys::ignore_signals(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
         let marker = Marker::parse(&bytes);
         let refused = |why: String| {
+            let detached_from = if marker.is_none() && matches!(self.branch(), Ok(None)) {
+                self.synced_branch().ok().flatten()
+            } else {
+                None
+            };
             let dirty = self.dirty_files().unwrap_or_default();
-            let saves_to = self.save_dir(&dirty);
+            // Copying into a new backup run changes nothing in the repo, so nothing is reset.
+            let saved = ((marker.is_some() || detached_from.is_some()) && !dirty.is_empty())
+                .then(|| self.save_copies(&dirty).map_err(|e| format!("{e:#}")));
             Recovery::Refused(Refusal {
                 why,
                 repo: self.repo.clone(),
                 marker: marker
                     .as_ref()
                     .map(|marker| (marker.branch.clone(), marker.old.clone())),
-                detached_from: if marker.is_none() && matches!(self.branch(), Ok(None)) {
-                    self.synced_branch().ok().flatten()
-                } else {
-                    None
-                },
+                detached_from,
                 head: self.head().ok().flatten(),
                 rebase_dir: self.rebase_dir().is_some(),
                 dirty,
-                saves_to,
+                saved,
             })
         };
         let Some(found) = &marker else {
@@ -2225,7 +2227,7 @@ impl Git {
             if dirty && paths.into_iter().any(|path| !settled(path)) {
                 return Ok(Err(format!(
                     "{} has changes that are not committed",
-                    change.path.display()
+                    crate::output::escape_line(&change.path.to_string_lossy())
                 )));
             }
         }
@@ -2285,7 +2287,7 @@ impl Git {
         if let Some(change) = self.changes()?.first() {
             return Ok(Err(format!(
                 "{} still differs from {} after the restore",
-                change.path.display(),
+                crate::output::escape_line(&change.path.to_string_lossy()),
                 marker.old
             )));
         }
@@ -2301,38 +2303,85 @@ impl Git {
         marker: &Marker,
         blobs: &BTreeMap<PathBuf, BTreeSet<String>>,
     ) -> Result<Result<Option<Saved>, String>> {
-        let mut edits = Vec::new();
+        let mut paths = Vec::new();
         for path in marker.decisions.keys() {
             let Some(bytes) = self.worktree_bytes(path)? else {
                 continue;
             };
             let oid = self.hash_object(&bytes, false)?;
             if !blobs.get(path).is_some_and(|known| known.contains(&oid)) {
-                edits.push((path, bytes));
+                paths.push(path.clone());
             }
         }
-        let Some((first, _)) = edits.first() else {
+        let Some(first) = paths.first() else {
             return Ok(Ok(None));
         };
-        let Some(backups) = &self.backups else {
+        if self.backups.is_none() {
             return Ok(Err(format!(
                 "{} has changes that are not committed",
-                first.display()
+                crate::output::escape_line(&first.to_string_lossy())
             )));
-        };
-        let dir = backup_run_dir(backups, SystemTime::now())?.join(".dotman/repo");
-        let mut paths = Vec::new();
-        for (path, bytes) in edits {
-            let text = path
-                .to_str()
-                .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
-            // Under `.dotman/repo/`, a reserved root name is a plain path.
-            validate_key(&format!("repo/{text}"))
-                .with_context(|| format!("cannot save {}", path.display()))?;
-            back_up_bytes(&dir, text, &bytes)?;
-            paths.push(path.clone());
         }
+        let dir = self.save_copies(&paths)?;
         Ok(Ok(Some(Saved { paths, dir })))
+    }
+
+    /// Copies each of `paths` from the worktree to `.dotman/repo/<path>` in a new backup run, and
+    /// returns that directory.
+    fn save_copies(&self, paths: &[PathBuf]) -> Result<PathBuf> {
+        let backups = self
+            .backups
+            .as_ref()
+            .ok_or_else(|| anyhow!("no backups directory is set"))?;
+        let dir = backup_run_dir(backups, SystemTime::now())?.join(".dotman/repo");
+        for path in paths {
+            self.save_copy(&dir, path)
+                .with_context(|| format!("cannot save {}", path.display()))?;
+        }
+        Ok(dir)
+    }
+
+    /// Copies repo path `path` to `<dir>/<path>` byte for byte, whatever its name holds: a file at
+    /// 0600, a symlink as a symlink, under 0700 directories. Nothing is read through a symlink in
+    /// the repo or written through one in `dir`. A path with nothing in the worktree is skipped.
+    fn save_copy(&self, dir: &Path, path: &Path) -> Result<()> {
+        ensure!(
+            path.components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "not a path inside the repo"
+        );
+        let Some(held) = self.worktree_entry(path)? else {
+            return Ok(());
+        };
+        let dest = dir.join(path);
+        let parent = dest
+            .parent()
+            .ok_or_else(|| anyhow!("{} has no parent", dest.display()))?;
+        let mut at = dir.to_path_buf();
+        for part in path.parent().into_iter().flat_map(Path::components) {
+            at.push(part);
+            if fs::symlink_metadata(&at).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                bail!("{} is a symlink", at.display());
+            }
+        }
+        crate::paths::create_private_dir(parent, false)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+        match held {
+            Held::Link(target) => std::os::unix::fs::symlink(OsStr::from_bytes(&target), &dest)
+                .with_context(|| format!("cannot create {}", dest.display())),
+            Held::File(bytes) => {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&dest)
+                    .with_context(|| format!("cannot create {}", dest.display()))?;
+                file.write_all(&bytes)
+                    .and_then(|()| file.sync_all())
+                    .with_context(|| format!("cannot write {}", dest.display()))
+            }
+        }
     }
 
     /// The branch the replay detached `HEAD` from, as the reflog's `@{-1}` names it; else the one
@@ -2374,27 +2423,6 @@ impl Git {
             return Ok(None);
         };
         Ok(self.resolve_commit(&full_ref(&branch))?.map(|_| branch))
-    }
-
-    /// The `.dotman/repo` directory of a new backup run, with the parent of each of `dirty` in
-    /// it made 0700, so a printed `cp` can copy each there. `None` when there is nothing to copy,
-    /// no backups directory is set, or one cannot be made.
-    fn save_dir(&self, dirty: &[PathBuf]) -> Option<PathBuf> {
-        if dirty.is_empty() {
-            return None;
-        }
-        let dir = backup_run_dir(self.backups.as_ref()?, SystemTime::now())
-            .ok()?
-            .join(".dotman/repo");
-        for path in dirty {
-            let parent = dir.join(path);
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent.parent()?)
-                .ok()?;
-        }
-        Some(dir)
     }
 
     /// The files in the worktree whose content `checkout -f` would drop: with a rebase dir, those
@@ -2450,6 +2478,13 @@ impl Git {
     /// `None` when nothing, a directory or a special file is there, or the path lies under a
     /// symlink.
     fn worktree_bytes(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+        Ok(self.worktree_entry(path)?.map(|held| match held {
+            Held::File(bytes) | Held::Link(bytes) => bytes,
+        }))
+    }
+
+    /// [`Git::worktree_bytes`], telling a symlink from a file.
+    fn worktree_entry(&self, path: &Path) -> Result<Option<Held>> {
         if self.symlinked_parent(path)?.is_some() {
             return Ok(None);
         }
@@ -2462,7 +2497,7 @@ impl Git {
         if meta.file_type().is_symlink() {
             let target =
                 fs::read_link(&full).with_context(|| format!("cannot read {}", full.display()))?;
-            return Ok(Some(target.into_os_string().into_vec()));
+            return Ok(Some(Held::Link(target.into_os_string().into_vec())));
         }
         if !meta.is_file() {
             return Ok(None);
@@ -2475,7 +2510,7 @@ impl Git {
         let mut bytes = Vec::new();
         io::Read::read_to_end(&mut file, &mut bytes)
             .with_context(|| format!("cannot read {}", full.display()))?;
-        Ok(Some(bytes))
+        Ok(Some(Held::File(bytes)))
     }
 
     /// The untracked files git 2.25 leaves from a stop, which `rebase --abort` keeps, each with the
@@ -4936,6 +4971,35 @@ mod tests {
             b.recover_pull().expect("recover"),
             Recovery::Locked(locks) if locks.len() == 1
         ));
+    }
+
+    /// After the kill, the user turns a decided path into a symlink: recovery saves it as one.
+    #[test]
+    fn recovery_saves_a_hand_edit_that_is_a_symlink_as_a_symlink() {
+        let d = diverged(
+            BACKENDS[0],
+            &[("a.txt", Some(b"a\n"))],
+            &[("a.txt", Some(b"a origin\n"))],
+            &[&[("a.txt", Some(b"a local\n"))]],
+        );
+        let b = &d.b;
+        let decisions = decide(vec![("a.txt", set(b, b"a local\n"))]);
+        b.start_replay("origin", "main", &d.onto, &decisions)
+            .expect("start");
+        fs::remove_file(b.repo().join("a.txt")).expect("remove");
+        std::os::unix::fs::symlink("by hand", b.repo().join("a.txt")).expect("symlink");
+        let saved = match b.recover_pull().expect("recover") {
+            Recovery::Restored { saved } => saved,
+            _ => None,
+        }
+        .expect("the edit is saved");
+        assert_eq!(saved.paths, [PathBuf::from("a.txt")]);
+        let copy = saved.dir.join("a.txt");
+        assert_eq!(
+            fs::read_link(&copy).expect("a symlink"),
+            Path::new("by hand")
+        );
+        assert_restored(&d);
     }
 
     /// The user's config would move a second branch, answer from a recorded resolution and add a

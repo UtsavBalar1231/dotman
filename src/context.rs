@@ -431,7 +431,9 @@ impl Context {
                         saved
                             .paths
                             .iter()
-                            .map(|path| shown_key(&path.to_string_lossy()))
+                            .map(|path| {
+                                crate::output::escape_line(&path.to_string_lossy()).into_owned()
+                            })
                             .collect::<Vec<_>>()
                             .join(", "),
                         saved.dir.display()
