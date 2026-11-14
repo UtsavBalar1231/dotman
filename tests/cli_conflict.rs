@@ -846,6 +846,78 @@ fn on_a_terminal_keep_mine_here_only_is_not_offered_for_an_existing_variant_or_a
     no_replay_left(&b);
 }
 
+/// The names in every commit the remote holds, and in `env`'s `$HOME`, that hold a `~`, as git's
+/// renamed copies such as `.a~HEAD` do.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn tilde_names(env: &TestEnv) -> Vec<String> {
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let committed = env.git(&[
+        "--git-dir",
+        &remote,
+        "log",
+        "--all",
+        "--format=",
+        "--name-only",
+    ]);
+    let home: Vec<String> = fs::read_dir(env.home())
+        .expect("read $HOME")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    committed
+        .lines()
+        .map(str::to_owned)
+        .chain(home)
+        .filter(|name| name.contains('~'))
+        .collect()
+}
+
+/// A file on one machine against a symlink on the other is a whole-version question, which git
+/// stops on by moving the file to a copy such as `.a~HEAD`. Each flag, and `[k]` or `[t]` on a
+/// terminal, takes one side whole, whichever machine has the symlink; both machines converge, and
+/// git's copy is in no commit and in neither `$HOME`.
+#[test]
+fn a_file_against_a_symlink_is_taken_whole_by_each_answer() {
+    for link_there in [true, false] {
+        for answer in ["--keep-local", "--take-repo", "k", "t"] {
+            let (a, b) = pair(&[(".a", b"a1\na2\n", 0o644), (".target", b"t\n", 0o644)]);
+            let (linked, edited) = if link_there { (&a, &b) } else { (&b, &a) };
+            edited.write(".a", b"a1\nedited\n", 0o644);
+            linked.ok(&["forget", ".a"]);
+            fs::remove_file(linked.home().join(".a")).expect("remove the file");
+            std::os::unix::fs::symlink(".target", linked.home().join(".a")).expect("symlink");
+            linked.ok(&["add", ".a"]);
+            exits(&a, 0, &["sync"]);
+            let seen = match answer {
+                "k" | "t" => sync_in_a_terminal(&b, format!("{answer}\n").as_bytes()),
+                flag => exits(&b, 0, &["sync", flag]),
+            };
+            assert!(!seen.contains("cannot settle"), "{answer}: {seen}");
+            no_replay_left(&b);
+            exits(&a, 0, &["sync"]);
+            let link_wins = matches!(answer, "--keep-local" | "k") != link_there;
+            for env in [&a, &b] {
+                let path = env.home().join(".a");
+                if link_wins {
+                    let target = fs::read_link(&path).expect("a symlink");
+                    assert_eq!(target, std::path::Path::new(".target"), "{answer}: {seen}");
+                } else {
+                    assert!(!path.is_symlink(), "{answer}: {seen}");
+                    assert_eq!(env.read(".a"), b"a1\nedited\n", "{answer}: {seen}");
+                }
+                assert_eq!(tilde_names(env), Vec::<String>::new(), "{answer}: {seen}");
+            }
+            common::assert_converged(&a, &b);
+        }
+    }
+}
+
 /// The sweep removes a killed run's `.dotman-tmp-` dir from `$XDG_RUNTIME_DIR`, where the conflict
 /// flow puts its private copies, as soon as its process is gone, old or fresh; a live run's dir and
 /// a user's directory of a similar name stay.

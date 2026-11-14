@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -44,6 +44,8 @@ const GENERATED: [&str; 2] = [".dotman/age-recipients", "install.sh"];
 const MODES: [&str; 3] = ["100644", "100755", "120000"];
 
 const SYMLINK: &str = "120000";
+
+const FILES: [&str; 2] = ["100644", "100755"];
 
 /// The answer `--keep-local` or `--take-repo` gives every question of a pull.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,13 +510,42 @@ impl<'a> Pull<'a> {
             let (here, there) = (kind(&self.mine, &name), kind(&self.theirs, &name));
             return Some(self.two_kinds(&name, here, there));
         }
-        stop.follows_rename.then(|| {
+        let moved_aside = self.symlink_copy(stop)
+            || (self.file_against_symlink(path)
+                && [&stop.ours, &stop.replayed]
+                    .into_iter()
+                    .flatten()
+                    .all(|entry| entry.mode == SYMLINK));
+        (stop.follows_rename && !moved_aside).then(|| {
             format!(
                 "git matched {} with a file renamed here or in {REMOTE}/{}",
                 shown(path),
                 self.branch
             )
         })
+    }
+
+    /// Whether `path` is a file on one side and a symlink on the other, which git stops on by
+    /// moving the file to a copy, such as `x~HEAD`, and keeping the symlink at `path`.
+    fn file_against_symlink(&self, path: &Path) -> bool {
+        let file =
+            |entry: Option<&Entry>| entry.is_some_and(|entry| FILES.contains(&entry.mode.as_str()));
+        let link = |entry: Option<&Entry>| entry.is_some_and(|entry| entry.mode == SYMLINK);
+        let (mine, theirs) = (self.mine.get(path), self.theirs.get(path));
+        (file(mine) && link(theirs)) || (link(mine) && file(theirs))
+    }
+
+    /// Whether `stop` is git's copy of a [`Pull::file_against_symlink`] path: in no tree, holding
+    /// only file stages. Its path takes the answer on the original, so the copy is removed.
+    fn symlink_copy(&self, stop: &Stopped) -> bool {
+        let in_a_tree = [&self.base, &self.mine, &self.theirs]
+            .iter()
+            .any(|tree| tree.contains_key(&stop.path));
+        let files = [&stop.base, &stop.ours, &stop.replayed]
+            .into_iter()
+            .flatten()
+            .all(|entry| FILES.contains(&entry.mode.as_str()));
+        !in_a_tree && files && stems(&stop.path).any(|stem| self.file_against_symlink(&stem))
     }
 
     fn two_kinds(&self, path: &Path, here: &str, there: &str) -> String {
@@ -1701,6 +1732,19 @@ fn kind(tree: &BTreeMap<PathBuf, Entry>, path: &Path) -> &'static str {
         None if tree.keys().any(|key| key.starts_with(path)) => DIRECTORY,
         None => MISSING,
     }
+}
+
+/// The paths git could have renamed `path` from: its name cut at each `~`, as `x~HEAD` is a copy
+/// of `x`.
+fn stems(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    let name = path.file_name().map_or(&[][..], OsStrExt::as_bytes);
+    name.iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'~')
+        .filter_map(move |(at, _)| {
+            let stem = name.get(..at).filter(|stem| !stem.is_empty())?;
+            Some(path.with_file_name(OsStr::from_bytes(stem)))
+        })
 }
 
 /// The target key a source belongs to: the source with its variant block taken off.
