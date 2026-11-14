@@ -3481,7 +3481,18 @@ fn a_symlink_or_a_submodule_in_origin_exits_4_with_git_steps_that_work_as_printe
         let err = exits(&b, 4, &["sync", "--keep-local"]);
         assert_eq!(err.matches(reason).count(), 1, "{err}");
         assert!(!err.contains("git matched"), "{err}");
-        printed_copy(&err, copy_of, path);
+        // git 2.25's `recursive` sets no copy of a file aside from a submodule: it leaves the path
+        // empty, and step 3 checks this machine's version out.
+        if shape == "submodule" && common::pull_strategy(&b) == "recursive" {
+            let edit = steps(&err).get(1).cloned().unwrap_or_default();
+            assert!(
+                edit.ends_with("\n.a is left empty: step 3 checks out this machine's version"),
+                "{err}"
+            );
+            assert!(!err.contains("aside as a copy"), "{err}");
+        } else {
+            printed_copy(&err, copy_of, path);
+        }
         no_replay_left(&b);
         run_git_steps(&b, &err, || {});
         no_replay_left(&b);

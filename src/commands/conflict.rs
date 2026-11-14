@@ -45,6 +45,8 @@ const MODES: [&str; 3] = ["100644", "100755", "120000"];
 
 const SYMLINK: &str = "120000";
 
+const GITLINK: &str = "160000";
+
 const FILES: [&str; 2] = ["100644", "100755"];
 
 /// The answer `--keep-local` or `--take-repo` gives every question of a pull.
@@ -1490,10 +1492,12 @@ impl<'a> Pull<'a> {
             self.ctx.paths.repo.display()
         )];
         let mut staging = Vec::new();
+        let mut copied = false;
         for stop in &self.seen {
             let copy = stop.aside.as_ref().unwrap_or(&stop.path);
             let found = self.existing(copy).unwrap_or_else(|| copy.clone());
             if let Some((holds, steps)) = copy_steps(stop, &found, &self.ctx.paths.repo, &theirs) {
+                copied |= found != *copy;
                 edit.push(holds);
                 staging.extend(steps);
             }
@@ -1516,7 +1520,7 @@ impl<'a> Pull<'a> {
                 output::warning(&format!("{why}, which dotman cannot settle."));
             }
         }
-        if !staging.is_empty() {
+        if copied {
             output::warning(&format!(
                 "The pull puts one version of such a path aside as a copy, which step 2 names: step 3 keeps this machine's version under the path's name and removes {theirs}'s. To keep {theirs}'s instead, leave out that path's lines in step 3, put {theirs}'s version under the path's name in place of this machine's, and remove the copy."
             ));
@@ -1750,7 +1754,7 @@ fn kind(tree: &BTreeMap<PathBuf, Entry>, path: &Path) -> &'static str {
     match tree.get(path).map(|entry| entry.mode.as_str()) {
         Some("100644" | "100755") => "a file",
         Some(SYMLINK) => "a symlink",
-        Some("160000") => "a submodule",
+        Some(GITLINK) => "a submodule",
         Some(_) => "an entry git does not check out",
         None if tree.keys().any(|key| key.starts_with(path)) => DIRECTORY,
         None => MISSING,
@@ -1769,7 +1773,7 @@ fn copy_steps(
     let bin = name::bin();
     let copy = stop.aside.as_ref().unwrap_or(&stop.path);
     if found == copy.as_path() {
-        return None;
+        return unwritten_steps(stop, found);
     }
     let whose = match (&stop.ours, &stop.replayed) {
         (None, Some(_)) => "this machine's".to_owned(),
@@ -1790,6 +1794,28 @@ fn copy_steps(
     ));
     let holds = format!("Copy {} holds {whose} {}", quoted(&[copy]), shown(&found));
     Some((holds, steps))
+}
+
+/// For a file here against a submodule in origin, which git 2.25 stops on with no copy and only
+/// an empty directory at `found`, the step 2 line saying so and the step 3 line that checks out
+/// this machine's version: `git add` of the empty directory would stage the path's removal.
+fn unwritten_steps(stop: &Stopped, found: &Path) -> Option<(String, Vec<String>)> {
+    let gitlink = |entry: &Option<Entry>| entry.as_ref().is_some_and(|entry| entry.mode == GITLINK);
+    if !gitlink(&stop.ours) || stop.replayed.is_none() || gitlink(&stop.replayed) {
+        return None;
+    }
+    let path = found.to_path_buf();
+    Some((
+        format!(
+            "{} is left empty: step 3 checks out this machine's version",
+            shown(found)
+        ),
+        vec![format!(
+            "{} git checkout --no-overlay REBASE_HEAD -- {}",
+            name::bin(),
+            quoted(&[&path])
+        )],
+    ))
 }
 
 /// The paths git could have renamed `path` from: its name cut at each `~`, as `x~HEAD` is a copy
@@ -1882,6 +1908,33 @@ mod tests {
             ))
         );
         assert_eq!(steps(&stop("x", None, false)), None);
+    }
+
+    /// git 2.25 leaves a file here against a submodule in origin as one stop with no copy, so the
+    /// steps check out this machine's version; later gits move the file to a copy, which leaves
+    /// the submodule's own stop with nothing to check out.
+    #[test]
+    fn a_file_against_a_submodule_with_no_copy_is_checked_out() {
+        let (file, gitlink) = (entry("100644", 'a'), entry(GITLINK, 'b'));
+        let stop = |replayed: Option<Entry>| Stopped {
+            path: PathBuf::from("x"),
+            base: Some(file.clone()),
+            ours: Some(gitlink.clone()),
+            replayed,
+            follows_rename: false,
+            aside: None,
+        };
+        let steps =
+            |stop: &Stopped| copy_steps(stop, Path::new("x"), Path::new("/r"), "origin/main");
+        assert_eq!(
+            steps(&stop(Some(file.clone()))),
+            Some((
+                "x is left empty: step 3 checks out this machine's version".to_owned(),
+                vec!["dotman git checkout --no-overlay REBASE_HEAD -- x".to_owned()]
+            ))
+        );
+        assert_eq!(steps(&stop(None)), None);
+        assert_eq!(steps(&stop(Some(gitlink.clone()))), None);
     }
 
     #[test]
