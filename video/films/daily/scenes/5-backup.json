@@ -1,0 +1,14 @@
+{
+  "on": "desktop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "cat ~/.local/state/dotman/backups/*/.zshrc"
+    },
+    {
+      "wait": 1.0
+    }
+  ]
+}

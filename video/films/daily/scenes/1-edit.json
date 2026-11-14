@@ -1,0 +1,14 @@
+{
+  "on": "laptop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "echo 'alias ll=\"ls -la\"' >> ~/.zshrc"
+    },
+    {
+      "run": "dotman status"
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "groups": [
+    {
+      "id": "laptop",
+      "label": "laptop",
+      "x": 60,
+      "y": 346,
+      "w": 913,
+      "h": 356,
+      "at": -2.0
+    },
+    {
+      "id": "desktop",
+      "label": "desktop",
+      "x": 1527,
+      "y": 346,
+      "w": 333,
+      "h": 356,
+      "at": -2.0
+    }
+  ],
+  "nodes": [
+    {
+      "id": "repo",
+      "label": "git repo",
+      "type": "done",
+      "x": 1130,
+      "y": 500,
+      "w": 240,
+      "at": -2.0
+    },
+    {
+      "id": "init",
+      "label": "init",
+      "type": "step",
+      "x": 124,
+      "y": 500,
+      "w": 205,
+      "at": -2.0
+    },
+    {
+      "id": "add",
+      "label": "add",
+      "type": "step",
+      "x": 414,
+      "y": 500,
+      "w": 205,
+      "at": -2.0
+    },
+    {
+      "id": "sync",
+      "label": "sync",
+      "type": "step",
+      "x": 704,
+      "y": 500,
+      "w": 205,
+      "at": -2.0
+    },
+    {
+      "id": "clone",
+      "label": "init <url>",
+      "type": "step",
+      "x": 1591,
+      "y": 500,
+      "w": 205,
+      "at": -2.0
+    },
+    {
+      "id": "asks",
+      "label": "asks if your file differs",
+      "type": "note",
+      "x": 1493,
+      "y": 850,
+      "w": 400,
+      "at": -2.0
+    }
+  ],
+  "edges": [
+    {
+      "from": "init",
+      "to": "add",
+      "gap": 18,
+      "at": -2.0
+    },
+    {
+      "from": "add",
+      "to": "sync",
+      "gap": 18,
+      "at": -2.0
+    },
+    {
+      "from": "laptop",
+      "to": "repo",
+      "at": -2.0
+    },
+    {
+      "from": "repo",
+      "to": "desktop",
+      "at": -2.0
+    },
+    {
+      "from": "asks",
+      "to": "desktop",
+      "at": -2.0
+    }
+  ],
+  "duration": 2.6
+}

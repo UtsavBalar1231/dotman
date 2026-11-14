@@ -1,0 +1,14 @@
+{
+  "on": "desktop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "dotman sync"
+    },
+    {
+      "run": "tail -n 1 ~/.zshrc"
+    }
+  ]
+}

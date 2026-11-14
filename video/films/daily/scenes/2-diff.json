@@ -1,0 +1,11 @@
+{
+  "on": "laptop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "dotman diff"
+    }
+  ]
+}

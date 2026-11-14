@@ -1,0 +1,115 @@
+{
+  "groups": [
+    {
+      "id": "sync",
+      "label": "dotman sync",
+      "x": 367,
+      "y": 346,
+      "w": 1146,
+      "h": 356,
+      "at": 1.7
+    }
+  ],
+  "nodes": [
+    {
+      "id": "home",
+      "label": "$HOME",
+      "type": "input",
+      "x": 60,
+      "y": 500,
+      "w": 180,
+      "at": 0.6
+    },
+    {
+      "id": "capture",
+      "label": "capture",
+      "type": "step",
+      "x": 415,
+      "y": 500,
+      "w": 150,
+      "at": 2.2
+    },
+    {
+      "id": "commit",
+      "label": "commit",
+      "type": "step",
+      "x": 640,
+      "y": 500,
+      "w": 150,
+      "at": 3.1
+    },
+    {
+      "id": "pull",
+      "label": "pull",
+      "type": "step",
+      "x": 865,
+      "y": 500,
+      "w": 150,
+      "at": 4.0
+    },
+    {
+      "id": "apply",
+      "label": "apply",
+      "type": "step",
+      "x": 1090,
+      "y": 500,
+      "w": 150,
+      "at": 4.9
+    },
+    {
+      "id": "push",
+      "label": "push",
+      "type": "step",
+      "x": 1315,
+      "y": 500,
+      "w": 150,
+      "at": 5.800000000000001
+    },
+    {
+      "id": "repo",
+      "label": "git repo",
+      "type": "done",
+      "x": 1640,
+      "y": 500,
+      "w": 220,
+      "at": 7.0
+    }
+  ],
+  "edges": [
+    {
+      "from": "home",
+      "to": "sync",
+      "at": 1.0
+    },
+    {
+      "from": "capture",
+      "to": "commit",
+      "gap": 18,
+      "at": 2.7
+    },
+    {
+      "from": "commit",
+      "to": "pull",
+      "gap": 18,
+      "at": 3.6
+    },
+    {
+      "from": "pull",
+      "to": "apply",
+      "gap": 18,
+      "at": 4.5
+    },
+    {
+      "from": "apply",
+      "to": "push",
+      "gap": 18,
+      "at": 5.4
+    },
+    {
+      "from": "sync",
+      "to": "repo",
+      "at": 6.4
+    }
+  ],
+  "duration": 8.8
+}

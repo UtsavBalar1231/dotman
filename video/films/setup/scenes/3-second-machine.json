@@ -1,0 +1,25 @@
+{
+  "on": "desktop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "dotman init file:///srv/dotfiles.git",
+      "answers": [
+        [
+          "Host name",
+          "\r"
+        ],
+        [
+          "Profiles",
+          "\r"
+        ],
+        [
+          "[s] skip",
+          "t\r"
+        ]
+      ]
+    }
+  ]
+}

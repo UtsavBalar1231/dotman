@@ -1,0 +1,14 @@
+{
+  "on": "laptop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "dotman add --template ~/.tmux.conf"
+    },
+    {
+      "wait": 0.6
+    }
+  ]
+}

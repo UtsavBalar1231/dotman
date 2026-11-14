@@ -1,22 +1,99 @@
 {
-  "machines": ["laptop", "desktop"],
-  "prepare": [
-    {"on": "laptop", "run": "git init -q --bare -b main /srv/dotfiles.git"},
-    {"on": "laptop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && git config --global core.pager cat"},
-    {"on": "desktop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && git config --global core.pager cat"},
-    {"on": "laptop", "run": "printf 'export EDITOR=nvim\\nalias ll=\"ls -l\"\\n' > ~/.zshrc && printf 'set -g mouse on\\n' > ~/.tmux.conf"},
-    {"on": "laptop", "run": "dotman init --no-import --remote file:///srv/dotfiles.git --host laptop --no-system --no-key && dotman add ~/.zshrc && dotman sync"},
-    {"on": "desktop", "run": "dotman init file:///srv/dotfiles.git --host desktop && printf 'set -g prefix C-a\\n' > ~/.tmux.conf"}
+  "machines": [
+    "laptop",
+    "desktop"
   ],
-  "fade": 0.4,
+  "prepare": [
+    {
+      "on": "laptop",
+      "run": "git init -q --bare -b main /srv/dotfiles.git"
+    },
+    {
+      "on": "laptop",
+      "run": "git config --global user.name Alex && git config --global user.email alex@example.com && git config --global core.pager cat"
+    },
+    {
+      "on": "desktop",
+      "run": "git config --global user.name Alex && git config --global user.email alex@example.com"
+    },
+    {
+      "on": "laptop",
+      "run": "printf 'export EDITOR=nvim\\nalias gs=\"git status\"\\n' > ~/.zshrc && printf 'set -g mouse on\\n' > ~/.tmux.conf"
+    },
+    {
+      "on": "laptop",
+      "run": "dotman init --remote file:///srv/dotfiles.git --no-system --no-key && dotman add ~/.zshrc ~/.tmux.conf && dotman sync"
+    },
+    {
+      "on": "desktop",
+      "run": "dotman init file:///srv/dotfiles.git"
+    }
+  ],
   "shots": [
-    {"clip": "clips/title.json"},
-    {"clip": "clips/three-sides.json"},
-    {"scene": "scenes/edit.json"},
-    {"scene": "scenes/arrive.json"},
-    {"clip": "clips/both-have-it.json"},
-    {"scene": "scenes/share.json"},
-    {"scene": "scenes/existing.json"},
-    {"clip": "clips/end.json"}
+    {
+      "card": "title",
+      "text": "Daily use"
+    },
+    {
+      "card": "title",
+      "text": "Edit your dotfiles where they are.",
+      "duration": 3.5
+    },
+    {
+      "scene": "scenes/1-edit.json",
+      "closeup": {
+        "match": "changed-locally",
+        "after": 0.5,
+        "hold": 3.0
+      }
+    },
+    {
+      "diagram": "sides-1.json"
+    },
+    {
+      "scene": "scenes/2-diff.json",
+      "closeup": {
+        "match": "^\\+alias ll",
+        "after": 1.3,
+        "hold": 3.0
+      }
+    },
+    {
+      "diagram": "sides-2.json"
+    },
+    {
+      "scene": "scenes/3-sync.json",
+      "closeup": {
+        "match": "pushed 1 commit to origin/main",
+        "after": 1.3,
+        "hold": 3.0
+      }
+    },
+    {
+      "diagram": "sync-1.json"
+    },
+    {
+      "scene": "scenes/4-other-machine.json",
+      "closeup": {
+        "match": "^alias ll",
+        "after": 0.5,
+        "hold": 3.5,
+        "scale": 1.3333333333333333
+      }
+    },
+    {
+      "diagram": "sync-2.json"
+    },
+    {
+      "scene": "scenes/5-backup.json"
+    },
+    {
+      "card": "title",
+      "text": "Edit on one machine. Sync on both.",
+      "duration": 3.5
+    },
+    {
+      "card": "end"
+    }
   ]
 }

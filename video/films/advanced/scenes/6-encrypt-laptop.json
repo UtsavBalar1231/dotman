@@ -1,0 +1,17 @@
+{
+  "on": "laptop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "dotman key init"
+    },
+    {
+      "run": "dotman add --encrypt ~/.ssh/config"
+    },
+    {
+      "hidden": "dotman sync && cp ~/.config/dotman/age-identity.txt /srv/key.txt"
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "groups": [
+    {
+      "id": "sync",
+      "label": "dotman sync",
+      "x": 367,
+      "y": 346,
+      "w": 1146,
+      "h": 356,
+      "at": -2.0
+    }
+  ],
+  "nodes": [
+    {
+      "id": "home",
+      "label": "$HOME",
+      "type": "input",
+      "x": 60,
+      "y": 500,
+      "w": 180,
+      "at": -2.0
+    },
+    {
+      "id": "capture",
+      "label": "capture",
+      "type": "step",
+      "x": 415,
+      "y": 500,
+      "w": 150,
+      "at": -2.0
+    },
+    {
+      "id": "commit",
+      "label": "commit",
+      "type": "step",
+      "x": 640,
+      "y": 500,
+      "w": 150,
+      "at": -2.0
+    },
+    {
+      "id": "pull",
+      "label": "pull",
+      "type": "step",
+      "x": 865,
+      "y": 500,
+      "w": 150,
+      "at": -2.0
+    },
+    {
+      "id": "apply",
+      "label": "apply",
+      "type": "step",
+      "x": 1090,
+      "y": 500,
+      "w": 150,
+      "at": -2.0
+    },
+    {
+      "id": "push",
+      "label": "push",
+      "type": "step",
+      "x": 1315,
+      "y": 500,
+      "w": 150,
+      "at": -2.0
+    },
+    {
+      "id": "repo",
+      "label": "git repo",
+      "type": "done",
+      "x": 1640,
+      "y": 500,
+      "w": 220,
+      "at": -2.0
+    },
+    {
+      "id": "backs",
+      "label": "backs up what it replaces",
+      "type": "note",
+      "x": 965,
+      "y": 850,
+      "w": 400,
+      "at": 0.6
+    }
+  ],
+  "edges": [
+    {
+      "from": "home",
+      "to": "sync",
+      "at": -2.0
+    },
+    {
+      "from": "capture",
+      "to": "commit",
+      "gap": 18,
+      "at": -2.0
+    },
+    {
+      "from": "commit",
+      "to": "pull",
+      "gap": 18,
+      "at": -2.0
+    },
+    {
+      "from": "pull",
+      "to": "apply",
+      "gap": 18,
+      "at": -2.0
+    },
+    {
+      "from": "apply",
+      "to": "push",
+      "gap": 18,
+      "at": -2.0
+    },
+    {
+      "from": "sync",
+      "to": "repo",
+      "at": -2.0
+    },
+    {
+      "from": "backs",
+      "to": "apply",
+      "gap": 20,
+      "at": 1.1
+    }
+  ],
+  "duration": 3.8
+}

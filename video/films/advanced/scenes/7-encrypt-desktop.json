@@ -1,0 +1,20 @@
+{
+  "on": "desktop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "hidden": "cp /srv/key.txt ~/key.txt"
+    },
+    {
+      "run": "dotman sync"
+    },
+    {
+      "run": "dotman key import ~/key.txt"
+    },
+    {
+      "run": "dotman sync"
+    }
+  ]
+}

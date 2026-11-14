@@ -1,0 +1,87 @@
+{
+  "groups": [
+    {
+      "id": "repo",
+      "label": "git repo",
+      "x": 206,
+      "y": 160,
+      "w": 648,
+      "h": 640,
+      "at": -2.0
+    }
+  ],
+  "nodes": [
+    {
+      "id": "src1",
+      "label": ".config/monitors{host=laptop}.conf",
+      "type": "done",
+      "x": 270,
+      "y": 300,
+      "w": 520,
+      "at": -2.0
+    },
+    {
+      "id": "dst1",
+      "label": "applies on laptop only",
+      "type": "input",
+      "x": 1154,
+      "y": 300,
+      "w": 560,
+      "at": -2.0
+    },
+    {
+      "id": "src2",
+      "label": ".tmux{tmpl}.conf",
+      "type": "done",
+      "x": 270,
+      "y": 480,
+      "w": 520,
+      "at": -2.0
+    },
+    {
+      "id": "dst2",
+      "label": "rendered on each machine",
+      "type": "input",
+      "x": 1154,
+      "y": 480,
+      "w": 560,
+      "at": -2.0
+    },
+    {
+      "id": "src3",
+      "label": ".ssh/config{age}",
+      "type": "done",
+      "x": 270,
+      "y": 660,
+      "w": 520,
+      "at": 0.6
+    },
+    {
+      "id": "dst3",
+      "label": "decrypted with your key",
+      "type": "input",
+      "x": 1154,
+      "y": 660,
+      "w": 560,
+      "at": 2.1
+    }
+  ],
+  "edges": [
+    {
+      "from": "repo",
+      "to": "dst1",
+      "at": -2.0
+    },
+    {
+      "from": "repo",
+      "to": "dst2",
+      "at": -2.0
+    },
+    {
+      "from": "repo",
+      "to": "dst3",
+      "at": 1.4
+    }
+  ],
+  "duration": 4.4
+}

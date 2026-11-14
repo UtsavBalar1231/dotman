@@ -1,0 +1,44 @@
+{
+  "groups": [
+    {
+      "id": "laptop",
+      "label": "laptop",
+      "x": 60,
+      "y": 346,
+      "w": 913,
+      "h": 356,
+      "at": 0.6
+    },
+    {
+      "id": "desktop",
+      "label": "desktop",
+      "x": 1527,
+      "y": 346,
+      "w": 333,
+      "h": 356,
+      "at": 1.6
+    }
+  ],
+  "nodes": [
+    {
+      "id": "repo",
+      "label": "git repo",
+      "type": "done",
+      "x": 1130,
+      "y": 500,
+      "w": 240,
+      "at": 3.2
+    },
+    {
+      "id": "init",
+      "label": "init",
+      "type": "step",
+      "x": 124,
+      "y": 500,
+      "w": 205,
+      "at": 4.6
+    }
+  ],
+  "edges": [],
+  "duration": 6.8
+}

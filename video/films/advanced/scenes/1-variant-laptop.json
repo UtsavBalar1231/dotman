@@ -1,0 +1,14 @@
+{
+  "on": "laptop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "dotman add --for host=laptop ~/.config/monitors.conf"
+    },
+    {
+      "run": "dotman sync"
+    }
+  ]
+}

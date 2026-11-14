@@ -1,12 +1,87 @@
 {
-  "machines": ["laptop", "desktop"],
-  "fade": 0.4,
+  "machines": [
+    "laptop",
+    "desktop"
+  ],
+  "prepare": [
+    {
+      "on": "laptop",
+      "run": "git init -q --bare -b main /srv/dotfiles.git"
+    },
+    {
+      "on": "laptop",
+      "run": "git config --global user.name Alex && git config --global user.email alex@example.com"
+    },
+    {
+      "on": "desktop",
+      "run": "git config --global user.name Alex && git config --global user.email alex@example.com"
+    },
+    {
+      "on": "laptop",
+      "run": "printf 'export EDITOR=nvim\\nalias gs=\"git status\"\\n' > ~/.zshrc && printf 'set -g mouse on\\n' > ~/.tmux.conf"
+    },
+    {
+      "on": "desktop",
+      "run": "printf 'export EDITOR=vim\\n' > ~/.zshrc"
+    }
+  ],
   "shots": [
-    {"clip": "clips/title.json"},
-    {"clip": "clips/one-repo.json"},
-    {"scene": "scenes/first-machine.json"},
-    {"clip": "clips/second.json"},
-    {"scene": "scenes/second-machine.json"},
-    {"clip": "clips/end.json"}
+    {
+      "card": "title",
+      "text": "Set up dotman"
+    },
+    {
+      "card": "title",
+      "text": "Your dotfiles drift between machines.",
+      "duration": 3.5
+    },
+    {
+      "diagram": "diagram-1.json"
+    },
+    {
+      "scene": "scenes/1-init.json"
+    },
+    {
+      "diagram": "diagram-2.json"
+    },
+    {
+      "scene": "scenes/2-add-sync.json",
+      "closeup": {
+        "match": "pushed 1 commit to origin/main",
+        "after": 0.5,
+        "hold": 3.0
+      }
+    },
+    {
+      "diagram": "diagram-3.json"
+    },
+    {
+      "scene": "scenes/3-second-machine.json",
+      "closeup": {
+        "match": "backed up the files it replaced to",
+        "after": 0.6,
+        "hold": 3.5,
+        "scale": 1.3333333333333333
+      }
+    },
+    {
+      "scene": "scenes/4-in-step.json",
+      "closeup": {
+        "match": "2 managed, 2 clean",
+        "after": 0.5,
+        "hold": 3.0
+      }
+    },
+    {
+      "diagram": "diagram-4.json"
+    },
+    {
+      "card": "title",
+      "text": "Both machines now have the same files.",
+      "duration": 3.5
+    },
+    {
+      "card": "end"
+    }
   ]
 }

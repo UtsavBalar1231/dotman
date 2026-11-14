@@ -1,25 +1,116 @@
 {
-  "machines": ["laptop", "desktop"],
-  "fade": 0.4,
+  "machines": [
+    "laptop",
+    "desktop"
+  ],
   "prepare": [
-    {"on": "laptop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && git init -q --bare -b main /srv/dotfiles.git"},
-    {"on": "laptop", "run": "dotman init --remote file:///srv/dotfiles.git --no-system --no-key"},
-    {"on": "laptop", "run": "printf 'export EDITOR=nvim\\nexport PATH=$HOME/.local/bin:$PATH\\n' > ~/.profile && dotman add ~/.profile && dotman sync"},
-    {"on": "desktop", "run": "git config --global user.name Alex && git config --global user.email alex@example.com && dotman init file:///srv/dotfiles.git"}
+    {
+      "on": "laptop",
+      "run": "git init -q --bare -b main /srv/dotfiles.git"
+    },
+    {
+      "on": "laptop",
+      "run": "git config --global user.name Alex && git config --global user.email alex@example.com"
+    },
+    {
+      "on": "desktop",
+      "run": "git config --global user.name Alex && git config --global user.email alex@example.com"
+    },
+    {
+      "on": "laptop",
+      "run": "printf 'export EDITOR=nvim\\nalias gs=\"git status\"\\n' > ~/.zshrc && printf 'set -g mouse on\\nset -g status-left \"[laptop] \"\\n' > ~/.tmux.conf"
+    },
+    {
+      "on": "laptop",
+      "run": "mkdir -p ~/.config && printf 'monitor = eDP-1, 2880x1800@90, 0x0, 1.5\\n' > ~/.config/monitors.conf"
+    },
+    {
+      "on": "laptop",
+      "run": "mkdir -m 700 ~/.ssh && printf 'Host work\\n  HostName 10.0.4.12\\n  User alex\\n' > ~/.ssh/config && chmod 600 ~/.ssh/config"
+    },
+    {
+      "on": "desktop",
+      "run": "mkdir -p ~/.config && printf 'monitor = DP-1, 3840x2160@60, 0x0, 1\\n' > ~/.config/monitors.conf"
+    },
+    {
+      "on": "laptop",
+      "run": "dotman init --remote file:///srv/dotfiles.git --no-system --no-key && dotman add ~/.zshrc ~/.tmux.conf && dotman sync"
+    },
+    {
+      "on": "desktop",
+      "run": "dotman init file:///srv/dotfiles.git"
+    }
   ],
   "shots": [
-    {"clip": "clips/title.json"},
-    {"clip": "clips/variants.json"},
-    {"scene": "scenes/variant-laptop.json"},
-    {"scene": "scenes/variant-desktop.json"},
-    {"clip": "clips/templates.json"},
-    {"scene": "scenes/template-laptop.json"},
-    {"scene": "scenes/template-desktop.json"},
-    {"clip": "clips/encrypt.json"},
-    {"scene": "scenes/encrypt-laptop.json"},
-    {"scene": "scenes/encrypt-desktop.json"},
-    {"clip": "clips/guard.json"},
-    {"scene": "scenes/guard-laptop.json"},
-    {"clip": "clips/end.json"}
+    {
+      "card": "title",
+      "text": "Per-machine files and secrets"
+    },
+    {
+      "diagram": "names-1.json"
+    },
+    {
+      "scene": "scenes/1-variant-laptop.json"
+    },
+    {
+      "scene": "scenes/2-variant-desktop.json",
+      "closeup": {
+        "match": "^monitor = DP-1",
+        "after": 0.5,
+        "hold": 3.0,
+        "scale": 1.3333333333333333
+      }
+    },
+    {
+      "diagram": "names-2.json"
+    },
+    {
+      "scene": "scenes/3-template-add.json"
+    },
+    {
+      "scene": "scenes/4-template-edit.json"
+    },
+    {
+      "scene": "scenes/5-template-desktop.json",
+      "closeup": {
+        "match": "\\[desktop\\]",
+        "after": 0.5,
+        "hold": 3.0
+      }
+    },
+    {
+      "diagram": "names-3.json"
+    },
+    {
+      "scene": "scenes/6-encrypt-laptop.json"
+    },
+    {
+      "scene": "scenes/7-encrypt-desktop.json",
+      "closeup": {
+        "match": "\\(decrypted\\)",
+        "after": 0.5,
+        "hold": 3.0
+      }
+    },
+    {
+      "diagram": "names-4.json"
+    },
+    {
+      "scene": "scenes/8-guard.json",
+      "closeup": {
+        "match": "^  \\.zshrc: line 3 holds",
+        "after": 0.5,
+        "hold": 3.5,
+        "scale": 1.3333333333333333
+      }
+    },
+    {
+      "card": "title",
+      "text": "The file name says how it is applied.",
+      "duration": 3.5
+    },
+    {
+      "card": "end"
+    }
   ]
 }

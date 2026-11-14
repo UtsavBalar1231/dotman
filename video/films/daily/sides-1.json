@@ -1,0 +1,44 @@
+{
+  "groups": [
+    {
+      "id": "sides",
+      "label": "three sides",
+      "x": 330,
+      "y": 346,
+      "w": 1260,
+      "h": 356,
+      "at": 0.6
+    }
+  ],
+  "nodes": [
+    {
+      "id": "home",
+      "label": "$HOME",
+      "type": "input",
+      "x": 1210,
+      "y": 500,
+      "w": 300,
+      "at": 1.4
+    },
+    {
+      "id": "repo",
+      "label": "repo",
+      "type": "done",
+      "x": 410,
+      "y": 500,
+      "w": 300,
+      "at": 2.4
+    },
+    {
+      "id": "last",
+      "label": "last applied",
+      "type": "step",
+      "x": 810,
+      "y": 500,
+      "w": 300,
+      "at": 3.6
+    }
+  ],
+  "edges": [],
+  "duration": 6.4
+}

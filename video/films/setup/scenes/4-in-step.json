@@ -1,0 +1,14 @@
+{
+  "on": "desktop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "cat ~/.zshrc"
+    },
+    {
+      "run": "dotman status"
+    }
+  ]
+}

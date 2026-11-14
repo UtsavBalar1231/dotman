@@ -1,0 +1,73 @@
+{
+  "groups": [
+    {
+      "id": "sides",
+      "label": "three sides",
+      "x": 330,
+      "y": 346,
+      "w": 1260,
+      "h": 356,
+      "at": -2.0
+    }
+  ],
+  "nodes": [
+    {
+      "id": "home",
+      "label": "$HOME",
+      "type": "input",
+      "x": 1210,
+      "y": 500,
+      "w": 300,
+      "at": -2.0
+    },
+    {
+      "id": "repo",
+      "label": "repo",
+      "type": "done",
+      "x": 410,
+      "y": 500,
+      "w": 300,
+      "at": -2.0
+    },
+    {
+      "id": "last",
+      "label": "last applied",
+      "type": "step",
+      "x": 810,
+      "y": 500,
+      "w": 300,
+      "at": -2.0
+    },
+    {
+      "id": "n-home",
+      "label": "changed here: sync captures it",
+      "type": "note",
+      "x": 1120,
+      "y": 850,
+      "w": 480,
+      "at": 0.6
+    },
+    {
+      "id": "n-repo",
+      "label": "changed here: sync applies it",
+      "type": "note",
+      "x": 330,
+      "y": 850,
+      "w": 460,
+      "at": 2.8
+    }
+  ],
+  "edges": [
+    {
+      "from": "n-home",
+      "to": "sides",
+      "at": 1.1
+    },
+    {
+      "from": "n-repo",
+      "to": "sides",
+      "at": 3.3
+    }
+  ],
+  "duration": 6.0
+}

@@ -1,0 +1,28 @@
+{
+  "on": "laptop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "run": "dotman edit ~/.tmux.conf",
+      "answers": [
+        [
+          "status-left",
+          "/laptop\r"
+        ],
+        [
+          "laptop",
+          "cw{{ host }}\u001b"
+        ],
+        [
+          "Modified",
+          ":wq\r"
+        ]
+      ]
+    },
+    {
+      "hidden": "dotman sync"
+    }
+  ]
+}

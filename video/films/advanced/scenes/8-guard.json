@@ -1,0 +1,18 @@
+{
+  "on": "laptop",
+  "steps": [
+    {
+      "wait": 0.8
+    },
+    {
+      "hidden": "printf 'export GITHUB_TOKEN=%s%s\\n' 'gh''p_' \"$(printf 'a1B2%.0s' $(seq 9))\" >> ~/.zshrc"
+    },
+    {
+      "run": "dotman sync",
+      "status": 3
+    },
+    {
+      "run": "dotman status"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "groups": [
+    {
+      "id": "repo",
+      "label": "git repo",
+      "x": 206,
+      "y": 160,
+      "w": 648,
+      "h": 640,
+      "at": 0.6
+    }
+  ],
+  "nodes": [
+    {
+      "id": "src1",
+      "label": ".config/monitors{host=laptop}.conf",
+      "type": "done",
+      "x": 270,
+      "y": 300,
+      "w": 520,
+      "at": 1.4
+    },
+    {
+      "id": "dst1",
+      "label": "applies on laptop only",
+      "type": "input",
+      "x": 1154,
+      "y": 300,
+      "w": 560,
+      "at": 2.9
+    }
+  ],
+  "edges": [
+    {
+      "from": "repo",
+      "to": "dst1",
+      "at": 2.2
+    }
+  ],
+  "duration": 5.4
+}
