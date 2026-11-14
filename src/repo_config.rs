@@ -268,18 +268,24 @@ pub(crate) struct Tie {
 
 impl Tie {
     /// Sets the tied key in `merged` to `theirs`' value, or removes it where `theirs` has none. A
-    /// `[system]` table that both sides have keeps the merged mode, the stricter of the two.
+    /// `[system]` table keeps the merged mode, the stricter of the two, and takes root's owner and
+    /// group where `theirs` has none.
     pub(crate) fn take_theirs(&self, merged: &mut RepoConfig, theirs: &RepoConfig) {
         let key = self.key.as_str();
         match self.table {
             HOOKS => set_or_remove(&mut merged.hooks, key, theirs.hooks.get(key).cloned()),
             SYSTEM => {
-                let mode = merged.system.get(key).map(|kept| kept.mode.clone());
-                let table = theirs.system.get(key).map(|table| SystemFile {
-                    mode: mode.unwrap_or_else(|| table.mode.clone()),
-                    ..table.clone()
-                });
-                set_or_remove(&mut merged.system, key, table);
+                let Some(mode) = merged.system.get(key).map(|kept| kept.mode.clone()) else {
+                    return;
+                };
+                let table = theirs
+                    .system
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| root_table(0));
+                merged
+                    .system
+                    .insert(key.to_owned(), SystemFile { mode, ..table });
             }
             _ => {}
         }
@@ -323,7 +329,13 @@ pub(crate) fn merge(
         }
         SYSTEM => {
             !settled_system.contains(&tie.key)
-                && !stricter_table(&mut system, &tie.key, mine, theirs)
+                && !stricter_table(
+                    &mut system,
+                    &tie.key,
+                    mine,
+                    theirs,
+                    git_modes(&format!("{}{}", system::DIR, tie.key)),
+                )
         }
         _ => true,
     });
@@ -443,23 +455,40 @@ fn stricter_entry(
     (!git || ours_git & 0o777 != both).then(|| format!("{both:04o}"))
 }
 
-// Gives a `[system]` key both sides hold the stricter mode, with this machine's owner and group;
-// true when the mode was all that differed, so no tie is left.
+// A system file with no `[system]` table is written as root's at its git mode.
+fn root_table(git_mode: u32) -> SystemFile {
+    SystemFile {
+        owner: "root".to_owned(),
+        group: "root".to_owned(),
+        mode: format!("{:04o}", git_mode & 0o777),
+        package_owned: false,
+    }
+}
+
+// Gives a tied `[system]` key the stricter mode, with this machine's owner and group; a side with
+// no table counts as root's at its git mode in `git`. True when the mode was all that differed,
+// so no tie is left.
 fn stricter_table(
     tables: &mut BTreeMap<String, SystemFile>,
     key: &str,
     mine: &RepoConfig,
     theirs: &RepoConfig,
+    (ours_git, theirs_git): (u32, u32),
 ) -> bool {
-    let (Some(m), Some(t)) = (mine.system.get(key), theirs.system.get(key)) else {
-        return false;
+    let side = |config: &RepoConfig, git_mode| {
+        config
+            .system
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| root_table(git_mode))
     };
+    let (m, t) = (side(mine, ours_git), side(theirs, theirs_git));
     let mode = format!("{:04o}", bits(Some(&m.mode), 0) & bits(Some(&t.mode), 0));
     let kept = SystemFile {
         mode: mode.clone(),
-        ..m.clone()
+        ..m
     };
-    let settled = kept == SystemFile { mode, ..t.clone() };
+    let settled = kept == SystemFile { mode, ..t };
     tables.insert(key.to_owned(), kept);
     settled
 }
@@ -907,6 +936,43 @@ mode = "0644"
                 package_owned: false,
             })
         );
+    }
+
+    /// A `[system]` tie where one side has no table counts that side as root's at the git mode of
+    /// the key's source, so either answer keeps the stricter mode without special bits.
+    #[test]
+    fn a_system_tie_counts_a_missing_table_as_roots_at_the_git_mode() {
+        let base = system_cfg(&[("/etc/x", table("root", "root", "0640"))]);
+        let without = RepoConfig::default();
+        let git = |source: &str| match source {
+            ".dotman/system/etc/x" => (0o100_755, 0o100_755),
+            _ => (0o100_644, 0o100_644),
+        };
+        let want = |owner: &str, mode: &str| {
+            Some(SystemFile {
+                owner: owner.to_owned(),
+                group: owner.to_owned(),
+                mode: mode.to_owned(),
+                package_owned: false,
+            })
+        };
+        for (wide, mode) in [("4777", "0755"), ("0750", "0750")] {
+            let theirs = system_cfg(&[("/etc/x", table("app", "app", wide))]);
+            let (mut merged, ties) = merge(&base, &without, &theirs, &BTreeMap::new(), &[], &git);
+            assert_eq!(ties.len(), 1, "{wide}");
+            assert_eq!(system_of(&merged, "/etc/x"), want("root", mode), "{wide}");
+            for tie in &ties {
+                tie.take_theirs(&mut merged, &theirs);
+            }
+            assert_eq!(system_of(&merged, "/etc/x"), want("app", mode), "{wide}");
+        }
+
+        let mine = system_cfg(&[("/etc/x", table("app", "app", "0600"))]);
+        let (mut merged, ties) = merge(&base, &mine, &without, &BTreeMap::new(), &[], &git);
+        for tie in &ties {
+            tie.take_theirs(&mut merged, &without);
+        }
+        assert_eq!(system_of(&merged, "/etc/x"), want("root", "0600"));
     }
 
     #[test]

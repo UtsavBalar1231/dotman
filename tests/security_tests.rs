@@ -4965,6 +4965,80 @@ fn a_dropped_modes_entry_against_a_wider_one_on_an_executable_keeps_the_stricter
     }
 }
 
+fn system_table(owner: &str, mode: &str) -> dotman::repo_config::SystemFile {
+    dotman::repo_config::SystemFile {
+        owner: owner.to_owned(),
+        group: owner.to_owned(),
+        mode: mode.to_owned(),
+        package_owned: false,
+    }
+}
+
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn set_system_table(env: &TestEnv, table: Option<&dotman::repo_config::SystemFile>) {
+    let mut config = env.repo_config();
+    match table {
+        Some(table) => config.system.insert("/etc/x".to_owned(), table.clone()),
+        None => config.system.remove("/etc/x"),
+    };
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+}
+
+/// A `[system]` tie where one side dropped the table counts that side as root's at git's 0644:
+/// the mode settles to the stricter one with special bits dropped, and owner and group follow
+/// the answer, root's for the side with no table.
+#[test]
+fn a_system_tie_with_a_dropped_table_settles_to_the_stricter_mode() {
+    let evil = system_table("evil", "4777");
+    let app = system_table("app", "0600");
+    for (mine, theirs, flag, want) in [
+        (
+            None,
+            Some(&evil),
+            "--take-repo",
+            system_table("evil", "0644"),
+        ),
+        (
+            None,
+            Some(&evil),
+            "--keep-local",
+            system_table("root", "0644"),
+        ),
+        (
+            Some(&app),
+            None,
+            "--take-repo",
+            system_table("root", "0600"),
+        ),
+    ] {
+        let (a, b) = two_machines();
+        a.write_repo(".dotman/system/etc/x", b"x base\n");
+        set_system_table(&a, Some(&system_table("root", "0640")));
+        a.push_repo();
+        b.ok(&["sync"]);
+
+        a.write_repo(".dotman/system/etc/x", b"x origin\n");
+        set_system_table(&a, theirs);
+        a.push_repo();
+        set_system_table(&b, mine);
+        let repo = b.repo().to_string_lossy().into_owned();
+        b.git(&["-C", &repo, "commit", "-qam", "change the table"]);
+
+        exits(&b.run(&["sync", flag]), 0);
+        let case = format!("{mine:?} {theirs:?} {flag}");
+        assert_eq!(b.repo_config().system.get("/etc/x"), Some(&want), "{case}");
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let pushed = a.git(&["--git-dir", &remote, "show", "main:.dotman.toml"]);
+        assert!(
+            pushed.contains(&format!("mode = \"{}\"", want.mode)),
+            "{case}: {pushed}"
+        );
+    }
+}
+
 /// Each side keeps half of a private key, which a merge of the two would join: the merged copy is
 /// refused under a flag, sync exits 4 naming the file and changes nothing, and the way out it
 /// prints works as printed. A credential that origin's own version holds is no reason to refuse:
