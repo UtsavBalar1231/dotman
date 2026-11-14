@@ -524,9 +524,11 @@ fn an_unreadable_marker_on_a_detached_head_leads_back_to_the_branch() {
     }
 }
 
-/// After a kill, the user saves copies in the repo named as git 2.25 names the copies a stop leaves,
-/// `.t~mine` and an editor's `.t~`: recovery keeps them. A new file that holds the blob the replay
-/// had at `.t` is git's, and goes.
+/// After a kill, the user saves copies in the repo named as git 2.25 names the copies a stop
+/// leaves, `.t~mine`, `.t~home`, `.t~orig` and an editor's `.t~`, each holding a version the replay
+/// had at `.t`: recovery keeps them. A new file named as git names its own copies, `.t~HEAD` or
+/// `.t~<commit> (<subject>)` as later gits and `.t~<commit>... <subject>` as 2.25 write it, that
+/// holds such a version is git's, and goes.
 #[test]
 fn recovery_keeps_a_user_s_file_named_like_git_s_leftover() {
     for pattern in [
@@ -539,24 +541,38 @@ fn recovery_keeps_a_user_s_file_named_like_git_s_leftover() {
         let out = b.run(&["sync", "--keep-local"]);
         assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
         let repo = b.repo();
-        for name in [".t~mine", ".t~"] {
-            fs::write(repo.join(name), format!("user copy {name}\n")).expect("write a copy");
+        let mine: &[u8] = b"1\nfrom b\n3\n";
+        let origin: &[u8] = b"1\nfrom a\n3\n";
+        let user = [
+            (".t~mine", mine),
+            (".t~home", mine),
+            (".t~orig", origin),
+            (".t~", origin),
+        ];
+        let git = [
+            (".t~HEAD", mine),
+            (".t~0123abc (mine 0)", origin),
+            (".t~0123abc... mine 0", origin),
+        ];
+        for (name, bytes) in user.iter().chain(&git) {
+            fs::write(repo.join(name), bytes).expect("write a copy");
         }
-        fs::write(repo.join(".t~HEAD"), b"1\nfrom b\n3\n").expect("write git's copy");
 
         let err = exits(&b, 0, &["sync", "--keep-local"]);
         assert!(
             err.contains("the repo is back as it was before that pull"),
             "{pattern}: {err}"
         );
-        for name in [".t~mine", ".t~"] {
+        for (name, bytes) in user {
             assert_eq!(
                 fs::read(repo.join(name)).expect("the copy survives"),
-                format!("user copy {name}\n").as_bytes(),
-                "{pattern}: {err}"
+                bytes,
+                "{pattern} {name}: {err}"
             );
         }
-        assert!(!repo.join(".t~HEAD").exists(), "{pattern}: {err}");
+        for (name, _) in git {
+            assert!(!repo.join(name).exists(), "{pattern} {name}: {err}");
+        }
         no_replay_left(&b);
     }
 }

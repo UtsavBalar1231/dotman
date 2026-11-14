@@ -966,7 +966,7 @@ const DELETIONS: &[(&str, usize, &str)] = &[
     (
         "src/git.rs",
         2,
-        "the `.git/dotman-pull` marker of a replayed pull, and, in the repo worktree only, a file whose decision is absent or that a stopped rebase left as `<path>~<suffix>` holding a blob the replay had at `<path>`",
+        "the `.git/dotman-pull` marker of a replayed pull, and, in the repo worktree only, a file whose decision is absent or that a stopped rebase left as `<path>~HEAD` or `<path>~<commit> (<subject>)`, as git names its copies, holding a blob the replay had at `<path>`",
     ),
     (
         "src/import/gittree.rs",

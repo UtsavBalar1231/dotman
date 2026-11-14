@@ -497,6 +497,23 @@ impl Marker {
     }
 }
 
+/// Whether `suffix`, the part of a file name after `<path>~`, is how git names the copy of `<path>`
+/// it sets aside at a stop: a side's label, `HEAD` or the replayed commit's `<abbrev> (<subject>)`,
+/// which git 2.25 writes `<abbrev>... <subject>`, with `_<n>` added when the name is taken.
+fn git_copy_suffix(suffix: &[u8]) -> bool {
+    let head = suffix.strip_prefix(b"HEAD").is_some_and(|rest| {
+        rest.is_empty()
+            || rest
+                .strip_prefix(b"_")
+                .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
+    });
+    let abbrev = suffix.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+    let label = suffix
+        .get(abbrev..)
+        .is_some_and(|rest| rest.starts_with(b" (") || rest.starts_with(b"... "));
+    head || (abbrev >= 4 && label)
+}
+
 /// A git object id: 40 or 64 lowercase hex digits.
 fn is_oid(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
@@ -2438,9 +2455,9 @@ impl Git {
     }
 
     /// The untracked files git 2.25 leaves from a stop, which `rebase --abort` keeps, each with the
-    /// path it is a copy of: those not in `untracked` from before the rebase, named
-    /// `<path>~<suffix>`, that hold one of `blobs` for `<path>`. Another new file is none, as a
-    /// user's `<path>~mine` or an editor's `<path>~` is not.
+    /// path it is a copy of: those not in `untracked` from before the rebase, named as
+    /// [`git_copy_suffix`] takes, that hold one of `blobs` for `<path>`. Another new file is none,
+    /// as a user's `<path>~mine` or an editor's `<path>~` is not, whatever it holds.
     fn leftovers(
         &self,
         untracked: &BTreeSet<PathBuf>,
@@ -2450,11 +2467,12 @@ impl Git {
         for path in self.untracked()?.difference(untracked) {
             let stem = path
                 .file_name()
-                .and_then(|name| name.as_bytes().split(|b| *b == b'~').next())
-                .filter(|stem| {
-                    !stem.is_empty() && path.file_name().map(OsStrExt::as_bytes) != Some(*stem)
+                .and_then(|name| {
+                    let mut parts = name.as_bytes().splitn(2, |b| *b == b'~');
+                    Some((parts.next()?, parts.next()?))
                 })
-                .map(|stem| path.with_file_name(OsStr::from_bytes(stem)));
+                .filter(|(stem, suffix)| !stem.is_empty() && git_copy_suffix(suffix))
+                .map(|(stem, _)| path.with_file_name(OsStr::from_bytes(stem)));
             let Some((stem, known)) = stem.and_then(|stem| blobs.get_key_value(&stem)) else {
                 continue;
             };
