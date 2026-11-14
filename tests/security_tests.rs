@@ -4919,9 +4919,7 @@ fn a_merged_copy_holding_a_credential_is_refused_and_the_way_out_works() {
     let before = b.four_trees();
     let err = exits(&b.run(&["sync", "--keep-local"]), 4);
     assert!(
-        err.contains(
-            ".conf: in the merged file, line 1 holds a private-key; nothing was pulled or pushed"
-        ),
+        err.contains(".conf: in the merged file, line 1 holds a private-key; nothing was taken\n"),
         "{err}"
     );
     let [home, _, state, remote] = b.four_trees();

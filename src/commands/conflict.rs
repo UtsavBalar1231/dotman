@@ -490,7 +490,9 @@ impl<'a> Pull<'a> {
         if let Some(dir) = &self.temp {
             return Ok(dir.path().to_path_buf());
         }
-        let dir = private_temp_dir(TEMP_PREFIX, &private_base(self.ctx)?)?;
+        // The PID in the name is what lets the temp sweep remove a killed run's copy.
+        let prefix = format!("{TEMP_PREFIX}{}-", std::process::id());
+        let dir = private_temp_dir(&prefix, &private_base(self.ctx)?)?;
         let path = dir.path().to_path_buf();
         self.temp = Some(dir);
         Ok(path)
@@ -766,10 +768,7 @@ impl<'a> Pull<'a> {
 
     fn report_refused(&self, path: &Path, why: &str, answer: Answer) {
         let bin = name::bin();
-        output::warning(&format!(
-            "{}: {why}; nothing was pulled or pushed, and your files and commits are as they were",
-            shown(path)
-        ));
+        output::warning(&format!("{}: {why}; nothing was taken", shown(path)));
         let source = source(path);
         let fix = if path == Path::new(SETTINGS) {
             format!("change and commit {SETTINGS} in the repo")
