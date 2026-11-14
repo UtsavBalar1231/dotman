@@ -10,7 +10,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -1461,7 +1461,17 @@ impl Git {
 
     /// Stores `bytes` as a blob, with no filter, and returns its id.
     pub fn write_blob(&self, bytes: &[u8]) -> Result<String> {
-        let out = self.run_stdin(&["hash-object", "-w", "--no-filters", "--stdin"], bytes)?;
+        self.hash_object(bytes, true)
+    }
+
+    /// The blob id of `bytes`, with no filter; stored only when `store`.
+    fn hash_object(&self, bytes: &[u8], store: bool) -> Result<String> {
+        let args: &[&str] = if store {
+            &["hash-object", "-w", "--no-filters", "--stdin"]
+        } else {
+            &["hash-object", "--no-filters", "--stdin"]
+        };
+        let out = self.run_stdin(args, bytes)?;
         let oid = text(&out);
         ensure!(is_oid(&oid), "git hash-object printed {oid:?}");
         Ok(oid)
@@ -1986,7 +1996,8 @@ impl Git {
         let Some(head) = head else {
             return Ok(Err("HEAD has no commit".to_owned()));
         };
-        self.remove_leftovers(marker)?;
+        let blobs = self.replay_blobs(marker)?;
+        self.remove_leftovers(marker, &blobs)?;
         if matching {
             self.run(&["rebase", "--abort"])?;
         } else {
@@ -2006,7 +2017,7 @@ impl Git {
             self.probe(&["update-index", "-q", "--unmerged", "--refresh"])?;
             self.run(&["read-tree", "-m", "-u", "HEAD", &marker.old])?;
         }
-        self.remove_leftovers(marker)?;
+        self.remove_leftovers(marker, &blobs)?;
         self.run(&["symbolic-ref", "HEAD", &refname])?;
         if let Some(change) = self.changes()?.first() {
             return Ok(Err(format!(
@@ -2033,29 +2044,78 @@ impl Git {
         parse_status(&self.run_with(cmd, &args)?.stdout)
     }
 
+    /// The blobs the replay could have written at each path: its index stages, its entries in
+    /// `HEAD`, the old head and the fetched commit, and its decision. Gitlinks are left out.
+    fn replay_blobs(&self, marker: &Marker) -> Result<BTreeMap<PathBuf, BTreeSet<String>>> {
+        let mut blobs: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+        let mut add = |path: &Path, entry: &Entry| {
+            if entry.mode != "160000" {
+                blobs
+                    .entry(path.to_path_buf())
+                    .or_default()
+                    .insert(entry.oid.clone());
+            }
+        };
+        for rev in ["HEAD", &marker.old, &marker.onto] {
+            for (path, entry) in &self.tree_entries(rev)? {
+                add(path, entry);
+            }
+        }
+        for (path, stages) in &self.unmerged_entries()? {
+            for entry in stages.iter().flatten() {
+                add(path, entry);
+            }
+        }
+        for (path, decision) in &marker.decisions {
+            if let Decision::Set(entry) = decision {
+                add(path, entry);
+            }
+        }
+        Ok(blobs)
+    }
+
+    /// The bytes at repo path `path` in the worktree: a file's content or a symlink's target.
+    /// `None` when nothing, a directory or a special file is there, or the path lies under a
+    /// symlink.
+    fn worktree_bytes(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+        if self.symlinked_parent(path)?.is_some() {
+            return Ok(None);
+        }
+        let full = self.repo.join(path);
+        let meta = match fs::symlink_metadata(&full) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("cannot stat {}", full.display())),
+        };
+        if meta.file_type().is_symlink() {
+            let target =
+                fs::read_link(&full).with_context(|| format!("cannot read {}", full.display()))?;
+            return Ok(Some(target.into_os_string().into_vec()));
+        }
+        if !meta.is_file() {
+            return Ok(None);
+        }
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&full)
+            .with_context(|| format!("cannot open {}", full.display()))?;
+        let mut bytes = Vec::new();
+        io::Read::read_to_end(&mut file, &mut bytes)
+            .with_context(|| format!("cannot read {}", full.display()))?;
+        Ok(Some(bytes))
+    }
+
     /// Removes the untracked files git 2.25 leaves from a stop, which `rebase --abort` keeps:
-    /// those that were not there before the replay and that are named `<path>~<suffix>` after a
-    /// path or directory of the old head, the fetched commit or a decision. Another new file
-    /// stays.
-    fn remove_leftovers(&self, marker: &Marker) -> Result<()> {
-        let new: Vec<PathBuf> = self
-            .untracked()?
-            .difference(&marker.untracked)
-            .cloned()
-            .collect();
-        if new.is_empty() {
-            return Ok(());
-        }
-        let mut known: BTreeSet<PathBuf> = marker.decisions.keys().cloned().collect();
-        for rev in [&marker.old, &marker.onto] {
-            known.extend(self.tree_entries(rev)?.into_keys());
-        }
-        let dirs: Vec<PathBuf> = known
-            .iter()
-            .flat_map(|path| path.ancestors().skip(1).map(Path::to_path_buf))
-            .collect();
-        known.extend(dirs);
-        for path in new {
+    /// those that were not there before the replay, are named `<path>~<suffix>`, and hold one of
+    /// `blobs` for `<path>`, from [`Git::replay_blobs`]. Another new file stays, as a user's
+    /// `<path>~mine` or an editor's `<path>~` does.
+    fn remove_leftovers(
+        &self,
+        marker: &Marker,
+        blobs: &BTreeMap<PathBuf, BTreeSet<String>>,
+    ) -> Result<()> {
+        for path in self.untracked()?.difference(&marker.untracked) {
             let stem = path
                 .file_name()
                 .and_then(|name| name.as_bytes().split(|b| *b == b'~').next())
@@ -2063,10 +2123,14 @@ impl Git {
                     !stem.is_empty() && path.file_name().map(OsStrExt::as_bytes) != Some(*stem)
                 })
                 .map(|stem| path.with_file_name(OsStr::from_bytes(stem)));
-            if stem.is_some_and(|stem| known.contains(&stem))
-                && self.symlinked_parent(&path)?.is_none()
-            {
-                self.remove_worktree_file(&path)?;
+            let Some(known) = stem.and_then(|stem| blobs.get(&stem)) else {
+                continue;
+            };
+            let Some(bytes) = self.worktree_bytes(path)? else {
+                continue;
+            };
+            if known.contains(&self.hash_object(&bytes, false)?) {
+                self.remove_worktree_file(path)?;
             }
         }
         Ok(())

@@ -346,6 +346,43 @@ fn a_sync_killed_just_after_the_branch_moves_recovers() {
     killed_at("*' update-ref '*", false);
 }
 
+/// After a kill, the user saves copies in the repo named as git 2.25 names the copies a stop leaves,
+/// `.t~mine` and an editor's `.t~`: recovery keeps them. A new file that holds the blob the replay
+/// had at `.t` is git's, and goes.
+#[test]
+fn recovery_keeps_a_user_s_file_named_like_git_s_leftover() {
+    for pattern in [
+        "*' update-ref '*",
+        "*' rebase --continue'*|*' rebase --skip'*",
+    ] {
+        let (_a, mut b) = replay_pair();
+        let (pre, post) = kill_once(&b, pattern, true);
+        wrap_git(&mut b, &pre, &post);
+        let out = b.run(&["sync", "--keep-local"]);
+        assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+        let repo = b.repo();
+        for name in [".t~mine", ".t~"] {
+            fs::write(repo.join(name), format!("user copy {name}\n")).expect("write a copy");
+        }
+        fs::write(repo.join(".t~HEAD"), b"1\nfrom b\n3\n").expect("write git's copy");
+
+        let err = exits(&b, 0, &["sync", "--keep-local"]);
+        assert!(
+            err.contains("the repo is back as it was before that pull"),
+            "{pattern}: {err}"
+        );
+        for name in [".t~mine", ".t~"] {
+            assert_eq!(
+                fs::read(repo.join(name)).expect("the copy survives"),
+                format!("user copy {name}\n").as_bytes(),
+                "{pattern}: {err}"
+            );
+        }
+        assert!(!repo.join(".t~HEAD").exists(), "{pattern}: {err}");
+        no_replay_left(&b);
+    }
+}
+
 /// [`TestEnv::four_trees`] with the repo's `.git` left out but for its objects and refs, since an
 /// aborted pull rewrites the index, the reflogs and `ORIG_HEAD`; with the status in their place.
 fn outside_git(
