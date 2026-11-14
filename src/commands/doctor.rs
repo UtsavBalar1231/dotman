@@ -473,13 +473,13 @@ fn remote(git: &Git, online: bool) -> Check {
     }
 }
 
-/// A branch name that sync and status refuse, or a detached `HEAD` that sync refuses. A rebase or
-/// a bisect detaches `HEAD` too, and gets its own check.
+/// A branch name that sync and status refuse, or a detached `HEAD` that sync refuses. A rebase, a
+/// bisect and a stopped sync's replay detach `HEAD` too, and get their own check.
 fn branch(git: &Git) -> Option<Check> {
     let line = match git.branch() {
         Ok(None) => {
             let remote = matches!(git.remote_url("origin"), Ok(Some(_)));
-            if !remote || git.operation().is_some() {
+            if !remote || git.operation().is_some() || git.own_pull() {
                 return None;
             }
             sync::detached(git).ok()?

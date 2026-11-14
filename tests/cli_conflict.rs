@@ -434,6 +434,96 @@ fn the_refusal_s_steps_save_an_uncommitted_edit_before_they_check_out() {
     }
 }
 
+/// The branches of `env`'s repo and of the remote, one name per line.
+fn branches(env: &TestEnv) -> (String, String) {
+    let list = |dir: String| {
+        env.git(&[
+            "--git-dir",
+            &dir,
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/",
+        ])
+    };
+    (
+        list(env.repo().join(".git").to_string_lossy().into_owned()),
+        list(env.remote_path().to_string_lossy().into_owned()),
+    )
+}
+
+/// A sync killed just before the branch moves leaves `HEAD` detached under the marker: `doctor`
+/// points to sync alone, with no `checkout -b` that would fork the machine onto a new branch.
+#[test]
+fn doctor_under_the_marker_prints_no_detached_head_fix() {
+    let (_a, mut b) = replay_pair();
+    let (pre, post) = kill_once(&b, "*' update-ref '*", true);
+    wrap_git(&mut b, &pre, &post);
+    let out = b.run(&["sync", "--keep-local"]);
+    assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+    let doctor = String::from_utf8_lossy(&b.run(&["doctor"]).stdout).into_owned();
+    assert!(
+        doctor.contains("fail  pull: an earlier dotman sync was stopped while it finished a pull"),
+        "{doctor}"
+    );
+    assert!(!doctor.contains("checkout -b"), "{doctor}");
+    assert!(!doctor.contains("branch:"), "{doctor}");
+    exits(&b, 0, &["sync", "--keep-local"]);
+    let main = "refs/heads/main\n".to_owned();
+    assert_eq!(branches(&b), (main.clone(), main));
+}
+
+/// A marker that does not parse, with `HEAD` left detached by the kill: the refusal checks out the
+/// branch the repo syncs before it removes the marker. Its steps, run as printed, then the answer
+/// the conflict asks for, end in a clean sync on that branch, and no other branch reaches the
+/// remote. On the first device no clone named `origin`'s `HEAD`, so its only branch is taken.
+#[test]
+fn an_unreadable_marker_on_a_detached_head_leads_back_to_the_branch() {
+    for first in [false, true] {
+        let (a, b) = replay_pair();
+        let (mut killed, other) = if first {
+            exits(&b, 0, &["sync", "--keep-local"]);
+            a.write(".t", b"1\nfrom a again\n3\n", 0o644);
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let (pre, post) = kill_once(&killed, "*' update-ref '*", true);
+        wrap_git(&mut killed, &pre, &post);
+        let out = killed.run(&["sync", "--keep-local"]);
+        assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+        let marker = killed.repo().join(".git/dotman-pull");
+        fs::write(&marker, b"garbage").expect("spoil the marker");
+        assert_eq!(
+            killed.repo().join(".git/refs/remotes/origin/HEAD").exists(),
+            !first,
+            "only the clone knows origin's HEAD"
+        );
+
+        let err = exits(&killed, 4, &["sync", "--keep-local"]);
+        assert!(err.contains("cannot be read"), "{err}");
+        let steps = numbered_steps(&err);
+        assert_eq!(
+            steps,
+            [
+                "dotman git checkout -f main".to_owned(),
+                format!("rm {}", marker.display()),
+                "dotman sync".to_owned(),
+            ],
+            "{err}"
+        );
+        for step in &steps {
+            let out = common::paste(&killed, step);
+            let code = if step == "dotman sync" { 4 } else { 0 };
+            assert_eq!(out.status.code(), Some(code), "{step}: {}", stderr(&out));
+        }
+        exits(&killed, 0, &["sync", "--keep-local"]);
+        no_replay_left(&killed);
+        let main = "refs/heads/main\n".to_owned();
+        assert_eq!(branches(&killed), (main.clone(), main), "first: {first}");
+        exits(&other, 0, &["sync"]);
+    }
+}
+
 /// After a kill, the user saves copies in the repo named as git 2.25 names the copies a stop leaves,
 /// `.t~mine` and an editor's `.t~`: recovery keeps them. A new file that holds the blob the replay
 /// had at `.t` is git's, and goes.

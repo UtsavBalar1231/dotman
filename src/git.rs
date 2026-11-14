@@ -280,6 +280,9 @@ pub struct Refusal {
     repo: PathBuf,
     /// `None` when the marker cannot be read.
     marker: Option<(String, String)>,
+    /// With no marker read and `HEAD` detached, the branch the repo syncs, which the steps check
+    /// out again; a sync on a detached `HEAD` would only point at a new branch.
+    detached_from: Option<String>,
     head: Option<String>,
     rebase_dir: bool,
     /// Worktree files, repo-relative, that hold changes `checkout -f` would drop.
@@ -345,19 +348,29 @@ impl fmt::Display for Refusal {
             self.repo.display(),
             self.why
         )?;
-        let Some((branch, old)) = &self.marker else {
-            return write!(
-                f,
-                " To go on, remove the marker and sync:\n  1. rm {marker}\n  2. {bin} sync"
-            );
+        let head = self.head.as_deref().unwrap_or("no commit");
+        let mut steps = match (&self.marker, &self.detached_from) {
+            (Some((branch, old)), _) => {
+                write!(
+                    f,
+                    " Before that pull, {branch} was at {old}; HEAD is now at {head}. To put the repo on {branch} as it is now, {}:",
+                    self.drops()
+                )?;
+                self.checkout_steps(branch)
+            }
+            (None, Some(branch)) => {
+                write!(
+                    f,
+                    " HEAD is detached at {head}. To put the repo on {branch} as it is now, {}, then remove the marker and sync:",
+                    self.drops()
+                )?;
+                self.checkout_steps(branch)
+            }
+            (None, None) => {
+                write!(f, " To go on, remove the marker and sync:")?;
+                Vec::new()
+            }
         };
-        write!(
-            f,
-            " Before that pull, {branch} was at {old}; HEAD is now at {}. To put the repo on {branch} as it is now, {}:",
-            self.head.as_deref().unwrap_or("no commit"),
-            self.drops()
-        )?;
-        let mut steps = self.checkout_steps(branch);
         steps.push(format!("rm {marker}"));
         steps.push(format!("{bin} sync"));
         for (n, step) in (1_u32..).zip(steps) {
@@ -2000,6 +2013,11 @@ impl Git {
                 marker: marker
                     .as_ref()
                     .map(|marker| (marker.branch.clone(), marker.old.clone())),
+                detached_from: if marker.is_none() && matches!(self.branch(), Ok(None)) {
+                    self.synced_branch().ok().flatten()
+                } else {
+                    None
+                },
                 head: self.head().ok().flatten(),
                 rebase_dir: self.rebase_dir().is_some(),
                 dirty,
@@ -2158,6 +2176,31 @@ impl Git {
             paths.push(path.clone());
         }
         Ok(Ok(Some(Saved { paths, dir })))
+    }
+
+    /// The branch `origin`'s `HEAD` names, else the only local branch, when it is a local branch
+    /// whose name [`checked_branch`] takes.
+    fn synced_branch(&self) -> Result<Option<String>> {
+        let remote_head = self
+            .optional(&["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])?
+            .and_then(|name| name.strip_prefix("refs/remotes/origin/").map(str::to_owned));
+        let branch = if remote_head.is_some() {
+            remote_head
+        } else {
+            let out = self.run(&["for-each-ref", "--format=%(refname)", "refs/heads/"])?;
+            let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+            let mut names = listed
+                .lines()
+                .filter_map(|name| name.strip_prefix("refs/heads/"));
+            match (names.next(), names.next()) {
+                (Some(only), None) => Some(only.to_owned()),
+                _ => None,
+            }
+        };
+        let Some(branch) = branch.and_then(|branch| checked_branch(&branch).ok()) else {
+            return Ok(None);
+        };
+        Ok(self.resolve_commit(&full_ref(&branch))?.map(|_| branch))
     }
 
     /// The `.dotman/repo` directory of a new backup run, with the parent of each of `dirty` in
