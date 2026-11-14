@@ -710,10 +710,12 @@ impl Context {
         }
         let home = &self.paths.home;
         // dotman's own directories hold the state and the age identity, both written atomically;
-        // the runtime dir holds the conflict flow's private copies, decrypted ones included.
+        // the runtime dir holds the conflict flow's private copies, decrypted ones included, so a
+        // dead run's directory there goes at once.
+        let runtime = runtime_dir();
         let mut dirs: BTreeSet<PathBuf> = std::iter::once(self.paths.state_dir.clone())
             .chain(self.paths.config_file.parent().map(Path::to_path_buf))
-            .chain(runtime_dir())
+            .chain(runtime.clone())
             .collect();
         for key in self.sources()?.keys() {
             // Only real directories, so the sweep never reaches through a symlinked parent.
@@ -730,11 +732,14 @@ impl Context {
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
             };
+            let at_once = runtime.as_ref() == Some(&dir);
             stale.extend(
                 entries
                     .filter_map(Result::ok)
                     .map(|entry| entry.path())
-                    .filter(|path| is_leftover(path, TEMP_PREFIX)),
+                    .filter(|path| {
+                        is_leftover(path, TEMP_PREFIX) || (at_once && is_dead_private_dir(path))
+                    }),
             );
         }
         // An import stages its clone beside the repo, or in the temp directory for a dry run.
@@ -1069,16 +1074,30 @@ fn is_stale(path: &Path, pid: Option<u32>) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
-    let ours = meta.is_file()
-        || meta.file_type().is_symlink()
-        || (meta.is_dir() && meta.mode() & 0o777 == 0o700 && meta.uid() == sys::geteuid());
+    let ours = meta.is_file() || meta.file_type().is_symlink() || is_private_dir(&meta);
     let untouched = meta
         .modified()
         .ok()
         .and_then(|at| at.elapsed().ok())
         .is_some_and(|age| age >= STALE_AFTER);
-    let dead = pid.is_none_or(|pid| pid != std::process::id() && !sys::pid_alive(pid));
-    ours && untouched && dead
+    ours && untouched && pid.is_none_or(is_dead)
+}
+
+/// A 0700 directory of this user named as [`is_leftover`] takes, whose PID is no live process,
+/// however recently it was touched.
+fn is_dead_private_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| leftover_pid(name, TEMP_PREFIX))
+        .is_some_and(is_dead)
+        && fs::symlink_metadata(path).is_ok_and(|meta| is_private_dir(&meta))
+}
+
+fn is_private_dir(meta: &fs::Metadata) -> bool {
+    meta.is_dir() && meta.mode() & 0o777 == 0o700 && meta.uid() == sys::geteuid()
+}
+
+fn is_dead(pid: u32) -> bool {
+    pid != std::process::id() && !sys::pid_alive(pid)
 }
 
 fn leftover_pid(name: &OsStr, prefix: &str) -> Option<u32> {

@@ -409,6 +409,47 @@ fn a_sync_killed_in_the_editor_leaves_nothing_half_merged() {
     common::assert_converged(&a, &b);
 }
 
+/// The private copies a sync killed in the editor leaves in the runtime dir are removed by the next
+/// sync at once, not ten minutes later.
+#[test]
+fn the_private_copies_a_killed_editor_leaves_are_removed_by_the_next_sync() {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+    let run = b.root().join("run");
+    fs::create_dir(&run).expect("runtime dir");
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("chmod");
+    let editor = b.root().join("editor");
+    fs::write(&editor, "#!/bin/sh\nkill -KILL \"$PPID\"\n").expect("write the editor");
+    fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let (editor, run_var) = (editor.to_string_lossy(), run.to_string_lossy());
+    let vars = [
+        PLAIN.as_slice(),
+        &[("VISUAL", &*editor), ("XDG_RUNTIME_DIR", &*run_var)],
+    ]
+    .concat();
+    let seen = common::in_a_terminal(&b, &vars, &["sync"], b"e\n").expect("script(1) runs");
+    let private = || -> usize {
+        fs::read_dir(&run)
+            .expect("read the runtime dir")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".dotman-tmp-")
+            })
+            .count()
+    };
+    assert_ne!(private(), 0, "the kill left the copies: {seen}");
+
+    let out = b.run_with(&[("XDG_RUNTIME_DIR", &run_var)], &["sync", "--keep-local"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(private(), 0, "{}", stderr(&out));
+}
+
 /// This machine's version of a file that loses is saved before the replay starts: a sync killed as
 /// the replay's rebase begins has already saved it, and the copy outlasts the recovery.
 #[test]
@@ -591,10 +632,10 @@ fn on_a_terminal_keep_mine_here_only_is_not_offered_for_an_existing_variant_or_a
 }
 
 /// The sweep removes a killed run's `.dotman-tmp-` dir from `$XDG_RUNTIME_DIR`, where the conflict
-/// flow puts its private copies, once it is old enough; a fresh one, which a live run may own, and
+/// flow puts its private copies, as soon as its process is gone, old or fresh; a live run's dir and
 /// a user's directory of a similar name stay.
 #[test]
-fn the_sweep_removes_an_old_temp_dir_from_the_runtime_dir_and_keeps_a_fresh_one() {
+fn the_sweep_removes_a_dead_run_s_temp_dir_from_the_runtime_dir_and_keeps_a_live_one() {
     use std::os::unix::fs::DirBuilderExt;
     let env = first_device(&[(".a", b"a\n", 0o644)]);
     let run = env.root().join("run");
@@ -623,10 +664,16 @@ fn the_sweep_removes_an_old_temp_dir_from_the_runtime_dir_and_keeps_a_fresh_one(
     };
     let stale = dir(format!(".dotman-tmp-{dead}-a1B2c3"), 0o700, true);
     let fresh = dir(format!(".dotman-tmp-{dead}-f1B2c3"), 0o700, false);
+    let live = dir(
+        format!(".dotman-tmp-{}-l1B2c3", std::process::id()),
+        0o700,
+        true,
+    );
     let users = dir(format!(".dotman-tmp-{dead}-u1B2c3"), 0o755, true);
     let run_var = run.to_string_lossy().into_owned();
     let err = env.ok_with(&[("XDG_RUNTIME_DIR", run_var.as_str())], &["sync"]);
     assert!(!stale.exists(), "{err}");
-    assert!(fresh.exists(), "{err}");
+    assert!(!fresh.exists(), "{err}");
+    assert!(live.exists(), "{err}");
     assert!(users.exists(), "{err}");
 }
