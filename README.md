@@ -63,7 +63,7 @@ https://github.com/user-attachments/assets/8bde50d1-c0ee-4340-8b72-7202184c55ae
 ## Documentation
 
 - [Getting started](docs/getting-started.md): setting up in full, what dotman needs, and using it in Codespaces, Dev Containers and DevPod.
-- [Daily use](docs/daily-use.md): the commands and their exit codes, how `status` and `sync` work, backups and file modes, ignoring files, and the flags that answer prompts.
+- [Daily use](docs/daily-use.md): the commands and their exit codes, how `status` and `sync` work, what happens when a pull conflicts, backups and file modes, ignoring files, and the flags that answer prompts.
 - [Per-machine files](docs/per-machine.md): variants, templates and hooks.
 - [Secrets](docs/secrets.md): encrypted files, your age key, and how dotman keeps credentials out of the repo.
 - [System files](docs/system-files.md): files outside `$HOME`, such as in `/etc`.
@@ -71,7 +71,6 @@ https://github.com/user-attachments/assets/8bde50d1-c0ee-4340-8b72-7202184c55ae
 
 ## Limitations
 
-- If two machines re-encrypt your secrets at the same moment, sync can hit a conflict. Syncing again sorts it out.
 - macOS hasn't been built or tested. Build from source there.
 - Windows isn't supported.
 

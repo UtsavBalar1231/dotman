@@ -310,6 +310,32 @@ const CLAIMS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "A pull is never left half merged while you decide",
+        &[
+            "a_sync_killed_in_the_editor_leaves_nothing_half_merged",
+            "on_a_terminal_stop_or_no_answer_changes_nothing",
+            "an_unanswered_conflict_exits_4_changes_nothing_and_both_printed_answers_work",
+        ],
+    ),
+    (
+        "settling a conflict on one variant rewrites the table that every variant",
+        &[
+            "a_system_source_follows_the_winner_through_its_mapped_key",
+            "two_variants_of_a_system_path_with_different_winners_take_this_machines_table",
+        ],
+    ),
+    (
+        "The version that loses is always saved first",
+        &[
+            "the_version_that_loses_is_saved_before_the_replay_starts",
+            "the_same_line_edited_on_both_is_settled_by_each_flag",
+            "a_losing_template_edit_is_saved",
+            "binary_files_and_symlinks_take_one_version_whole",
+            "an_encrypted_conflict_keeps_the_version_the_flag_picks",
+            "an_edit_against_a_removal_is_settled_by_each_flag_from_either_side",
+        ],
+    ),
+    (
         "A backup copy is never overwritten",
         &["a_file_backed_up_by_both_passes_of_a_sync_keeps_both_copies"],
     ),
@@ -490,6 +516,20 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "a_merged_copy_holding_a_credential_is_refused_and_the_way_out_works",
             "a_recorded_rerere_resolution_never_answers_a_conflict",
             "a_private_file_s_mode_follows_the_version_that_wins",
+        ],
+    ),
+    (
+        "The settled repo paths reach git on stdin, never as arguments",
+        &[
+            "a_key_named_dash_x_settles_and_is_removed",
+            "a_conflict_on_a_key_that_starts_with_a_dash_is_settled_by_a_flag",
+        ],
+    ),
+    (
+        "is encrypted to every recipient of the merged `.dotman.toml`",
+        &[
+            "an_encrypted_edit_is_encrypted_to_every_merged_recipient_and_leaves_no_plaintext",
+            "an_encrypted_edit_may_add_a_credential_and_it_is_committed_encrypted",
         ],
     ),
     (

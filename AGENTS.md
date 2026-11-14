@@ -57,6 +57,7 @@ scripts/                release helper scripts
 | Encryption, keys, recipients | `src/secrets.rs`, `src/commands/key.rs` | The key goes to age's stdin only |
 | The content guard | `src/secrets.rs` (`RULES`, `held`, `held_link`) | One combined regex; the age rule also runs alone, and binary files are skipped. `held` scans the key's name first and `held_link` a symlink's target; no allow entry covers either |
 | What sync holds or refuses | `src/commands/sync.rs` | `held_entries` is the staging guard; the mass-delete and unrelated-history refusals live here too |
+| How a pull conflict is settled | `src/commands/conflict.rs` | `resolve` classifies each stopped path, takes the flag's answer or asks, runs `accept` on new text and saves the losing versions; `Git::replay` in `git.rs` does the index writes, the marker and the branch move |
 | Key rules | `src/paths.rs` (`validate_key`) | Control characters, `.git` in NTFS spellings and reserved root names |
 | Checks every command runs first | `src/context.rs` (`guard`, `lock`) | All but `doctor`, `git` and `completion`; `log` runs only the first. A command that writes calls `lock`, which takes the lock, runs `guard` and refreshes `.git/info/attributes` |
 | An importer | `src/import/` | `import::run` routes by detection order |
@@ -101,6 +102,7 @@ scripts/                release helper scripts
 - **State and repo ID.** `$XDG_STATE_HOME/dotman/state.toml` is never synced and is written through temp, fsync and rename. `.git/dotman-id` identifies the repo; a state whose `repo_id` differs is treated as empty. A state file that fails to parse is never treated as empty.
 - **Repo root names.** `.git`, `.dotman.toml`, `.dotman/`, `README*`, `LICENSE*` and `install.sh` are never applied. `.git` is refused as a key component at any depth.
 - **Home writes.** Managed files reach `$HOME` only through `safe_write` and `safe_symlink`: no symlinked parent, no write through a symlink, temp file at 0600, setuid, setgid and sticky stripped, a backup first when the content differs. The `--swap` replacement and rollback, `write_atomic` for dotman's own files and `git config --global` are the other writes, listed in SECURITY.md; a new one goes there too.
+- **Pull conflicts.** New text from a pull conflict becomes a blob only after `accept` in `conflict.rs`, this machine's losing version is saved before the replay, and resolved content reaches the repo worktree through git's index, never written by dotman; a replay killed under `.git/dotman-pull` is put back by `Context::lock`.
 - **System scope.** `system-write` is the only path that runs as root. It rereads `[system] roots` from the invoking user's config, refuses `DOTMAN_SYSTEM_ROOT` and a plan prefix when euid is 0, and walks every target with `openat(O_NOFOLLOW)`.
 - **`unsafe`.** Only in `src/sys.rs`, each block with a `// SAFETY:` comment. The crate root denies it.
 - **Arithmetic.** `arithmetic_side_effects`, `float_arithmetic` and `indexing_slicing` are errors under lint-strict, in `tests/` too. Use checked or saturating integer arithmetic and `.get()`. A local `#[allow]` goes on one item with a `// reason:` comment that proves the bound.

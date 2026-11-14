@@ -32,7 +32,7 @@ Print help (see a summary with \*(Aq\-h\*(Aq)
 .SH DECISIONS
 .TP
 \fB\-\-keep\-local\fR
-Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync\*(Aqs pull conflicts, keep this machine\*(Aqs side of each clash: a text file keeps origin\*(Aqs edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add \-\-for host=<host> <file>` instead, or `add \-\-encrypt \-\-for host=<host> <file>` when any of its sources is encrypted
+Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync\*(Aqs pull conflicts, keep this machine\*(Aqs side of each clash: a text file keeps origin\*(Aqs edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add \-\-for host=<host> <file>` instead, or `add \-\-encrypt \-\-for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync\*(Aqs question about a pull conflict also offers `[h]` for that
 .TP
 \fB\-\-take\-repo\fR
 Take the repo version of conflicting and existing files, after backing them up. When sync\*(Aqs pull conflicts, take origin\*(Aqs side of each clash: a text file keeps this machine\*(Aqs edits elsewhere in it, other files are taken whole, and this machine\*(Aqs version is saved first
