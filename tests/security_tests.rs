@@ -4880,6 +4880,39 @@ fn a_private_text_file_stays_private_under_either_flag() {
     }
 }
 
+/// A hostile origin sets the `[modes]` entry of a file this machine records as 0600 to 0666,
+/// beside a text clash that stops the pull: the `[modes]` tie takes the stricter mode with no
+/// question, so neither flag, nor `[t]` on a terminal, widens the file here or in what is pushed.
+#[test]
+fn a_hostile_modes_entry_does_not_widen_a_private_file_through_a_tie() {
+    for flag in ["--keep-local", "--take-repo", "terminal"] {
+        let (a, b) = two_machines();
+        b.write(".bpriv", b"bpriv\n", 0o600);
+        b.ok(&["add", ".bpriv"]);
+        let entry = |env: &TestEnv| env.repo_config().modes.get(".bpriv").cloned();
+        assert_eq!(entry(&b).as_deref(), Some("0600"));
+        let mut config = a.repo_config();
+        config.modes.insert(".bpriv".to_owned(), "0666".to_owned());
+        config.save(&a.repo().join(".dotman.toml"), false).unwrap();
+        a.write(".bashrc", b"alias ll='ls -l'\n", 0o644);
+        a.ok(&["sync"]);
+        b.write(".bashrc", b"alias ll='ls -la'\n", 0o644);
+        if flag == "terminal" {
+            let seen = common::in_a_terminal(&b, &[], &["sync"], b"t\n").expect("script(1) runs");
+            assert!(!seen.contains("[modes]"), "{seen}");
+            assert_eq!(b.read(".bashrc"), b"alias ll='ls -l'\n", "{seen}");
+        } else {
+            let err = exits(&b.run(&["sync", flag]), 0);
+            assert!(!err.contains("0600 to 0666"), "{err}");
+        }
+        assert_eq!(entry(&b).as_deref(), Some("0600"), "{flag}");
+        assert_eq!(mode_of(&b.home().join(".bpriv")), 0o600, "{flag}");
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let pushed = a.git(&["--git-dir", &remote, "show", "main:.dotman.toml"]);
+        assert!(pushed.contains("\".bpriv\" = \"0600\""), "{flag}: {pushed}");
+    }
+}
+
 /// Each side keeps half of a private key, which a merge of the two would join: the merged copy is
 /// refused under a flag, sync exits 4 naming the file and changes nothing, and the way out it
 /// prints works as printed. A credential that origin's own version holds is no reason to refuse:

@@ -608,17 +608,27 @@ impl<'a> Pull<'a> {
     }
 
     fn settled(&self, path: &Path, winner: Winner, text_merge: bool) -> Settled {
-        let mode = |tree: &BTreeMap<PathBuf, Entry>| {
-            tree.get(path)
-                .and_then(|entry| u32::from_str_radix(&entry.mode, 8).ok())
-                .unwrap_or(0o100_644)
-        };
+        let (ours_mode, theirs_mode) = self.git_modes(&source(path));
         Settled {
             winner,
             text_merge,
-            ours_mode: mode(&self.mine),
-            theirs_mode: mode(&self.theirs),
+            ours_mode,
+            theirs_mode,
         }
+    }
+
+    /// A source's git tree mode here and in origin, such as `0o100644`; 0644 where a side lacks
+    /// it, and 0755 for a directory's `[modes]` key, which ends in `/`.
+    fn git_modes(&self, source: &str) -> (u32, u32) {
+        let mode = |tree: &BTreeMap<PathBuf, Entry>| {
+            if source.ends_with('/') {
+                return 0o40_755;
+            }
+            tree.get(Path::new(source))
+                .and_then(|entry| u32::from_str_radix(&entry.mode, 8).ok())
+                .unwrap_or(0o100_644)
+        };
+        (mode(&self.mine), mode(&self.theirs))
     }
 
     /// The content `answer` gives `path`, or why the new text it would make is refused.
@@ -1027,8 +1037,15 @@ impl<'a> Pull<'a> {
     /// A list merges with no tie, so the answers still to come do not change it.
     fn recipients(&self) -> Result<Vec<String>, String> {
         let [base, mine, theirs] = self.configs()?;
-        let (merged, _) =
-            repo_config::merge(&base, &mine, &theirs, &self.winners, &self.host_copies);
+        let git = |source: &str| self.git_modes(source);
+        let (merged, _) = repo_config::merge(
+            &base,
+            &mine,
+            &theirs,
+            &self.winners,
+            &self.host_copies,
+            &git,
+        );
         Ok(merged.age.recipients)
     }
 
@@ -1250,10 +1267,17 @@ impl<'a> Pull<'a> {
             // git merged it cleanly, and nothing here can read it to correct the result.
             Err(_) => return Ok(None),
         };
-        let (merged, ties) =
-            repo_config::merge(&base, &mine, &theirs, &self.winners, &self.host_copies);
+        let git = |source: &str| self.git_modes(source);
+        let (merged, ties) = repo_config::merge(
+            &base,
+            &mine,
+            &theirs,
+            &self.winners,
+            &self.host_copies,
+            &git,
+        );
         if !self.settings {
-            let (plain, _) = repo_config::merge(&base, &mine, &theirs, &BTreeMap::new(), &[]);
+            let (plain, _) = repo_config::merge(&base, &mine, &theirs, &BTreeMap::new(), &[], &git);
             if plain == merged {
                 return Ok(None);
             }

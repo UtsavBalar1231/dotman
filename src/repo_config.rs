@@ -258,8 +258,8 @@ impl Settled {
     }
 }
 
-/// A `[modes]`, `[hooks]` or `[system]` key that both sides set differently. The merge keeps
-/// this machine's value and leaves the question to the caller.
+/// A `[hooks]` or `[system]` key that both sides set differently. The merge keeps this machine's
+/// value and leaves the question to the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tie {
     pub table: &'static str,
@@ -267,13 +267,21 @@ pub(crate) struct Tie {
 }
 
 impl Tie {
-    /// Sets the tied key in `merged` to `theirs`' value, or removes it where `theirs` has none.
+    /// Sets the tied key in `merged` to `theirs`' value, or removes it where `theirs` has none. A
+    /// `[system]` table that both sides have keeps the merged mode, the stricter of the two.
     pub(crate) fn take_theirs(&self, merged: &mut RepoConfig, theirs: &RepoConfig) {
         let key = self.key.as_str();
         match self.table {
-            MODES => set_or_remove(&mut merged.modes, key, theirs.modes.get(key).cloned()),
             HOOKS => set_or_remove(&mut merged.hooks, key, theirs.hooks.get(key).cloned()),
-            _ => set_or_remove(&mut merged.system, key, theirs.system.get(key).cloned()),
+            SYSTEM => {
+                let mode = merged.system.get(key).map(|kept| kept.mode.clone());
+                let table = theirs.system.get(key).map(|table| SystemFile {
+                    mode: mode.unwrap_or_else(|| table.mode.clone()),
+                    ..table.clone()
+                });
+                set_or_remove(&mut merged.system, key, table);
+            }
+            _ => {}
         }
     }
 }
@@ -281,13 +289,17 @@ impl Tie {
 /// Three-way merge of `.dotman.toml`: `mine` is this machine's side, `theirs` origin's. Lists keep
 /// this machine's order, add what origin added and drop what either side removed. Maps merge per
 /// key. A settled source's `[modes]` entry and `[system]` table follow `winners` instead, and
-/// `host_copies` (shared source, variant) gives each variant this machine's `[modes]` entry.
+/// `host_copies` (shared source, variant) gives each variant this machine's `[modes]` entry. A
+/// `[modes]` key both sides set differently takes the stricter mode, `git_modes` giving the
+/// source's git tree mode on each side for a side with no entry, and a `[system]` table both set
+/// differently takes the stricter mode; neither mode is left to an answer.
 pub(crate) fn merge(
     base: &RepoConfig,
     mine: &RepoConfig,
     theirs: &RepoConfig,
     winners: &BTreeMap<String, Settled>,
     host_copies: &[(String, String)],
+    git_modes: &dyn Fn(&str) -> (u32, u32),
 ) -> (RepoConfig, Vec<Tie>) {
     let mut ties = Vec::new();
     let mut modes = merge_map(MODES, &base.modes, &mine.modes, &theirs.modes, &mut ties);
@@ -302,8 +314,18 @@ pub(crate) fn merge(
     follow_modes(&mut modes, mine, theirs, winners);
     let settled_system = follow_system(&mut system, mine, theirs, winners);
     ties.retain(|tie| match tie.table {
-        MODES => !winners.contains_key(&tie.key),
-        SYSTEM => !settled_system.contains(&tie.key),
+        MODES => {
+            if !winners.contains_key(&tie.key) {
+                let (m, t) = (mine.modes.get(&tie.key), theirs.modes.get(&tie.key));
+                let entry = stricter_entry(m, t, git_modes(&tie.key));
+                set_or_remove(&mut modes, &tie.key, entry);
+            }
+            false
+        }
+        SYSTEM => {
+            !settled_system.contains(&tie.key)
+                && !stricter_table(&mut system, &tie.key, mine, theirs)
+        }
         _ => true,
     });
     for (source, variant) in host_copies {
@@ -406,6 +428,44 @@ fn set_or_remove<V>(map: &mut BTreeMap<String, V>, key: &str, value: Option<V>) 
 // counts as git's mode, and an entry that does not parse as the strictest.
 fn bits(entry: Option<&str>, git_mode: u32) -> u32 {
     entry.map_or(git_mode, |text| parse_mode(text).unwrap_or(0)) & 0o777
+}
+
+// A side with no entry counts as `git` modes' side; the result is no entry when it is that git
+// mode, since an entry would skip the narrowing a file at git's mode gets.
+fn stricter_entry(
+    mine: Option<&String>,
+    theirs: Option<&String>,
+    (ours_git, theirs_git): (u32, u32),
+) -> Option<String> {
+    let both =
+        bits(mine.map(String::as_str), ours_git) & bits(theirs.map(String::as_str), theirs_git);
+    let git = match (mine, theirs) {
+        (None, _) => Some(ours_git & 0o777),
+        (_, None) => Some(theirs_git & 0o777),
+        _ => None,
+    };
+    (git != Some(both)).then(|| format!("{both:04o}"))
+}
+
+// Gives a `[system]` key both sides hold the stricter mode, with this machine's owner and group;
+// true when the mode was all that differed, so no tie is left.
+fn stricter_table(
+    tables: &mut BTreeMap<String, SystemFile>,
+    key: &str,
+    mine: &RepoConfig,
+    theirs: &RepoConfig,
+) -> bool {
+    let (Some(m), Some(t)) = (mine.system.get(key), theirs.system.get(key)) else {
+        return false;
+    };
+    let mode = format!("{:04o}", bits(Some(&m.mode), 0) & bits(Some(&t.mode), 0));
+    let kept = SystemFile {
+        mode: mode.clone(),
+        ..m.clone()
+    };
+    let settled = kept == SystemFile { mode, ..t.clone() };
+    tables.insert(key.to_owned(), kept);
+    settled
 }
 
 fn follow_modes(
@@ -721,8 +781,12 @@ mode = "0644"
             .collect()
     }
 
+    fn git(_: &str) -> (u32, u32) {
+        (0o100_644, 0o100_644)
+    }
+
     fn plain(base: &RepoConfig, mine: &RepoConfig, theirs: &RepoConfig) -> (RepoConfig, Vec<Tie>) {
-        merge(base, mine, theirs, &BTreeMap::new(), &[])
+        merge(base, mine, theirs, &BTreeMap::new(), &[], &git)
     }
 
     fn system_of(config: &RepoConfig, key: &str) -> Option<SystemFile> {
@@ -764,39 +828,86 @@ mode = "0644"
 
     #[test]
     fn a_key_set_differently_on_both_sides_is_a_tie() {
-        let base = cfg(
-            "[modes]\n\"a\" = \"0600\"\n\"gone\" = \"0600\"\n[hooks]\n\"h\" = \"one\"\n\
-             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"root\"\nmode = \"0644\"\n",
-        );
-        let mine = cfg(
-            "[modes]\n\"a\" = \"0640\"\n\"new\" = \"0600\"\n[hooks]\n\"h\" = \"mine\"\n\
-             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"wheel\"\nmode = \"0644\"\n",
-        );
-        let theirs = cfg(
-            "[modes]\n\"a\" = \"0660\"\n\"gone\" = \"0640\"\n\"new\" = \"0644\"\n\
-             [hooks]\n\"h\" = \"theirs\"\n[system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"adm\"\nmode = \"0644\"\n",
-        );
-        let (merged, ties) = plain(&base, &mine, &theirs);
+        let base = cfg("[hooks]\n\"h\" = \"one\"\n\
+             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"root\"\nmode = \"0644\"\n");
+        let mine = cfg("[hooks]\n\"h\" = \"mine\"\n\
+             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"wheel\"\nmode = \"0644\"\n");
+        let theirs = cfg("[hooks]\n\"h\" = \"theirs\"\n\
+             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"adm\"\nmode = \"0644\"\n");
+        let (mut merged, ties) = plain(&base, &mine, &theirs);
         let tie = |table, key: &str| Tie {
             table,
             key: key.to_owned(),
         };
-        assert_eq!(
-            ties,
-            [
-                tie(MODES, "a"),
-                tie(MODES, "gone"),
-                tie(MODES, "new"),
-                tie(HOOKS, "h"),
-                tie(SYSTEM, "/etc/x"),
-            ]
-        );
-        assert_eq!(mode_of(&merged, "a").as_deref(), Some("0640"));
-        assert_eq!(mode_of(&merged, "gone"), None);
+        assert_eq!(ties, [tie(HOOKS, "h"), tie(SYSTEM, "/etc/x")]);
         assert_eq!(merged.hooks.get("h").map(String::as_str), Some("mine"));
         assert_eq!(
             system_of(&merged, "/etc/x").map(|f| f.group).as_deref(),
             Some("wheel")
+        );
+        for tie in &ties {
+            tie.take_theirs(&mut merged, &theirs);
+        }
+        assert_eq!(merged.hooks.get("h").map(String::as_str), Some("theirs"));
+        assert_eq!(system_of(&merged, "/etc/x"), system_of(&theirs, "/etc/x"));
+    }
+
+    /// A `[modes]` key both sides set differently is no tie: it takes the stricter mode, without
+    /// special bits, a side with no entry counting as its git mode, whatever the answer.
+    #[test]
+    fn a_modes_key_set_differently_on_both_takes_the_stricter_mode() {
+        let base = cfg("[modes]\n\"a\" = \"0600\"\n\"gone\" = \"0600\"\n\"run\" = \"0700\"\n");
+        let mine = cfg(
+            "[modes]\n\"a\" = \"0640\"\n\"new\" = \"0600\"\n\"s\" = \"4755\"\n\"wide\" = \"0600\"\n",
+        );
+        let theirs = cfg(
+            "[modes]\n\"a\" = \"0660\"\n\"gone\" = \"0640\"\n\"new\" = \"0666\"\n\"run\" = \"0777\"\n\
+             \"s\" = \"0777\"\n\"wide\" = \"0666\"\n",
+        );
+        let git = |source: &str| match source {
+            "run" => (0o100_755, 0o100_755),
+            _ => (0o100_644, 0o100_644),
+        };
+        let (merged, ties) = merge(&base, &mine, &theirs, &BTreeMap::new(), &[], &git);
+        assert_eq!(ties, []);
+        for (key, mode) in [
+            ("a", Some("0640")),
+            ("gone", Some("0640")),
+            ("new", Some("0600")),
+            ("s", Some("0755")),
+            ("wide", Some("0600")),
+            ("run", None),
+        ] {
+            assert_eq!(mode_of(&merged, key).as_deref(), mode, "{key}");
+        }
+    }
+
+    /// A `[system]` table both sides set differently takes the stricter mode: with nothing else
+    /// different it is no tie, and taking origin's owner and group keeps that mode.
+    #[test]
+    fn a_system_table_set_differently_on_both_takes_the_stricter_mode() {
+        let base = system_cfg(&[("/etc/x", table("root", "root", "0640"))]);
+        let mine = system_cfg(&[("/etc/x", table("root", "root", "0600"))]);
+        let theirs = system_cfg(&[("/etc/x", table("root", "root", "0666"))]);
+        let (merged, ties) = plain(&base, &mine, &theirs);
+        assert_eq!(ties, []);
+        assert_eq!(system_of(&merged, "/etc/x"), system_of(&mine, "/etc/x"));
+
+        let theirs = system_cfg(&[("/etc/x", table("app", "adm", "4666"))]);
+        let (mut merged, ties) = plain(&base, &mine, &theirs);
+        assert_eq!(ties.len(), 1);
+        assert_eq!(system_of(&merged, "/etc/x"), system_of(&mine, "/etc/x"));
+        for tie in &ties {
+            tie.take_theirs(&mut merged, &theirs);
+        }
+        assert_eq!(
+            system_of(&merged, "/etc/x"),
+            Some(SystemFile {
+                owner: "app".to_owned(),
+                group: "adm".to_owned(),
+                mode: "0600".to_owned(),
+                package_owned: false,
+            })
         );
     }
 
@@ -856,7 +967,7 @@ mode = "0644"
                 ("b", settled(winner, false)),
                 ("c", settled(winner, false)),
             ]);
-            merge(&base, &mine, &theirs, &won, &[])
+            merge(&base, &mine, &theirs, &won, &[], &git)
         };
         let (merged, ties) = run(Winner::Mine);
         assert_eq!(ties, [], "a settled source is no tie");
@@ -884,7 +995,7 @@ mode = "0644"
                 ("a", settled(winner, text_merge)),
                 ("s", settled(winner, text_merge)),
             ]);
-            let (merged, ties) = merge(&base, &mine, &theirs, &won, &[]);
+            let (merged, ties) = merge(&base, &mine, &theirs, &won, &[], &git);
             assert_eq!(ties, []);
             assert_eq!(mode_of(&merged, "a").as_deref(), Some("0640"), "{winner:?}");
             assert_eq!(
@@ -903,7 +1014,7 @@ mode = "0644"
         for winner in [Winner::Mine, Winner::Theirs] {
             let won = winners(&[("secret", settled(winner, true))]);
             for (mine, theirs) in [(&with, &without), (&without, &with)] {
-                let (merged, _) = merge(&base, mine, theirs, &won, &[]);
+                let (merged, _) = merge(&base, mine, theirs, &won, &[], &git);
                 assert_eq!(
                     mode_of(&merged, "secret").as_deref(),
                     Some("0600"),
@@ -929,7 +1040,7 @@ mode = "0644"
             ),
             ("none", settled(Winner::Merged, true)),
         ]);
-        let (merged, _) = merge(&base, &RepoConfig::default(), &theirs, &won, &[]);
+        let (merged, _) = merge(&base, &RepoConfig::default(), &theirs, &won, &[], &git);
         assert_eq!(mode_of(&merged, "run").as_deref(), Some("0644"));
         assert_eq!(mode_of(&merged, "none"), None);
     }
@@ -941,10 +1052,10 @@ mode = "0644"
         let theirs = cfg("[modes]\n\"rc\" = \"0600\"\n");
         let won = winners(&[("rc", settled(Winner::Theirs, false))]);
         let copies = [("rc".to_owned(), "rc{host=laptop}".to_owned())];
-        let (merged, _) = merge(&base, &mine, &theirs, &won, &copies);
+        let (merged, _) = merge(&base, &mine, &theirs, &won, &copies, &git);
         assert_eq!(mode_of(&merged, "rc").as_deref(), Some("0600"));
         assert_eq!(mode_of(&merged, "rc{host=laptop}").as_deref(), Some("0640"));
-        let (merged, _) = merge(&base, &theirs, &theirs, &won, &copies[..0]);
+        let (merged, _) = merge(&base, &theirs, &theirs, &won, &copies[..0], &git);
         assert_eq!(mode_of(&merged, "rc{host=laptop}"), None);
     }
 
@@ -971,7 +1082,7 @@ mode = "0644"
         let source = ".dotman/system/etc/hosts{host=laptop}";
         let run = |winner| {
             let won = winners(&[(source, settled(winner, false))]);
-            merge(&base, &mine, &theirs, &won, &[])
+            merge(&base, &mine, &theirs, &won, &[], &git)
         };
         let (merged, ties) = run(Winner::Theirs);
         assert_eq!(ties, [], "a settled system source is no tie");
@@ -991,7 +1102,7 @@ mode = "0644"
 
         let without = RepoConfig::default();
         let won = winners(&[(".dotman/system/etc/hosts", settled(Winner::Theirs, false))]);
-        let (merged, _) = merge(&base, &mine, &without, &won, &[]);
+        let (merged, _) = merge(&base, &mine, &without, &won, &[], &git);
         assert!(!merged.system.contains_key("/etc/hosts"), "theirs had none");
         assert!(merged.system.contains_key("/etc/other"));
     }
@@ -1004,7 +1115,7 @@ mode = "0644"
         let source = ".dotman/system/etc/x";
         let run = |winner, text_merge| {
             let won = winners(&[(source, settled(winner, text_merge))]);
-            system_of(&merge(&base, &mine, &theirs, &won, &[]).0, "/etc/x")
+            system_of(&merge(&base, &mine, &theirs, &won, &[], &git).0, "/etc/x")
         };
         let want = |owner: &str, group: &str| SystemFile {
             owner: owner.to_owned(),
@@ -1030,7 +1141,7 @@ mode = "0644"
                 settled(Winner::Theirs, false),
             ),
         ]);
-        let (merged, _) = merge(&base, &mine, &theirs, &won, &[]);
+        let (merged, _) = merge(&base, &mine, &theirs, &won, &[], &git);
         assert_eq!(
             system_of(&merged, "/etc/x"),
             Some(SystemFile {
@@ -1050,7 +1161,7 @@ mode = "0644"
                 settled(Winner::Theirs, false),
             ),
         ]);
-        let (merged, _) = merge(&base, &mine, &theirs, &same, &[]);
+        let (merged, _) = merge(&base, &mine, &theirs, &same, &[], &git);
         assert_eq!(system_of(&merged, "/etc/x"), system_of(&theirs, "/etc/x"));
     }
 }

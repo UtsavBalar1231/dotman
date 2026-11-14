@@ -3688,34 +3688,61 @@ fn on_a_terminal_an_unanswered_conflict_is_reported_as_without_one() {
     assert_eq!(b.read(".a"), b"from b\n");
 }
 
+/// Sets the `[hooks]` command of `.unmanaged`, a key no change matches, in `env`'s `.dotman.toml`.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn set_unmanaged_hook(env: &TestEnv, command: &str) {
+    let mut config = env.repo_config();
+    config
+        .hooks
+        .insert(".unmanaged".to_owned(), command.to_owned());
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .expect("save .dotman.toml");
+}
+
+fn unmanaged_hook(env: &TestEnv) -> Option<String> {
+    env.repo_config().hooks.get(".unmanaged").cloned()
+}
+
 /// A `.dotman.toml` key both machines set to different values is the one settings question: the
 /// report lists the file and the key, and each flag takes its side's value.
 #[test]
 fn a_settings_key_set_differently_on_both_is_answered_by_each_flag() {
-    for (flag, kept) in [("--keep-local", "0640"), ("--take-repo", "0600")] {
+    for (flag, kept) in [("--keep-local", "echo b"), ("--take-repo", "echo a")] {
         let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
-        for (env, mode) in [(&a, "0600"), (&b, "0640")] {
-            let mut config = env.repo_config();
-            config
-                .modes
-                .insert(".unmanaged".to_owned(), mode.to_owned());
-            config
-                .save(&env.repo().join(".dotman.toml"), false)
-                .expect("save .dotman.toml");
-        }
+        set_unmanaged_hook(&a, "echo a");
+        set_unmanaged_hook(&b, "echo b");
         exits(&a, 0, &["sync"]);
         let err = exits(&b, 4, &["sync"]);
         assert!(
-            err.contains("conflicting paths:\n  .dotman.toml\n.dotman.toml sets [modes] \".unmanaged\" differently here and in origin/main\nanswer with "),
+            err.contains("conflicting paths:\n  .dotman.toml\n.dotman.toml sets [hooks] \".unmanaged\" differently here and in origin/main\nanswer with "),
             "{err}"
         );
         no_replay_left(&b);
         exits(&b, 0, &["sync", flag]);
-        let mode = b.repo_config().modes.get(".unmanaged").cloned();
-        assert_eq!(mode.as_deref(), Some(kept), "{flag}");
+        assert_eq!(unmanaged_hook(&b).as_deref(), Some(kept), "{flag}");
         exits(&a, 0, &["sync"]);
-        let mode = a.repo_config().modes.get(".unmanaged").cloned();
-        assert_eq!(mode.as_deref(), Some(kept), "{flag}");
+        assert_eq!(unmanaged_hook(&a).as_deref(), Some(kept), "{flag}");
+    }
+}
+
+/// A `[modes]` key both machines set to different values is no question: it takes the stricter
+/// mode, so a sync with no flag goes through and neither machine's file is widened.
+#[test]
+fn a_modes_key_set_differently_on_both_takes_the_stricter_mode_with_no_question() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    for (env, mode) in [(&a, 0o640), (&b, 0o604)] {
+        env.write(".m", b"m\n", mode);
+        env.ok(&["add", ".m"]);
+    }
+    exits(&a, 0, &["sync"]);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(!err.contains("the pull conflicts"), "{err}");
+    exits(&a, 0, &["sync"]);
+    for env in [&a, &b] {
+        let mode = env.repo_config().modes.get(".m").cloned();
+        assert_eq!(mode.as_deref(), Some("0600"));
     }
 }
 
@@ -4197,21 +4224,15 @@ fn an_edit_taken_before_a_replay_that_fails_is_saved() {
 #[test]
 fn on_a_terminal_a_settings_tie_is_asked_with_the_files() {
     for (input, file, kept) in [
-        (&b"k\n"[..], false, "0640"),
-        (b"t\n", false, "0600"),
-        (b"p\nk\nt\n", true, "0600"),
+        (&b"k\n"[..], false, "echo b"),
+        (b"t\n", false, "echo a"),
+        (b"p\nk\nt\n", true, "echo a"),
     ] {
         let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
-        for (env, mode) in [(&a, "0600"), (&b, "0640")] {
-            let mut config = env.repo_config();
-            config
-                .modes
-                .insert(".unmanaged".to_owned(), mode.to_owned());
-            config
-                .save(&env.repo().join(".dotman.toml"), false)
-                .expect("save .dotman.toml");
+        for (env, name) in [(&a, "a"), (&b, "b")] {
+            set_unmanaged_hook(env, &format!("echo {name}"));
             if file {
-                env.write(".a", format!("from {mode}\n").as_bytes(), 0o644);
+                env.write(".a", format!("from {name}\n").as_bytes(), 0o644);
             }
         }
         exits(&a, 0, &["sync"]);
@@ -4221,13 +4242,12 @@ fn on_a_terminal_a_settings_tie_is_asked_with_the_files() {
             "{seen}"
         );
         assert!(
-            seen.contains(".dotman.toml sets [modes] \".unmanaged\" differently here and in origin/main\n[k] keeps this machine's value of each, [t] takes origin/main's\n.dotman.toml [k] keep mine  [t] take theirs  [d] diff  [s] stop: "),
+            seen.contains(".dotman.toml sets [hooks] \".unmanaged\" differently here and in origin/main\n[k] keeps this machine's value of each, [t] takes origin/main's\n.dotman.toml [k] keep mine  [t] take theirs  [d] diff  [s] stop: "),
             "{seen}"
         );
-        let mode = b.repo_config().modes.get(".unmanaged").cloned();
-        assert_eq!(mode.as_deref(), Some(kept), "{seen}");
+        assert_eq!(unmanaged_hook(&b).as_deref(), Some(kept), "{seen}");
         if file {
-            assert_eq!(b.read(".a"), b"from 0640\n", "{seen}");
+            assert_eq!(b.read(".a"), b"from b\n", "{seen}");
         }
         no_replay_left(&b);
         exits(&a, 0, &["sync"]);
