@@ -56,9 +56,11 @@ fn first_device(files: &[(&str, &[u8], u32)]) -> TestEnv {
     env
 }
 
+/// The second machine, with a host name pinned so that `[h]`, which names a `{host=…}` variant,
+/// is offered whatever this machine's own host name is.
 fn clone_to_new_device(first: &TestEnv) -> TestEnv {
     let env = first.second_device();
-    env.ok(&["init", &env.remote_url(), "--take-repo"]);
+    env.ok(&["init", &env.remote_url(), "--take-repo", "--host", "beta"]);
     env
 }
 
