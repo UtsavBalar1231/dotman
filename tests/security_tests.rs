@@ -4385,7 +4385,7 @@ fn the_printed_pull_reaches_a_branch_other_than_main() {
     b.ok(&["add", ".x"]);
 
     let err = exits(&b.run(&["sync"]), 4);
-    let pull = "dotman git pull --rebase origin topic/a.b";
+    let pull = "dotman git pull --rebase -s ort origin topic/a.b";
     assert!(err.contains(&format!("1. {pull}")), "{err}");
     assert!(
         err.contains(".x is a file here and a directory in origin/topic/a.b"),

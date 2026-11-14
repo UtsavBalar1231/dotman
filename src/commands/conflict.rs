@@ -1491,28 +1491,11 @@ impl<'a> Pull<'a> {
         )];
         let mut staging = Vec::new();
         for stop in &self.seen {
-            let found = self
-                .existing(&stop.path)
-                .unwrap_or_else(|| stop.path.clone());
-            let whose = match (&stop.ours, &stop.replayed) {
-                _ if found == stop.path => None,
-                (None, Some(_)) => Some("this machine's".to_owned()),
-                (Some(_), None) => Some(format!("{theirs}'s")),
-                _ => None,
-            };
-            if let Some(whose) = whose {
-                if stop.ours.is_none() {
-                    staging.push(format!(
-                        "{bin} git checkout --no-overlay REBASE_HEAD -- {}",
-                        quoted(&[&found])
-                    ));
-                }
-                staging.push(format!("{bin} git rm -q -f -- {}", quoted(&[&stop.path])));
-                edit.push(format!(
-                    "Copy {} holds {whose} {}",
-                    quoted(&[&stop.path]),
-                    shown(&found)
-                ));
+            let copy = stop.aside.as_ref().unwrap_or(&stop.path);
+            let found = self.existing(copy).unwrap_or_else(|| copy.clone());
+            if let Some((holds, steps)) = copy_steps(stop, &found, &self.ctx.paths.repo, &theirs) {
+                edit.push(holds);
+                staging.extend(steps);
             }
             if !listed.contains(&found) {
                 listed.push(found);
@@ -1543,9 +1526,13 @@ impl<'a> Pull<'a> {
             staging.push(format!("{bin} git add -- {}", quoted(&add)));
         }
         staging.push(format!("{bin} git add -u"));
+        // The same backend as dotman's pull, so the stop and its copies are the ones named here.
+        let mut pull = vec!["git", "pull", "--rebase"];
+        pull.extend_from_slice(self.ctx.git.pull_backend().unwrap_or_default());
         print_steps(&[
             vec![format!(
-                "{bin} git pull --rebase {REMOTE} {}",
+                "{bin} {} {REMOTE} {}",
+                pull.join(" "),
                 shell_words::quote(self.branch)
             )],
             edit,
@@ -1770,6 +1757,41 @@ fn kind(tree: &BTreeMap<PathBuf, Entry>, path: &Path) -> &'static str {
     }
 }
 
+/// For a stop whose one version git put aside as a copy of `found`, the step 2 line naming the
+/// copy and the step 3 lines that keep this machine's version under `found` and remove the copy.
+/// git 2.25 leaves the copy untracked, so plain `rm`, with the path in `repo`, removes it.
+fn copy_steps(
+    stop: &Stopped,
+    found: &Path,
+    repo: &Path,
+    theirs: &str,
+) -> Option<(String, Vec<String>)> {
+    let bin = name::bin();
+    let copy = stop.aside.as_ref().unwrap_or(&stop.path);
+    if found == copy.as_path() {
+        return None;
+    }
+    let whose = match (&stop.ours, &stop.replayed) {
+        (None, Some(_)) => "this machine's".to_owned(),
+        (Some(_), None) => format!("{theirs}'s"),
+        _ => return None,
+    };
+    let found = found.to_path_buf();
+    let mut steps = Vec::new();
+    if stop.ours.is_none() {
+        steps.push(format!(
+            "{bin} git checkout --no-overlay REBASE_HEAD -- {}",
+            quoted(&[&found])
+        ));
+    }
+    steps.push(stop.aside.as_ref().map_or_else(
+        || format!("{bin} git rm -q -f -- {}", quoted(&[copy])),
+        |copy| format!("rm -f -- {}", quoted(&[&repo.join(copy)])),
+    ));
+    let holds = format!("Copy {} holds {whose} {}", quoted(&[copy]), shown(&found));
+    Some((holds, steps))
+}
+
 /// The paths git could have renamed `path` from: its name cut at each `~`, as `x~HEAD` is a copy
 /// of `x`.
 fn stems(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
@@ -1815,6 +1837,51 @@ mod tests {
             mode: mode.to_owned(),
             oid: oid.to_string().repeat(40),
         }
+    }
+
+    /// A copy git tracks, as later gits make it, is removed with `git rm`; one git 2.25 left
+    /// untracked, with plain `rm`. Only the side whose version is the copy is checked out.
+    #[test]
+    fn copy_steps_remove_the_copy_as_git_left_it() {
+        let file = Some(entry("100644", 'a'));
+        let stop = |path: &str, aside: Option<&str>, ours: bool| Stopped {
+            path: PathBuf::from(path),
+            base: None,
+            ours: file.clone().filter(|_| ours),
+            replayed: file.clone().filter(|_| !ours),
+            follows_rename: true,
+            aside: aside.map(PathBuf::from),
+        };
+        let repo = Path::new("/r");
+        let steps = |stop: &Stopped| copy_steps(stop, Path::new("x"), repo, "origin/main");
+        assert_eq!(
+            steps(&stop("x~HEAD", None, false)),
+            Some((
+                "Copy 'x~HEAD' holds this machine's x".to_owned(),
+                vec![
+                    "dotman git checkout --no-overlay REBASE_HEAD -- x".to_owned(),
+                    "dotman git rm -q -f -- 'x~HEAD'".to_owned(),
+                ]
+            ))
+        );
+        assert_eq!(
+            steps(&stop("x", Some("x~1a2b3c4... sync(b): x"), false)),
+            Some((
+                "Copy 'x~1a2b3c4... sync(b): x' holds this machine's x".to_owned(),
+                vec![
+                    "dotman git checkout --no-overlay REBASE_HEAD -- x".to_owned(),
+                    "rm -f -- '/r/x~1a2b3c4... sync(b): x'".to_owned(),
+                ]
+            ))
+        );
+        assert_eq!(
+            steps(&stop("x", Some("x~HEAD"), true)),
+            Some((
+                "Copy 'x~HEAD' holds origin/main's x".to_owned(),
+                vec!["rm -f -- '/r/x~HEAD'".to_owned()]
+            ))
+        );
+        assert_eq!(steps(&stop("x", None, false)), None);
     }
 
     #[test]

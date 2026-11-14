@@ -392,7 +392,7 @@ fn a_conflict_in_dotman_toml_is_aborted_with_junk_in_the_worktree() {
     no_replay_left(&b);
     exits(&b, 0, &["status"]);
     let [pull, edit, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
-    assert_eq!(pull, "dotman git pull --rebase origin main");
+    assert_eq!(pull, "dotman git pull --rebase -s ort origin main");
     assert_eq!(
         edit,
         format!("Edit the conflicting files under {}.", repo_path(&b))
@@ -3366,7 +3366,9 @@ fn printed_copy(err: &str, whose: &str, path: &str) -> String {
 /// dotman does not settle, even with a flag and beside a conflict it does settle: sync exits 4
 /// with git's steps, which name each path as it stands after the abort and git's copy of this
 /// machine's version. Run as printed, after the edit of the file that clashes, they keep this
-/// machine's version, commit no copy, and end in a clean sync.
+/// machine's version, commit no copy, and end in a clean sync. The user's git config picks the
+/// apply backend, which would name the copy differently; the printed pull overrides it as
+/// dotman's own does.
 #[test]
 fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
     let outside = TestEnv::new();
@@ -3385,6 +3387,10 @@ fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
         }
         b.write(".a", b"from b\n", 0o644);
         b.ok(&["add", name]);
+        let gitconfig = b.home().join(".gitconfig");
+        let mut config = fs::read_to_string(&gitconfig).expect("read .gitconfig");
+        config.push_str("[rebase]\n\tbackend = apply\n");
+        fs::write(&gitconfig, config).expect("write .gitconfig");
         let err = exits(&b, 4, &["sync", "--keep-local"]);
         assert!(
             err.contains(&format!(
@@ -3597,6 +3603,30 @@ fn an_edit_against_a_removal_is_settled_by_each_flag_from_either_side() {
         a.run(&["sync"]);
         assert_eq!(managed(&a), back, "{flag}");
     }
+}
+
+/// An edit of a file the other machine forgot, beside a file of the same content, still stops
+/// the pull when the user's git config picks the apply backend, which git before 2.26 uses by
+/// default: that backend reads the forgotten file as renamed to its twin and puts the edit
+/// there. The edit is kept under its own name, and the twin is left as it was.
+#[test]
+fn an_edit_against_a_removal_never_lands_in_a_file_of_the_same_content() {
+    let managed = |env: &TestEnv| env.porcelain("list").iter().any(|(_, key)| key == ".c");
+    let (a, b) = pair(&[(".c", b"same\n", 0o644), (".twin", b"same\n", 0o644)]);
+    let gitconfig = b.home().join(".gitconfig");
+    let mut config = fs::read_to_string(&gitconfig).expect("read .gitconfig");
+    config.push_str("[rebase]\n\tbackend = apply\n");
+    fs::write(&gitconfig, config).expect("write .gitconfig");
+    a.ok(&["forget", ".c"]);
+    exits(&a, 0, &["sync"]);
+    b.write(".c", b"edited on b\n", 0o644);
+    let err = exits(&b, 4, &["sync"]);
+    assert!(err.contains("conflicting paths:\n  .c\n"), "{err}");
+    exits(&b, 0, &["sync", "--keep-local"]);
+    assert!(managed(&b));
+    assert_eq!(remote_file(&b, ".c"), "edited on b\n");
+    assert_eq!(remote_file(&b, ".twin"), "same\n");
+    assert_eq!(b.read(".twin"), b"same\n");
 }
 
 /// A binary file and a symlink each take one version whole; the version this machine loses is
@@ -4303,7 +4333,7 @@ fn an_edit_taken_before_a_replay_that_fails_is_saved() {
     let (_a, mut b) = clash();
     wrap_git(
         &mut b,
-        "case \" $* \" in *' rebase --onto '*) exit 1 ;; esac",
+        "case \" $* \" in *' rebase --merge --onto '*) exit 1 ;; esac",
     );
     let editor = editor(&b, "printf 'edited here\\n' > \"$1\"");
     let seen = sync_in_a_terminal(&b, &[("VISUAL", editor.as_str())], b"e\n");

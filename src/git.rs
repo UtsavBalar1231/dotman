@@ -168,7 +168,8 @@ impl fmt::Debug for Git {
 
 /// On the first pull and on every rebase of the replay: the user's config must not move another
 /// branch, or the branch itself off a detached `HEAD`, or settle a conflict from a recorded
-/// resolution. On git before 2.38 `rebase.updateRefs` is unknown and ignored.
+/// resolution. On git before 2.38 `rebase.updateRefs` is unknown and ignored. The user's
+/// `rebase.backend` is overridden by [`Git::pull_backend`] and the replay's `--merge`.
 const PULL_PINS: [&str; 4] = [
     "-c",
     "rebase.updateRefs=false",
@@ -210,6 +211,26 @@ pub enum Side {
     Theirs,
 }
 
+/// Each path's blob ids in `trees` and in the `unmerged` stages; gitlinks are left out.
+fn known_blobs<'a>(
+    trees: impl IntoIterator<Item = &'a BTreeMap<PathBuf, Entry>>,
+    unmerged: &'a BTreeMap<PathBuf, [Option<Entry>; 3]>,
+) -> BTreeMap<PathBuf, BTreeSet<String>> {
+    let staged = unmerged
+        .iter()
+        .flat_map(|(path, stages)| stages.iter().flatten().map(move |entry| (path, entry)));
+    let mut blobs: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for (path, entry) in trees.into_iter().flatten().chain(staged) {
+        if entry.mode != "160000" {
+            blobs
+                .entry(path.clone())
+                .or_default()
+                .insert(entry.oid.clone());
+        }
+    }
+    blobs
+}
+
 fn holds(tree: &BTreeMap<PathBuf, Entry>, path: &Path, decision: &Decision) -> bool {
     match decision {
         Decision::Set(entry) => tree.get(path) == Some(entry),
@@ -232,6 +253,10 @@ pub struct Stopped {
     /// A stage is not what `HEAD` or the replayed commit holds at this path: git followed a
     /// rename into it, or put a copy there that a file against a directory displaced.
     pub follows_rename: bool,
+    /// Where git 2.25 put this path's file when a directory holds the path in the worktree: an
+    /// untracked copy, repo-relative, such as `x~<commit>`. Later gits stop on the copy's path
+    /// instead, with the stage there.
+    pub aside: Option<PathBuf>,
 }
 
 /// Result of [`Git::replay`].
@@ -1412,15 +1437,31 @@ impl Git {
         Ok(text(&out) == "true")
     }
 
-    /// `git pull --rebase --autostash`. On conflict the rebase is aborted and the paths returned.
+    /// `git pull --rebase --autostash`. On conflict the rebase is aborted, the copies git 2.25
+    /// left removed, and the paths returned.
     pub fn pull_rebase(&self, remote: &str, branch: &str) -> Result<PullOutcome> {
         let stash = ["rev-parse", "-q", "--verify", "refs/stash"];
         let stashed_before = self.optional(&stash)?;
+        let untracked = self.untracked()?;
         let refname = full_ref(branch);
-        let args = ["pull", "--rebase", "--autostash", remote, &refname];
+        let mut args = vec!["pull", "--rebase", "--autostash"];
+        args.extend_from_slice(self.pull_backend()?);
+        args.extend([remote, refname.as_str()]);
         let mut pinned = self.command();
         pinned.args(PULL_PINS);
-        let out = self.output(pinned, &args)?;
+        let mut out = self.output(pinned, &args)?;
+        // git before 2.26 stops on a commit the pull leaves empty, which later gits drop.
+        let mut last = None;
+        while !out.status.success() && self.stopped_empty()? {
+            let at = (self.head()?, self.resolve_commit("REBASE_HEAD")?);
+            if last.as_ref() == Some(&at) {
+                break;
+            }
+            last = Some(at);
+            let mut cmd = self.command();
+            cmd.args(PULL_PINS);
+            out = self.output(cmd, &["rebase", "--skip"])?;
+        }
         if out.status.success() {
             // git exits 0 when putting the autostash back conflicts, and keeps it in the stash.
             let paths = self.unmerged_paths()?;
@@ -1432,9 +1473,11 @@ impl Git {
         if !self.operation_in_progress() {
             return Err(self.remote_failure(&args, &out));
         }
-        let stopped = self.stopped(None);
+        let stopped = self.stopped(None, &untracked);
+        let blobs = self.stop_blobs();
         self.run(&["rebase", "--abort"])?;
         let stopped = stopped?;
+        self.remove_leftovers(&untracked, &blobs?)?;
         // A rebase that stopped with nothing in conflict hit something else, as a lock file in
         // `.git` stops it, and calling it a conflict would leave no step that helps.
         if stopped.is_empty() {
@@ -1448,8 +1491,13 @@ impl Git {
     }
 
     /// The unmerged paths of a stopped rebase with their stages, each marked when a stage is not
-    /// what `HEAD` or `REBASE_HEAD` holds at the path. With `decided`, only the paths it lacks.
-    fn stopped(&self, decided: Option<&BTreeMap<PathBuf, Decision>>) -> Result<Vec<Stopped>> {
+    /// what `HEAD` or `REBASE_HEAD` holds at the path, and with the copy git 2.25 set aside, a
+    /// file not in `untracked` before the rebase. With `decided`, only the paths it lacks.
+    fn stopped(
+        &self,
+        decided: Option<&BTreeMap<PathBuf, Decision>>,
+        untracked: &BTreeSet<PathBuf>,
+    ) -> Result<Vec<Stopped>> {
         let unmerged = self.unmerged_entries()?;
         if unmerged.is_empty() {
             return Ok(Vec::new());
@@ -1459,6 +1507,16 @@ impl Git {
             Some(commit) => Some(self.tree_entries(&commit)?),
             None => None,
         };
+        let mut aside: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+        let blobs = known_blobs(std::iter::once(&head).chain(&replayed), &unmerged);
+        for (copy, stem) in self.leftovers(untracked, &blobs)? {
+            let under_directory = unmerged.contains_key(&stem)
+                && self.symlinked_parent(&stem)?.is_none()
+                && fs::symlink_metadata(self.repo.join(&stem)).is_ok_and(|meta| meta.is_dir());
+            if under_directory {
+                aside.entry(stem).or_insert(copy);
+            }
+        }
         Ok(unmerged
             .into_iter()
             .filter(|(path, _)| decided.is_none_or(|decided| !decided.contains_key(path)))
@@ -1468,6 +1526,7 @@ impl Git {
                         .as_ref()
                         .is_some_and(|tree| theirs.as_ref() != tree.get(&path));
                 Stopped {
+                    aside: aside.remove(&path),
                     path,
                     base,
                     ours,
@@ -1476,6 +1535,62 @@ impl Git {
                 }
             })
             .collect())
+    }
+
+    /// The blobs a stopped rebase could have written at each path: its entries in `HEAD` and
+    /// `REBASE_HEAD`, and its index stages.
+    fn stop_blobs(&self) -> Result<BTreeMap<PathBuf, BTreeSet<String>>> {
+        let mut trees = vec![self.tree_entries("HEAD")?];
+        if let Some(commit) = self.resolve_commit("REBASE_HEAD")? {
+            trees.push(self.tree_entries(&commit)?);
+        }
+        Ok(known_blobs(&trees, &self.unmerged_entries()?))
+    }
+
+    /// Whether a rebase stopped on a commit whose every change `HEAD` already holds, as git
+    /// before 2.26 does where later gits drop the commit: nothing in conflict, nothing staged and
+    /// no lock file. Skipping it loses nothing.
+    fn stopped_empty(&self) -> Result<bool> {
+        if self.rebase_dir().is_none()
+            || !self.lock_files().is_empty()
+            || !self.unmerged_entries()?.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(commit) = self.resolve_commit("REBASE_HEAD")? else {
+            return Ok(false);
+        };
+        let Some(parent) = self.resolve_commit(&format!("{commit}^"))? else {
+            return Ok(false);
+        };
+        let staged = ["diff", "--cached", "--quiet", "--no-ext-diff"];
+        if self.probe(&staged)?.status.code() != Some(0) {
+            return Ok(false);
+        }
+        let (before, after) = (self.tree_entries(&parent)?, self.tree_entries(&commit)?);
+        let head = self.tree_entries("HEAD")?;
+        Ok(before
+            .keys()
+            .chain(after.keys())
+            .filter(|path| before.get(*path) != after.get(*path))
+            .all(|path| head.get(path) == after.get(path)))
+    }
+
+    /// What `git pull --rebase` takes after `--rebase` to rebase with the merge backend whatever
+    /// the user's `rebase.backend`, which git before 2.26 does not know: the git's default
+    /// strategy, named. The apply backend merges against a base made of the patch's paths alone,
+    /// so a file removed in origin that another file's content matches reads as renamed there,
+    /// and the edit of it lands in that other file with no conflict.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the git version cannot be read.
+    pub fn pull_backend(&self) -> Result<&'static [&'static str]> {
+        Ok(if self.version()? < (2, 34, 0) {
+            &["-s", "recursive"]
+        } else {
+            &["-s", "ort"]
+        })
     }
 
     /// `ls-files -u`: each unmerged path with its stages 1, 2 and 3.
@@ -1718,7 +1833,8 @@ impl Git {
     /// Runs the rebase to its end, settling each stop. `Some` when a stop has paths with no
     /// decision, which leaves the rebase stopped there.
     fn finish_rebase(&self, marker: &Marker, fork: &str) -> Result<Option<Vec<Stopped>>> {
-        let mut said = self.rebase(&["--onto", &marker.onto, fork])?;
+        // `--merge`: see `Git::pull_backend` for why never the apply backend.
+        let mut said = self.rebase(&["--merge", "--onto", &marker.onto, fork])?;
         let mut last = None;
         while self.rebase_dir().is_some() {
             let at = (self.head()?, self.resolve_commit("REBASE_HEAD")?);
@@ -1727,7 +1843,7 @@ impl Git {
                 "the rebase stopped again where it was: {said}"
             );
             last = Some(at);
-            let unsettled = self.stopped(Some(&marker.decisions))?;
+            let unsettled = self.stopped(Some(&marker.decisions), &marker.untracked)?;
             if !unsettled.is_empty() {
                 return Ok(Some(unsettled));
             }
@@ -2103,7 +2219,7 @@ impl Git {
         } else {
             None
         };
-        self.remove_leftovers(marker, &blobs)?;
+        self.remove_leftovers(&marker.untracked, &blobs)?;
         if matching {
             self.run(&["rebase", "--abort"])?;
         } else {
@@ -2123,7 +2239,7 @@ impl Git {
             self.probe(&["update-index", "-q", "--unmerged", "--refresh"])?;
             self.run(&["read-tree", "-m", "-u", "HEAD", &marker.old])?;
         }
-        self.remove_leftovers(marker, &blobs)?;
+        self.remove_leftovers(&marker.untracked, &blobs)?;
         self.run(&["symbolic-ref", "HEAD", &refname])?;
         if let Some(change) = self.changes()?.first() {
             return Ok(Err(format!(
@@ -2257,31 +2373,20 @@ impl Git {
     /// The blobs the replay could have written at each path: its index stages, its entries in
     /// `HEAD`, the old head and the fetched commit, and its decision. Gitlinks are left out.
     fn replay_blobs(&self, marker: &Marker) -> Result<BTreeMap<PathBuf, BTreeSet<String>>> {
-        let mut blobs: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
-        let mut add = |path: &Path, entry: &Entry| {
-            if entry.mode != "160000" {
-                blobs
-                    .entry(path.to_path_buf())
-                    .or_default()
-                    .insert(entry.oid.clone());
-            }
-        };
+        let mut trees = Vec::new();
         for rev in ["HEAD", &marker.old, &marker.onto] {
-            for (path, entry) in &self.tree_entries(rev)? {
-                add(path, entry);
-            }
+            trees.push(self.tree_entries(rev)?);
         }
-        for (path, stages) in &self.unmerged_entries()? {
-            for entry in stages.iter().flatten() {
-                add(path, entry);
-            }
-        }
-        for (path, decision) in &marker.decisions {
-            if let Decision::Set(entry) = decision {
-                add(path, entry);
-            }
-        }
-        Ok(blobs)
+        let decided: BTreeMap<PathBuf, Entry> = marker
+            .decisions
+            .iter()
+            .filter_map(|(path, decision)| match decision {
+                Decision::Set(entry) => Some((path.clone(), entry.clone())),
+                Decision::Absent => None,
+            })
+            .collect();
+        trees.push(decided);
+        Ok(known_blobs(&trees, &self.unmerged_entries()?))
     }
 
     /// The bytes at repo path `path` in the worktree: a file's content or a symlink's target.
@@ -2316,16 +2421,17 @@ impl Git {
         Ok(Some(bytes))
     }
 
-    /// Removes the untracked files git 2.25 leaves from a stop, which `rebase --abort` keeps:
-    /// those that were not there before the replay, are named `<path>~<suffix>`, and hold one of
-    /// `blobs` for `<path>`, from [`Git::replay_blobs`]. Another new file stays, as a user's
-    /// `<path>~mine` or an editor's `<path>~` does.
-    fn remove_leftovers(
+    /// The untracked files git 2.25 leaves from a stop, which `rebase --abort` keeps, each with the
+    /// path it is a copy of: those not in `untracked` from before the rebase, named
+    /// `<path>~<suffix>`, that hold one of `blobs` for `<path>`. Another new file is none, as a
+    /// user's `<path>~mine` or an editor's `<path>~` is not.
+    fn leftovers(
         &self,
-        marker: &Marker,
+        untracked: &BTreeSet<PathBuf>,
         blobs: &BTreeMap<PathBuf, BTreeSet<String>>,
-    ) -> Result<()> {
-        for path in self.untracked()?.difference(&marker.untracked) {
+    ) -> Result<Vec<(PathBuf, PathBuf)>> {
+        let mut found = Vec::new();
+        for path in self.untracked()?.difference(untracked) {
             let stem = path
                 .file_name()
                 .and_then(|name| name.as_bytes().split(|b| *b == b'~').next())
@@ -2333,15 +2439,26 @@ impl Git {
                     !stem.is_empty() && path.file_name().map(OsStrExt::as_bytes) != Some(*stem)
                 })
                 .map(|stem| path.with_file_name(OsStr::from_bytes(stem)));
-            let Some(known) = stem.and_then(|stem| blobs.get(&stem)) else {
+            let Some((stem, known)) = stem.and_then(|stem| blobs.get_key_value(&stem)) else {
                 continue;
             };
             let Some(bytes) = self.worktree_bytes(path)? else {
                 continue;
             };
             if known.contains(&self.hash_object(&bytes, false)?) {
-                self.remove_worktree_file(path)?;
+                found.push((path.clone(), stem.clone()));
             }
+        }
+        Ok(found)
+    }
+
+    fn remove_leftovers(
+        &self,
+        untracked: &BTreeSet<PathBuf>,
+        blobs: &BTreeMap<PathBuf, BTreeSet<String>>,
+    ) -> Result<()> {
+        for (path, _) in self.leftovers(untracked, blobs)? {
+            self.remove_worktree_file(&path)?;
         }
         Ok(())
     }
@@ -3851,6 +3968,7 @@ mod tests {
                     ours: Some(blob(b"from a\n")),
                     replayed: Some(blob(b"from b\n")),
                     follows_rename: false,
+                    aside: None,
                 }]
             }
         );
@@ -4060,7 +4178,8 @@ mod tests {
         commit_file(&git, "a", b"a", "one");
     }
 
-    /// Where git knows `rebase.backend`; git before 2.26 rebases with apply either way.
+    /// The user's `rebase.backend`, which dotman's pull and replay override; git before 2.26
+    /// ignores it.
     const BACKENDS: [&str; 2] = ["'rebase.backend=merge'", "'rebase.backend=apply'"];
 
     /// Writes, or with `None` removes, each file, then commits them all.
@@ -4304,9 +4423,8 @@ mod tests {
         }
     }
 
-    /// git 2.25 leaves its copy of the file as an untracked `x~<subject>`, which the undo
-    /// removes. The first pull's abort leaves one too, which is removed by hand here so that the
-    /// replay's own copy is new.
+    /// git 2.25 leaves its copy of the file as an untracked `x~<commit>`, which the stop names
+    /// and both the first pull's abort and the replay's undo remove.
     #[test]
     fn a_file_against_a_directory_stops_and_leaves_nothing_behind() {
         for backend in BACKENDS {
@@ -4316,7 +4434,15 @@ mod tests {
                 &[("x/y", Some(b"dir\n"))],
                 &[&[("x", Some(b"file\n"))]],
             );
-            d.sb.raw_ok(d.b.repo(), &["clean", "-fq"]);
+            let copies = d
+                .stopped
+                .iter()
+                .map(|stop| stop.aside.as_ref().unwrap_or(&stop.path))
+                .filter(|copy| copy.to_string_lossy().starts_with("x~"))
+                .count();
+            assert_eq!(copies, 1, "{backend}: {:?}", d.stopped);
+            let status = d.sb.raw_ok(d.b.repo(), &["status", "--porcelain", "-uall"]);
+            assert_eq!(status, "", "{backend}: the pull left nothing behind");
             let replayed =
                 d.b.replay("origin", "main", &d.onto, &BTreeMap::new(), "beta")
                     .expect("replay");
@@ -4326,6 +4452,156 @@ mod tests {
             );
             assert_restored(&d);
         }
+    }
+
+    /// git 2.25's layout of a file against a directory, made by hand where git is newer: the
+    /// stage at `x` itself and the copy untracked. The stop names the copy, and the abort's
+    /// cleanup removes it.
+    #[test]
+    fn the_untracked_copy_git_2_25_sets_aside_is_named_and_removed() {
+        let d = diverged(
+            BACKENDS[0],
+            &[("base", Some(b"b\n"))],
+            &[("x/y", Some(b"dir\n"))],
+            &[&[("x", Some(b"file\n"))]],
+        );
+        let b = &d.b;
+        let before = b.untracked().expect("untracked");
+        let by_hand = d.sb.raw(b.repo(), &["rebase", "-m", &d.onto]);
+        assert!(!by_hand.status.success());
+        let zero = "0".repeat(40);
+        for (path, [_, _, theirs]) in b.unmerged_entries().expect("unmerged") {
+            if let Some(entry) = theirs.filter(|_| path != Path::new("x")) {
+                let info = format!(
+                    "0 {zero}\t{}\n{} {} 3\tx\n",
+                    path.display(),
+                    entry.mode,
+                    entry.oid
+                );
+                b.run_stdin(&["update-index", "--index-info"], info.as_bytes())
+                    .expect("index-info");
+            }
+        }
+        let stopped = b.stopped(None, &before).expect("stopped");
+        let file = stopped
+            .iter()
+            .find(|stop| stop.path == Path::new("x"))
+            .expect("the stop at x");
+        let copy = file.aside.clone().expect("the copy is named");
+        assert!(copy.to_string_lossy().starts_with("x~"), "{copy:?}");
+        assert_eq!(fs::read(b.repo().join(&copy)).expect("copy"), b"file\n");
+        let blobs = b.stop_blobs().expect("blobs");
+        d.sb.raw_ok(b.repo(), &["rebase", "--abort"]);
+        assert!(b.repo().join(&copy).exists(), "the abort keeps the copy");
+        b.remove_leftovers(&before, &blobs).expect("remove");
+        assert_restored(&d);
+    }
+
+    /// Origin removes `gone` while this machine edits it, and `twin` holds what `gone` held. The
+    /// apply backend, which the user's config may pick, would read `gone` as renamed to `twin`
+    /// and put the edit there with no conflict.
+    #[test]
+    fn an_edit_against_a_removal_stops_whatever_backend_the_user_set() {
+        for backend in BACKENDS {
+            let d = diverged(
+                backend,
+                &[("gone", Some(b"same\n")), ("twin", Some(b"same\n"))],
+                &[("gone", None)],
+                &[&[("gone", Some(b"edited\n"))]],
+            );
+            let stops: Vec<(&Path, bool, bool)> = d
+                .stopped
+                .iter()
+                .map(|s| (s.path.as_path(), s.ours.is_some(), s.replayed.is_some()))
+                .collect();
+            assert_eq!(stops, [(Path::new("gone"), false, true)], "{backend}");
+            assert_restored(&d);
+            let decisions = decide(vec![("gone", set(&d.b, b"edited\n"))]);
+            let replayed =
+                d.b.replay("origin", "main", &d.onto, &decisions, "beta")
+                    .expect("replay");
+            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert_eq!(blob_at(&d.b, "HEAD", "gone"), b"edited\n", "{backend}");
+            assert_eq!(blob_at(&d.b, "HEAD", "twin"), b"same\n", "{backend}");
+            assert_eq!(fs::read(d.b.repo().join("twin")).expect("twin"), b"same\n");
+        }
+    }
+
+    /// Origin and this machine make the same edit, which leaves this machine's first commit
+    /// empty; git before 2.26 stops on it where later gits drop it.
+    #[test]
+    fn a_commit_the_pull_empties_is_dropped() {
+        for backend in BACKENDS {
+            let sb = Sandbox::new();
+            let remote = sb.bare_remote();
+            let a = sb.git("a");
+            a.init().expect("init");
+            change(&a, &[("x", Some(b"x\n")), ("y", Some(b"y\n"))], "base");
+            a.set_remote_url("origin", utf8(&remote)).expect("remote");
+            a.push("origin", "main").expect("push");
+            let b = sb
+                .git("b")
+                .with_env([("GIT_CONFIG_PARAMETERS", backend), ("GIT_EDITOR", "false")]);
+            b.clone_from(utf8(a.repo())).expect("clone");
+            change(&a, &[("x", Some(b"X\n")), ("y", Some(b"Y\n"))], "theirs");
+            a.push("origin", "main").expect("push");
+            change(&b, &[("x", Some(b"X\n"))], "mine 0");
+            change(&b, &[("z", Some(b"z\n"))], "mine 1");
+            assert_eq!(
+                b.pull_rebase("origin", "main").expect("pull"),
+                PullOutcome::Ok,
+                "{backend}"
+            );
+            let onto = b.resolve_commit("FETCH_HEAD").expect("rev-parse");
+            assert_eq!(
+                b.resolve_commit("HEAD^").expect("rev-parse"),
+                onto,
+                "{backend}"
+            );
+            assert_eq!(blob_at(&b, "HEAD", "z"), b"z\n");
+            assert_eq!(b.rebase_dir(), None);
+        }
+    }
+
+    /// A stop on a commit `HEAD` already holds, made by hand where git drops such a commit, is
+    /// one to skip; a stop in conflict, or on a commit `HEAD` lacks, is not.
+    #[test]
+    fn only_a_stop_on_a_commit_head_already_holds_is_empty() {
+        let d = diverged(
+            BACKENDS[0],
+            &[
+                ("x", Some(b"x\n")),
+                ("y", Some(b"y\n")),
+                ("c", Some(b"c\n")),
+            ],
+            &[
+                ("x", Some(b"X\n")),
+                ("y", Some(b"Y\n")),
+                ("c", Some(b"c origin\n")),
+            ],
+            &[&[("x", Some(b"X\n"))], &[("c", Some(b"c local\n"))]],
+        );
+        let b = &d.b;
+        let mut args = vec!["rebase", "-m"];
+        match b.version().expect("version") {
+            v if v >= (2, 45, 0) => args.push("--empty=stop"),
+            v if v >= (2, 26, 0) => args.push("--empty=ask"),
+            _ => {}
+        }
+        let fork = b.merge_base(&d.onto, &d.old).expect("base").expect("fork");
+        args.extend(["--onto", d.onto.as_str(), fork.as_str()]);
+        assert!(!d.sb.raw(b.repo(), &args).status.success());
+        assert!(
+            b.stopped_empty().expect("empty"),
+            "the first commit holds X"
+        );
+        let later = b.resolve_commit(&d.old).expect("rev-parse").expect("old");
+        d.sb.raw_ok(b.repo(), &["update-ref", "REBASE_HEAD", &later]);
+        assert!(!b.stopped_empty().expect("empty"), "HEAD lacks c local");
+        assert!(!d.sb.raw(b.repo(), &["rebase", "--skip"]).status.success());
+        assert_eq!(b.unmerged_paths().expect("unmerged"), [Path::new("c")]);
+        assert!(!b.stopped_empty().expect("empty"), "c is in conflict");
+        d.sb.raw_ok(b.repo(), &["rebase", "--abort"]);
     }
 
     #[test]

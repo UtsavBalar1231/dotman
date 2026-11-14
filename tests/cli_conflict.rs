@@ -237,7 +237,7 @@ fn a_conflicting_path_under_a_symlinked_directory_is_never_written_through() {
         &mut b,
         "",
         &format!(
-            "case \" $* \" in *' rebase --onto '*) if [ -e '{armed}' ]; then rm '{armed}'; rm -rf '{d}'; ln -s '{outside}' '{d}'; fi;; esac",
+            "case \" $* \" in *' rebase --merge --onto '*) if [ -e '{armed}' ]; then rm '{armed}'; rm -rf '{d}'; ln -s '{outside}' '{d}'; fi;; esac",
             armed = armed.display(),
             d = repo.join("d").display(),
             outside = outside.display(),
@@ -673,7 +673,7 @@ fn the_version_that_loses_is_saved_before_the_replay_starts() {
     a.write(".a", b"from a\n", 0o644);
     exits(&a, 0, &["sync"]);
     b.write(".a", b"from b\n", 0o644);
-    let (pre, post) = kill_once(&b, "*' rebase --onto '*", true);
+    let (pre, post) = kill_once(&b, "*' rebase --merge --onto '*", true);
     wrap_git(&mut b, &pre, &post);
     let out = b.run(&["sync", "--take-repo"]);
     assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
