@@ -900,8 +900,9 @@ fn unparsable_config_fix(git: &Git, file: &Path) -> Result<Option<String>> {
         return Ok(None);
     };
     let refname = shell_words::quote(&format!("refs/heads/{branch}")).into_owned();
+    let backend = git.pull_backend()?.join(" ");
     Ok(Some(format!(
-        "the last commit holds this text too: once a fix is pushed, pull it with `{bin} git pull --rebase --autostash {remote} {refname}` and run `{bin} sync`, or fix it in this file and run `{bin} sync`"
+        "the last commit holds this text too: once a fix is pushed, pull it with `{bin} git pull --rebase {backend} --autostash {remote} {refname}` and run `{bin} sync`, or fix it in this file and run `{bin} sync`"
     )))
 }
 

@@ -454,8 +454,10 @@ fn a_pulled_bad_glob_names_the_pull_that_brings_its_correction() {
     a.ok(&["git", "push", "-q", "origin", "HEAD:refs/heads/main"]);
     for args in [&["sync"][..], &["status"], &["forget", ".a", "--dry-run"]] {
         let err = exits(&b, 1, args);
+        // The strategy that pins the merge backend is `ort` or `recursive` by git version.
         assert!(
-            err.contains("the last commit holds this text too: once a fix is pushed, pull it with `dotman git pull --rebase --autostash origin refs/heads/main` and run `dotman sync`"),
+            err.contains("the last commit holds this text too: once a fix is pushed, pull it with `dotman git pull --rebase -s ")
+                && err.contains(" --autostash origin refs/heads/main` and run `dotman sync`"),
             "{args:?}: {err}"
         );
     }
