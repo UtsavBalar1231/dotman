@@ -11,7 +11,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -282,6 +282,56 @@ pub struct Refusal {
     marker: Option<(String, String)>,
     head: Option<String>,
     rebase_dir: bool,
+    /// Worktree files, repo-relative, that hold changes `checkout -f` would drop.
+    dirty: Vec<PathBuf>,
+    /// Where the steps copy `dirty` first: the `.dotman/repo` directory of a new backup run, made
+    /// private with the parent of each copy. `None` when no backups directory is set or it could
+    /// not be made.
+    saves_to: Option<PathBuf>,
+}
+
+impl Refusal {
+    /// The steps that save the dirty files, check out `branch` and go on. A symlink is copied as
+    /// one.
+    fn checkout_steps(&self, branch: &str) -> Vec<String> {
+        let bin = crate::name::bin();
+        let quote = |path: &Path| shell_words::quote(&path.to_string_lossy()).into_owned();
+        let mut steps = Vec::new();
+        if let Some(dir) = &self.saves_to {
+            for path in &self.dirty {
+                steps.push(format!(
+                    "cp -P -- {} {}",
+                    quote(&self.repo.join(path)),
+                    quote(&dir.join(path))
+                ));
+            }
+        }
+        if self.rebase_dir {
+            steps.push(format!("{bin} git rebase --quit"));
+        }
+        steps.push(format!(
+            "{bin} git checkout -f {}",
+            shell_words::quote(branch)
+        ));
+        steps
+    }
+
+    /// What `checkout -f` drops, and where the steps save it first.
+    fn drops(&self) -> String {
+        let shown: Vec<String> = self
+            .dirty
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        match &self.saves_to {
+            Some(dir) if !shown.is_empty() => format!(
+                "which drops the changes that are not committed in the repo, after copying {} to {}",
+                shown.join(", "),
+                dir.display()
+            ),
+            _ => "which drops the changes that are not committed in the repo".to_owned(),
+        }
+    }
 }
 
 impl fmt::Display for Refusal {
@@ -303,17 +353,11 @@ impl fmt::Display for Refusal {
         };
         write!(
             f,
-            " Before that pull, {branch} was at {old}; HEAD is now at {}. To put the repo on {branch} as it is now, which drops the changes that are not committed in the repo:",
-            self.head.as_deref().unwrap_or("no commit")
+            " Before that pull, {branch} was at {old}; HEAD is now at {}. To put the repo on {branch} as it is now, {}:",
+            self.head.as_deref().unwrap_or("no commit"),
+            self.drops()
         )?;
-        let mut steps = Vec::new();
-        if self.rebase_dir {
-            steps.push(format!("{bin} git rebase --quit"));
-        }
-        steps.push(format!(
-            "{bin} git checkout -f {}",
-            shell_words::quote(branch)
-        ));
+        let mut steps = self.checkout_steps(branch);
         steps.push(format!("rm {marker}"));
         steps.push(format!("{bin} sync"));
         for (n, step) in (1_u32..).zip(steps) {
@@ -1948,6 +1992,8 @@ impl Git {
         let _ignored = crate::sys::ignore_signals(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
         let marker = Marker::parse(&bytes);
         let refused = |why: String| {
+            let dirty = self.dirty_files().unwrap_or_default();
+            let saves_to = self.save_dir(&dirty);
             Recovery::Refused(Refusal {
                 why,
                 repo: self.repo.clone(),
@@ -1956,6 +2002,8 @@ impl Git {
                     .map(|marker| (marker.branch.clone(), marker.old.clone())),
                 head: self.head().ok().flatten(),
                 rebase_dir: self.rebase_dir().is_some(),
+                dirty,
+                saves_to,
             })
         };
         let Some(found) = &marker else {
@@ -2110,6 +2158,43 @@ impl Git {
             paths.push(path.clone());
         }
         Ok(Ok(Some(Saved { paths, dir })))
+    }
+
+    /// The `.dotman/repo` directory of a new backup run, with the parent of each of `dirty` in
+    /// it made 0700, so a printed `cp` can copy each there. `None` when there is nothing to copy,
+    /// no backups directory is set, or one cannot be made.
+    fn save_dir(&self, dirty: &[PathBuf]) -> Option<PathBuf> {
+        if dirty.is_empty() {
+            return None;
+        }
+        let dir = backup_run_dir(self.backups.as_ref()?, SystemTime::now())
+            .ok()?
+            .join(".dotman/repo");
+        for path in dirty {
+            let parent = dir.join(path);
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent.parent()?)
+                .ok()?;
+        }
+        Some(dir)
+    }
+
+    /// The files in the worktree whose content `checkout -f` would drop: with a rebase dir, those
+    /// that differ from the index outside the paths in conflict, as what git staged is its own;
+    /// else every changed path. A path deleted from disk or under a symlink has nothing to copy.
+    fn dirty_files(&self) -> Result<Vec<PathBuf>> {
+        let rebase = self.rebase_dir().is_some();
+        let mut dirty = Vec::new();
+        for change in self.changes()? {
+            let own =
+                rebase && (change.kind == StatusKind::Unmerged || change.xy.get(1..) == Some("."));
+            if !own && self.worktree_bytes(&change.path)?.is_some() {
+                dirty.push(change.path);
+            }
+        }
+        Ok(dirty)
     }
 
     /// Tracked changes, staged or not, and unmerged paths; untracked files are left out.

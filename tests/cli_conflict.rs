@@ -378,6 +378,62 @@ fn recovery_saves_a_hand_edit_of_a_decided_path_first() {
     }
 }
 
+/// The lines numbered `  1. ` and on in `err`, in order.
+fn numbered_steps(err: &str) -> Vec<String> {
+    err.lines()
+        .filter_map(|line| {
+            let (n, step) = line.trim_start().split_once(". ")?;
+            n.parse::<u32>().is_ok().then(|| step.to_owned())
+        })
+        .collect()
+}
+
+/// After a kill, the user edits a file the pull does not touch: recovery refuses, names it, and
+/// its printed steps copy it to a backup run before `checkout -f` drops it. Run as printed, they
+/// lead to a clean sync, and the edit survives in the copy.
+#[test]
+fn the_refusal_s_steps_save_an_uncommitted_edit_before_they_check_out() {
+    for pattern in [
+        "*' update-ref '*",
+        "*' rebase --continue'*|*' rebase --skip'*",
+    ] {
+        let (a, mut b) = pair(&[(".t", b"1\n2\n3\n", 0o644), (".other", b"other\n", 0o644)]);
+        a.write(".t", b"1\nfrom a\n3\n", 0o644);
+        exits(&a, 0, &["sync"]);
+        b.write(".t", b"1\nfrom b\n3\n", 0o644);
+        let (pre, post) = kill_once(&b, pattern, true);
+        wrap_git(&mut b, &pre, &post);
+        let out = b.run(&["sync", "--keep-local"]);
+        assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+        let edit = b"other\nby hand\n";
+        fs::write(b.repo().join(".other"), edit).expect("edit by hand");
+
+        let err = exits(&b, 4, &["sync", "--keep-local"]);
+        assert!(err.contains(".other has changes"), "{pattern}: {err}");
+        assert!(err.contains("after copying .other to "), "{pattern}: {err}");
+        let steps = numbered_steps(&err);
+        let checkout = steps
+            .iter()
+            .position(|step| step == "dotman git checkout -f main")
+            .expect("a checkout step");
+        let save = steps
+            .iter()
+            .position(|step| step.contains("cp -P -- "))
+            .expect("a save step");
+        assert!(save < checkout, "{err}");
+        for step in &steps {
+            let out = common::paste(&b, step);
+            let code = if step == "dotman sync" { 4 } else { 0 };
+            assert_eq!(out.status.code(), Some(code), "{step}: {}", stderr(&out));
+        }
+        exits(&b, 0, &["sync", "--keep-local"]);
+        no_replay_left(&b);
+        let saved = common::files_containing(&b.state_dir().join("backups"), b"by hand");
+        assert_eq!(saved.len(), 1, "{pattern}: {saved:?}");
+        exits(&a, 0, &["sync"]);
+    }
+}
+
 /// After a kill, the user saves copies in the repo named as git 2.25 names the copies a stop leaves,
 /// `.t~mine` and an editor's `.t~`: recovery keeps them. A new file that holds the blob the replay
 /// had at `.t` is git's, and goes.
