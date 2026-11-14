@@ -3848,7 +3848,7 @@ fn temp_left(dir: &Path) -> Vec<String> {
                 .to_string_lossy()
                 .into_owned()
         })
-        .filter(|name| name.starts_with(".dotman-tmp-") || name.starts_with("dotman-diff-"))
+        .filter(|name| name.starts_with(".dotman-tmp-"))
         .collect()
 }
 

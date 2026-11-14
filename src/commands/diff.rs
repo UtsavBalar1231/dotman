@@ -5,7 +5,7 @@
 //! diff tool never see a path inside `$HOME` or the repo.
 
 use crate::cli::DiffArgs;
-use crate::context::Context;
+use crate::context::{Context, TEMP_PREFIX};
 use crate::engine::status::{Content, Source, SourceEntry, Variants, Worktree};
 use crate::engine::{Home, Node, observe_portable, read_node};
 use crate::git::Git;
@@ -146,7 +146,7 @@ fn show_all(
 ) -> Result<()> {
     ctx.git.check_version()?;
     // Decrypted content goes here, so it is removed on every return, a failed git diff included.
-    let tmp = private_temp_dir("dotman-diff-", &private_base(ctx)?)?;
+    let tmp = private_temp_dir(&temp_prefix(), &private_base(ctx)?)?;
     let (home_side, repo_side) = (tmp.path().join(sides.home), tmp.path().join(sides.repo));
     let (home, home_real) = (&ctx.paths.home, ctx.paths.home_real.as_deref());
     let mut differs = false;
@@ -207,7 +207,7 @@ pub(crate) fn show_versions(
     versions: &[(PathBuf, [Option<Version>; 2])],
 ) -> Result<()> {
     ctx.git.check_version()?;
-    let tmp = private_temp_dir("dotman-diff-", &private_base(ctx)?)?;
+    let tmp = private_temp_dir(&temp_prefix(), &private_base(ctx)?)?;
     let (here, origin) = (tmp.path().join("here"), tmp.path().join("origin"));
     for (path, [mine, theirs]) in versions {
         if !path
@@ -319,6 +319,12 @@ fn stage(
     }
     place(&repo_side.join(rel), &r.content, r.tuple.mode)?;
     Ok(true)
+}
+
+/// Named as every dotman temp file is, with this run's PID, so the sweep removes the decrypted
+/// copies of a killed run once that PID is gone.
+fn temp_prefix() -> String {
+    format!("{TEMP_PREFIX}{}-", std::process::id())
 }
 
 // `$XDG_RUNTIME_DIR` is private to the user and usually memory-backed; the state dir is private too.

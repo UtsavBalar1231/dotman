@@ -988,7 +988,7 @@ fn diff_compares_the_plaintext_and_removes_its_temp_dir() {
         .unwrap()
         .filter(|e| {
             e.as_ref()
-                .is_ok_and(|e| e.file_name().to_string_lossy().starts_with("dotman-diff-"))
+                .is_ok_and(|e| e.file_name().to_string_lossy().starts_with(".dotman-tmp-"))
         })
         .count();
     assert_eq!(leftovers, 0);
@@ -1030,7 +1030,7 @@ fn an_interrupted_diff_leaves_no_temp_dir_behind() {
     let left: Vec<String> = fs::read_dir(env.state_dir())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("dotman-diff-"))
+        .filter(|name| name.starts_with(".dotman-tmp-"))
         .collect();
     assert_eq!(left, Vec::<String>::new());
 }
