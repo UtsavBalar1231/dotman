@@ -346,6 +346,38 @@ fn a_sync_killed_just_after_the_branch_moves_recovers() {
     killed_at("*' update-ref '*", false);
 }
 
+/// After a kill, the user edits a decided path in the repo by hand: recovery saves the edit to a
+/// backup run, says where, and then puts the repo back.
+#[test]
+fn recovery_saves_a_hand_edit_of_a_decided_path_first() {
+    for pattern in [
+        "*' update-ref '*",
+        "*' rebase --continue'*|*' rebase --skip'*",
+    ] {
+        let (_a, mut b) = replay_pair();
+        let (pre, post) = kill_once(&b, pattern, true);
+        wrap_git(&mut b, &pre, &post);
+        let out = b.run(&["sync", "--keep-local"]);
+        assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+        let edit = b"1\nfrom b\n3\nby hand\n";
+        fs::write(b.repo().join(".t"), edit).expect("edit by hand");
+
+        let err = exits(&b, 0, &["sync", "--keep-local"]);
+        assert!(
+            err.contains("the repo is back as it was before that pull"),
+            "{pattern}: {err}"
+        );
+        let dir = err
+            .lines()
+            .find_map(|line| line.strip_prefix("saved the uncommitted edits of the repo's .t to "))
+            .map(std::path::PathBuf::from)
+            .expect("a saved line");
+        assert!(dir.starts_with(b.state_dir().join("backups")), "{err}");
+        assert_eq!(fs::read(dir.join(".t")).expect("the saved edit"), edit);
+        no_replay_left(&b);
+    }
+}
+
 /// After a kill, the user saves copies in the repo named as git 2.25 names the copies a stop leaves,
 /// `.t~mine` and an editor's `.t~`: recovery keeps them. A new file that holds the blob the replay
 /// had at `.t` is git's, and goes.

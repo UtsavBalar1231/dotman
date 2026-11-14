@@ -2,7 +2,8 @@
 //!
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
 
-use crate::paths::write_atomic;
+use crate::engine::write::{back_up_bytes, backup_run_dir};
+use crate::paths::{validate_key, write_atomic};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -151,6 +152,8 @@ pub struct Git {
     env: Vec<(OsString, OsString)>,
     version_checked: OnceLock<()>,
     leave_out: Option<LeaveOut>,
+    /// Where [`Git::recover_pull`] saves an uncommitted edit before it puts the repo back.
+    backups: Option<PathBuf>,
 }
 
 impl fmt::Debug for Git {
@@ -248,13 +251,26 @@ pub enum Recovery {
     /// There is no marker.
     NoMarker,
     /// The pull had not moved the branch; the repo is back as it was before it.
-    Restored,
+    Restored {
+        /// Uncommitted edits of the marker's paths, saved first.
+        saved: Option<Saved>,
+    },
     /// The branch already held the finished pull; `HEAD` is on it again.
     Finished,
     /// Lock files a killed git left; recovery waits until they are removed.
     Locked(Vec<PathBuf>),
     /// The repo is in a state the marker does not explain; nothing was changed.
     Refused(Refusal),
+}
+
+/// Worktree content of the marker's paths that holds none of the replay's blobs, an edit made by
+/// hand after the kill, which [`Git::recover_pull`] copied before it put the repo back.
+#[derive(Debug)]
+pub struct Saved {
+    /// Repo-relative.
+    pub paths: Vec<PathBuf>,
+    /// The `.dotman/repo` directory of a backup run, which holds each copy at its repo path.
+    pub dir: PathBuf,
 }
 
 /// Why [`Git::recover_pull`] left the repo as it was, with the steps that put it back by hand.
@@ -570,6 +586,7 @@ impl Git {
             env: Vec::new(),
             version_checked: OnceLock::new(),
             leave_out: None,
+            backups: None,
         }
     }
 
@@ -577,6 +594,14 @@ impl Git {
     #[must_use]
     pub fn leaving_out(mut self, pick: LeaveOut) -> Self {
         self.leave_out = Some(pick);
+        self
+    }
+
+    /// Sets the backups directory a run dir is made in for what [`Git::recover_pull`] saves.
+    /// Without one, recovery refuses rather than drop an uncommitted edit.
+    #[must_use]
+    pub fn backing_up_into(mut self, backups: PathBuf) -> Self {
+        self.backups = Some(backups);
         self
     }
 
@@ -1763,9 +1788,11 @@ impl Git {
         }
     }
 
+    /// In the run that replayed, nobody edited the worktree since, so nothing is saved: a decided
+    /// path at a stop still holds git's conflict markers.
     fn undo_quietly(&self) -> Result<()> {
-        match self.recover_pull()? {
-            Recovery::Restored | Recovery::NoMarker => Ok(()),
+        match self.recover(false)? {
+            Recovery::Restored { .. } | Recovery::NoMarker => Ok(()),
             Recovery::Finished => bail!("the branch moved during the replay"),
             Recovery::Locked(locks) => {
                 let shown: Vec<String> = locks
@@ -1903,6 +1930,11 @@ impl Git {
     /// changes nothing. Dirtiness is judged before anything changes. SIGINT, SIGTERM and SIGHUP
     /// are ignored while it runs.
     pub fn recover_pull(&self) -> Result<Recovery> {
+        self.recover(true)
+    }
+
+    /// [`Git::recover_pull`]; with `keep_edits`, a hand edit of a marker path is saved first.
+    fn recover(&self, keep_edits: bool) -> Result<Recovery> {
         let path = self.marker_path();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -1929,7 +1961,7 @@ impl Git {
         let Some(found) = &marker else {
             return Ok(refused(format!("{} cannot be read", path.display())));
         };
-        Ok(match self.recover_from(found) {
+        Ok(match self.recover_from(found, keep_edits) {
             Ok(Ok(recovery)) => recovery,
             Ok(Err(why)) => refused(why),
             Err(e) => refused(format!("{e:#}")),
@@ -1937,7 +1969,7 @@ impl Git {
     }
 
     /// [`Git::recover_pull`] with a marker that parsed; `Err` inside says why it refuses.
-    fn recover_from(&self, marker: &Marker) -> Result<Result<Recovery, String>> {
+    fn recover_from(&self, marker: &Marker, keep_edits: bool) -> Result<Result<Recovery, String>> {
         let onto = self
             .rebase_dir()
             .map(|dir| fs::read_to_string(dir.join("onto")).unwrap_or_default());
@@ -1997,6 +2029,14 @@ impl Git {
             return Ok(Err("HEAD has no commit".to_owned()));
         };
         let blobs = self.replay_blobs(marker)?;
+        let saved = if keep_edits {
+            match self.save_edits(marker, &blobs)? {
+                Ok(saved) => saved,
+                Err(why) => return Ok(Err(why)),
+            }
+        } else {
+            None
+        };
         self.remove_leftovers(marker, &blobs)?;
         if matching {
             self.run(&["rebase", "--abort"])?;
@@ -2027,7 +2067,49 @@ impl Git {
             )));
         }
         self.remove_marker()?;
-        Ok(Ok(Recovery::Restored))
+        Ok(Ok(Recovery::Restored { saved }))
+    }
+
+    /// Copies each of the marker's paths whose worktree content is none of `blobs` for it, so an
+    /// edit made by hand after the kill, to `.dotman/repo/<path>` in a new backup run. `Err`
+    /// inside, naming the path, when there is one and no backups directory is set.
+    fn save_edits(
+        &self,
+        marker: &Marker,
+        blobs: &BTreeMap<PathBuf, BTreeSet<String>>,
+    ) -> Result<Result<Option<Saved>, String>> {
+        let mut edits = Vec::new();
+        for path in marker.decisions.keys() {
+            let Some(bytes) = self.worktree_bytes(path)? else {
+                continue;
+            };
+            let oid = self.hash_object(&bytes, false)?;
+            if !blobs.get(path).is_some_and(|known| known.contains(&oid)) {
+                edits.push((path, bytes));
+            }
+        }
+        let Some((first, _)) = edits.first() else {
+            return Ok(Ok(None));
+        };
+        let Some(backups) = &self.backups else {
+            return Ok(Err(format!(
+                "{} has changes that are not committed",
+                first.display()
+            )));
+        };
+        let dir = backup_run_dir(backups, SystemTime::now())?.join(".dotman/repo");
+        let mut paths = Vec::new();
+        for (path, bytes) in edits {
+            let text = path
+                .to_str()
+                .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+            // Under `.dotman/repo/`, a reserved root name is a plain path.
+            validate_key(&format!("repo/{text}"))
+                .with_context(|| format!("cannot save {}", path.display()))?;
+            back_up_bytes(&dir, text, &bytes)?;
+            paths.push(path.clone());
+        }
+        Ok(Ok(Some(Saved { paths, dir })))
     }
 
     /// Tracked changes, staged or not, and unmerged paths; untracked files are left out.
@@ -2971,7 +3053,9 @@ mod tests {
         }
 
         fn git(&self, name: &str) -> Git {
-            Git::new(self.dir.path().join(name), "test").with_env(self.env())
+            Git::new(self.dir.path().join(name), "test")
+                .with_env(self.env())
+                .backing_up_into(self.dir.path().join(format!("{name}-backups")))
         }
 
         /// Un-isolated git, run the way a user would run it.
@@ -4314,10 +4398,14 @@ mod tests {
                     assert_eq!(status, "");
                     continue;
                 }
-                assert!(
-                    matches!(recovery, Recovery::Restored),
-                    "{backend} {kill}: {recovery:?}"
-                );
+                // Recovery cannot tell git's conflict markers in a decided path at a stop from an
+                // edit, so it keeps a copy of them.
+                let saved = match &recovery {
+                    Recovery::Restored { saved } => saved.as_ref().map(|saved| saved.paths.clone()),
+                    _ => Some(Vec::new()),
+                };
+                let markers = (kill == "stop").then(|| vec![PathBuf::from("a.txt")]);
+                assert_eq!(saved, markers, "{backend} {kill}: {recovery:?}");
                 assert_restored(&d);
                 let again = b
                     .replay("origin", "main", &d.onto, &decisions, "beta")
@@ -4348,7 +4436,10 @@ mod tests {
             let staged = d.sb.raw_ok(b.repo(), &["diff", "--cached", "--name-only"]);
             assert!(staged.contains("b.txt"), "{backend}: {staged}");
             let recovery = b.recover_pull().expect("recover");
-            assert!(matches!(recovery, Recovery::Restored), "{recovery:?}");
+            assert!(
+                matches!(recovery, Recovery::Restored { .. }),
+                "{recovery:?}"
+            );
             assert_restored(&d);
         }
     }

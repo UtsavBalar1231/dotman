@@ -188,7 +188,9 @@ impl Context {
         let leave_out =
             move |git: &Git, untracked: &[PathBuf]| left_out(git, &state_file, untracked);
         Self {
-            git: Git::new(paths.repo.clone(), dot_command).leaving_out(Box::new(leave_out)),
+            git: Git::new(paths.repo.clone(), dot_command)
+                .leaving_out(Box::new(leave_out))
+                .backing_up_into(paths.state_dir.join("backups")),
             keys: KeyRules::new(&paths),
             paths,
             machine,
@@ -422,9 +424,23 @@ impl Context {
         }
         match self.git.recover_pull()? {
             Recovery::NoMarker => {}
-            Recovery::Restored => crate::output::info(
-                "an earlier sync was stopped while it finished a pull; the repo is back as it was before that pull",
-            ),
+            Recovery::Restored { saved } => {
+                if let Some(saved) = saved {
+                    crate::output::info(&format!(
+                        "saved the uncommitted edits of the repo's {} to {}",
+                        saved
+                            .paths
+                            .iter()
+                            .map(|path| shown_key(&path.to_string_lossy()))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        saved.dir.display()
+                    ));
+                }
+                crate::output::info(
+                    "an earlier sync was stopped while it finished a pull; the repo is back as it was before that pull",
+                );
+            }
             Recovery::Finished => crate::output::info(
                 "an earlier sync finished its pull but was stopped before tidying up; nothing was lost",
             ),
