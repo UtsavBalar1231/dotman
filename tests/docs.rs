@@ -285,7 +285,7 @@ fn every_flag_the_docs_name_exists() -> R {
 const CLAIMS: &[(&str, &[&str])] = &[
     // README.md
     (
-        "It never writes through a symlink, never runs a hook you have not approved",
+        "It never writes through a symlink, runs a hook you haven't approved",
         &[
             "a_target_symlink_is_never_written_through",
             "hostile_symlinks_never_carry_a_write_outside_home",
