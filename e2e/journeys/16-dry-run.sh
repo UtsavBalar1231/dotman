@@ -49,4 +49,23 @@ e2e_check "the real sync changed something" test "$before" != "$(e2e_snapshot)"
 e2e_file_is b .bashrc $'export A=2\n'
 e2e_file_is b .config/app/app.conf $'v=1\n'
 
+# A machine whose next sync conflicts: a dry run cannot see the remote's edit, says it would pull,
+# and changes nothing, while the real sync stops with exit 4 and changes nothing either.
+e2e_write a .bashrc $'export A=3\n'
+e2e_dm_rc 0 a sync
+e2e_write b .bashrc $'export A=4\n'
+for args in "sync" "sync --keep-local" "sync --take-repo"; do
+    read -ra argv <<<"$args"
+    e2e_dry_run b "${argv[@]}"
+    e2e_rc_is 0
+    e2e_err_lacks 'the pull conflicts'
+done
+e2e_dm_rc 4 b sync
+e2e_err_has 'the pull conflicts with your changes'
+e2e_dry_run b sync
+e2e_file_is b .bashrc $'export A=4\n'
+e2e_dm_rc 0 b sync --keep-local
+e2e_dm_rc 0 a sync
+e2e_file_is a .bashrc $'export A=4\n'
+
 e2e_finish

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Faults: SIGKILL sync, apply, add <dir>, add --template, import, init <url> and key init at random points, then recover as printed.
+# Faults: SIGKILL sync, apply, add <dir>, add --template, import, init <url>, key init and a conflicting sync --keep-local at random points, and the conflict's replay at each named step, then recover as printed.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -8,7 +8,7 @@ source "$(dirname "$0")/../lib.sh"
 # kill's point as a fraction of how long the command last took, which varies from machine to machine.
 iters=${E2E_KILL_ITERS:-3}
 seed=${E2E_KILL_SEED:-20261112}
-read -r -a ops <<<"${E2E_KILL_OPS:-sync apply add import init key}"
+read -r -a ops <<<"${E2E_KILL_OPS:-sync apply add import init key conflict}"
 RANDOM=$seed
 
 e2e_begin faults/kill timeout
@@ -18,6 +18,7 @@ printf 'seed %s (E2E_KILL_SEED), %s kills per operation (E2E_KILL_ITERS), operat
 declare -A versions=() latest=() span=() stored=()
 killed=0
 finished=0
+round=0
 # Every plaintext of the {age} file holds this; no repo object may.
 plain_marker=PLAIN-e2e-
 key_a=
@@ -102,13 +103,15 @@ fk_age() {
 
 # Invariant: every managed file under machine M's HOME, and every plain one in its repo worktree,
 # is whole: its bytes are a version some machine wrote. Missing is allowed mid-run. The worktree is
-# skipped while git is mid-operation there: git's checkout writes in place, the guard refuses every
-# command until the printed abort, and the abort puts the file back.
+# skipped while git is mid-operation there, and always when the second argument is "home": git's
+# checkout writes in place, the guard refuses every command until the printed abort, and the abort
+# puts the file back; a killed replay can leave a file with conflict markers there.
 fk_whole() {
     local m=$1 rel path bad=0 repo git busy=0
     repo=$(e2e_repo "$m")
     git=$repo/.git
     [[ -d $git/rebase-merge || -d $git/rebase-apply || -e $git/MERGE_HEAD || -e $git/dotman-pull ]] && busy=1
+    [[ ${2:-} == home ]] && busy=1
     for rel in "${!latest[@]}"; do
         for path in "$(e2e_home "$m")/$rel" "$repo/${stored[$rel]:-$rel}"; do
             [[ $busy == 1 && $path == "$repo"/* ]] && continue
@@ -126,11 +129,13 @@ fk_whole() {
 }
 
 # Prints the commands the last dotman call printed that undo what a killed run left: removing git's
-# lock files, then aborting the operation git was in, once. The abort is also named inline before the
-# numbered steps, but it fails until the lock files are gone, as the message says.
+# lock files and the pull marker, then ending the operation git was in, once. The abort is also named
+# inline before the numbered steps, but it fails until the lock files are gone, as the message says.
+# A refused pull's steps end the rebase with --quit and check the branch out before the marker goes;
+# the removals run first here, which leaves the same repo.
 fk_ways_out() {
     local cmds
-    cmds=$(e2e_recipe | grep -E -- '^rm |^dotman git (rebase|merge|cherry-pick|revert|am) --abort$' | awk '!seen[$0]++') || true
+    cmds=$(e2e_recipe | grep -E -- '^rm |^dotman git (rebase|merge|cherry-pick|revert|am) (--abort|--quit)$|^dotman git checkout -f [^ ]+$' | awk '!seen[$0]++') || true
     [[ -n $cmds ]] || return 0
     grep -- '^rm ' <<<"$cmds" || true
     grep -v -- '^rm ' <<<"$cmds" || true
@@ -238,6 +243,27 @@ fk_edit() {
 " 600; fi
 }
 
+# Runs dotman ARGS on machine M with a git on its PATH that kills dotman WHEN (before or after) it runs
+# a git command whose arguments match the shell glob PATTERN, and expects the kill: a replay step that
+# a random delay seldom hits. The stub is gone afterwards.
+fk_kill_at() {
+    local m=$1 pattern=$2 when=$3 real
+    shift 3
+    real=$(command -v git)
+    e2e_stub "$m" git "#!/bin/sh
+case \" \$* \" in $pattern) [ $when = before ] && kill -KILL \"\$PPID\" ;; esac
+'$real' \"\$@\"
+rc=\$?
+case \" \$* \" in $pattern) [ $when = after ] && kill -KILL \"\$PPID\" ;; esac
+exit \$rc
+"
+    e2e_dm "$m" "$@"
+    e2e_rc_is 137 "$m: dotman $* killed $when a git command matching $pattern"
+    rm -f -- "$(e2e_bin "$m")/git"
+    killed=$((killed + 1))
+    printf 'kill  [%s] %s: dotman %s killed %s git %s\n' "$E2E_NAME" "$m" "$1" "$when" "$pattern"
+}
+
 fk_setup() {
     local i
     e2e_machines a b
@@ -248,6 +274,7 @@ fk_setup() {
 "
     done
     fk_write a .bashrc $'export E2E_ROUND=0\n'
+    fk_write a .shared.conf $'s1\ns2\ns3\ns4\ns5\ns6\n'
     fk_write_big a .big
     fk_write a .secret.env "TOKEN=${plain_marker}0
 " 600
@@ -256,7 +283,7 @@ fk_setup() {
     e2e_dm_rc 0 a key init
     key_a="$(e2e_config a)/age-identity.txt"
     e2e_identity_known "$key_a"
-    e2e_dm_rc 0 a add .config/app .bashrc .big
+    e2e_dm_rc 0 a add .config/app .bashrc .big .shared.conf
     e2e_dm_rc 0 a add --encrypt .secret.env
     e2e_dm_rc 0 a sync
     e2e_join b beta --age-key-file "$key_a"
@@ -383,6 +410,80 @@ op_key() {
     fk_converge "$m" a "$m"
 }
 
+# Clears machine M's XDG_RUNTIME_DIR of dotman temp dirs, as a logout would clear its tmpfs: the
+# conflict flow's private copies live there, and the sweep only reaches the state dir.
+fk_logout() {
+    rm -rf -- "$(e2e_mroot "$1")/run"/.dotman-tmp-*
+}
+
+# Writes a binary file REL holding TEXT and a NUL byte on machine M, at MODE (default 644).
+fk_write_bin() {
+    local m=$1 rel=$2 path
+    path="$(e2e_home "$m")/$rel"
+    printf 'bin\0%s\n' "$3" >"$path"
+    chmod "${4:-644}" "$path"
+    e2e_ledger "$m:~/$rel" "$path"
+    fk_version "$rel" "$path"
+}
+
+# Both machines edit one line of .shared.conf and one binary file that the other machine made
+# private, so the pull stops on both and the winner's [modes] entry corrects .dotman.toml after the
+# replay. Machine M's sync --keep-local is then killed: at a random point when KILL is "random", and
+# else at the git step named by KILL, NAME-WHEN, through a stub. M's version of both files wins; the
+# printed lines, run as printed, lead to convergence.
+op_conflict() {
+    local kill=$1 m other pattern when bin
+    round=$((round + 1))
+    bin=.priv$round.bin
+    if ((RANDOM % 2)); then m=a other=b; else m=b other=a; fi
+    fk_write_bin a "$bin" "base $round"
+    e2e_dm_rc 0 a add "$bin"
+    e2e_dm_rc 0 a sync
+    e2e_dm_rc 0 b sync
+    fk_write "$other" .shared.conf "s1
+s2
+other $round $RANDOM
+s4
+s5
+s6
+"
+    fk_write_bin "$other" "$bin" "other $round $RANDOM" 600
+    e2e_dm_rc 0 "$other" sync
+    fk_write "$m" .shared.conf "s1
+s2
+mine $round $RANDOM
+s4
+s5
+s6
+"
+    fk_write_bin "$m" "$bin" "mine $round $RANDOM"
+    case $kill in
+        random) fk_kill "$m" 900 sync --keep-local ;;
+        *)
+            when=${kill##*-}
+            case ${kill%-*} in
+                detach) pattern="*' checkout '*' --detach'*" ;;
+                rebase) pattern="*' rebase --onto '*" ;;
+                continue) pattern="*' rebase --continue'*|*' rebase --skip'*" ;;
+                correct) pattern="*' commit '*' resolve '*" ;;
+                update-ref) pattern="*' update-ref '*" ;;
+                symbolic-ref) pattern="*' symbolic-ref HEAD refs/heads/'*" ;;
+                *) e2e_die "no kill point '$kill'" ;;
+            esac
+            fk_kill_at "$m" "$pattern" "$when" sync --keep-local
+            e2e_dm_rc 4 "$m" status
+            e2e_err_has 'was stopped while it finished a pull'
+            e2e_dry_run "$m" sync
+            e2e_rc_is 4
+            ;;
+    esac
+    fk_whole "$m" home
+    fk_retry "$m" '' sync --keep-local
+    fk_age "$m"
+    fk_logout "$m"
+    fk_converge "$other" "$m" "$other"
+}
+
 fk_setup
 for op in "${ops[@]}"; do
     began=$SECONDS
@@ -394,7 +495,16 @@ for op in "${ops[@]}"; do
             import) op_import "$n" ;;
             init) op_init "$n" ;;
             key) op_key "$n" ;;
-            *) e2e_die "no operation '$op'; E2E_KILL_OPS takes sync apply add import init key" ;;
+            conflict)
+                op_conflict random
+                if [[ $n == 1 ]]; then
+                    for kill in detach-after rebase-after continue-before continue-after correct-before \
+                        update-ref-before update-ref-after symbolic-ref-after; do
+                        op_conflict "$kill"
+                    done
+                fi
+                ;;
+            *) e2e_die "no operation '$op'; E2E_KILL_OPS takes sync apply add import init key conflict" ;;
         esac
     done
     printf 'time  [%s] %s: %s kills in %ss\n' "$E2E_NAME" "$op" "$iters" $((SECONDS - began))

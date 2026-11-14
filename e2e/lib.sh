@@ -17,6 +17,8 @@ E2E_LAST_CMD=
 E2E_LAST_MACHINE=
 E2E_PRINTED_RC=0
 E2E_MACHINES=()
+# NAME=value pairs e2e_run_printed sets, through env, for the commands it runs.
+E2E_PRINTED_ENV=()
 
 # Prints a message to stderr and exits; for harness misuse, not for product failures.
 e2e_die() {
@@ -490,7 +492,7 @@ e2e_age_identity() {
 e2e_recipe_emit() {
     case $1 in
         *'<'*'>'*) ;;
-        "dotman "* | "git "* | "rm "* | "mv "* | "cp "*)
+        "dotman "* | "git "* | "rm "* | "mv "* | "cp "* | "env "*)
             printf '%s\n' "$1"
             return 0
             ;;
@@ -527,8 +529,9 @@ e2e_printed() {
     e2e_recipe | { grep -E -- "$1" || true; } | sed -n 1p
 }
 
-# Runs CMD exactly as printed, with bash --noprofile --norc in machine M's environment and
-# stdin closed; records a failure unless it exits WANT (default 0), and sets E2E_PRINTED_RC.
+# Runs CMD exactly as printed, with bash --noprofile --norc in machine M's environment, plus
+# E2E_PRINTED_ENV, and stdin closed; records a failure unless it exits WANT (default 0), and
+# sets E2E_PRINTED_RC.
 e2e_run_printed() {
     local m=$1 cmd=$2 want=${3:-0} rc=0
     if [[ -z $cmd ]]; then
@@ -537,7 +540,7 @@ e2e_run_printed() {
         return 0
     fi
     e2e_guard "$m"
-    e2e_on "$m" bash --noprofile --norc -c "$cmd" </dev/null >"$E2E_ROOT/recipe.out" 2>&1 || rc=$?
+    e2e_on "$m" env "${E2E_PRINTED_ENV[@]}" bash --noprofile --norc -c "$cmd" </dev/null >"$E2E_ROOT/recipe.out" 2>&1 || rc=$?
     {
         printf '\n[%s] printed $ %s  (exit %s)\n' "$m" "$cmd" "$rc"
         cat "$E2E_ROOT/recipe.out"
