@@ -2,6 +2,8 @@
 
 Variants, templates and hooks. Back to the [README](../README.md).
 
+https://github.com/user-attachments/assets/1fe70751-00ad-4450-a434-e7a7c49416ab
+
 ## Variants
 
 A repo file can carry one brace block in its final name component, such as `monitors{host=laptop}.conf`. It targets `monitors.conf` and applies only where its conditions hold. Any other brace text is a literal file name.

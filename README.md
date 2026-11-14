@@ -44,6 +44,20 @@ From then on, edit files where they are and run `dotman sync`. It captures local
 
 [Getting started](docs/getting-started.md) covers the rest, such as how `sync` captures new files under a directory you add.
 
+## Demo
+
+Setting up two machines (68 s):
+
+https://github.com/user-attachments/assets/5a1b549c-4b24-4aad-8043-5cd7a52a45b3
+
+Daily use: edit, sync, and the backup of what a sync replaced (71 s):
+
+https://github.com/user-attachments/assets/8368d460-57bb-469e-b0d4-c3caa5fbe6db
+
+Per-machine files, templates and secrets (88 s):
+
+https://github.com/user-attachments/assets/1fe70751-00ad-4450-a434-e7a7c49416ab
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md): the full quick start, requirements, and Codespaces, Dev Containers and DevPod.

@@ -2,6 +2,8 @@
 
 Setting up the first machine and the next ones, and what dotman needs. Back to the [README](../README.md).
 
+https://github.com/user-attachments/assets/5a1b549c-4b24-4aad-8043-5cd7a52a45b3
+
 ## Quick start
 
 On the first machine, `init` asks only what it cannot detect: git identity, a remote (it can create a private GitHub repo through `gh`), host name and profiles, system files, and an encryption key.

@@ -2,6 +2,8 @@
 
 Encrypted files, the age identity, and the guards that keep credentials out of the repo. Back to the [README](../README.md).
 
+https://github.com/user-attachments/assets/1fe70751-00ad-4450-a434-e7a7c49416ab
+
 `dotman add --encrypt <file>` stores the file as age ciphertext, encrypted to every recipient in `.dotman.toml`. `apply` decrypts it to `$HOME` at mode 0600 unless you set `[modes]` by hand. Plaintext is never written into the repo.
 
 Without a key, encrypted files are reported as `locked` and skipped.
