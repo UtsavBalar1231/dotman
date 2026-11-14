@@ -232,18 +232,16 @@ const HOOKS: &str = "[hooks]";
 const SYSTEM: &str = "[system]";
 
 /// Which answer settled a source.
-// reason: the conflict flow that builds these is not wired in yet.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Winner {
     Mine,
     Theirs,
+    // reason: the edit answer that builds it comes with the terminal menu.
+    #[cfg_attr(not(test), allow(dead_code))]
     Merged,
 }
 
 /// A source whose conflict was settled, for the follow rules of [`merge`].
-// reason: the conflict flow that builds these is not wired in yet.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Settled {
     pub winner: Winner,
@@ -262,20 +260,28 @@ impl Settled {
 
 /// A `[modes]`, `[hooks]` or `[system]` key that both sides set differently. The merge keeps
 /// this machine's value and leaves the question to the caller.
-// reason: the conflict flow that builds these is not wired in yet.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tie {
     pub table: &'static str,
     pub key: String,
 }
 
+impl Tie {
+    /// Sets the tied key in `merged` to `theirs`' value, or removes it where `theirs` has none.
+    pub(crate) fn take_theirs(&self, merged: &mut RepoConfig, theirs: &RepoConfig) {
+        let key = self.key.as_str();
+        match self.table {
+            MODES => set_or_remove(&mut merged.modes, key, theirs.modes.get(key).cloned()),
+            HOOKS => set_or_remove(&mut merged.hooks, key, theirs.hooks.get(key).cloned()),
+            _ => set_or_remove(&mut merged.system, key, theirs.system.get(key).cloned()),
+        }
+    }
+}
+
 /// Three-way merge of `.dotman.toml`: `mine` is this machine's side, `theirs` origin's. Lists keep
 /// this machine's order, add what origin added and drop what either side removed. Maps merge per
 /// key. A settled source's `[modes]` entry and `[system]` table follow `winners` instead, and
 /// `host_copies` (shared source, variant) gives each variant this machine's `[modes]` entry.
-// reason: the conflict flow that calls this is not wired in yet.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn merge(
     base: &RepoConfig,
     mine: &RepoConfig,

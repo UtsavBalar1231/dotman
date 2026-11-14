@@ -94,9 +94,9 @@ because the [hooks] table changed since a warning showed it, so
 \-\-approve\-hooks showed the new table and approved nothing.
 .TP
 \fB4\fR
-\fBsync\fR hit a rebase conflict, aborted the pull and printed the
-steps to resolve it; or a git operation or conflict is unfinished
-in the repo.
+\fBsync\fR hit a pull conflict that it did not settle, so nothing was
+pulled or pushed, and printed what to run; or a git operation, a
+pull a stopped sync left, or a conflict is unfinished in the repo.
 .PP
 The \fBgit\fR subcommand exits with git\*(Aqs own status.
 .SH ENVIRONMENT

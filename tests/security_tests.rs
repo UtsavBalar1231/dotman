@@ -3582,7 +3582,6 @@ fn a_merge_driver_in_the_user_s_git_config_never_settles_a_conflict() {
     );
 
     let pull = "dotman git pull --rebase origin main";
-    assert!(err.contains(pull), "{err}");
     let args: Vec<&str> = pull.split(' ').skip(1).collect();
     let out = b.run(&args);
     assert!(!out.status.success(), "{}", stderr(&out));
@@ -3671,7 +3670,6 @@ fn a_tracked_attribute_macro_never_transforms_content_or_settles_a_conflict() {
         let err = exits(&b.run(&["sync"]), 4);
         assert!(err.contains("conflicting paths:\n  .conf"), "{err}");
         let pull = "dotman git pull --rebase origin main";
-        assert!(err.contains(pull), "{err}");
         let args: Vec<&str> = pull.split(' ').skip(1).collect();
         let out = b.run(&args);
         assert!(!out.status.success(), "{}", stderr(&out));
@@ -4357,9 +4355,9 @@ fn the_rebase_recovery_never_prints_a_branch_dotman_refuses() {
     exits(&env.run(&["status"]), 0);
 }
 
-/// The conflict recipe names a branch other than `main` as the repo has it, and its pull, run as
-/// printed on a branch with a slash and a dot, reaches the conflict: a full refname passed to git
-/// pulls the same branch.
+/// The git steps of a conflict dotman does not settle name a branch other than `main` as the repo
+/// has it, and their pull, run as printed on a branch with a slash and a dot, reaches the
+/// conflict: a full refname passed to git pulls the same branch.
 #[test]
 fn the_printed_pull_reaches_a_branch_other_than_main() {
     let a = TestEnv::new();
@@ -4380,17 +4378,26 @@ fn the_printed_pull_reaches_a_branch_other_than_main() {
     ]);
     let b = a.second_device();
     b.ok(&["init", &a.remote_url()]);
-    a.write(".a", b"from a\n", 0o644);
+    a.write(".x/y", b"y\n", 0o644);
+    a.ok(&["add", ".x/y"]);
     a.ok(&["sync"]);
-    b.write(".a", b"from b\n", 0o644);
+    b.write(".x", b"file\n", 0o644);
+    b.ok(&["add", ".x"]);
 
     let err = exits(&b.run(&["sync"]), 4);
     let pull = "dotman git pull --rebase origin topic/a.b";
     assert!(err.contains(&format!("1. {pull}")), "{err}");
+    assert!(
+        err.contains(".x is a file here and a directory in origin/topic/a.b"),
+        "{err}"
+    );
     let out = common::paste(&b, pull);
     assert!(!out.status.success(), "the pull stops on the conflict");
-    let merged = fs::read_to_string(b.repo().join(".a")).unwrap();
-    assert!(merged.contains("<<<<<<<"), "{merged}");
+    assert!(
+        names(&b.repo()).iter().any(|name| name.starts_with(".x~")),
+        "{:?}",
+        names(&b.repo())
+    );
 }
 
 // Upstream .dotman.toml
@@ -4814,5 +4821,261 @@ fn a_pattern_removed_here_applies_until_sync_drops_it() {
     assert!(
         !doctor.contains("ignore: this machine still applies"),
         "{doctor}"
+    );
+}
+
+// A pull that conflicts
+
+/// A private file's `[modes]` entry follows the version that wins: one machine forgets a 0600
+/// file, which drops its entry, while the other edits it. Taking origin's version brings the file
+/// back with its 0600 entry, for this machine and a new one; keeping this machine's removal drops
+/// both.
+#[test]
+fn a_private_file_s_mode_follows_the_version_that_wins() {
+    for flag in ["--take-repo", "--keep-local"] {
+        let (a, b) = two_machines();
+        a.write(".secret", b"one\n", 0o600);
+        a.ok(&["add", ".secret"]);
+        a.ok(&["sync"]);
+        b.ok(&["sync"]);
+        let entry = |env: &TestEnv| env.repo_config().modes.get(".secret").cloned();
+        assert_eq!(entry(&b).as_deref(), Some("0600"));
+        a.write(".secret", b"two\n", 0o600);
+        a.ok(&["sync"]);
+        b.ok(&["forget", ".secret"]);
+        exits(&b.run(&["sync", flag]), 0);
+        let taken = flag == "--take-repo";
+        assert_eq!(entry(&b).is_some(), taken, "{flag}");
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let pushed = a.git(&["--git-dir", &remote, "show", "main:.dotman.toml"]);
+        assert_eq!(pushed.contains("\".secret\" = \"0600\""), taken, "{pushed}");
+        if taken {
+            assert_eq!(b.read(".secret"), b"two\n");
+            assert_eq!(mode_of(&b.home().join(".secret")), 0o600);
+            let c = a.second_device();
+            c.ok(&["init", &c.remote_url()]);
+            assert_eq!(mode_of(&c.home().join(".secret")), 0o600);
+        }
+    }
+}
+
+/// A 0600 text file whose `[modes]` entry only origin's side has stays 0600 under either flag,
+/// `--keep-local` included: a merged text takes the stricter mode of the two sides.
+#[test]
+fn a_private_text_file_stays_private_under_either_flag() {
+    for flag in ["--keep-local", "--take-repo"] {
+        let (a, b) = two_machines();
+        let mut config = a.repo_config();
+        config.modes.insert(".bashrc".to_owned(), "0600".to_owned());
+        config.save(&a.repo().join(".dotman.toml"), false).unwrap();
+        a.write(".bashrc", b"alias ll='ls -l'\n", 0o600);
+        a.ok(&["sync", "--keep-local"]);
+        b.write(".bashrc", b"alias ll='ls -la'\n", 0o644);
+        exits(&b.run(&["sync", flag]), 0);
+        let entry = b.repo_config().modes.get(".bashrc").cloned();
+        assert_eq!(entry.as_deref(), Some("0600"), "{flag}");
+        assert_eq!(mode_of(&b.home().join(".bashrc")), 0o600, "{flag}");
+        a.ok(&["sync"]);
+        assert_eq!(mode_of(&a.home().join(".bashrc")), 0o600, "{flag}");
+    }
+}
+
+/// Each side keeps half of a private key, which a merge of the two would join: the merged copy is
+/// refused under a flag, sync exits 4 naming the file and changes nothing, and the way out it
+/// prints works as printed. A credential that origin's own version holds is no reason to refuse:
+/// this machine's guard does not stop origin's lines by themselves.
+#[test]
+fn a_merged_copy_holding_a_credential_is_refused_and_the_way_out_works() {
+    use std::os::unix::fs::PermissionsExt;
+    let header = concat!("-----BEGIN PRIVATE", " KEY-----");
+    let body = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB";
+    let token = concat!("ghp_", "abcdefghijklmnopqrstuvwxyz0123456789");
+    let (a, b) = two_machines();
+    let base = format!("{header}\nProc-Type: x\n!!!!\nComment: y\nzzz\nsep\nclash\n");
+    a.write(".conf", base.as_bytes(), 0o644);
+    a.write(".tokens", b"one\nsep\nclash\n", 0o644);
+    a.ok(&["add", ".conf", ".tokens"]);
+    a.ok(&["sync"]);
+    b.ok(&["sync"]);
+    let theirs = base.replace("zzz", body).replace("clash", "clash a");
+    a.write(".conf", theirs.as_bytes(), 0o644);
+    a.write(
+        ".tokens",
+        format!("t={token}\nsep\nclash a\n").as_bytes(),
+        0o644,
+    );
+    a.ok(&["add", "--allow-plain", ".tokens"]);
+    a.ok(&["sync"]);
+    b.write(
+        ".conf",
+        base.replace("!!!!\n", "")
+            .replace("clash", "clash b")
+            .as_bytes(),
+        0o644,
+    );
+    b.write(".tokens", b"one\nsep\nclash b\n", 0o644);
+
+    exits(&b.run(&["sync"]), 4);
+    let before = b.four_trees();
+    let err = exits(&b.run(&["sync", "--keep-local"]), 4);
+    assert!(
+        err.contains(
+            ".conf: in the merged file, line 1 holds a private-key; nothing was pulled or pushed"
+        ),
+        "{err}"
+    );
+    let [home, _, state, remote] = b.four_trees();
+    let [home_before, _, state_before, remote_before] = before;
+    assert_eq!(
+        (home, state, remote),
+        (home_before, state_before, remote_before)
+    );
+
+    let editor = b.root().join("editor");
+    fs::write(
+        &editor,
+        "#!/bin/sh\nsed -i 's/^Proc-Type: x$/Proc Type x/' \"$1\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
+    let editor = editor.to_string_lossy().into_owned();
+    for line in [
+        common::hint_line(&err, "edit"),
+        common::hint_line(&err, "sync"),
+    ] {
+        let out = b
+            .process_for(Path::new("sh"))
+            .env("VISUAL", &editor)
+            .arg("-c")
+            .arg(format!(
+                "PATH={}:\"$PATH\"; {line}",
+                shell_words::quote(
+                    &Path::new(env!("CARGO_BIN_EXE_dotman"))
+                        .parent()
+                        .unwrap()
+                        .to_string_lossy()
+                )
+            ))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{line}: {}", stderr(&out));
+    }
+    assert_eq!(
+        b.read(".tokens"),
+        format!("t={token}\nsep\nclash b\n").as_bytes()
+    );
+    assert!(
+        String::from_utf8_lossy(&b.read(".conf")).contains("Proc Type x\nComment: y\nQUFB"),
+        "{}",
+        String::from_utf8_lossy(&b.read(".conf"))
+    );
+}
+
+/// An encrypted conflict settled by either flag, after both sides were decrypted to compare
+/// them, leaves no plaintext in any object of the repo or the remote, unreachable loose objects
+/// included.
+#[test]
+fn an_encrypted_conflict_leaves_no_plaintext_in_any_object() {
+    if !age_installed() {
+        return;
+    }
+    for flag in ["--keep-local", "--take-repo"] {
+        let a = TestEnv::new();
+        a.ok(&["init", "--remote", &a.remote_url()]);
+        a.ok(&["key", "init"]);
+        a.write(".env", b"plain_marker_base\n", 0o600);
+        a.ok(&["add", "--encrypt", ".env"]);
+        a.ok(&["sync"]);
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        a.git(&[
+            "--git-dir",
+            &remote,
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+        let b = a.second_device();
+        b.ok(&["init", &b.remote_url()]);
+        let identity = a.xdg_config().join("dotman/age-identity.txt");
+        b.ok(&["key", "import", &identity.to_string_lossy()]);
+        b.ok(&["apply"]);
+        a.write(".env", b"plain_marker_from_a\n", 0o600);
+        a.ok(&["sync"]);
+        b.write(".env", b"plain_marker_from_b\n", 0o600);
+        exits(&b.run(&["sync"]), 4);
+        exits(&b.run(&["sync", flag]), 0);
+        for git_dir in [b.repo().join(".git"), a.remote_path()] {
+            let dir = git_dir.to_string_lossy().into_owned();
+            let objects = a.git_raw(&[
+                "--git-dir",
+                &dir,
+                "cat-file",
+                "--batch-all-objects",
+                "--batch",
+            ]);
+            assert!(objects.status.success());
+            assert!(
+                !objects
+                    .stdout
+                    .windows(b"plain_marker".len())
+                    .any(|w| w == b"plain_marker"),
+                "{flag}: plaintext in an object of {dir}"
+            );
+        }
+    }
+}
+
+/// A resolution that git's rerere recorded never answers a conflict, with `rerere.enabled` and
+/// `rerere.autoupdate` in the user's git config: sync still stops on the conflict, a flag settles
+/// it by its own rule, and the recorded text reaches no commit that is pushed. The control: the
+/// same pull run by hand takes the recorded resolution.
+#[test]
+fn a_recorded_rerere_resolution_never_answers_a_conflict() {
+    let (a, b) = two_machines();
+    let gitconfig = b.home().join(".gitconfig");
+    let mut config = fs::read_to_string(&gitconfig).unwrap();
+    config.push_str("[rerere]\n\tenabled = true\n\tautoupdate = true\n");
+    fs::write(&gitconfig, config).unwrap();
+    a.write(".bashrc", b"from a\n", 0o644);
+    a.ok(&["sync"]);
+    b.write(".bashrc", b"from b\n", 0o644);
+    exits(&b.run(&["sync"]), 4);
+
+    let repo = b.repo();
+    let repo_arg = repo.to_string_lossy().into_owned();
+    let head = b.git(&["-C", &repo_arg, "rev-parse", "HEAD"]);
+    let pull = ["git", "pull", "--rebase", "origin", "main"];
+    assert!(!b.run(&pull).status.success(), "the pull stops");
+    fs::write(repo.join(".bashrc"), b"RECORDED\n").unwrap();
+    exits(&b.run(&["git", "add", "--", ".bashrc"]), 0);
+    exits(
+        &b.run(&["git", "-c", "core.editor=true", "rebase", "--continue"]),
+        0,
+    );
+    b.git(&["-C", &repo_arg, "reset", "-q", "--hard", head.trim()]);
+    assert!(!b.run(&pull).status.success(), "the pull stops again");
+    assert_eq!(
+        fs::read(repo.join(".bashrc")).unwrap(),
+        b"RECORDED\n",
+        "rerere answered the pull run by hand"
+    );
+    exits(&b.run(&["git", "rebase", "--abort"]), 0);
+
+    let err = exits(&b.run(&["sync"]), 4);
+    assert!(err.contains("conflicting paths:\n  .bashrc\n"), "{err}");
+    assert_eq!(fs::read(repo.join(".bashrc")).unwrap(), b"from b\n");
+    exits(&b.run(&["sync", "--take-repo"]), 0);
+    assert_eq!(b.read(".bashrc"), b"from a\n");
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    let objects = a.git_raw(&[
+        "--git-dir",
+        &remote,
+        "cat-file",
+        "--batch-all-objects",
+        "--batch",
+    ]);
+    assert!(
+        !objects.stdout.windows(8).any(|w| w == b"RECORDED"),
+        "the recorded resolution was pushed"
     );
 }

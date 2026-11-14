@@ -285,7 +285,7 @@ fn stage(
 }
 
 // `$XDG_RUNTIME_DIR` is private to the user and usually memory-backed; the state dir is private too.
-fn private_base(ctx: &Context) -> Result<PathBuf> {
+pub(crate) fn private_base(ctx: &Context) -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())

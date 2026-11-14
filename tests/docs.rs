@@ -360,7 +360,10 @@ const CLAIMS: &[(&str, &[&str])] = &[
     ),
     (
         "Plaintext is never written into the repo",
-        &["the_plaintext_of_an_encrypted_file_never_reaches_the_repo"],
+        &[
+            "the_plaintext_of_an_encrypted_file_never_reaches_the_repo",
+            "an_encrypted_conflict_leaves_no_plaintext_in_any_object",
+        ],
     ),
     (
         "stripped from every other child process",
@@ -481,6 +484,9 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "an_upstream_ignore_removal_captures_nothing_here",
             "a_pattern_removed_here_applies_until_sync_drops_it",
             "a_pushed_file_never_becomes_one_of_dotman_s_own_files",
+            "a_merged_copy_holding_a_credential_is_refused_and_the_way_out_works",
+            "a_recorded_rerere_resolution_never_answers_a_conflict",
+            "a_private_file_s_mode_follows_the_version_that_wins",
         ],
     ),
     (

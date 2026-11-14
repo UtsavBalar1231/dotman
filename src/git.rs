@@ -1261,6 +1261,12 @@ impl Git {
         Ok(out.stdout)
     }
 
+    /// Raw bytes of the blob `oid`.
+    pub fn blob(&self, oid: &str) -> Result<Vec<u8>> {
+        ensure!(is_oid(oid), "not a git object id: {oid}");
+        Ok(self.run(&["cat-file", "blob", oid])?.stdout)
+    }
+
     /// The commit `rev` names, or `None` when it is not a revision.
     pub fn resolve_commit(&self, rev: &str) -> Result<Option<String>> {
         if rev.starts_with('-') {

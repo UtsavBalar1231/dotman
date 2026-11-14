@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# An encrypted {age} file edited on both machines: the printed pick-a-side steps keep one whole.
+# An encrypted {age} file edited on both machines: the printed --keep-local keeps this machine's
+# version whole, on both machines.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -24,14 +25,14 @@ e2e_write a .secret.env $'TOKEN=two\n' 600
 e2e_write b .secret.env $'TOKEN=three\n' 600
 e2e_dm_rc 0 a sync
 e2e_dm_rc 4 b sync
-e2e_err_has 'Encrypted files cannot be merged'
+e2e_err_has 'conflicting paths:'
+e2e_err_has '.secret{age}.env'
 e2e_file_is b .secret.env $'TOKEN=three\n'
 
-e2e_run_printed b "$(e2e_printed 'pull --rebase')" 1
-e2e_run_recipe b "checkout --theirs|git add|rebase --continue" 3
-e2e_run_printed b "$(e2e_printed '^dotman sync$')"
+e2e_run_printed b "$(e2e_printed '^dotman sync --keep-local$')"
 
 e2e_file_is b .secret.env $'TOKEN=three\n'
+e2e_remote_never_holds 'TOKEN=three'
 e2e_dm_rc 0 a sync
 e2e_file_is a .secret.env $'TOKEN=three\n'
 e2e_check "a's version is in a backup on a" grep -rqF 'TOKEN=two' "$(e2e_backups a)"

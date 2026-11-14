@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod apply;
+pub(crate) mod conflict;
 pub mod diff;
 pub mod doctor;
 pub mod edit;

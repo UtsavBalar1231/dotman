@@ -1,14 +1,15 @@
 //! `dotman sync`: capture local changes, commit them, pull with rebase, apply what arrived and push.
 //!
 //! Capture and apply are two passes of `apply`, split by the pull. A rebase conflict aborts the
-//! pull and leaves everything as it was, with the recovery steps printed. Encrypted files are
-//! re-encrypted after the apply, when `[age] recipients` changed, so a machine that pulls the
-//! re-encryption finds nothing left to do.
+//! pull; `conflict` then settles it and replays the pull, or reports it with everything as it
+//! was. Encrypted files are re-encrypted after the apply, when `[age] recipients` changed, so a
+//! machine that pulls the re-encryption finds nothing left to do.
 
 use crate::cli::SyncArgs;
 use crate::commands::Outcome;
 use crate::commands::add;
 use crate::commands::apply::{self, Applied, Options, Pass};
+use crate::commands::conflict::{self, Answer};
 use crate::config::Allow;
 use crate::context::{Context, TEMP_PREFIX, is_under};
 use crate::engine::{Node, read_node};
@@ -141,7 +142,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     }
 
     let reached = |err| remote_error(err, committed.new_commit);
-    let Some(pulled) = pull(&ctx, &branch).map_err(reached)? else {
+    let answer = Answer::from_flags(args.decisions.keep_local, args.decisions.take_repo);
+    let Some(pulled) = pull(&ctx, &branch, committed.held, answer).map_err(reached)? else {
         apply::check_failed(first_failed, uncaptured)?;
         return Ok(Outcome::Conflict);
     };
@@ -228,8 +230,9 @@ fn renders(ctx: &Context, base: Option<&str>) -> Result<bool> {
 }
 
 /// Pulls `branch` when the remote has it, and says whether it did; `None` when the pull stopped,
-/// with the recovery steps printed, before anything reached `$HOME`.
-fn pull(ctx: &Context, branch: &str) -> Result<Option<bool>> {
+/// with what to do printed, before anything reached `$HOME`. A conflict is settled with `answer`
+/// unless the commit held something back.
+fn pull(ctx: &Context, branch: &str, held: bool, answer: Option<Answer>) -> Result<Option<bool>> {
     // A remote without the branch is a first push: there is nothing to pull.
     if !ctx.git.remote_has_branch(REMOTE, branch)? {
         return Ok(Some(false));
@@ -238,19 +241,21 @@ fn pull(ctx: &Context, branch: &str) -> Result<Option<bool>> {
     let before = ctx.git.head()?;
     match ctx.git.pull_rebase(REMOTE, branch)? {
         PullOutcome::Ok => {
-            let arrived = ctx.git.count_commits(before.as_deref(), "FETCH_HEAD")?;
-            if arrived > 0 {
-                output::success(&format!(
-                    "pulled {} from {REMOTE}/{branch}",
-                    output::count(arrived, "commit")
-                ));
-            }
+            pulled(ctx, before.as_deref(), "FETCH_HEAD", branch)?;
             Ok(Some(true))
         }
         PullOutcome::Conflict { stopped } => {
-            let paths: Vec<PathBuf> = stopped.into_iter().map(|stop| stop.path).collect();
-            report_conflict(ctx, branch, &paths);
-            Ok(None)
+            let onto = ctx
+                .git
+                .resolve_commit("FETCH_HEAD")?
+                .ok_or_else(|| anyhow!("the pull left no fetched commit"))?;
+            if holds_back_the_answer(ctx, held)?
+                || !conflict::resolve(ctx, branch, &onto, stopped, answer)?
+            {
+                return Ok(None);
+            }
+            pulled(ctx, before.as_deref(), &onto, branch)?;
+            Ok(Some(true))
         }
         // The worktree may hold conflict markers, which the next pass would write into `$HOME`.
         PullOutcome::Unstashed { paths } => {
@@ -258,6 +263,46 @@ fn pull(ctx: &Context, branch: &str) -> Result<Option<bool>> {
             Ok(None)
         }
     }
+}
+
+fn pulled(ctx: &Context, before: Option<&str>, tip: &str, branch: &str) -> Result<()> {
+    let arrived = ctx.git.count_commits(before, tip)?;
+    if arrived > 0 {
+        output::success(&format!(
+            "pulled {} from {REMOTE}/{branch}",
+            output::count(arrived, "commit")
+        ));
+    }
+    Ok(())
+}
+
+/// The replay needs a clean worktree, so a pull that conflicts after the commit held something
+/// back, or left a tracked path changed, stops before anything is settled; true when it did.
+fn holds_back_the_answer(ctx: &Context, held: bool) -> Result<bool> {
+    let changed: Vec<PathBuf> = ctx
+        .git
+        .status()?
+        .into_iter()
+        .filter(|entry| entry.kind != StatusKind::Untracked && !is_temp(&entry.path))
+        .map(|entry| entry.path)
+        .collect();
+    if !held && changed.is_empty() {
+        return Ok(false);
+    }
+    output::warning(&format!(
+        "the pull conflicts with your changes, and the repo holds changes that are not committed, so sync stopped before it settled the conflict. Nothing was pulled or pushed, and your files and commits are as they were. Resolve what the warnings above hold back, then run `{} sync` again",
+        name::bin()
+    ));
+    if !changed.is_empty() {
+        output::warning("not committed:");
+        for path in changed {
+            output::warning(&format!(
+                "  {}",
+                output::escape_line(&path.to_string_lossy())
+            ));
+        }
+    }
+    Ok(true)
 }
 
 fn without_remote(
@@ -823,7 +868,7 @@ fn tail(path: &str) -> &str {
 
 /// Prints numbered recovery steps. A step's first line is a command or a sentence; its further
 /// lines go below, indented past the number, so that every command stands alone on its line.
-fn print_steps(steps: &[Vec<String>]) {
+pub(crate) fn print_steps(steps: &[Vec<String>]) {
     for (n, lines) in (1_u8..).zip(steps) {
         let mut lines = lines.iter();
         if let Some(first) = lines.next() {
@@ -837,7 +882,7 @@ fn print_steps(steps: &[Vec<String>]) {
 
 /// `paths` quoted for any shell. `shell_words` leaves the braces of a variant name bare, and fish
 /// can read those as a brace expansion.
-fn quoted(paths: &[&PathBuf]) -> String {
+pub(crate) fn quoted(paths: &[&PathBuf]) -> String {
     if paths.is_empty() {
         return "<paths>".to_owned();
     }
@@ -853,79 +898,6 @@ fn quoted(paths: &[&PathBuf]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// The key that `source` holds encrypted; `None` for a source that is not encrypted.
-fn sealed_key(source: &Path) -> Option<String> {
-    let source = source.to_string_lossy();
-    let sources = Sources::group([source.as_ref()]);
-    let key = sources.keys().next()?;
-    (sources.flag(key, &source) == Flag::Age).then(|| key.to_owned())
-}
-
-/// The steps that redo the pull and resolve it. Ciphertext cannot be merged, so an encrypted file
-/// keeps one side whole; in a rebase `--ours` is the upstream side and `--theirs` the local commit.
-fn report_conflict(ctx: &Context, branch: &str, paths: &[PathBuf]) {
-    let bin = name::bin();
-    let (sealed, plain): (Vec<&PathBuf>, Vec<&PathBuf>) =
-        paths.iter().partition(|path| sealed_key(path).is_some());
-    output::warning(
-        "the pull conflicts with your changes. It was aborted, and your files and commits are as they were.",
-    );
-    output::warning("To resolve it:");
-    let mut steps = vec![vec![format!(
-        "{bin} git pull --rebase {REMOTE} {}",
-        shell_words::quote(branch)
-    )]];
-    if !plain.is_empty() || sealed.is_empty() {
-        steps.push(vec![format!(
-            "Edit the conflicting {}files under {}.",
-            if sealed.is_empty() { "" } else { "plain " },
-            ctx.paths.repo.display()
-        )]);
-    }
-    if !sealed.is_empty() {
-        let files = quoted(&sealed);
-        steps.push(vec![
-            format!(
-                "Encrypted files cannot be merged, so keep one version of each whole. In this rebase, --theirs is this machine's version and --ours is the one from {REMOTE}/{branch}. To keep this machine's:"
-            ),
-            format!("  {bin} git checkout --theirs -- {files}"),
-            format!("or to take the one from {REMOTE}/{branch}:"),
-            format!("  {bin} git checkout --ours -- {files}"),
-        ]);
-    }
-    let all: Vec<&PathBuf> = paths.iter().collect();
-    steps.push(vec![format!("{bin} git add -- {}", quoted(&all))]);
-    let mut resume = vec![format!("{bin} git -c core.editor=true rebase --continue")];
-    // Git before 2.26 rebases with the apply backend, which stops on a commit that taking the
-    // upstream version emptied instead of dropping it.
-    if !sealed.is_empty() {
-        resume.extend([
-            format!(
-                "if git says there are no changes, as older git does when the one from {REMOTE}/{branch} leaves this machine's commit empty, skip that commit instead:"
-            ),
-            format!("  {bin} git rebase --skip"),
-        ]);
-    }
-    steps.push(resume);
-    steps.push(vec![format!("{bin} sync")]);
-    print_steps(&steps);
-    if !sealed.is_empty() {
-        let homes: Vec<String> = sealed
-            .iter()
-            .filter_map(|path| sealed_key(path))
-            .map(|key| add::pasteable(&ctx.paths.home, &key))
-            .collect();
-        output::warning(&format!(
-            "To merge the two versions by hand afterwards, edit {}, where dotman keeps the decrypted file, and run `{bin} sync`; the version you did not keep stays in the history, where `{bin} restore --from <commit>` reaches it.",
-            homes.join(" and ")
-        ));
-    }
-    output::warning("conflicting paths:");
-    for path in paths {
-        output::warning(&format!("  {}", path.display()));
-    }
 }
 
 fn report_unstashed(ctx: &Context, paths: &[PathBuf]) {

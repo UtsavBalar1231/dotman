@@ -17,9 +17,9 @@ Exit status:
      blocked, or reported for action; or hooks were not approved,
      because the [hooks] table changed since a warning showed it, so
      --approve-hooks showed the new table and approved nothing.
-  4  `sync` hit a rebase conflict, aborted the pull and printed the
-     steps to resolve it; or a git operation or conflict is unfinished
-     in the repo.
+  4  `sync` hit a pull conflict that it did not settle, so nothing was
+     pulled or pushed, and printed what to run; or a git operation, a
+     pull a stopped sync left, or a conflict is unfinished in the repo.
   The `git` subcommand exits with git's own status.
 
 Environment:
@@ -99,8 +99,11 @@ Exit status:
      Everything else is still committed, pulled, applied and pushed,
      except when an uncommitted repo edit holds a credential or an age
      key: then sync stops before the pull.
-  4  The pull hit a conflict. Sync aborted it, so nothing it brought
-     reached $HOME, and printed the steps to resolve it.
+  4  The pull hit a conflict that sync did not settle, so nothing was
+     pulled or pushed: neither --keep-local nor --take-repo answered
+     it, the answer made a file the content guard holds or a template
+     that does not render, or its shape is one only git can settle, and
+     sync printed the git steps.
   1  An error. Among them: the remote shares no commit with the repo, or
      the commit would delete at least 10 tracked files and at least half
      of them, which needs a yes at the prompt or --allow-mass-delete.
@@ -312,10 +315,10 @@ pub struct InitArgs {
 // reason: independent answers to separate prompts, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct Decisions {
-    /// Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted
+    /// Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync's pull conflicts, keep this machine's side of each clash: a text file keeps origin's edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted
     #[arg(long, help_heading = "Decisions", conflicts_with = "take_repo")]
     pub keep_local: bool,
-    /// Take the repo version of conflicting and existing files, after backing them up
+    /// Take the repo version of conflicting and existing files, after backing them up. When sync's pull conflicts, take origin's side of each clash: a text file keeps this machine's edits elsewhere in it, other files are taken whole, and this machine's version is saved first
     #[arg(long, help_heading = "Decisions")]
     pub take_repo: bool,
     /// Stop managing files deleted locally; they stay deleted

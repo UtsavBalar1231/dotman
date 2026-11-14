@@ -312,7 +312,7 @@ mod tests {
         assert!(at(".SH SUBCOMMANDS") < at(".SH \"EXIT STATUS\""));
         assert!(at(".SH \"EXIT STATUS\"") < at(".SH ENVIRONMENT"));
         assert!(at(".SH ENVIRONMENT") < at(".SH VERSION"));
-        assert!(top.contains(".TP\n\\fB4\\fR\n\\fBsync\\fR hit a rebase conflict, aborted the pull and printed the\nsteps to resolve it;"));
+        assert!(top.contains(".TP\n\\fB4\\fR\n\\fBsync\\fR hit a pull conflict that it did not settle, so nothing was\npulled or pushed, and printed what to run;"));
         assert!(
             top.contains(".PP\nThe \\fBgit\\fR subcommand exits with git\\*(Aqs own status.\n")
         );

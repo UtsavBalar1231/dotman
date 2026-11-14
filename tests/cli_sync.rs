@@ -190,76 +190,117 @@ fn disjoint_edits_converge_after_syncing_a_then_b_then_a() {
     assert_eq!(b.token_of("status", ".b").as_deref(), Some("clean"));
 }
 
-#[test]
-fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
-    let (a, b) = pair(&[(".a", b"base\n", 0o644), (".b", b"b\n", 0o644)]);
-    a.write(".a", b"from a\n", 0o644);
-    exits(&a, 0, &["sync"]);
-    let published = a.remote_refs();
-
-    // A repo whose first sync never pushed has no upstream, and the steps must not need one.
-    b.ok(&["git", "branch", "--unset-upstream"]);
-    b.write(".a", b"from b\n", 0o644);
-    let err = exits(&b, 4, &["sync"]);
-    assert!(
-        err.contains("the pull conflicts with your changes. It was aborted, and your files and commits are as they were.\nTo resolve it:\n"),
-        "{err}"
-    );
-    let [pull, edit, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
-    assert_eq!(pull, "dotman git pull --rebase origin main");
-    assert_eq!(
-        edit,
-        format!("Edit the conflicting files under {}.", repo_path(&b))
-    );
-    assert_eq!(add, "dotman git add -- .a");
-    assert_eq!(resume, "dotman git -c core.editor=true rebase --continue");
-    assert_eq!(sync, "dotman sync");
-    assert!(err.contains("conflicting paths:\n  .a"), "{err}");
-
-    assert!(!b.repo().join(".git/rebase-merge").exists());
-    assert!(!b.repo().join(".git/rebase-apply").exists());
-    assert_eq!(b.read(".a"), b"from b\n");
-    assert_eq!(a.read(".a"), b"from a\n");
-    assert_eq!(
-        fs::read(b.repo().join(".a")).expect("repo file"),
-        b"from b\n"
-    );
-    assert_eq!(a.remote_refs(), published);
-
-    let out = paste(&b, &pull);
-    assert!(!out.status.success(), "the pull stops on the conflict");
-    // git before 2.26 rebases with the apply backend.
-    assert!(
-        b.repo().join(".git/rebase-merge").exists() || b.repo().join(".git/rebase-apply").exists(),
-        "{}",
-        stderr(&out)
-    );
-    exits(&b, 4, &["status"]);
-    b.write_repo(".a", b"resolved\n");
-    for step in [&add, &resume] {
-        let out = paste(&b, step);
-        assert!(out.status.success(), "{step}: {}", stderr(&out));
-    }
-
-    // S still equals B's edit, so only the always-back-up rule keeps those bytes outside history.
-    let out = paste(&b, &sync);
-    let err = stderr(&out);
-    assert!(out.status.success(), "{err}");
-    assert!(err.lines().any(|l| l == "apply .a (backed up)"), "{err}");
-    assert!(
-        err.contains("\nbacked up the files it replaced to "),
-        "{err}"
-    );
-    assert_eq!(b.read(".a"), b"resolved\n");
-    assert_eq!(b.backups(".a"), [(b"from b\n".to_vec(), 0o600)]);
-    exits(&a, 0, &["sync"]);
-    assert_eq!(a.read(".a"), b"resolved\n");
-    assert_converged(&a, &b);
+/// Where a sync says it saved this machine's version of `path`.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn saved_copy(err: &str, path: &str) -> std::path::PathBuf {
+    let prefix = format!("saved this machine's {path} to ");
+    let line = err
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .expect("a saved line");
+    std::path::PathBuf::from(line)
 }
 
-/// git reads a path that starts with a dash as an option unless `--` comes first.
+/// No rebase directory and no pull marker is left in `env`'s repo.
+fn no_replay_left(env: &TestEnv) {
+    for dir in ["rebase-merge", "rebase-apply", "dotman-pull"] {
+        assert!(!env.repo().join(".git").join(dir).exists(), "{dir}");
+    }
+}
+
+/// [`TestEnv::four_trees`] with the repo's `.git` left out but for its objects and refs, since an
+/// aborted pull rewrites the index, the reflogs and `ORIG_HEAD`; with the status in their place.
+fn outside_git(
+    env: &TestEnv,
+) -> (
+    Vec<std::collections::BTreeMap<String, common::Entry>>,
+    String,
+) {
+    let [home, mut repo, state, remote] = env.four_trees();
+    repo.retain(|path, _| {
+        !(path == ".git" || path.starts_with(".git/"))
+            || path.starts_with(".git/objects/")
+            || path.starts_with(".git/refs/")
+    });
+    let status = env.git(&["-C", &repo_path(env), "status", "--porcelain"]);
+    (vec![home, repo, state, remote], status)
+}
+
+/// One line edited on both machines, with an edit elsewhere in the file on each: each flag
+/// settles the clash to its side and keeps both machines' other edits, this machine's version is
+/// saved first, and nothing is left of the replay. A repo whose first sync never pushed has no
+/// upstream, and the replay does not need one.
 #[test]
-fn a_conflict_on_a_key_that_starts_with_a_dash_resolves_with_the_printed_steps() {
+fn the_same_line_edited_on_both_is_settled_by_each_flag() {
+    for (flag, line) in [("--keep-local", "3 from b"), ("--take-repo", "3 from a")] {
+        let (a, b) = pair(&[(".a", b"1\n2\n3\n4\n5\n", 0o644), (".b", b"b\n", 0o644)]);
+        a.write(".a", b"1 from a\n2\n3 from a\n4\n5\n", 0o644);
+        exits(&a, 0, &["sync"]);
+        b.ok(&["git", "branch", "--unset-upstream"]);
+        let mine = b"1\n2\n3 from b\n4\n5 from b\n";
+        b.write(".a", mine, 0o644);
+        let err = exits(&b, 0, &["sync", flag]);
+        let merged = format!("1 from a\n2\n{line}\n4\n5 from b\n");
+        assert_eq!(b.read(".a"), merged.as_bytes(), "{flag}: {err}");
+        assert_eq!(remote_file(&b, ".a"), merged, "{flag}");
+        let saved = saved_copy(&err, ".a");
+        assert!(saved.ends_with(".dotman/repo/.a"), "{}", saved.display());
+        assert_eq!(fs::read(&saved).expect("the saved copy"), mine);
+        assert!(err.contains("pulled 1 commit from origin/main"), "{err}");
+        no_replay_left(&b);
+        exits(&a, 0, &["sync"]);
+        assert_eq!(a.read(".a"), merged.as_bytes(), "{flag}");
+        assert_converged(&a, &b);
+    }
+}
+
+/// Without a flag, a conflict exits 4 and changes nothing, however often it runs, and each answer
+/// it prints settles it as printed.
+#[test]
+fn an_unanswered_conflict_exits_4_changes_nothing_and_both_printed_answers_work() {
+    for (answer, kept) in [(0, "from b\n"), (1, "from a\n")] {
+        let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+        a.write(".a", b"from a\n", 0o644);
+        exits(&a, 0, &["sync"]);
+        let published = a.remote_refs();
+        b.write(".a", b"from b\n", 0o644);
+        let err = exits(&b, 4, &["sync"]);
+        assert!(
+            err.contains("the pull conflicts with your changes: 1 file was changed here and in origin/main in the same place. Nothing was pulled or pushed, and your files and commits are as they were.\nconflicting paths:\n  .a\nanswer with `dotman sync --keep-local` or `dotman sync --take-repo`\n--keep-local keeps this machine's side of each clash and --take-repo origin/main's; "),
+            "{err}"
+        );
+        assert!(!err.contains("git pull"), "{err}");
+        no_replay_left(&b);
+        assert_eq!(b.read(".a"), b"from b\n");
+        assert_eq!(
+            fs::read(b.repo().join(".a")).expect("repo file"),
+            b"from b\n"
+        );
+        assert_eq!(a.remote_refs(), published);
+        let before = outside_git(&b);
+        exits(&b, 4, &["sync"]);
+        assert_eq!(outside_git(&b), before);
+        exits(&b, 0, &["status"]);
+
+        let printed = backticked(&err);
+        assert_eq!(
+            printed,
+            ["dotman sync --keep-local", "dotman sync --take-repo"]
+        );
+        let line = printed.get(answer).expect("the printed answer");
+        let out = paste(&b, line);
+        assert!(out.status.success(), "{line}: {}", stderr(&out));
+        assert_eq!(b.read(".a"), kept.as_bytes(), "{line}");
+        exits(&a, 0, &["sync"]);
+        assert_eq!(a.read(".a"), kept.as_bytes(), "{line}");
+        assert_converged(&a, &b);
+    }
+}
+
+/// git reads a path that starts with a dash as an option unless it comes after `--` or on stdin.
+#[test]
+fn a_conflict_on_a_key_that_starts_with_a_dash_is_settled_by_a_flag() {
     let a = first_device(&[(".a", b"a\n", 0o644)]);
     a.write("-x", b"base\n", 0o644);
     a.ok(&["add", "./-x"]);
@@ -269,48 +310,80 @@ fn a_conflict_on_a_key_that_starts_with_a_dash_resolves_with_the_printed_steps()
     exits(&a, 0, &["sync"]);
     b.write("-x", b"from b\n", 0o644);
     let err = exits(&b, 4, &["sync"]);
-    let [pull, _, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
-    assert_eq!(add, "dotman git add -- -x");
-
-    assert!(!paste(&b, &pull).status.success(), "the pull stops");
-    b.write_repo("-x", b"resolved\n");
-    for step in [&add, &resume, &sync] {
-        let out = paste(&b, step);
-        assert!(out.status.success(), "{step}: {}", stderr(&out));
-    }
+    assert!(err.contains("conflicting paths:\n  -x\n"), "{err}");
+    let err = exits(&b, 0, &["sync", "--take-repo"]);
+    assert_eq!(
+        fs::read(saved_copy(&err, "-x")).expect("the saved copy"),
+        b"from b\n"
+    );
     exits(&a, 0, &["sync"]);
-    assert_eq!(a.read("-x"), b"resolved\n");
-    assert_eq!(b.read("-x"), b"resolved\n");
+    assert_eq!(a.read("-x"), b"from a\n");
+    assert_eq!(b.read("-x"), b"from a\n");
 }
 
-/// A conflict in `.dotman.toml` leaves conflict markers in it until the rebase is aborted, and
-/// untracked junk in the worktree must not make sync read it then: the rebase is still aborted.
+/// A `.dotman.toml` that does not parse on one side is a shape dotman does not settle: sync exits
+/// 4 with git's steps, untracked junk in the worktree does not stop the abort, doctor names the
+/// parse error once the printed pull stops, and the steps, run as printed with `GIT_EDITOR=false`
+/// exported, end in a clean sync.
 #[test]
 fn a_conflict_in_dotman_toml_is_aborted_with_junk_in_the_worktree() {
     let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
-    for (env, pattern) in [(&a, "**/*.from-a"), (&b, "**/*.from-b")] {
-        let mut config = env.repo_config();
-        config.ignore.patterns.push(pattern.to_owned());
-        config
-            .save(&env.repo().join(".dotman.toml"), false)
-            .expect("save .dotman.toml");
-    }
-    exits(&a, 0, &["sync"]);
+    write_bad_glob(&a);
+    a.ok(&["git", "commit", "-qam", "bad glob"]);
+    a.ok(&["git", "push", "-q", "origin", "HEAD:refs/heads/main"]);
+    let file = b.repo().join(".dotman.toml");
+    let ours = fs::read_to_string(&file)
+        .expect("read .dotman.toml")
+        .replacen(
+            "[ignore]\npatterns = [",
+            "[ignore]\npatterns = [\n    \"**/*.from-b\",",
+            1,
+        );
+    fs::write(&file, &ours).expect("write .dotman.toml");
     b.write_repo(".bashrc.orig", b"junk\n");
 
     let err = exits(&b, 4, &["sync"]);
-    assert!(err.contains("conflicting paths:\n  .dotman.toml"), "{err}");
-    assert!(!b.repo().join(".git/rebase-merge").exists());
-    assert!(!b.repo().join(".git/rebase-apply").exists());
+    assert!(
+        err.contains("conflicting paths:\n  .dotman.toml\n"),
+        "{err}"
+    );
+    assert!(
+        err.contains(".dotman.toml does not parse in origin/main: "),
+        "{err}"
+    );
+    assert!(
+        err.contains(", which dotman cannot settle.\nTo resolve the pull with git:\n"),
+        "{err}"
+    );
+    no_replay_left(&b);
     exits(&b, 0, &["status"]);
+    let [pull, edit, add, resume, sync]: [String; 5] = steps(&err).try_into().expect("five steps");
+    assert_eq!(pull, "dotman git pull --rebase origin main");
+    assert_eq!(
+        edit,
+        format!("Edit the conflicting files under {}.", repo_path(&b))
+    );
+    assert_eq!(add, "dotman git add -- .dotman.toml\ndotman git add -u");
+    assert_eq!(
+        resume,
+        "env GIT_EDITOR=true dotman git rebase --continue\nRepeat 2 to 4 while the rebase keeps stopping."
+    );
+    assert_eq!(sync, "dotman sync");
 
     // Redone by hand, the pull leaves the markers; a checkout of the last commit's copy would
     // resolve the conflict by dropping one side, so doctor does not offer it.
-    let pull = steps(&err).into_iter().next().expect("the pull step");
     assert!(!paste(&b, &pull).status.success(), "the pull stops");
     let doctor = String::from_utf8_lossy(&b.run(&["doctor"]).stdout).into_owned();
     assert!(doctor.contains(".dotman.toml: cannot parse"), "{doctor}");
     assert!(!doctor.contains("git checkout HEAD"), "{doctor}");
+    fs::write(&file, &ours).expect("resolve .dotman.toml");
+    let resume = resume.lines().next().unwrap_or_default();
+    for step in add.lines().chain([resume, sync.as_str()]) {
+        let out = paste_with(&b, &[("GIT_EDITOR", "false")], step);
+        assert!(out.status.success(), "{step}: {}", stderr(&out));
+    }
+    assert_eq!(remote_file(&b, ".dotman.toml"), ours);
+    exits(&b, 0, &["sync"]);
 }
 
 /// Writes a bad `[ignore]` glob into `env`'s `.dotman.toml` and returns the text it had.
@@ -405,7 +478,7 @@ fn a_rebase_conflict_wins_over_a_skipped_path() {
     let err = exits(&b, 4, &["sync"]);
     assert!(err.contains("local deletions left undecided (1)"), "{err}");
     assert!(
-        err.contains("dotman git -c core.editor=true rebase --continue"),
+        err.contains("answer with `dotman sync --keep-local` or `dotman sync --take-repo`"),
         "{err}"
     );
     assert!(!b.home().join(".d").exists());
@@ -429,81 +502,38 @@ fn sealed_pair() -> (TestEnv, TestEnv) {
     (a, b)
 }
 
-/// Both devices edit an encrypted file. The steps say which side `--ours` and `--theirs` stand for
-/// and keep one version whole; run as printed, either pick reaches both devices, and the plaintext
-/// it replaces is backed up. Git before 2.26, whose apply backend `rebase.backend=apply` stands in
-/// for, stops on the commit that taking the upstream version empties, and the printed skip goes on.
+/// Both devices edit an encrypted file. Each flag keeps one version whole, on both devices; the
+/// plaintext it replaces in `$HOME` is backed up, and the ciphertext this machine loses is saved.
+/// Git before 2.26, whose apply backend `rebase.backend=apply` stands in for, stops on the commit
+/// that taking origin's version empties, and the replay skips it.
 #[test]
-fn an_encrypted_conflict_keeps_the_version_the_printed_step_picks() {
+fn an_encrypted_conflict_keeps_the_version_the_flag_picks() {
     if !common::age_installed() {
         return;
     }
     let apply_backend = format!("{} 'rebase.backend=apply'", common::GIT_PARAMETERS);
     let older = [("GIT_CONFIG_PARAMETERS", apply_backend.as_str())];
-    for (side, kept, git) in [
-        ("--ours", "from a\n", &[][..]),
-        ("--theirs", "from b\n", &[][..]),
-        ("--ours", "from a\n", &older[..]),
+    let source = ".config/app/s{age}.conf";
+    for (flag, kept, git) in [
+        ("--take-repo", "from a\n", &[][..]),
+        ("--keep-local", "from b\n", &[][..]),
+        ("--take-repo", "from a\n", &older[..]),
     ] {
         let (a, b) = sealed_pair();
         a.write(SEALED, b"from a\n", 0o600);
         exits(&a, 0, &["sync"]);
         b.write(SEALED, b"from b\n", 0o600);
-        let err = exits(&b, 4, &["sync"]);
-        assert!(!err.contains("Edit the conflicting"), "{err}");
-        let [pull, pick, add, resume, sync]: [String; 5] =
-            steps(&err).try_into().expect("five steps");
+        let err = exits_with(&b, git, 4, &["sync"]);
         assert!(
-            pick.starts_with("Encrypted files cannot be merged, so keep one version of each whole. In this rebase, --theirs is this machine's version and --ours is the one from origin/main."),
-            "{pick}"
-        );
-        let file = "'.config/app/s{age}.conf'";
-        assert!(
-            pick.contains(&format!(
-                "To keep this machine's:\ndotman git checkout --theirs -- {file}\nor to take the one from origin/main:\ndotman git checkout --ours -- {file}"
-            )),
-            "{pick}"
-        );
-        assert_eq!(add, format!("dotman git add -- {file}"));
-        assert!(
-            err.contains(&format!(
-                "To merge the two versions by hand afterwards, edit {}, where dotman keeps the decrypted file",
-                b.home().join(SEALED).display()
-            )),
+            err.contains(&format!("conflicting paths:\n  {source}\n")),
             "{err}"
         );
-
-        let mut resume = resume.lines();
-        let (resume, skip) = (resume.next().unwrap_or_default(), resume.next_back());
-        assert_eq!(resume, "dotman git -c core.editor=true rebase --continue");
-        assert_eq!(skip, Some("dotman git rebase --skip"));
-
-        assert!(
-            !paste_with(&b, git, &pull).status.success(),
-            "the pull stops"
-        );
-        let chosen = format!("dotman git checkout {side} -- {file}");
-        assert!(pick.lines().any(|line| line == chosen), "{pick}");
-        for step in [chosen.as_str(), &add] {
-            let out = paste_with(&b, git, step);
-            assert!(out.status.success(), "{side} {step}: {}", stderr(&out));
-        }
-        let out = paste_with(&b, git, resume);
-        if git.is_empty() {
-            assert!(out.status.success(), "{side}: {}", stderr(&out));
-        } else {
-            // git am prints it on stdout.
-            let said = String::from_utf8_lossy(&out.stdout);
-            assert!(said.contains("No changes"), "{said}{}", stderr(&out));
-            let out = paste_with(&b, git, skip.unwrap_or_default());
-            assert!(out.status.success(), "skip: {}", stderr(&out));
-        }
-        let out = paste(&b, &sync);
-        assert!(out.status.success(), "{side} sync: {}", stderr(&out));
+        let err = exits_with(&b, git, 0, &["sync", flag]);
+        no_replay_left(&b);
         exits(&a, 0, &["sync"]);
-        assert_eq!(b.read(SEALED), kept.as_bytes(), "{side}");
-        assert_eq!(a.read(SEALED), kept.as_bytes(), "{side}");
-        let (replaced, lost) = if side == "--ours" {
+        assert_eq!(b.read(SEALED), kept.as_bytes(), "{flag}");
+        assert_eq!(a.read(SEALED), kept.as_bytes(), "{flag}");
+        let (replaced, lost) = if flag == "--take-repo" {
             (&b, "from b\n")
         } else {
             (&a, "from a\n")
@@ -513,8 +543,13 @@ fn an_encrypted_conflict_keeps_the_version_the_printed_step_picks() {
                 .backups(SEALED)
                 .iter()
                 .any(|(bytes, _)| bytes == lost.as_bytes()),
-            "{side}"
+            "{flag}"
         );
+        if flag == "--take-repo" {
+            let saved = fs::read(saved_copy(&err, source)).expect("the saved copy");
+            assert!(saved.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----"));
+            assert!(!saved.windows(4).any(|w| w == b"from"));
+        }
         assert_converged(&a, &b);
     }
 }
@@ -3235,4 +3270,400 @@ fn sync_never_pushes_a_template_that_does_not_render_and_the_way_out_runs_as_pri
     let err = exits(&b, 0, &["sync"]);
     assert!(err.contains("pushed 2 commits to origin/main"), "{err}");
     assert_ne!(a.remote_refs(), before);
+}
+
+/// Runs the git steps an unmodelled conflict prints, each line as printed with `GIT_EDITOR=false`
+/// exported; `edit` stands for step 2 and runs once the printed pull has stopped.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn run_git_steps(env: &TestEnv, err: &str, edit: impl FnOnce()) {
+    let [pull, _, add, resume, sync]: [String; 5] = steps(err).try_into().expect("five steps");
+    let vars = [("GIT_EDITOR", "false")];
+    assert!(
+        !paste_with(env, &vars, &pull).status.success(),
+        "the pull stops: {pull}"
+    );
+    edit();
+    let resume = resume.lines().next().unwrap_or_default();
+    for line in add.lines().chain([resume, sync.as_str()]) {
+        let out = paste_with(env, &vars, line);
+        assert!(out.status.success(), "{line}: {}", stderr(&out));
+    }
+}
+
+/// The file git renamed `name` to at a stop, such as `.x~HEAD`, in the repo worktree.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn renamed_copy(env: &TestEnv, name: &str) -> std::path::PathBuf {
+    let prefix = format!("{name}~");
+    fs::read_dir(env.repo())
+        .expect("read the repo")
+        .map(|entry| entry.expect("an entry").path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|file| file.to_string_lossy().starts_with(&prefix))
+        })
+        .expect("git's renamed copy")
+}
+
+/// A file or a symlink pointing outside the repo here, against a directory in origin, is a shape
+/// dotman does not settle, even with a flag and beside a conflict it does settle: sync exits 4
+/// with git's steps, which name each path as it stands after the abort and, run as printed, end
+/// in a clean sync.
+#[test]
+fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
+    let outside = TestEnv::new();
+    let target = outside.root().join("elsewhere");
+    fs::create_dir_all(&target).expect("the link target");
+    for (name, kind) in [(".x", "a file"), (".l", "a symlink")] {
+        let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+        a.write(format!("{name}/y"), b"y\n", 0o644);
+        a.write(".a", b"from a\n", 0o644);
+        a.ok(&["add", &format!("{name}/y")]);
+        exits(&a, 0, &["sync"]);
+        if kind == "a file" {
+            b.write(name, b"file\n", 0o644);
+        } else {
+            std::os::unix::fs::symlink(&target, b.home().join(name)).expect("symlink");
+        }
+        b.write(".a", b"from b\n", 0o644);
+        b.ok(&["add", name]);
+        let err = exits(&b, 4, &["sync", "--keep-local"]);
+        assert!(
+            err.contains(&format!(
+                "conflicting paths:\n  .a\n  {name}\n{name} is {kind} here and a directory in origin/main, which dotman cannot settle.\nTo resolve the pull with git:\n"
+            )),
+            "{err}"
+        );
+        let add = steps(&err).get(2).cloned().unwrap_or_default();
+        assert_eq!(
+            add,
+            format!("dotman git add -- .a {name}\ndotman git add -u")
+        );
+        no_replay_left(&b);
+        assert_eq!(b.read(".a"), b"from b\n");
+
+        let repo = b.repo();
+        run_git_steps(&b, &err, || {
+            // This machine's version of both: the directory goes, and git's copy takes its place.
+            fs::write(repo.join(".a"), b"resolved\n").expect("resolve .a");
+            fs::remove_dir_all(repo.join(name)).expect("remove the directory");
+            fs::rename(renamed_copy(&b, name), repo.join(name)).expect("put the copy back");
+        });
+        no_replay_left(&b);
+        assert_eq!(remote_file(&b, ".a"), "resolved\n");
+        exits(&b, 0, &["sync"]);
+        assert_eq!(b.read(".a"), b"resolved\n");
+    }
+}
+
+/// git follows a rename into a template: one machine turns `.p` into a template while the other
+/// edits `.p`, and the stop names `.p{tmpl}` with this machine's `.p` as its version. dotman does
+/// not settle a stage git took from a renamed path, and its steps work as printed.
+#[test]
+fn a_rename_followed_conflict_exits_4_with_git_steps_that_work_as_printed() {
+    let lines = "1\n2\n3\n4\n5\n6\n7\n8\n9\n";
+    let (a, b) = pair(&[(".p", lines.as_bytes(), 0o644)]);
+    a.ok(&["git", "mv", ".p", ".p{tmpl}"]);
+    a.write_repo(".p{tmpl}", lines.replace("5\n", "{{ 5 }}\n").as_bytes());
+    a.ok(&["git", "commit", "-qam", "template"]);
+    a.ok(&["git", "push", "-q", "origin", "HEAD:refs/heads/main"]);
+    b.write(".p", lines.replace("5\n", "five\n").as_bytes(), 0o644);
+
+    let err = exits(&b, 4, &["sync", "--take-repo"]);
+    assert!(
+        err.contains("conflicting paths:\n  .p{tmpl}\ngit matched .p{tmpl} with a file renamed here or in origin/main, which dotman cannot settle.\n"),
+        "{err}"
+    );
+    no_replay_left(&b);
+    let resolved = lines.replace("5\n", "{{ 5 }} five\n");
+    run_git_steps(&b, &err, || {
+        b.write_repo(".p{tmpl}", resolved.as_bytes());
+    });
+    assert_eq!(remote_file(&b, ".p{tmpl}"), resolved);
+    assert_eq!(b.read(".p"), lines.replace("5\n", "5 five\n").as_bytes());
+}
+
+/// Settings changed on both machines merge with no question: each adds a private file, which
+/// `[modes]` records, and a directory, which `[dirs]` records, and sync says how many settings
+/// came from origin.
+#[test]
+fn settings_changed_on_both_machines_merge_with_no_question() {
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    for (env, name) in [(&a, "from-a"), (&b, "from-b")] {
+        env.write(format!(".{name}.key"), b"k\n", 0o600);
+        env.write(format!(".config/{name}/f"), b"f\n", 0o644);
+        env.ok(&[
+            "add",
+            "--yes",
+            &format!(".{name}.key"),
+            &format!(".config/{name}"),
+        ]);
+    }
+    exits(&a, 0, &["sync"]);
+    let err = b.run(&["sync"]);
+    let err = stderr(&err);
+    assert!(
+        err.contains("merged .dotman.toml: 2 settings from origin/main"),
+        "{err}"
+    );
+    assert!(!err.contains("conflict"), "{err}");
+    exits(&a, 0, &["sync"]);
+    for env in [&a, &b] {
+        let config = env.repo_config();
+        for name in ["from-a", "from-b"] {
+            let key = format!(".{name}.key");
+            assert_eq!(config.modes.get(&key).map(String::as_str), Some("0600"));
+            assert!(config.dirs.paths.contains(&format!(".config/{name}")));
+            assert_eq!(mode_of(&env.home().join(&key)), 0o600, "{key}");
+        }
+    }
+}
+
+/// `key init` on both machines adds two recipients to `[age]`, which merge with no question;
+/// the generated record of them takes origin's and is then rewritten for both.
+#[test]
+fn key_init_on_both_machines_merges_the_recipients_with_no_question() {
+    if !common::age_installed() {
+        return;
+    }
+    let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+    a.ok(&["key", "init"]);
+    exits(&a, 0, &["sync"]);
+    b.ok(&["key", "init"]);
+    let err = exits(&b, 0, &["sync"]);
+    assert!(
+        err.contains("merged .dotman.toml: 1 setting from origin/main"),
+        "{err}"
+    );
+    exits(&a, 0, &["sync"]);
+    for env in [&a, &b] {
+        assert_eq!(env.repo_config().age.recipients.len(), 2);
+    }
+    assert_converged(&a, &b);
+}
+
+/// A file edited on one machine and forgotten on the other is settled by either flag from either
+/// side; `$HOME` keeps the file whatever the answer, and the version this machine loses is saved.
+#[test]
+fn an_edit_against_a_removal_is_settled_by_each_flag_from_either_side() {
+    let managed = |env: &TestEnv| env.porcelain("list").iter().any(|(_, key)| key == ".c");
+    for (flag, kept) in [("--keep-local", true), ("--take-repo", false)] {
+        let (a, b) = pair(&[(".a", b"a\n", 0o644), (".c", b"c\n", 0o644)]);
+        a.ok(&["forget", ".c"]);
+        exits(&a, 0, &["sync"]);
+        b.write(".c", b"edited on b\n", 0o644);
+        let err = exits(&b, 4, &["sync"]);
+        assert!(err.contains("conflicting paths:\n  .c\n"), "{err}");
+        let err = exits(&b, 0, &["sync", flag]);
+        assert_eq!(b.read(".c"), b"edited on b\n", "{flag}");
+        assert_eq!(managed(&b), kept, "{flag}: {err}");
+        if !kept {
+            let saved = fs::read(saved_copy(&err, ".c")).expect("the saved copy");
+            assert_eq!(saved, b"edited on b\n");
+        }
+        a.run(&["sync", "--take-repo"]);
+        assert_eq!(managed(&a), kept, "{flag}");
+        if kept {
+            assert_eq!(a.read(".c"), b"edited on b\n");
+        }
+    }
+    for (flag, back) in [("--keep-local", false), ("--take-repo", true)] {
+        let (a, b) = pair(&[(".a", b"a\n", 0o644), (".c", b"c\n", 0o644)]);
+        a.write(".c", b"edited on a\n", 0o644);
+        exits(&a, 0, &["sync"]);
+        b.ok(&["forget", ".c"]);
+        let err = exits(&b, 4, &["sync"]);
+        assert!(err.contains("conflicting paths:\n  .c\n"), "{err}");
+        let err = exits(&b, 0, &["sync", flag]);
+        assert_eq!(managed(&b), back, "{flag}: {err}");
+        if back {
+            assert_eq!(b.read(".c"), b"edited on a\n");
+        } else {
+            assert_eq!(b.read(".c"), b"c\n");
+        }
+        a.run(&["sync"]);
+        assert_eq!(managed(&a), back, "{flag}");
+    }
+}
+
+/// A binary file and a symlink each take one version whole; the version this machine loses is
+/// saved, a symlink as its target.
+#[test]
+fn binary_files_and_symlinks_take_one_version_whole() {
+    for (flag, side) in [("--keep-local", "b"), ("--take-repo", "a")] {
+        let a = first_device(&[(".bin", b"\0base\n", 0o644)]);
+        for target in [".t-base", ".t-a", ".t-b"] {
+            a.write(target, b"t\n", 0o644);
+        }
+        std::os::unix::fs::symlink(".t-base", a.home().join(".l")).expect("symlink");
+        a.ok(&["add", ".l"]);
+        exits(&a, 0, &["sync"]);
+        let b = clone_to_new_device(&a);
+        for target in [".t-base", ".t-a", ".t-b"] {
+            b.write(target, b"t\n", 0o644);
+        }
+        for (env, name) in [(&a, "a"), (&b, "b")] {
+            env.write(".bin", format!("\0from {name}\n").as_bytes(), 0o644);
+            fs::remove_file(env.home().join(".l")).expect("unlink");
+            std::os::unix::fs::symlink(format!(".t-{name}"), env.home().join(".l"))
+                .expect("symlink");
+        }
+        exits(&a, 0, &["sync"]);
+        let err = exits(&b, 0, &["sync", flag]);
+        assert_eq!(
+            b.read(".bin"),
+            format!("\0from {side}\n").as_bytes(),
+            "{flag}"
+        );
+        assert_eq!(
+            fs::read_link(b.home().join(".l")).expect("the link"),
+            Path::new(&format!(".t-{side}")),
+            "{flag}"
+        );
+        if side == "a" {
+            assert_eq!(
+                fs::read(saved_copy(&err, ".bin")).expect("saved"),
+                b"\0from b\n"
+            );
+            assert_eq!(fs::read(saved_copy(&err, ".l")).expect("saved"), b".t-b");
+        }
+        exits(&a, 0, &["sync"]);
+        assert_converged(&a, &b);
+    }
+}
+
+/// Commits `files` in `env`'s repo and `$HOME` alike, with git and no push.
+fn commit_here(env: &TestEnv, files: &[(&str, &[u8])], message: &str) {
+    for (key, bytes) in files {
+        env.write(key, bytes, 0o644);
+        env.write_repo(key, bytes);
+    }
+    env.ok(&["git", "commit", "-qam", message]);
+}
+
+/// Several unpushed commits get one answer per file for the whole pull: the first stop settles
+/// `.a`, and a later commit that stops on `.b` is answered by the same flag; the result is whole.
+#[test]
+fn several_unpushed_commits_get_one_answer_per_file() {
+    for (flag, a_line, b_line) in [
+        ("--keep-local", "2 from b again", "2 from b"),
+        ("--take-repo", "2 from a", "2 from a"),
+    ] {
+        let (a, b) = pair(&[(".a", b"1\n2\n3\n", 0o644), (".b", b"1\n2\n3\n", 0o644)]);
+        a.write(".a", b"1\n2 from a\n3\n", 0o644);
+        a.write(".b", b"1\n2 from a\n3\n", 0o644);
+        exits(&a, 0, &["sync"]);
+        commit_here(&b, &[(".a", b"1\n2 from b\n3\n")], "one");
+        commit_here(
+            &b,
+            &[
+                (".a", b"1\n2 from b again\n3\n"),
+                (".b", b"1\n2 from b\n3\n"),
+            ],
+            "two",
+        );
+        let err = exits(&b, 4, &["sync"]);
+        assert!(err.contains("conflicting paths:\n  .a\n"), "{err}");
+        let err = exits(&b, 0, &["sync", flag]);
+        assert_eq!(
+            b.read(".a"),
+            format!("1\n{a_line}\n3\n").as_bytes(),
+            "{flag}"
+        );
+        assert_eq!(
+            b.read(".b"),
+            format!("1\n{b_line}\n3\n").as_bytes(),
+            "{flag}"
+        );
+        for path in [".a", ".b"] {
+            assert!(
+                err.lines()
+                    .filter(|line| line.starts_with(&format!("saved this machine's {path} ")))
+                    .count()
+                    == usize::from(flag == "--take-repo"),
+                "{flag} {path}: {err}"
+            );
+        }
+        no_replay_left(&b);
+        exits(&a, 0, &["sync"]);
+        assert_converged(&a, &b);
+    }
+}
+
+/// A template whose source both machines edited: the template text this machine loses is saved,
+/// not only what it rendered.
+#[test]
+fn a_losing_template_edit_is_saved() {
+    let a = first_device(&[(".a", b"a\n", 0o644)]);
+    a.write(".p", b"base\n", 0o644);
+    a.ok(&["add", "--template", ".p"]);
+    exits(&a, 0, &["sync"]);
+    let b = clone_to_new_device(&a);
+    a.write_repo(".p{tmpl}", b"{{ 1 }} from a\n");
+    exits(&a, 0, &["sync"]);
+    b.write_repo(".p{tmpl}", b"{{ 2 }} from b\n");
+    let err = exits(&b, 0, &["sync", "--take-repo"]);
+    assert_eq!(b.read(".p"), b"1 from a\n");
+    let saved = fs::read(saved_copy(&err, ".p{tmpl}")).expect("the saved copy");
+    assert_eq!(saved, b"{{ 2 }} from b\n");
+}
+
+/// A template whose merge under `--keep-local` does not render, though each side does, is refused:
+/// sync exits 4, names the file and changes nothing, and the way out it prints works as printed.
+#[test]
+fn keep_local_on_a_template_whose_merge_does_not_render_exits_4_and_changes_nothing() {
+    let a = first_device(&[(".a", b"a\n", 0o644)]);
+    a.write(".p", b"a\nb\nc\nd\ne\n", 0o644);
+    a.ok(&["add", "--template", ".p"]);
+    exits(&a, 0, &["sync"]);
+    let b = clone_to_new_device(&a);
+    a.write_repo(".p{tmpl}", b"{% if true %}\nb\nc\nd\n{% endif %}\n");
+    exits(&a, 0, &["sync"]);
+    b.write_repo(".p{tmpl}", b"a\nb\nc\nd\nE\n");
+    exits(&b, 4, &["sync"]);
+    let before = outside_git(&b);
+    let err = exits(&b, 4, &["sync", "--keep-local"]);
+    assert!(
+        err.contains(".p{tmpl}: the merged template does not render: "),
+        "{err}"
+    );
+    assert_eq!(outside_git(&b), before);
+    no_replay_left(&b);
+
+    let fixed = b.root().join("fixed");
+    fs::write(&fixed, "{% if true %}\nb\nc\nd\nE\n{% endif %}\n").expect("write");
+    let editor = b.root().join("editor");
+    fs::write(
+        &editor,
+        format!("#!/bin/sh\ncp '{}' \"$1\"\n", fixed.display()),
+    )
+    .expect("write the editor");
+    fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let editor = editor.to_string_lossy().into_owned();
+    let vars = [("VISUAL", editor.as_str())];
+    for line in [
+        common::hint_line(&err, "edit"),
+        common::hint_line(&err, "sync"),
+    ] {
+        let out = paste_with(&b, &vars, &line);
+        assert!(out.status.success(), "{line}: {}", stderr(&out));
+    }
+    assert_eq!(b.read(".p"), b"\nb\nc\nd\nE\n\n");
+}
+
+/// On a terminal with no flag, a conflict is reported as it is without one, and nothing changes.
+#[test]
+fn on_a_terminal_an_unanswered_conflict_is_reported_as_without_one() {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+    let out = common::in_a_terminal(&b, &[], &["sync"], b"").expect("script(1) runs");
+    assert!(
+        out.contains("answer with `dotman sync --keep-local` or `dotman sync --take-repo`"),
+        "{out}"
+    );
+    no_replay_left(&b);
+    assert_eq!(b.read(".a"), b"from b\n");
 }

@@ -400,6 +400,11 @@ impl Context {
         Err(self.in_progress(Unfinished::OwnPull).into())
     }
 
+    /// A replay that could not be undone, as the [`InProgress`] that `main` exits 4 with.
+    pub(crate) fn refused_pull(&self, refusal: Refusal) -> InProgress {
+        self.in_progress(Unfinished::Refused(refusal))
+    }
+
     fn in_progress(&self, unfinished: Unfinished) -> InProgress {
         InProgress {
             unfinished,
@@ -1088,7 +1093,7 @@ fn leftover_pid(name: &OsStr, prefix: &str) -> Option<u32> {
 const HOLDS_NO_SETTINGS: &str = "holds no settings";
 
 /// Whether `.dotman.toml` text is blank lines and comments only, which reads as the defaults.
-fn holds_no_settings(bytes: &[u8]) -> bool {
+pub(crate) fn holds_no_settings(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes)
         .ok()
         .and_then(|text| toml::from_str::<toml::Table>(text).ok())

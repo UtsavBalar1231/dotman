@@ -257,31 +257,56 @@ pub fn held_in_commit(bytes: &[u8]) -> Option<Finding> {
 }
 
 fn scan(bytes: &[u8]) -> Box<dyn Iterator<Item = Finding> + '_> {
+    Box::new(matched(bytes).into_iter().map(|(found, _)| found))
+}
+
+/// Every finding in `bytes` with the text its rule matched, as [`findings`] finds them, so two
+/// files can be compared by what they hold rather than by line.
+#[must_use]
+pub fn findings_with_text(bytes: &[u8]) -> Vec<(Finding, &[u8])> {
+    if looks_binary(bytes) {
+        return Vec::new();
+    }
+    matched(bytes)
+}
+
+fn matched(bytes: &[u8]) -> Vec<(Finding, &[u8])> {
     let (Ok(scanner), Ok(age)) = (SCANNER.as_ref(), AGE_SCANNER.as_ref()) else {
-        return Box::new(std::iter::once(Finding {
+        let unscanned = Finding {
             rule: "unscanned",
             line: 1,
             place: Place::Content,
-        }));
+        };
+        return vec![(unscanned, bytes)];
     };
-    let mut found: Vec<(usize, &'static str)> = scanner
+    let mut found: Vec<(usize, usize, &'static str)> = scanner
         .captures_iter(bytes)
         .filter_map(|caps| {
             let (at, (rule, _)) = RULES
                 .iter()
                 .enumerate()
                 .find(|(at, _)| caps.get(at.saturating_add(1)).is_some())?;
-            Some((caps.get(at.saturating_add(1))?.start(), *rule))
+            let span = caps.get(at.saturating_add(1))?;
+            Some((span.start(), span.end(), *rule))
         })
         .collect();
-    found.extend(age.find_iter(bytes).map(|key| (key.start(), AGE_RULE)));
-    found.sort_unstable();
-    found.dedup();
-    Box::new(found.into_iter().map(move |(start, rule)| Finding {
-        rule,
-        line: line_at(bytes, start),
-        place: Place::Content,
-    }))
+    found.extend(
+        age.find_iter(bytes)
+            .map(|key| (key.start(), key.end(), AGE_RULE)),
+    );
+    found.sort_unstable_by_key(|(start, end, rule)| (*start, *rule, *end));
+    found.dedup_by(|a, b| (a.0, a.2) == (b.0, b.2));
+    found
+        .into_iter()
+        .map(|(start, end, rule)| {
+            let finding = Finding {
+                rule,
+                line: line_at(bytes, start),
+                place: Place::Content,
+            };
+            (finding, bytes.get(start..end).unwrap_or_default())
+        })
+        .collect()
 }
 
 /// A NUL in the first [`SNIFF_BYTES`].
