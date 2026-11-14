@@ -101,11 +101,17 @@ fk_age() {
 }
 
 # Invariant: every managed file under machine M's HOME, and every plain one in its repo worktree,
-# is whole: its bytes are a version some machine wrote. Missing is allowed mid-run.
+# is whole: its bytes are a version some machine wrote. Missing is allowed mid-run. The worktree is
+# skipped while git is mid-operation there: git's checkout writes in place, the guard refuses every
+# command until the printed abort, and the abort puts the file back.
 fk_whole() {
-    local m=$1 rel path bad=0
+    local m=$1 rel path bad=0 repo git busy=0
+    repo=$(e2e_repo "$m")
+    git=$repo/.git
+    [[ -d $git/rebase-merge || -d $git/rebase-apply || -e $git/MERGE_HEAD || -e $git/dotman-pull ]] && busy=1
     for rel in "${!latest[@]}"; do
-        for path in "$(e2e_home "$m")/$rel" "$(e2e_repo "$m")/${stored[$rel]:-$rel}"; do
+        for path in "$(e2e_home "$m")/$rel" "$repo/${stored[$rel]:-$rel}"; do
+            [[ $busy == 1 && $path == "$repo"/* ]] && continue
             [[ -e $path || -L $path ]] || continue
             if [[ ! -f $path || -L $path ]]; then
                 bad=1
@@ -120,9 +126,14 @@ fk_whole() {
 }
 
 # Prints the commands the last dotman call printed that undo what a killed run left: removing git's
-# lock files, or aborting the operation git was in.
+# lock files, then aborting the operation git was in, once. The abort is also named inline before the
+# numbered steps, but it fails until the lock files are gone, as the message says.
 fk_ways_out() {
-    e2e_recipe | grep -E -- '^rm |^dotman git (rebase|merge|cherry-pick|revert|am) --abort$' || true
+    local cmds
+    cmds=$(e2e_recipe | grep -E -- '^rm |^dotman git (rebase|merge|cherry-pick|revert|am) --abort$' | awk '!seen[$0]++') || true
+    [[ -n $cmds ]] || return 0
+    grep -- '^rm ' <<<"$cmds" || true
+    grep -v -- '^rm ' <<<"$cmds" || true
 }
 
 # Runs dotman ARGS on machine M until it exits 0 or ACCEPT (a grep -E pattern of its stderr) matches,
