@@ -558,14 +558,15 @@ fn follow_system(
             let git =
                 |side: fn(&Settled) -> u32| settled.iter().fold(0o777, |all, s| all & side(s));
             // A side with no table would leave the file root's at git's mode, which can be wider
-            // than the other side's table, so that table is kept, at the stricter mode.
-            from.or(other).map(|table| SystemFile {
+            // than the other side's table, so a table is kept at the stricter mode, root's when
+            // the side that supplies owner and group has none.
+            (from.is_some() || other.is_some()).then(|| SystemFile {
                 mode: format!(
                     "{:04o}",
                     bits(m.map(|f| f.mode.as_str()), git(|s| s.ours_mode))
                         & bits(t.map(|f| f.mode.as_str()), git(|s| s.theirs_mode))
                 ),
-                ..table.clone()
+                ..from.cloned().unwrap_or_else(|| root_table(0))
             })
         };
         set_or_remove(tables, key, table);
@@ -1185,11 +1186,11 @@ mode = "0644"
         let without = RepoConfig::default();
         let won = winners(&[(".dotman/system/etc/hosts", settled(Winner::Theirs, false))]);
         let (merged, _) = merge(&base, &mine, &without, &won, &[], &git);
-        let kept = system_of(&merged, "/etc/hosts").expect("this machine's table is kept");
+        let kept = system_of(&merged, "/etc/hosts").expect("a table at the stricter mode is kept");
         assert_eq!(
-            (kept.group.as_str(), kept.mode.as_str()),
-            ("wheel", "0640"),
-            "theirs had none, so the file would have been root's at 0644"
+            (kept.owner.as_str(), kept.group.as_str(), kept.mode.as_str()),
+            ("root", "root", "0640"),
+            "theirs had none, so the file would have been root's at 0644, and wheel is not theirs"
         );
         assert!(merged.system.contains_key("/etc/other"));
 
@@ -1201,8 +1202,12 @@ mode = "0644"
             &[],
             &git,
         );
-        let kept = system_of(&merged, "/etc/hosts").expect("origin's table is kept");
-        assert_eq!((kept.group.as_str(), kept.mode.as_str()), ("adm", "0644"));
+        let kept = system_of(&merged, "/etc/hosts").expect("a table at the stricter mode is kept");
+        assert_eq!(
+            (kept.owner.as_str(), kept.group.as_str(), kept.mode.as_str()),
+            ("root", "root", "0644"),
+            "this machine had none, so adm, origin's group, is not handed over"
+        );
     }
 
     #[test]

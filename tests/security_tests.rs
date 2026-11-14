@@ -5039,6 +5039,57 @@ fn a_system_tie_with_a_dropped_table_settles_to_the_stricter_mode() {
     }
 }
 
+/// A system file that conflicts takes its owner and group from the answer's side; when that side
+/// dropped the table, they are root's, at the stricter of the two modes, and the other side's
+/// owner and group are not handed over.
+#[test]
+fn a_system_file_whose_answer_dropped_the_table_stays_roots_at_the_stricter_mode() {
+    let evil = system_table("evil", "4777");
+    let app = system_table("app", "0600");
+    for (mine, theirs, flag, want) in [
+        (
+            None,
+            Some(&evil),
+            "--keep-local",
+            system_table("root", "0644"),
+        ),
+        (
+            Some(&app),
+            None,
+            "--take-repo",
+            system_table("root", "0600"),
+        ),
+    ] {
+        let (a, b) = two_machines();
+        a.write_repo(".dotman/system/etc/x", b"x base\n");
+        set_system_table(&a, Some(&system_table("root", "0640")));
+        a.push_repo();
+        b.ok(&["sync"]);
+
+        a.write_repo(".dotman/system/etc/x", b"x origin\n");
+        set_system_table(&a, theirs);
+        a.push_repo();
+        b.write_repo(".dotman/system/etc/x", b"x b\n");
+        set_system_table(&b, mine);
+        let repo = b.repo().to_string_lossy().into_owned();
+        b.git(&[
+            "-C",
+            &repo,
+            "commit",
+            "-qam",
+            "change the file and its table",
+        ]);
+
+        exits(&b.run(&["sync", flag]), 0);
+        let case = format!("{mine:?} {theirs:?} {flag}");
+        assert_eq!(b.repo_config().system.get("/etc/x"), Some(&want), "{case}");
+        let remote = a.remote_path().to_string_lossy().into_owned();
+        let pushed = a.git(&["--git-dir", &remote, "show", "main:.dotman.toml"]);
+        assert!(!pushed.contains("owner = \"evil\""), "{case}: {pushed}");
+        assert!(!pushed.contains("owner = \"app\""), "{case}: {pushed}");
+    }
+}
+
 /// Each side keeps half of a private key, which a merge of the two would join: the merged copy is
 /// refused under a flag, sync exits 4 naming the file and changes nothing, and the way out it
 /// prints works as printed. A credential that origin's own version holds is no reason to refuse:
