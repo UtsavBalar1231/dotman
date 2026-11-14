@@ -64,6 +64,26 @@ fn restore_from_an_earlier_commit_backs_up_and_leaves_the_repo_alone() {
 }
 
 #[test]
+fn restore_says_once_where_the_replaced_file_went_and_a_dry_run_says_it_would() {
+    let env = two_commits();
+    let err = env.ok(&["restore", ".a", "--from", "HEAD~1", "--dry-run"]);
+    assert!(
+        err.contains("\nwould back up the file it replaces to "),
+        "{err}"
+    );
+    assert!(!err.contains("\n  "), "{err}");
+    let err = env.ok(&["restore", ".a", "--from", "HEAD~1"]);
+    let run = err
+        .lines()
+        .find_map(|line| line.strip_prefix("backed up the file it replaced to "))
+        .expect("the backup line");
+    assert_eq!(
+        std::fs::read(std::path::Path::new(run).join(".a")).unwrap(),
+        b"two\n"
+    );
+}
+
+#[test]
 fn restore_from_a_date_between_commits_picks_the_earlier_one() {
     let env = two_commits();
     env.ok(&["restore", ".a", "--from", "2020-02-01"]);

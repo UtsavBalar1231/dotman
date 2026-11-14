@@ -48,6 +48,19 @@ esac
     (env, log)
 }
 
+/// The recipient is longer than a line has room for after a label, so it goes on a line of its own.
+#[test]
+fn key_init_lists_the_recipient_on_its_own_line_under_a_label() {
+    let (env, _) = stub_keygen();
+    let err = env.ok(&["key", "init"]);
+    assert!(
+        err.contains(
+            "\n  recipient:\n    age1stubrecipient\n  added to [age] recipients in .dotman.toml\n"
+        ),
+        "{err}"
+    );
+}
+
 /// `key init` has keygen write into a 0700 temp directory beside the identity file and renames the
 /// result into place at 0600, so a kill never leaves a partial identity where the key belongs.
 #[test]

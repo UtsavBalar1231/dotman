@@ -110,6 +110,25 @@ fn other_key() -> TestEnv {
     env
 }
 
+/// The list item stays short and the remedy follows the list once, on a line that wraps at spaces.
+#[test]
+fn locked_paths_are_listed_short_and_the_remedy_follows_the_list_once() {
+    if !age_installed() {
+        return;
+    }
+    let b = keyed_device().second_device();
+    let err = exits(&b.run(&["init", &b.remote_url()]), 0);
+    assert!(
+        err.contains(&format!("\n  {HOSTS} (no age key)\n")),
+        "{err}"
+    );
+    assert!(
+        err.contains("\nset DOTMAN_AGE_KEY or DOTMAN_AGE_KEY_FILE, or run `dotman key import`, to decrypt it\n"),
+        "{err}"
+    );
+    assert_eq!(err.matches("DOTMAN_AGE_KEY_FILE").count(), 1, "{err}");
+}
+
 #[test]
 fn a_keyless_device_is_locked_and_the_key_in_the_environment_applies_it() {
     if !age_installed() {
@@ -596,10 +615,10 @@ fn sync_after_add_encrypt_of_a_loose_file_reports_a_mode_change() {
         "{err}"
     );
     assert!(
-        err.contains("\n  the old mode is recorded in ") && err.contains("/.dotman/modes.txt\n"),
+        err.contains("\nrecorded the old modes in ") && err.contains("/.dotman/modes.txt\n"),
         "{err}"
     );
-    assert!(!err.contains("backed up to"), "{err}");
+    assert!(!err.contains("backed up"), "{err}");
     assert_eq!(mode_of(&env.home().join(HOSTS)), 0o600);
 }
 
@@ -826,7 +845,7 @@ fn sync_says_when_it_applies_a_decrypted_file() {
     let err = b.ok_with(&[("DOTMAN_AGE_KEY", &key)], &["sync"]);
     assert!(
         err.lines()
-            .any(|line| line == "apply .config/gh/hosts.yml (decrypted)"),
+            .any(|line| line == "apply .config/gh/hosts.yml (decrypted, backed up)"),
         "{err}"
     );
 }

@@ -245,7 +245,11 @@ fn the_same_file_edited_on_both_exits_4_and_the_printed_steps_recover() {
     let out = paste(&b, &sync);
     let err = stderr(&out);
     assert!(out.status.success(), "{err}");
-    assert!(err.contains("backed up to"), "{err}");
+    assert!(err.lines().any(|l| l == "apply .a (backed up)"), "{err}");
+    assert!(
+        err.contains("\nbacked up the files it replaced to "),
+        "{err}"
+    );
     assert_eq!(b.read(".a"), b"resolved\n");
     assert_eq!(b.backups(".a"), [(b"from b\n".to_vec(), 0o600)]);
     exits(&a, 0, &["sync"]);
@@ -1387,6 +1391,39 @@ fn existing_after_the_pull() -> (TestEnv, TestEnv) {
     a.ok(&["add", ".tmux.conf"]);
     exits(&a, 0, &["sync"]);
     (a, b)
+}
+
+/// A sync that asks and then backs up a file, on the width the demo films record at: no line is
+/// wider than the terminal, and the backup directory is whole on a line of its own.
+#[test]
+#[cfg(target_os = "linux")]
+fn on_a_71_column_terminal_a_sync_that_backs_up_prints_no_line_wider_than_it() {
+    let (_a, b) = existing_after_the_pull();
+    let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
+    let Some(seen) = common::in_a_terminal_cols(&b, &plain, &["sync"], b"t\n", 71) else {
+        return;
+    };
+    let seen = seen.replace("\r\n", "\n");
+    // The harness's temp root is longer than a home directory, and a path cannot be broken, so
+    // the width is judged with the root shortened.
+    let root = b.root().to_string_lossy().into_owned();
+    let short = seen.replace(&root, "/t");
+    let wide: Vec<&str> = short.lines().filter(|l| l.chars().count() > 71).collect();
+    assert!(wide.is_empty(), "wider than 71: {wide:?} in {seen}");
+    assert!(seen.contains("apply .tmux.conf (backed up)\n"), "{seen}");
+    assert!(seen.contains("\n[p] decide per file  [s] skip: "), "{seen}");
+    let run = seen
+        .replace("\n  ", " ")
+        .split("backed up the files it replaced to ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_owned)
+        .expect("the once-per-run line");
+    assert!(seen.contains(&format!("\n  {run}\n")), "{seen}");
+    assert_eq!(
+        fs::read(Path::new(&run).join(".tmux.conf")).unwrap(),
+        b"mine\n"
+    );
 }
 
 /// After the pull the answer `[k]` keeps the file and the next sync captures it, and the question

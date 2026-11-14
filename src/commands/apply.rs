@@ -234,6 +234,8 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
         sources: &sources,
         modes: repo_config.modes.clone(),
         backups: backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?,
+        backed_up: false,
+        mode_file: None,
         attention: false,
         failed: 0,
         uncaptured: 0,
@@ -274,6 +276,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     }
     run.write_system(&mut state, &repo_config);
     run.capture_new(&scan, &mut state, &mut repo_config);
+    run.report_backups();
     run.report_kept();
 
     let repo_saved = run.save_repo(&mut repo_config, &mut state);
@@ -539,6 +542,10 @@ struct Run<'a> {
     sources: &'a Sources,
     modes: BTreeMap<String, String>,
     backups: PathBuf,
+    /// Whether a file was, or in a dry run would be, copied into `backups`.
+    backed_up: bool,
+    /// The run's `modes.txt`, once a mode was, or would be, recorded in it.
+    mode_file: Option<PathBuf>,
     attention: bool,
     failed: usize,
     uncaptured: usize,
@@ -636,8 +643,20 @@ impl Run<'_> {
             if n == 1 { "path is" } else { "paths are" },
             if n == 1 { "it" } else { "them" },
         ));
+        // The remedy is said once, after the list, where it wraps at spaces.
+        let remedy = format!("; {}", secrets::key_hint());
+        let mut remedied = false;
         for (key, reason) in &self.locked {
-            output::warning(&format!("  {key} ({reason})"));
+            let shown = reason.strip_suffix(&remedy).unwrap_or(reason);
+            remedied |= shown.len() != reason.len();
+            output::warning(&format!("  {key} ({shown})"));
+        }
+        if remedied {
+            output::warning(&format!(
+                "{}, to decrypt {}",
+                secrets::key_hint(),
+                if n == 1 { "it" } else { "them" },
+            ));
         }
     }
 
@@ -884,7 +903,7 @@ impl Run<'_> {
             }
         }
         loop {
-            match parse_reply(question, &prompt::ask(&menu(question, true))?, true) {
+            match parse_reply(question, &prompt::ask_menu(&menu(question, true))?, true) {
                 Some(Reply::Choose(choice)) => return Ok(vec![choice; items.len()]),
                 Some(Reply::Diffs) => self.show_diffs(items),
                 Some(Reply::PerFile) => {
@@ -901,7 +920,7 @@ impl Run<'_> {
     fn decide_one(&self, question: &Question, item: &Item) -> Result<Choice> {
         loop {
             let asked = format!("{} {}", item.key, menu(question, false));
-            match parse_reply(question, &prompt::ask(&asked)?, false) {
+            match parse_reply(question, &prompt::ask_menu(&asked)?, false) {
                 Some(Reply::Choose(choice)) => return Ok(choice),
                 Some(Reply::Diffs) => self.show_diffs(&[item]),
                 Some(Reply::PerFile) | None => output::warning("not one of the listed answers"),
@@ -1197,7 +1216,11 @@ impl Run<'_> {
             match helper::reported(&ran.stdout, &item.target) {
                 Some((Reported::Written | Reported::OwnerSkipped, _)) => {
                     silent = false;
-                    self.announce("apply", key);
+                    if item.current.is_some() {
+                        self.announce("apply", &format!("{key} (backed up)"));
+                    } else {
+                        self.announce("apply", key);
+                    }
                     state
                         .system
                         .insert(key.clone(), item.r.tuple.entry(&item.r.source));
@@ -1360,8 +1383,8 @@ impl Run<'_> {
             };
             let rel = system::source_path(item.key.trim_start_matches('/'));
             match back_up_bytes(&self.backups, &rel, bytes) {
-                Ok(path) => {
-                    self.backed_up(&path);
+                Ok(_) => {
+                    self.backed_up = true;
                     kept.push(item);
                 }
                 Err(e) => {
@@ -1822,21 +1845,25 @@ impl Run<'_> {
                             "apply",
                             &format!("{key} (mode {old_mode:04o} to {mode:04o})"),
                         );
-                        let verb = if self.opts.dry_run {
-                            "would record the old mode in"
-                        } else {
-                            "the old mode is recorded in"
-                        };
-                        output::info(&format!("  {verb} {}", record.display()));
+                        self.mode_file = Some(record.clone());
                     }
                     (backup, _) => {
+                        let mut notes = Vec::new();
                         if r.encrypted {
-                            self.announce("apply", &format!("{key} (decrypted)"));
-                        } else {
-                            self.announce("apply", key);
+                            notes.push("decrypted");
                         }
-                        if let Some(backup) = backup {
-                            self.backed_up(backup);
+                        if backup.is_some() {
+                            self.backed_up = true;
+                            notes.push(if self.opts.dry_run {
+                                "would back up"
+                            } else {
+                                "backed up"
+                            });
+                        }
+                        if notes.is_empty() {
+                            self.announce("apply", key);
+                        } else {
+                            self.announce("apply", &format!("{key} ({})", notes.join(", ")));
                         }
                     }
                 }
@@ -1914,13 +1941,27 @@ impl Run<'_> {
         }
     }
 
-    fn backed_up(&self, backup: &Path) {
-        let verb = if self.opts.dry_run {
-            "would back up to"
-        } else {
-            "backed up to"
+    /// Says once per run where the files it replaced went, on a line that wraps at spaces, so
+    /// each file's own line stays short.
+    fn report_backups(&self) {
+        let dir = self.backups.display();
+        let dry = self.opts.dry_run;
+        let said = match (self.backed_up, &self.mode_file) {
+            (false, None) => return,
+            (true, None) if dry => format!("would back up the files it replaces to {dir}"),
+            (true, None) => format!("backed up the files it replaced to {dir}"),
+            (true, Some(_)) if dry => format!(
+                "would back up the files it replaces to {dir}, with the old modes in its .dotman/modes.txt"
+            ),
+            (true, Some(_)) => format!(
+                "backed up the files it replaced to {dir}, with the old modes in its .dotman/modes.txt"
+            ),
+            (false, Some(file)) if dry => {
+                format!("would record the old modes in {}", file.display())
+            }
+            (false, Some(file)) => format!("recorded the old modes in {}", file.display()),
         };
-        output::info(&format!("  {verb} {}", backup.display()));
+        output::info(&said);
     }
 }
 

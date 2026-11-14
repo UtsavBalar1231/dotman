@@ -286,7 +286,7 @@ fn row_8_existing_file_is_backed_up_before_the_repo_version() {
     assert_eq!(env.read(".bashrc"), b"mine\n");
 
     let err = env.ok(&["apply", "--take-repo"]);
-    assert!(err.contains("backed up to"), "{err}");
+    assert!(err.contains("apply .bashrc (backed up)"), "{err}");
     assert_eq!(env.read(".bashrc"), b"repo\n");
     assert_eq!(mode_of(&env.home().join(".bashrc")), 0o640);
     assert_eq!(env.backups(".bashrc"), [(b"mine\n".to_vec(), 0o600)]);
@@ -310,7 +310,16 @@ fn row_10_changed_in_repo_is_backed_up_before_it_is_written() {
     env.write_repo(".bashrc", b"two\n");
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("changed-in-repo"));
     let err = env.ok(&["apply"]);
-    assert!(err.contains("backed up to"), "{err}");
+    assert!(
+        err.lines().any(|l| l == "apply .bashrc (backed up)"),
+        "{err}"
+    );
+    let run = err
+        .lines()
+        .find_map(|line| line.strip_prefix("backed up the files it replaced to "))
+        .expect("the once-per-run backup line");
+    assert_eq!(fs::read(Path::new(run).join(".bashrc")).unwrap(), b"one\n");
+    assert!(!err.contains("\n  backed up"), "{err}");
     assert_eq!(env.read(".bashrc"), b"two\n");
     assert_eq!(token(&env, ".bashrc").as_deref(), Some("clean"));
     assert_eq!(env.backups(".bashrc"), [(b"one\n".to_vec(), 0o600)]);
@@ -340,7 +349,7 @@ fn a_mode_only_write_names_the_modes_and_the_record() {
         "{err}"
     );
     assert!(
-        err.contains("\n  would record the old mode in ") && err.contains("/.dotman/modes.txt\n"),
+        err.contains("\nwould record the old modes in ") && err.contains("/.dotman/modes.txt\n"),
         "{err}"
     );
     assert!(!err.contains("backed up"), "{err}");
@@ -355,12 +364,74 @@ fn a_mode_only_write_names_the_modes_and_the_record() {
     );
     let record = err
         .lines()
-        .find_map(|line| line.strip_prefix("  the old mode is recorded in "))
+        .find_map(|line| line.strip_prefix("recorded the old modes in "))
         .expect("a record line");
     assert_eq!(
         fs::read(record).unwrap(),
         b".ssh/config\t0644\n",
         "the printed path holds the old mode"
+    );
+}
+
+/// One run that replaces a file and only re-modes another says where both went once, on an
+/// unindented line, and a dry run says the same in the conditional.
+#[test]
+fn a_run_that_backs_up_and_records_a_mode_says_where_once() {
+    let env = added(&[
+        (".bashrc", b"one\n", 0o644),
+        (".ssh/config", b"Host x\n", 0o644),
+    ]);
+    let mut config = env.repo_config();
+    config
+        .modes
+        .insert(".ssh/config".to_owned(), "0600".to_owned());
+    config
+        .save(&env.repo().join(".dotman.toml"), false)
+        .unwrap();
+    env.write_repo(".bashrc", b"two\n");
+
+    let err = env.ok(&["apply", "--dry-run"]);
+    assert!(
+        err.lines()
+            .any(|l| l == "would apply .bashrc (would back up)"),
+        "{err}"
+    );
+    let said = err
+        .lines()
+        .find(|line| line.starts_with("would back up the files it replaces to "))
+        .expect("the dry run's line");
+    assert!(
+        said.ends_with(", with the old modes in its .dotman/modes.txt"),
+        "{said}"
+    );
+    assert_eq!(env.backups(".bashrc"), []);
+
+    let err = env.ok(&["apply"]);
+    assert!(
+        err.lines().any(|l| l == "apply .bashrc (backed up)"),
+        "{err}"
+    );
+    assert!(
+        err.lines()
+            .any(|l| l == "apply .ssh/config (mode 0644 to 0600)"),
+        "{err}"
+    );
+    assert_eq!(
+        err.matches("backed up the files it replaced to ").count(),
+        1,
+        "{err}"
+    );
+    let run = err
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("backed up the files it replaced to ")?
+                .strip_suffix(", with the old modes in its .dotman/modes.txt")
+        })
+        .expect("the once-per-run line");
+    assert_eq!(fs::read(Path::new(run).join(".bashrc")).unwrap(), b"one\n");
+    assert_eq!(
+        fs::read(Path::new(run).join(".dotman/modes.txt")).unwrap(),
+        b".bashrc\t0644\n.ssh/config\t0644\n"
     );
 }
 
@@ -375,7 +446,7 @@ fn a_mode_only_change_records_the_mode_it_replaces() {
         .save(&env.repo().join(".dotman.toml"), false)
         .unwrap();
     let err = env.ok(&["apply"]);
-    assert!(err.contains("the old mode is recorded in "), "{err}");
+    assert!(err.contains("\nrecorded the old modes in "), "{err}");
     assert_eq!(mode_of(&env.home().join(".bashrc")), 0o600);
     assert_eq!(env.backups(".bashrc"), []);
     assert_eq!(
@@ -887,7 +958,11 @@ fn dry_run_apply_changes_none_of_the_four_trees() {
     let before = env.four_trees();
     let args = ["apply", "--dry-run", "--take-repo", "--forget-deleted"];
     let err = env.ok(&args);
-    for expected in ["would apply", "would back up to", "would forget"] {
+    for expected in [
+        "would apply",
+        "would back up the files it replaces to",
+        "would forget",
+    ] {
         assert!(err.contains(expected), "missing `{expected}` in:\n{err}");
     }
     assert_eq!(env.four_trees(), before);
@@ -914,7 +989,11 @@ fn dry_run_init_from_a_url_changes_none_of_the_four_trees() {
         .unwrap();
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
-    for expected in ["would clone", "would apply", "would back up to"] {
+    for expected in [
+        "would clone",
+        "would apply",
+        "would back up the files it replaces to",
+    ] {
         assert!(err.contains(expected), "missing `{expected}` in:\n{err}");
     }
     assert_eq!(b.four_trees(), before);

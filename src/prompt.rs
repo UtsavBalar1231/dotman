@@ -18,6 +18,17 @@ pub fn ask(question: &str) -> Result<String> {
     ask_on(&mut io::stderr().lock(), &mut io::stdin().lock(), question)
 }
 
+/// [`ask`] for a menu whose answers are two spaces apart. A terminal too narrow for one line gets
+/// the rows before the last as plain output first, so no answer is cut by the terminal's own wrap.
+pub fn ask_menu(question: &str) -> Result<String> {
+    let mut rows = output::menu_rows(question);
+    let last = rows.pop().unwrap_or_default();
+    for row in &rows {
+        output::context(row);
+    }
+    ask(&last)
+}
+
 // A question can name a key or a path from the repo.
 fn ask_on(err: &mut impl Write, input: &mut impl BufRead, question: &str) -> Result<String> {
     write!(err, "{} ", output::escape_line(question)).context("cannot write to stderr")?;

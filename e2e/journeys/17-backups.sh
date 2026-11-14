@@ -36,6 +36,8 @@ for v in 1 2 3; do
     seen=$(runs)
     e2e_dm_rc 0 b sync
     run=$(new_run "$seen")
+    e2e_err_has 'apply .bashrc (backed up)'
+    e2e_err_has "backed up the files it replaced to $run"
     [[ $v != 1 ]] || first=$run
     prev=$((v - 1))
     e2e_check "run $v backs up .bashrc as it was" grep -qx "export V=$prev" "$run/.bashrc"
@@ -54,7 +56,7 @@ seen=$(runs)
 e2e_dm_rc 0 b sync
 e2e_mode_is b .local/bin/tool 700
 e2e_err_has 'apply .local/bin/tool (mode 0755 to 0700)'
-e2e_err_has 'the old mode is recorded in '
+e2e_err_has 'recorded the old modes in '
 run=$(new_run "$seen")
 e2e_check "the mode-only run records the old mode" grep -qP '^\.local/bin/tool\t0755$' "$run/.dotman/modes.txt"
 e2e_check "the mode-only run copies nothing" test ! -e "$run/.local/bin/tool"

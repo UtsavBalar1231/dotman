@@ -151,7 +151,8 @@ fn generate_identity(ctx: &Context) -> Result<()> {
         identity.display()
     ));
     for recipient in &recipients {
-        output::info(&format!("  recipient {recipient}"));
+        output::info("  recipient:");
+        output::info(&format!("    {recipient}"));
         if added.contains(recipient) {
             output::info("  added to [age] recipients in .dotman.toml");
         }

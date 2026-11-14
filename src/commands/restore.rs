@@ -119,13 +119,13 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
         WriteOutcome::Written(written) => {
             let verb = if dry_run { "would restore" } else { "restore" };
             output::action(verb, &format!("{key} from {short}"));
-            if let Some(backup) = &written.backup {
-                let verb = if dry_run {
-                    "would back up to"
+            if written.backup.is_some() {
+                let said = if dry_run {
+                    "would back up the file it replaces to"
                 } else {
-                    "backed up to"
+                    "backed up the file it replaced to"
                 };
-                output::info(&format!("  {verb} {}", backup.display()));
+                output::info(&format!("{said} {}", backups.display()));
             }
             if let Some(warning) = written.warning() {
                 output::warning(&format!("{key}: {warning}"));

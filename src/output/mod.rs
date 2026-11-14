@@ -117,6 +117,37 @@ fn terminal_columns() -> Option<usize> {
     (columns >= MIN_WRAP_COLUMNS).then_some(columns)
 }
 
+/// `question` broken between its double-spaced answers into rows that fit the terminal with room
+/// for a typed answer on the last; one row when stderr is not a terminal wide enough to wrap for.
+#[must_use]
+pub fn menu_rows(question: &str) -> Vec<String> {
+    terminal_columns().map_or_else(
+        || vec![question.to_owned()],
+        |columns| rows_within(question, columns.saturating_sub(2)),
+    )
+}
+
+fn rows_within(text: &str, limit: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for piece in text.split("  ") {
+        match rows.last_mut() {
+            Some(row)
+                if row
+                    .chars()
+                    .count()
+                    .saturating_add(2)
+                    .saturating_add(piece.chars().count())
+                    <= limit =>
+            {
+                row.push_str("  ");
+                row.push_str(piece);
+            }
+            _ => rows.push(piece.to_owned()),
+        }
+    }
+    rows
+}
+
 /// `message` escaped, and wrapped to the terminal when stderr is one.
 fn fit(message: &str) -> Cow<'_, str> {
     let escaped = escape(message);
@@ -329,6 +360,21 @@ mod tests {
             wrap(LONG, 60),
             "next: run `dotman apply --dry-run` to see what would change,\n  then `dotman apply` to write it, or `dotman status` to\n  look again"
         );
+    }
+
+    #[test]
+    fn a_menu_breaks_between_answers_and_keeps_room_for_the_typed_one() {
+        let menu = "[k] keep all local  [t] take all from repo  [d] show diffs  [p] decide per file  [s] skip:";
+        assert_eq!(rows_within(menu, 200), [menu]);
+        assert_eq!(
+            rows_within(menu, 69),
+            [
+                "[k] keep all local  [t] take all from repo  [d] show diffs",
+                "[p] decide per file  [s] skip:"
+            ]
+        );
+        assert_eq!(rows_within("a  b", 1), ["a", "b"]);
+        assert_eq!(rows_within("", 10), [""]);
     }
 
     #[test]
