@@ -104,7 +104,7 @@ The editor opens a copy in a private 0700 directory under `$XDG_RUNTIME_DIR`, or
 
 A file's `[modes]` entry goes with the answer. When one machine's version is taken whole, the file gets that version's entry, or none if it had none. When the file is merged, by a flag or by `[e]`, it gets the stricter of the two modes, so a 0600 file stays 0600 whichever side wins. `[h]` gives the new variant this machine's entry.
 
-All the variants of a system file share one `[system]` table in `.dotman.toml`, keyed by the file's path, so settling a conflict on one variant rewrites the table that every variant of that path uses.
+All the variants of a system file share one `[system]` table in `.dotman.toml`, keyed by the file's path, so settling a conflict on one variant rewrites the table that every variant of that path uses. When the side whose table a system file would take has none, the other side's table is kept at the stricter mode, since a file without a table is written as root's at git's mode, which can be wider.
 
 ### What is saved
 

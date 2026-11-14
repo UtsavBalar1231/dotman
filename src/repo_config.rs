@@ -519,19 +519,21 @@ fn follow_system(
             continue;
         };
         let agree = settled.iter().all(|s| s.winner == first.winner);
-        let table = if agree && !settled.iter().any(|s| s.stricter()) {
-            if first.winner == Winner::Mine { m } else { t }.cloned()
+        // Owner, group and `package_owned` never merge: the winner's table supplies them, this
+        // machine's for a merged file and for variants settled with different winners.
+        let (from, other) = if agree && first.winner == Winner::Theirs {
+            (t, m)
         } else {
-            // Owner, group and `package_owned` never merge: the winner's table supplies them, this
-            // machine's for a merged file and for variants settled with different winners.
-            let from = if agree && first.winner == Winner::Theirs {
-                t
-            } else {
-                m
-            };
+            (m, t)
+        };
+        let table = if agree && !settled.iter().any(|s| s.stricter()) && from.is_some() {
+            from.cloned()
+        } else {
             let git =
                 |side: fn(&Settled) -> u32| settled.iter().fold(0o777, |all, s| all & side(s));
-            from.map(|table| SystemFile {
+            // A side with no table would leave the file root's at git's mode, which can be wider
+            // than the other side's table, so that table is kept, at the stricter mode.
+            from.or(other).map(|table| SystemFile {
                 mode: format!(
                     "{:04o}",
                     bits(m.map(|f| f.mode.as_str()), git(|s| s.ours_mode))
@@ -1102,8 +1104,24 @@ mode = "0644"
         let without = RepoConfig::default();
         let won = winners(&[(".dotman/system/etc/hosts", settled(Winner::Theirs, false))]);
         let (merged, _) = merge(&base, &mine, &without, &won, &[], &git);
-        assert!(!merged.system.contains_key("/etc/hosts"), "theirs had none");
+        let kept = system_of(&merged, "/etc/hosts").expect("this machine's table is kept");
+        assert_eq!(
+            (kept.group.as_str(), kept.mode.as_str()),
+            ("wheel", "0640"),
+            "theirs had none, so the file would have been root's at 0644"
+        );
         assert!(merged.system.contains_key("/etc/other"));
+
+        let (merged, _) = merge(
+            &base,
+            &without,
+            &theirs,
+            &winners(&[(".dotman/system/etc/hosts", settled(Winner::Mine, true))]),
+            &[],
+            &git,
+        );
+        let kept = system_of(&merged, "/etc/hosts").expect("origin's table is kept");
+        assert_eq!((kept.group.as_str(), kept.mode.as_str()), ("adm", "0644"));
     }
 
     #[test]
