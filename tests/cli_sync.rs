@@ -4003,6 +4003,7 @@ fn on_a_terminal_edit_takes_the_merged_copy_the_editor_saves() {
         "{opened}"
     );
     let merged = "1 from a\n2\nboth\n4\n5 from b\n";
+    assert!(seen.contains("\nresolve .a (edited)\n"), "{seen}");
     assert_eq!(b.read(".a"), merged.as_bytes(), "{seen}");
     assert_eq!(remote_file(&b, ".a"), merged);
     assert_eq!(
@@ -4132,10 +4133,8 @@ fn on_a_terminal_the_diff_of_an_encrypted_file_leaves_no_plaintext() {
     assert!(!objects.stdout.windows(11).any(|w| w == b"marker_from"));
 }
 
-/// A later local commit that stops on a path the first stop did not hold is asked as it comes, and
-/// each answer holds for its own file.
-#[test]
-fn on_a_terminal_a_later_stop_is_asked_as_it_comes() {
+/// Two unpushed commits on `b`: the first stops on `.a` only, the second on `.b` as well.
+fn two_stops() -> (TestEnv, TestEnv) {
     let (a, b) = pair(&[(".a", b"1\n2\n3\n", 0o644), (".b", b"1\n2\n3\n", 0o644)]);
     a.write(".a", b"1\n2 from a\n3\n", 0o644);
     a.write(".b", b"1\n2 from a\n3\n", 0o644);
@@ -4149,6 +4148,158 @@ fn on_a_terminal_a_later_stop_is_asked_as_it_comes() {
         ],
         "two",
     );
+    (a, b)
+}
+
+/// `[s]` at a later stop stops the whole pull: the first stop's answer is dropped with it.
+#[test]
+fn on_a_terminal_stop_at_a_later_stop_changes_nothing() {
+    let (a, b) = two_stops();
+    let head = || b.git(&["-C", &repo_path(&b), "rev-parse", "HEAD"]);
+    let (before, published) = (head(), a.remote_refs());
+    let seen = sync_in_a_terminal(&b, &[], b"k\ns\n");
+    assert!(seen.contains(".b [k] keep mine  [t] take theirs"), "{seen}");
+    assert!(seen.contains("conflicting paths:\n  .b\n"), "{seen}");
+    assert_eq!(head(), before);
+    assert_eq!(a.remote_refs(), published);
+    assert_eq!(b.read(".a"), b"1\n2 from b again\n3\n");
+    assert_eq!(b.read(".b"), b"1\n2 from b\n3\n");
+    no_replay_left(&b);
+}
+
+/// A replay that fails after an edit was taken keeps the edit in the run's backups.
+#[test]
+fn an_edit_taken_before_a_replay_that_fails_is_saved() {
+    let (_a, mut b) = clash();
+    wrap_git(
+        &mut b,
+        "case \" $* \" in *' rebase --onto '*) exit 1 ;; esac",
+    );
+    let editor = editor(&b, "printf 'edited here\\n' > \"$1\"");
+    let seen = sync_in_a_terminal(&b, &[("VISUAL", editor.as_str())], b"e\n");
+    let saved = seen
+        .lines()
+        .find_map(|line| line.strip_prefix("saved the edited .a to "))
+        .expect("a saved edit");
+    assert!(saved.ends_with(".dotman/edited/.a"), "{seen}");
+    assert_eq!(fs::read(saved).expect("the saved edit"), b"edited here\n");
+    assert!(!seen.contains("resolve .a (edited)"), "{seen}");
+    assert_eq!(b.read(".a"), b"1\n2\n3 from b\n4\n5 from b\n");
+    no_replay_left(&b);
+}
+
+/// A `.dotman.toml` key set differently on both sides is asked in the same menu: alone, `[k]` and
+/// `[t]` take each side's value, and beside a file `[p]` asks each in turn.
+#[test]
+fn on_a_terminal_a_settings_tie_is_asked_with_the_files() {
+    for (input, file, kept) in [
+        (&b"k\n"[..], false, "0640"),
+        (b"t\n", false, "0600"),
+        (b"p\nk\nt\n", true, "0600"),
+    ] {
+        let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+        for (env, mode) in [(&a, "0600"), (&b, "0640")] {
+            let mut config = env.repo_config();
+            config
+                .modes
+                .insert(".unmanaged".to_owned(), mode.to_owned());
+            config
+                .save(&env.repo().join(".dotman.toml"), false)
+                .expect("save .dotman.toml");
+            if file {
+                env.write(".a", format!("from {mode}\n").as_bytes(), 0o644);
+            }
+        }
+        exits(&a, 0, &["sync"]);
+        let seen = sync_in_a_terminal(&b, &[], input);
+        assert!(
+            seen.contains("  settings set on both      .dotman.toml\n"),
+            "{seen}"
+        );
+        assert!(
+            seen.contains(".dotman.toml sets [modes] \".unmanaged\" differently here and in origin/main\n[k] keeps this machine's value of each, [t] takes origin/main's\n.dotman.toml [k] keep mine  [t] take theirs  [d] diff  [s] stop: "),
+            "{seen}"
+        );
+        let mode = b.repo_config().modes.get(".unmanaged").cloned();
+        assert_eq!(mode.as_deref(), Some(kept), "{seen}");
+        if file {
+            assert_eq!(b.read(".a"), b"from 0640\n", "{seen}");
+        }
+        no_replay_left(&b);
+        exits(&a, 0, &["sync"]);
+        assert_converged(&a, &b);
+    }
+}
+
+/// `[p]` leaves `[e]` out for a binary file and a symlink, and the list shows both link targets.
+#[test]
+fn on_a_terminal_whole_versions_are_not_offered_an_edit() {
+    let a = first_device(&[(".bin", b"\0base\n", 0o644)]);
+    for target in [".t-base", ".t-a", ".t-b"] {
+        a.write(target, b"t\n", 0o644);
+    }
+    std::os::unix::fs::symlink(".t-base", a.home().join(".l")).expect("symlink");
+    a.ok(&["add", ".l"]);
+    exits(&a, 0, &["sync"]);
+    let b = clone_to_new_device(&a);
+    for target in [".t-base", ".t-a", ".t-b"] {
+        b.write(target, b"t\n", 0o644);
+    }
+    for (env, name) in [(&a, "a"), (&b, "b")] {
+        env.write(".bin", format!("\0from {name}\n").as_bytes(), 0o644);
+        fs::remove_file(env.home().join(".l")).expect("unlink");
+        std::os::unix::fs::symlink(format!(".t-{name}"), env.home().join(".l")).expect("symlink");
+    }
+    exits(&a, 0, &["sync"]);
+    let seen = sync_in_a_terminal(&b, &[], b"p\nt\nk\n");
+    assert!(
+        seen.contains("  binary, edited on both    .bin\n  symlink, edited on both   .l: a link to .t-b here, a link to .t-a in origin/main\n"),
+        "{seen}"
+    );
+    for key in [".bin", ".l"] {
+        assert!(
+            seen.contains(&format!(
+                "\n[k] keeps this machine's version whole, for every machine\n[t] takes origin/main's version whole, and this machine's is saved first\n{key} [k] keep mine  [t] take theirs  [d] diff  [s] stop: "
+            )),
+            "{seen}"
+        );
+    }
+    assert_eq!(b.read(".bin"), b"\0from a\n", "{seen}");
+    assert_eq!(
+        fs::read_link(b.home().join(".l")).expect("the link"),
+        Path::new(".t-b")
+    );
+    exits(&a, 0, &["sync"]);
+    assert_converged(&a, &b);
+}
+
+/// An encrypted file that this machine cannot decrypt offers no `[d]` and says why.
+#[test]
+fn on_a_terminal_an_encrypted_file_without_the_key_offers_no_diff() {
+    if !common::age_installed() {
+        return;
+    }
+    let (a, b) = sealed_pair();
+    a.write(SEALED, b"marker_from_a\n", 0o600);
+    exits(&a, 0, &["sync"]);
+    b.write(SEALED, b"marker_from_b\n", 0o600);
+    exits(&b, 4, &["sync"]);
+    fs::remove_file(b.xdg_config().join("dotman/age-identity.txt")).expect("remove the key");
+    let before = outside_git(&b);
+    let seen = sync_in_a_terminal(&b, &[], b"d\ns\n");
+    assert!(
+        seen.contains(".config/app/s{age}.conf cannot be decrypted here, so it cannot be shown or edited\n.config/app/s{age}.conf [k] keep mine  [t] take theirs  [s] stop: "),
+        "{seen}"
+    );
+    assert!(!seen.contains("marker_from"), "{seen}");
+    assert_eq!(outside_git(&b), before);
+}
+
+/// A later local commit that stops on a path the first stop did not hold is asked as it comes, and
+/// each answer holds for its own file.
+#[test]
+fn on_a_terminal_a_later_stop_is_asked_as_it_comes() {
+    let (a, b) = two_stops();
     // The third answer takes the repo's `.b` over the hand edit `commit_here` left in `$HOME`.
     let seen = sync_in_a_terminal(&b, &[], b"k\nt\nt\n");
     for key in [".a", ".b"] {

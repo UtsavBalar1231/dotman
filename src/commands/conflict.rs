@@ -227,10 +227,15 @@ pub fn resolve(
             "" => "unknown",
             host => host,
         };
-        let replayed = ctx
-            .git
-            .replay(REMOTE, branch, onto, &pull.decisions, host)
-            .map_err(|e| refused(ctx, e))?;
+        let replayed = match ctx.git.replay(REMOTE, branch, onto, &pull.decisions, host) {
+            Ok(replayed) => replayed,
+            Err(e) => {
+                if let Err(save) = pull.save_edits() {
+                    output::warning(&format!("cannot save the edited files: {save:#}"));
+                }
+                return Err(refused(ctx, e));
+            }
+        };
         match replayed {
             Replayed::Done => break,
             Replayed::Stopped(more) => {
@@ -246,6 +251,9 @@ pub fn resolve(
             "merged {SETTINGS}: {} from {REMOTE}/{branch}",
             output::count(n, "setting")
         ));
+    }
+    for path in &pull.edited {
+        output::action("resolve", &format!("{} (edited)", shown(path)));
     }
     Ok(true)
 }
@@ -286,6 +294,8 @@ struct Pull<'a> {
     ties_answer: Option<Answer>,
     /// The last edited copy of each path, which `[e]` opens again after a refusal.
     drafts: BTreeMap<PathBuf, Vec<u8>>,
+    /// The paths whose edit was taken; each one's draft is what was taken.
+    edited: BTreeSet<PathBuf>,
 }
 
 impl<'a> Pull<'a> {
@@ -311,6 +321,7 @@ impl<'a> Pull<'a> {
             from_origin: None,
             ties_answer: None,
             drafts: BTreeMap::new(),
+            edited: BTreeSet::new(),
         })
     }
 
@@ -762,6 +773,7 @@ impl<'a> Pull<'a> {
                         match self.edit(path, *template)? {
                             Ok(content) => {
                                 settled.insert(path.clone(), content);
+                                self.edited.insert(path.clone());
                                 return Ok(true);
                             }
                             Err(why) => refusal(path, &why),
@@ -1110,22 +1122,8 @@ impl<'a> Pull<'a> {
             })
             .collect();
         for (path, entry) in losers {
-            let text = path
-                .to_str()
-                .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
-            // The backup lands under `.dotman/repo/`, where a reserved root name is a plain path.
-            validate_key(&format!("repo/{text}"))
-                .with_context(|| format!("cannot save this machine's {}", shown(&path)))?;
             let bytes = self.blob(&entry)?;
-            if self.backups.is_none() {
-                let backups = self.ctx.paths.state_dir.join("backups");
-                self.backups = Some(backup_run_dir(&backups, SystemTime::now())?);
-            }
-            let dir = self
-                .backups
-                .as_ref()
-                .ok_or_else(|| anyhow!("no backup directory"))?;
-            let saved = back_up_bytes(dir, &format!(".dotman/repo/{text}"), &bytes)?;
+            let saved = self.back_up(&path, "repo", &bytes)?;
             output::info(&format!(
                 "saved this machine's {} to {}",
                 shown(&path),
@@ -1134,6 +1132,43 @@ impl<'a> Pull<'a> {
             self.saved.insert(path);
         }
         Ok(())
+    }
+
+    /// Saves each edit that was taken, for a replay that failed and so took none of them.
+    fn save_edits(&mut self) -> Result<()> {
+        let edits: Vec<(PathBuf, Vec<u8>)> = self
+            .edited
+            .iter()
+            .filter_map(|path| Some((path.clone(), self.drafts.get(path)?.clone())))
+            .collect();
+        for (path, bytes) in edits {
+            let saved = self.back_up(&path, "edited", &bytes)?;
+            output::warning(&format!(
+                "saved the edited {} to {}",
+                shown(&path),
+                saved.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Writes `bytes` to `.dotman/<under>/<path>` in this run's backup dir.
+    fn back_up(&mut self, path: &Path, under: &str, bytes: &[u8]) -> Result<PathBuf> {
+        let text = path
+            .to_str()
+            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+        // The backup lands under `.dotman/<under>/`, where a reserved root name is a plain path.
+        validate_key(&format!("{under}/{text}"))
+            .with_context(|| format!("cannot save {}", shown(path)))?;
+        if self.backups.is_none() {
+            let backups = self.ctx.paths.state_dir.join("backups");
+            self.backups = Some(backup_run_dir(&backups, SystemTime::now())?);
+        }
+        let dir = self
+            .backups
+            .as_ref()
+            .ok_or_else(|| anyhow!("no backup directory"))?;
+        back_up_bytes(dir, &format!(".dotman/{under}/{text}"), bytes)
     }
 
     fn changed(&self, count: usize) -> String {
