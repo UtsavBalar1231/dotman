@@ -158,7 +158,7 @@ fn read_state(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 /// `$VISUAL`, else `$EDITOR`, else `vi`, split like a shell would.
-fn editor_command() -> Result<(String, Vec<String>)> {
+pub(crate) fn editor_command() -> Result<(String, Vec<String>)> {
     let command = ["VISUAL", "EDITOR"]
         .iter()
         .filter_map(|name| std::env::var(name).ok())

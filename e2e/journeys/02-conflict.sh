@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A conflict on one file edited on both machines: exit 4 with the two answers, and the printed
+# A conflict on one file edited on both machines: exit 4 with the three answers, and the printed
 # --take-repo settles it, with this machine's version saved first.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
@@ -24,9 +24,10 @@ e2e_err_lacks 'git pull'
 e2e_file_is b .bashrc $'alias ll="ls -lh"\n'
 
 mapfile -t answers < <(e2e_recipe)
-e2e_check "the report prints 2 commands" test "${#answers[@]}" = 2
+e2e_check "the report prints 3 commands" test "${#answers[@]}" = 3
 e2e_check "the first keeps this machine's side" test "${answers[0]:-}" = 'dotman sync --keep-local'
 e2e_check "the second takes origin's side" test "${answers[1]:-}" = 'dotman sync --take-repo'
+e2e_check "the third asks on a terminal" test "${answers[2]:-}" = 'dotman sync'
 e2e_run_printed b "${answers[1]:-}"
 for dir in rebase-merge rebase-apply dotman-pull; do
     e2e_check "no $dir is left" test ! -e "$(e2e_repo b)/.git/$dir"

@@ -101,9 +101,10 @@ Exit status:
      key: then sync stops before the pull.
   4  The pull hit a conflict that sync did not settle, so nothing was
      pulled or pushed: neither --keep-local nor --take-repo answered
-     it, the answer made a file the content guard holds or a template
-     that does not render, or its shape is one only git can settle, and
-     sync printed the git steps.
+     it and no terminal could be asked, [s] stopped it on a terminal,
+     the answer made a file the content guard holds or a template that
+     does not render, or its shape is one only git can settle, and sync
+     printed the git steps.
   1  An error. Among them: the remote shares no commit with the repo, or
      the commit would delete at least 10 tracked files and at least half
      of them, which needs a yes at the prompt or --allow-mass-delete.

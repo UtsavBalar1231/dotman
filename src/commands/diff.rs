@@ -184,23 +184,60 @@ fn show_all(
         output::info("no differences between the repo and $HOME");
         return Ok(());
     }
-    for side in [&repo_side, &home_side] {
-        create_private_dir(side, false)
+    let order = if sides.repo_first {
+        [sides.repo, sides.home]
+    } else {
+        [sides.home, sides.repo]
+    };
+    run_diff(tmp.path(), order, no_pager)
+}
+
+/// One version of a path for [`show_versions`]: its content and its git mode.
+pub(crate) struct Version {
+    pub content: Content,
+    pub mode: u32,
+}
+
+/// One `git diff`, without a pager, from origin's version of each path, `origin/<path>`, to this
+/// machine's, `here/<path>`, so this machine's edits show as added lines. A missing version shows
+/// as an added or removed file. Decrypted content goes only into a private temp dir, removed
+/// before this returns.
+pub(crate) fn show_versions(
+    ctx: &Context,
+    versions: &[(PathBuf, [Option<Version>; 2])],
+) -> Result<()> {
+    ctx.git.check_version()?;
+    let tmp = private_temp_dir("dotman-diff-", &private_base(ctx)?)?;
+    let (here, origin) = (tmp.path().join("here"), tmp.path().join("origin"));
+    for (path, [mine, theirs]) in versions {
+        if !path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            bail!("{} is not a path inside the repo", path.display());
+        }
+        for (side, version) in [(&here, mine), (&origin, theirs)] {
+            if let Some(version) = version {
+                place(&side.join(path), &version.content, version.mode)?;
+            }
+        }
+    }
+    run_diff(tmp.path(), ["origin", "here"], true)
+}
+
+fn run_diff(tmp: &Path, [old, new]: [&str; 2], no_pager: bool) -> Result<()> {
+    for side in [old, new] {
+        let side = tmp.join(side);
+        create_private_dir(&side, false)
             .with_context(|| format!("cannot create {}", side.display()))?;
     }
-
-    let git = Git::new(tmp.path(), "diff");
+    let git = Git::new(tmp, "diff");
     let mut cmd = git.command();
     if no_pager || (std::io::stdout().is_terminal() && pager_missing(&git)) {
         cmd.arg("--no-pager");
     }
     // `--no-index` keeps each side's directory in the path, so `--no-prefix` with sides named
     // `repo` and `home` gives `repo/<key>` and `home/<key>`; `--src-prefix=repo/` would double it.
-    let (old, new) = if sides.repo_first {
-        (sides.repo, sides.home)
-    } else {
-        (sides.home, sides.repo)
-    };
     cmd.args(["diff", "--no-index", color(), "--no-prefix", "--", old, new]);
     let mut child = cmd.spawn().context("failed to run git diff")?;
     // Ctrl-C reaches the whole foreground group. Ignored here only after the spawn, so git and the

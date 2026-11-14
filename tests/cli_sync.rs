@@ -256,10 +256,10 @@ fn the_same_line_edited_on_both_is_settled_by_each_flag() {
 }
 
 /// Without a flag, a conflict exits 4 and changes nothing, however often it runs, and each answer
-/// it prints settles it as printed.
+/// it prints settles it as printed; the printed `dotman sync` asks on a terminal, here `[k]`.
 #[test]
 fn an_unanswered_conflict_exits_4_changes_nothing_and_both_printed_answers_work() {
-    for (answer, kept) in [(0, "from b\n"), (1, "from a\n")] {
+    for (answer, kept) in [(0, "from b\n"), (1, "from a\n"), (2, "from b\n")] {
         let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
         a.write(".a", b"from a\n", 0o644);
         exits(&a, 0, &["sync"]);
@@ -267,7 +267,7 @@ fn an_unanswered_conflict_exits_4_changes_nothing_and_both_printed_answers_work(
         b.write(".a", b"from b\n", 0o644);
         let err = exits(&b, 4, &["sync"]);
         assert!(
-            err.contains("the pull conflicts with your changes: 1 file was changed here and in origin/main in the same place. Nothing was pulled or pushed, and your files and commits are as they were.\nconflicting paths:\n  .a\nanswer with `dotman sync --keep-local` or `dotman sync --take-repo`\n--keep-local keeps this machine's side of each clash and --take-repo origin/main's; "),
+            err.contains("the pull conflicts with your changes: 1 file was changed here and in origin/main in the same place. Nothing was pulled or pushed, and your files and commits are as they were.\nconflicting paths:\n  .a\nanswer with `dotman sync --keep-local` or `dotman sync --take-repo`, or run `dotman sync` in a terminal to decide file by file\n--keep-local keeps this machine's side of each clash and --take-repo origin/main's; "),
             "{err}"
         );
         assert!(!err.contains("git pull"), "{err}");
@@ -286,11 +286,22 @@ fn an_unanswered_conflict_exits_4_changes_nothing_and_both_printed_answers_work(
         let printed = backticked(&err);
         assert_eq!(
             printed,
-            ["dotman sync --keep-local", "dotman sync --take-repo"]
+            [
+                "dotman sync --keep-local",
+                "dotman sync --take-repo",
+                "dotman sync"
+            ]
         );
         let line = printed.get(answer).expect("the printed answer");
-        let out = paste(&b, line);
-        assert!(out.status.success(), "{line}: {}", stderr(&out));
+        if answer == 2 {
+            let words = shell_words::split(line).expect("a command");
+            let args: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
+            let seen = common::in_a_terminal(&b, &[], &args, b"k\n").expect("script(1) runs");
+            assert!(seen.contains(".a [k] keep mine  [t] take theirs"), "{seen}");
+        } else {
+            let out = paste(&b, line);
+            assert!(out.status.success(), "{line}: {}", stderr(&out));
+        }
         assert_eq!(b.read(".a"), kept.as_bytes(), "{line}");
         exits(&a, 0, &["sync"]);
         assert_eq!(a.read(".a"), kept.as_bytes(), "{line}");
@@ -3763,4 +3774,408 @@ fn an_uncommitted_repo_edit_stops_a_conflicting_pull_before_anything_is_settled(
     assert!(!err.contains("saved this machine's"), "{err}");
     no_replay_left(&b);
     assert_eq!(b.read(".a"), b"from b\n");
+}
+
+const PLAIN: [(&str, &str); 2] = [("NO_COLOR", "1"), ("TERM", "dumb")];
+
+/// `.a` edited on its third line on both machines and origin's edit synced, with an edit
+/// elsewhere in the file on each side; `b` has not synced its own.
+fn clash() -> (TestEnv, TestEnv) {
+    let (a, b) = pair(&[(".a", b"1\n2\n3\n4\n5\n", 0o644)]);
+    a.write(".a", b"1 from a\n2\n3 from a\n4\n5\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"1\n2\n3 from b\n4\n5 from b\n", 0o644);
+    (a, b)
+}
+
+/// `.a` and `.b` each edited on both machines, origin's edits synced.
+fn two_clashes() -> (TestEnv, TestEnv) {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644), (".b", b"base\n", 0o644)]);
+    for key in [".a", ".b"] {
+        a.write(key, b"from a\n", 0o644);
+        b.write(key, b"from b\n", 0o644);
+    }
+    exits(&a, 0, &["sync"]);
+    (a, b)
+}
+
+/// `sync` on `env` in a terminal, with `vars` and the typed `input`; fails when `script` is
+/// missing, since CI has it. The terminal echoes the input before dotman asks, so a question is
+/// given the line end that typing its answer would give it.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn sync_in_a_terminal(env: &TestEnv, vars: &[(&str, &str)], input: &[u8]) -> String {
+    let vars = [PLAIN.as_slice(), vars].concat();
+    answered(&common::in_a_terminal(env, &vars, &["sync"], input).expect("script(1) runs"))
+}
+
+fn answered(seen: &str) -> String {
+    seen.replace('\r', "").replace(" stop: ", " stop: \n")
+}
+
+/// An editor that runs the shell `body` with the copy it opens as `$1`.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn editor(env: &TestEnv, body: &str) -> String {
+    let path = env.root().join("editor");
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write the editor");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    path.to_string_lossy().into_owned()
+}
+
+/// A private `XDG_RUNTIME_DIR` inside the test root.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn runtime_dir(env: &TestEnv) -> std::path::PathBuf {
+    let dir = env.root().join("run");
+    fs::create_dir_all(&dir).expect("runtime dir");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod");
+    dir
+}
+
+/// The temp dirs dotman left in `dir`, a runtime or state dir.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn temp_left(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .expect("read the dir")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with(".dotman-tmp-") || name.starts_with("dotman-diff-"))
+        .collect()
+}
+
+/// On a terminal, one file is asked with the one-file menu: `[k]` and `[t]` settle it as
+/// `--keep-local` and `--take-repo` do, and `[d]` shows origin's version against this machine's
+/// and asks again.
+#[test]
+fn on_a_terminal_each_answer_to_one_file_does_what_its_line_says() {
+    for (input, line) in [
+        (&b"k\n"[..], "3 from b"),
+        (b"t\n", "3 from a"),
+        (b"d\nK\n", "3 from b"),
+    ] {
+        let (a, b) = clash();
+        let seen = sync_in_a_terminal(&b, &[], input);
+        assert!(
+            seen.contains("1 file was changed here and in origin/main in the same place:\n  edited on both            .a\n[k] keeps this machine's side of each clash, for every machine\n[t] takes origin/main's side of each clash\neither way the other machine's edits elsewhere in the file are kept, and this machine's version is saved first\n"),
+            "{seen}"
+        );
+        assert!(
+            seen.contains(".a [k] keep mine  [t] take theirs  [e] edit  [d] diff  [s] stop: "),
+            "{seen}"
+        );
+        let merged = format!("1 from a\n2\n{line}\n4\n5 from b\n");
+        assert_eq!(b.read(".a"), merged.as_bytes(), "{seen}");
+        assert_eq!(remote_file(&b, ".a"), merged);
+        assert_eq!(
+            fs::read(saved_copy(&seen, ".a")).expect("the saved copy"),
+            b"1\n2\n3 from b\n4\n5 from b\n"
+        );
+        if input.starts_with(b"d") {
+            assert!(seen.contains("--- origin/.a\n+++ here/.a\n"), "{seen}");
+            assert!(seen.contains("\n-3 from a\n+3 from b\n"), "{seen}");
+        }
+        no_replay_left(&b);
+        exits(&a, 0, &["sync"]);
+        assert_converged(&a, &b);
+    }
+}
+
+/// `[s]`, an empty answer and end of input stop the whole pull with the message a run without a
+/// terminal prints, and change nothing; so does `DOTMAN_NON_INTERACTIVE`, which asks nothing.
+#[test]
+fn on_a_terminal_stop_or_no_answer_changes_nothing() {
+    let (_a, b) = clash();
+    exits(&b, 4, &["sync"]);
+    let before = outside_git(&b);
+    let quiet = [("DOTMAN_NON_INTERACTIVE", "1")];
+    for (vars, input) in [
+        (&[][..], &b"s\n"[..]),
+        (&[], b"\n"),
+        (&[], b""),
+        (&[], b"x\nd\ns\n"),
+        (&quiet, b"k\n"),
+    ] {
+        let seen = sync_in_a_terminal(&b, vars, input);
+        assert!(
+            seen.contains("answer with `dotman sync --keep-local` or `dotman sync --take-repo`, or run `dotman sync` in a terminal to decide file by file\n"),
+            "{seen}"
+        );
+        assert_eq!(seen.contains("[k] keep mine"), vars.is_empty(), "{seen}");
+        assert_eq!(outside_git(&b), before, "{seen}");
+        assert_eq!(temp_left(&b.state_dir()), Vec::<String>::new());
+        no_replay_left(&b);
+    }
+}
+
+/// Several files get the bulk question first: `[k]` and `[t]` answer every file, `[d]` shows every
+/// diff and asks again, and `[p]` asks each file in turn; `[s]` on any file stops the whole pull.
+#[test]
+fn on_a_terminal_several_files_are_answered_together_or_one_by_one() {
+    for (input, a_side, b_side) in [
+        (&b"k\n"[..], "b", "b"),
+        (b"t\n", "a", "a"),
+        (b"p\nk\nt\n", "b", "a"),
+        (b"d\np\nt\nk\n", "a", "b"),
+    ] {
+        let (a, b) = two_clashes();
+        let seen = sync_in_a_terminal(&b, &[], input);
+        assert!(
+            seen.contains("2 files were changed here and in origin/main in the same places:\n  edited on both            .a\n  edited on both            .b\n[k] all mine  [t] all theirs  [d] diffs  [p] per file  [s] stop: "),
+            "{seen}"
+        );
+        assert_eq!(
+            b.read(".a"),
+            format!("from {a_side}\n").as_bytes(),
+            "{seen}"
+        );
+        assert_eq!(
+            b.read(".b"),
+            format!("from {b_side}\n").as_bytes(),
+            "{seen}"
+        );
+        if input.starts_with(b"d") {
+            for key in [".a", ".b"] {
+                assert!(
+                    seen.contains(&format!("--- origin/{key}\n+++ here/{key}\n")),
+                    "{seen}"
+                );
+            }
+        }
+        if input.starts_with(b"p") || input.starts_with(b"d") {
+            assert!(seen.contains(".b [k] keep mine  [t] take theirs"), "{seen}");
+        }
+        no_replay_left(&b);
+        exits(&a, 0, &["sync"]);
+        assert_converged(&a, &b);
+    }
+
+    let (_a, b) = two_clashes();
+    exits(&b, 4, &["sync"]);
+    let before = outside_git(&b);
+    let seen = sync_in_a_terminal(&b, &[], b"p\nk\ns\n");
+    assert!(seen.contains("conflicting paths:\n  .a\n  .b\n"), "{seen}");
+    assert_eq!(outside_git(&b), before, "{seen}");
+}
+
+/// `[e]` opens the merged file with plain markers in a 0700 directory under `XDG_RUNTIME_DIR`,
+/// outside the repo and `$HOME`, takes what the editor saves, and removes the copy.
+#[test]
+fn on_a_terminal_edit_takes_the_merged_copy_the_editor_saves() {
+    let (a, b) = clash();
+    let run = runtime_dir(&b);
+    let (log, opened) = (b.root().join("log"), b.root().join("opened"));
+    let editor = editor(
+        &b,
+        &format!(
+            "printf '%s\\n%s\\n' \"$1\" \"$(stat -c %a \"$(dirname \"$1\")\")\" > '{}'\ncp \"$1\" '{}'\nprintf '1 from a\\n2\\nboth\\n4\\n5 from b\\n' > \"$1\"",
+            log.display(),
+            opened.display()
+        ),
+    );
+    let run_var = run.to_string_lossy().into_owned();
+    let vars = [
+        ("VISUAL", editor.as_str()),
+        ("XDG_RUNTIME_DIR", run_var.as_str()),
+    ];
+    let seen = sync_in_a_terminal(&b, &vars, b"e\n");
+    let log = fs::read_to_string(&log).expect("the editor ran");
+    let mut lines = log.lines();
+    let copy = Path::new(lines.next().expect("the copy"));
+    assert_eq!(lines.next(), Some("700"), "{log}");
+    assert_eq!(copy.parent().and_then(Path::parent), Some(run.as_path()));
+    assert_eq!(copy.file_name(), Some(OsStr::new(".a")));
+    assert!(!copy.starts_with(b.home()) && !copy.starts_with(b.repo()));
+    assert!(!copy.exists());
+    assert_eq!(temp_left(&run), Vec::<String>::new());
+    let opened = fs::read_to_string(&opened).expect("the opened copy");
+    assert!(
+        opened.contains("1 from a\n2\n<<<<<<< this machine (")
+            && opened
+                .contains(")\n3 from b\n=======\n3 from a\n>>>>>>> origin/main\n4\n5 from b\n")
+            && !opened.contains("|||||||"),
+        "{opened}"
+    );
+    let merged = "1 from a\n2\nboth\n4\n5 from b\n";
+    assert_eq!(b.read(".a"), merged.as_bytes(), "{seen}");
+    assert_eq!(remote_file(&b, ".a"), merged);
+    assert_eq!(
+        fs::read(saved_copy(&seen, ".a")).expect("the saved copy"),
+        b"1\n2\n3 from b\n4\n5 from b\n"
+    );
+    no_replay_left(&b);
+    exits(&a, 0, &["sync"]);
+    assert_converged(&a, &b);
+}
+
+/// An edited copy that is unchanged, keeps marker lines or holds a credential neither side held is
+/// refused with its reason, and the question is asked again; `[e]` then opens the last edit.
+#[test]
+fn on_a_terminal_an_edit_that_is_refused_is_asked_again() {
+    let (a, b) = clash();
+    let count = b.root().join("count");
+    let token = github_token();
+    let body = format!(
+        "n=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > '{count}'\ncase $n in\n2) sed -i '/^<<<<<<< /d' \"$1\" ;;\n3) printf 'x={token}\\n' > \"$1\" ;;\n4) grep -q '^x=' \"$1\" && printf 'merged\\n' > \"$1\" ;;\nesac",
+        count = count.display()
+    );
+    let editor = editor(&b, &body);
+    let seen = sync_in_a_terminal(&b, &[("VISUAL", editor.as_str())], b"e\ne\ne\ne\n");
+    for refusal in [
+        ".a: the file was not changed; nothing was taken\n",
+        ".a: the marker lines are still in the file; nothing was taken\n",
+        ".a: in the merged file, line 1 holds a github-token; nothing was taken\n",
+    ] {
+        assert!(seen.contains(refusal), "{refusal}: {seen}");
+    }
+    assert_eq!(
+        seen.matches(".a [k] keep mine  [t] take theirs  [e] edit")
+            .count(),
+        4,
+        "{seen}"
+    );
+    assert_eq!(b.read(".a"), b"merged\n", "{seen}");
+    exits(&a, 0, &["sync"]);
+    assert_converged(&a, &b);
+    let objects = b.git_raw(&[
+        "-C",
+        &repo_path(&b),
+        "cat-file",
+        "--batch-all-objects",
+        "--batch",
+    ]);
+    assert!(
+        !objects
+            .stdout
+            .windows(token.len())
+            .any(|w| w == token.as_bytes())
+    );
+}
+
+/// A `{tmpl}` edit that does not render is refused, an editor that fails takes nothing, and both
+/// ask again; an edit that renders is taken.
+#[test]
+fn on_a_terminal_a_template_edit_that_does_not_render_is_asked_again() {
+    let a = first_device(&[(".a", b"a\n", 0o644)]);
+    a.write(".p", b"1\n2\n3\n", 0o644);
+    a.ok(&["add", "--template", ".p"]);
+    exits(&a, 0, &["sync"]);
+    let b = clone_to_new_device(&a);
+    a.write_repo(".p{tmpl}", b"1\n{{ 2 }} a\n3\n");
+    exits(&a, 0, &["sync"]);
+    b.write_repo(".p{tmpl}", b"1\n{{ 2 }} b\n3\n");
+    let count = b.root().join("count");
+    let body = format!(
+        "n=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > '{count}'\ncase $n in\n1) printf '{{%% if %%}}\\n' > \"$1\" ;;\n2) exit 1 ;;\n3) printf '1\\n{{{{ 2 }}}} ab\\n3\\n' > \"$1\" ;;\nesac",
+        count = count.display()
+    );
+    let editor = editor(&b, &body);
+    let seen = sync_in_a_terminal(&b, &[("VISUAL", editor.as_str())], b"e\ne\ne\n");
+    assert!(
+        seen.contains(".p{tmpl}: the merged template does not render: "),
+        "{seen}"
+    );
+    assert!(
+        seen.contains(".p{tmpl}: the editor exited with exit status: 1; nothing was taken\n"),
+        "{seen}"
+    );
+    assert_eq!(remote_file(&b, ".p{tmpl}"), "1\n{{ 2 }} ab\n3\n");
+    assert_eq!(b.read(".p"), b"1\n2 ab\n3\n", "{seen}");
+    assert_eq!(temp_left(&b.state_dir()), Vec::<String>::new());
+}
+
+/// `[d]` on an encrypted file shows both plaintexts on the terminal only: the temp dir it used is
+/// gone and no object holds either; `[s]` then changes nothing.
+#[test]
+fn on_a_terminal_the_diff_of_an_encrypted_file_leaves_no_plaintext() {
+    if !common::age_installed() {
+        return;
+    }
+    let (a, b) = sealed_pair();
+    a.write(SEALED, b"marker_from_a\n", 0o600);
+    exits(&a, 0, &["sync"]);
+    b.write(SEALED, b"marker_from_b\n", 0o600);
+    exits(&b, 4, &["sync"]);
+    let before = outside_git(&b);
+    let run = runtime_dir(&b);
+    let run_var = run.to_string_lossy().into_owned();
+    let seen = sync_in_a_terminal(&b, &[("XDG_RUNTIME_DIR", run_var.as_str())], b"d\ns\n");
+    assert!(
+        seen.contains("  encrypted, edited on both .config/app/s{age}.conf\n"),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("[k] keep mine  [t] take theirs  [d] diff  [s] stop: "),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("\n-marker_from_a\n+marker_from_b\n"),
+        "{seen}"
+    );
+    assert_eq!(temp_left(&run), Vec::<String>::new());
+    assert_eq!(temp_left(&b.state_dir()), Vec::<String>::new());
+    assert_eq!(outside_git(&b), before);
+    let objects = b.git_raw(&[
+        "-C",
+        &repo_path(&b),
+        "cat-file",
+        "--batch-all-objects",
+        "--batch",
+    ]);
+    assert!(objects.status.success());
+    assert!(!objects.stdout.windows(11).any(|w| w == b"marker_from"));
+}
+
+/// A later local commit that stops on a path the first stop did not hold is asked as it comes, and
+/// each answer holds for its own file.
+#[test]
+fn on_a_terminal_a_later_stop_is_asked_as_it_comes() {
+    let (a, b) = pair(&[(".a", b"1\n2\n3\n", 0o644), (".b", b"1\n2\n3\n", 0o644)]);
+    a.write(".a", b"1\n2 from a\n3\n", 0o644);
+    a.write(".b", b"1\n2 from a\n3\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    commit_here(&b, &[(".a", b"1\n2 from b\n3\n")], "one");
+    commit_here(
+        &b,
+        &[
+            (".a", b"1\n2 from b again\n3\n"),
+            (".b", b"1\n2 from b\n3\n"),
+        ],
+        "two",
+    );
+    // The third answer takes the repo's `.b` over the hand edit `commit_here` left in `$HOME`.
+    let seen = sync_in_a_terminal(&b, &[], b"k\nt\nt\n");
+    for key in [".a", ".b"] {
+        assert!(
+            seen.contains(&format!("{key} [k] keep mine  [t] take theirs")),
+            "{seen}"
+        );
+    }
+    assert_eq!(b.read(".a"), b"1\n2 from b again\n3\n", "{seen}");
+    assert_eq!(b.read(".b"), b"1\n2 from a\n3\n", "{seen}");
+    no_replay_left(&b);
+    exits(&a, 0, &["sync"]);
+    assert_converged(&a, &b);
+}
+
+/// On the width the demo films record at, the conflict list, both menus and the stop report fit.
+#[test]
+fn on_a_71_column_terminal_the_conflict_questions_fit() {
+    for (pair, input) in [(clash(), &b"s\n"[..]), (two_clashes(), b"p\ns\n")] {
+        let (_a, b) = pair;
+        let seen = answered(
+            &common::in_a_terminal_cols(&b, &PLAIN, &["sync"], input, 71).expect("script(1) runs"),
+        );
+        let root = b.root().to_string_lossy().into_owned();
+        let short = seen.replace(&root, "/t");
+        let wide: Vec<&str> = short.lines().filter(|l| l.chars().count() > 71).collect();
+        assert!(wide.is_empty(), "wider than 71: {wide:?} in {seen}");
+        assert!(seen.contains("[k] keep mine  [t] take theirs"), "{seen}");
+    }
 }
