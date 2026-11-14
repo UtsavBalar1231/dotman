@@ -117,7 +117,7 @@ def main():
             else:
                 stem = f"{n:02d}-{shot['card']}"
                 clip = out_dir / f"{stem}.json"
-                clip.write_text(json.dumps(shot))
+                clip.write_text(json.dumps(shot | {"first": n == 1}))
                 kind = "card"
             part = out_dir / f"{stem}.mp4"
             sh("node", str(HERE / "render.mjs"), kind, str(clip), str(part))
