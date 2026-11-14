@@ -382,20 +382,23 @@ fn a_rebase_started_by_hand_is_still_refused() {
 
 /// `[h]` keeps this machine's version as the variant `add --for host=beta` names, with this
 /// machine's `[modes]` entry; the shared source takes origin's version, so the other machine keeps
-/// origin's after it syncs. The report names no `add --for host=` step.
+/// origin's after it syncs. The exit-4 report, where `[h]` would apply, names no
+/// `add --for host=` step.
 #[test]
 fn on_a_terminal_keep_mine_here_only_keeps_this_machine_s_version_as_its_variant() {
     let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
     a.write(".a", b"from a\n", 0o644);
     exits(&a, 0, &["sync"]);
     b.write(".a", b"from b\n", 0o600);
+    let report = exits(&b, 4, &["sync"]);
+    assert!(report.contains("conflicting paths:\n  .a\n"), "{report}");
+    assert!(!report.contains("--for host="), "{report}");
     let seen = sync_in_a_terminal(&b, b"h\n");
     assert!(
         seen.contains("this machine keeps its version as .a{host=beta}; every other machine takes origin/main's\n.a [k] keep mine  [t] take theirs  [h] keep mine on this machine only  [e] edit  [d] diff  [s] stop: "),
         "{seen}"
     );
     assert!(seen.contains("saved this machine's .a to "), "{seen}");
-    assert!(!seen.contains("--for host="), "{seen}");
     no_replay_left(&b);
     assert_eq!(b.read(".a"), b"from b\n", "{seen}");
     assert_eq!(common::mode_of(&b.home().join(".a")), 0o600);
@@ -413,6 +416,47 @@ fn on_a_terminal_keep_mine_here_only_keeps_this_machine_s_version_as_its_variant
     assert_eq!(a.read(".a"), b"from a\n");
     assert_eq!(common::mode_of(&a.home().join(".a")), 0o644);
     exits(&b, 0, &["sync"]);
+    assert_eq!(b.read(".a"), b"from b\n");
+}
+
+/// A sync killed at the correction commit, the step that adds `[h]`'s variant, leaves the marker;
+/// the next sync puts the repo back with no trace of the variant in the worktree or the index, so
+/// nothing captures it unasked, and answering `[h]` again finishes the pull.
+#[test]
+fn a_sync_killed_while_it_adds_the_variant_keep_mine_here_only_makes_recovers() {
+    let (a, mut b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+    let (pre, post) = kill_once(&b, "*' commit '*' resolve '*", true);
+    wrap_git(&mut b, &pre, &post);
+    let seen = sync_in_a_terminal(&b, b"h\n");
+    assert!(
+        b.repo().join(".git/dotman-pull").exists(),
+        "the marker stays: {seen}"
+    );
+    let err = exits(&b, 4, &["status"]);
+    assert!(
+        err.contains("was stopped while it finished a pull"),
+        "{err}"
+    );
+
+    let err = exits(&b, 4, &["sync"]);
+    assert!(
+        err.contains("the repo is back as it was before that pull"),
+        "{err}"
+    );
+    assert!(err.contains("conflicting paths:\n  .a\n"), "{err}");
+    no_replay_left(&b);
+    let repo = b.repo().to_string_lossy().into_owned();
+    assert!(!b.repo().join(".a{host=beta}").exists());
+    let tracked = b.git(&["-C", &repo, "ls-files"]);
+    assert!(!tracked.contains("{host=beta}"), "{tracked}");
+    assert_eq!(b.git(&["-C", &repo, "status", "--porcelain"]), "");
+
+    sync_in_a_terminal(&b, b"h\n");
+    no_replay_left(&b);
+    assert_eq!(remote_file(&b, ".a{host=beta}"), "from b\n");
     assert_eq!(b.read(".a"), b"from b\n");
 }
 
