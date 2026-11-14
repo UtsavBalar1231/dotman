@@ -112,7 +112,7 @@ The version that loses is always saved first. Before the replay, this machine's 
 
 ### The replay
 
-Once the last answer is in, dotman replays this machine's commits onto origin's with git. Resolved files go into git's index and git writes them to the repo. `$HOME` is written afterwards, by the usual apply. Your git config's `commit.gpgsign` and `merge.directoryRenames` affect the replay as they affect any pull.
+Once the last answer is in, dotman replays this machine's commits onto origin's with git. Resolved files go into git's index and git writes them to the repo. `$HOME` is written afterwards, by the usual apply. Your git config's `commit.gpgsign` affects the replay as it affects any pull. Your `merge.renames` and `merge.directoryRenames` affect neither the pull nor the replay: a file added in a directory that origin renamed stops the pull as a conflict.
 
 Ctrl-C, a hangup and a terminate signal are ignored while the replay runs. That also means Ctrl-C can't interrupt a `commit.gpgsign` pinentry that hangs. A run killed during the replay leaves `.git/dotman-pull` in the repo. `dotman status` and dry runs then exit 4 and say so, and the next command that writes, such as `dotman sync`, puts the repo back as it was before that pull. `sync` then pulls again.
 

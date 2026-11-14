@@ -167,14 +167,20 @@ impl fmt::Debug for Git {
 }
 
 /// On the first pull and on every rebase of the replay: the user's config must not move another
-/// branch, or the branch itself off a detached `HEAD`, or settle a conflict from a recorded
-/// resolution. On git before 2.38 `rebase.updateRefs` is unknown and ignored. The user's
-/// `rebase.backend` is overridden by [`Git::pull_backend`] and the replay's `--merge`.
-const PULL_PINS: [&str; 4] = [
+/// branch, or the branch itself off a detached `HEAD`, settle a conflict from a recorded
+/// resolution, or change how renames are matched, which would move a new file into a renamed
+/// directory, or keep a rename from stopping, with no conflict. On git before 2.38
+/// `rebase.updateRefs` is unknown and ignored. The user's `rebase.backend` is overridden by
+/// [`Git::pull_backend`] and the replay's `--merge`.
+const PULL_PINS: [&str; 8] = [
     "-c",
     "rebase.updateRefs=false",
     "-c",
     "rerere.enabled=false",
+    "-c",
+    "merge.directoryRenames=conflict",
+    "-c",
+    "merge.renames=true",
 ];
 
 /// In `.git`. While it exists, a replay may have moved `HEAD`, the index or the worktree, and
@@ -4965,6 +4971,28 @@ mod tests {
             b.resolve_commit("refs/heads/keep").expect("keep"),
             Some(mine)
         );
+    }
+
+    /// Origin renames the directory `d` while this machine adds `d/new`: the pull stops, as it
+    /// does with git's defaults, whether the user's config would move `d/new` into the renamed
+    /// directory or match no rename at all.
+    #[test]
+    fn the_user_s_rename_settings_leave_a_file_added_in_a_renamed_directory_a_stop() {
+        for config in ["'merge.directoryRenames=true'", "'merge.renames=false'"] {
+            let d = diverged(
+                config,
+                &[("d/one", Some(b"one\n")), ("d/two", Some(b"two\n"))],
+                &[
+                    ("d/one", None),
+                    ("d/two", None),
+                    ("e/one", Some(b"one\n")),
+                    ("e/two", Some(b"two\n")),
+                ],
+                &[&[("d/new", Some(b"new\n"))]],
+            );
+            assert!(!d.stopped.is_empty(), "{config}");
+            assert_restored(&d);
+        }
     }
 
     /// git 2.25's `restore` and every git's `rm` delete through a symlinked parent; the settle
