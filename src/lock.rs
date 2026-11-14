@@ -8,6 +8,11 @@ use std::fs::{File, OpenOptions, Permissions};
 use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::time::Duration;
+
+/// One second in all.
+const LOCK_RETRIES: u32 = 100;
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Held for as long as the value lives. The lock is an `flock` on the open file, so dropping
 /// the value releases it.
@@ -55,9 +60,21 @@ impl Lock {
             file.set_permissions(Permissions::from_mode(0o600))
                 .with_context(|| format!("cannot set the mode of {}", path.display()))?;
         }
+        // A killed run's forked child shares the open file description until it execs or exits,
+        // so the lock can outlive the run by a few milliseconds; wait that out before refusing.
+        let mut retries = LOCK_RETRIES;
         // Not `file.try_lock()`: on Rust 1.89 and later that resolves to std's inherent method,
         // which returns a different error type.
-        match FileExt::try_lock(&file) {
+        let locked = loop {
+            match FileExt::try_lock(&file) {
+                Err(TryLockError::WouldBlock) if retries > 0 => {
+                    retries = retries.saturating_sub(1);
+                    std::thread::sleep(LOCK_RETRY_DELAY);
+                }
+                other => break other,
+            }
+        };
+        match locked {
             Ok(()) => Ok(Self { file: Some(file) }),
             Err(TryLockError::WouldBlock) => {
                 bail!("another {} process is running", crate::name::bin())
@@ -117,6 +134,19 @@ mod tests {
         assert_eq!(err, "another dotman process is running");
         drop(first);
         assert!(acquire_after_release(&path, false).is_held());
+    }
+
+    #[test]
+    fn a_lock_released_while_the_next_run_waits_is_taken() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("state/lock");
+        let first = Lock::acquire(&path, false).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(first);
+        });
+        assert!(Lock::acquire(&path, false).unwrap().is_held());
+        release.join().unwrap();
     }
 
     #[test]
