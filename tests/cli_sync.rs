@@ -105,12 +105,33 @@ fn paste(env: &TestEnv, line: &str) -> Output {
     paste_with(env, &[], line)
 }
 
+/// `line` with its single-quoted spans left out: a `#` or `(` in a quoted name, such as git's copy
+/// `.x~HEAD (subject)`, survives a paste.
+fn unquoted(line: &str) -> String {
+    let (mut out, mut quoted, mut escaped) = (String::new(), false, false);
+    for c in line.chars() {
+        if quoted {
+            quoted = c != '\'';
+        } else if escaped {
+            escaped = false;
+            out.push(c);
+        } else if c == '\'' {
+            quoted = true;
+        } else {
+            escaped = c == '\\';
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Like [`paste`], with extra environment variables.
 // reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
 #[allow(clippy::expect_used)]
 fn paste_with(env: &TestEnv, vars: &[(&str, &str)], line: &str) -> Output {
+    let bare = unquoted(line);
     assert!(
-        !line.contains(" #") && !line.contains(" ("),
+        !bare.contains(" #") && !bare.contains(" ("),
         "not pasteable: {line}"
     );
     let bin = Path::new(env!("CARGO_BIN_EXE_dotman"))
@@ -3304,25 +3325,48 @@ fn run_git_steps(env: &TestEnv, err: &str, edit: impl FnOnce()) {
     }
 }
 
-/// The file git renamed `name` to at a stop, such as `.x~HEAD`, in the repo worktree.
+/// The names that hold a `~`, as git's copies such as `.x~HEAD` do, in the remote's tree and in
+/// `env`'s `$HOME`.
 // reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
 #[allow(clippy::expect_used)]
-fn renamed_copy(env: &TestEnv, name: &str) -> std::path::PathBuf {
-    let prefix = format!("{name}~");
-    fs::read_dir(env.repo())
-        .expect("read the repo")
-        .map(|entry| entry.expect("an entry").path())
-        .find(|path| {
-            path.file_name()
-                .is_some_and(|file| file.to_string_lossy().starts_with(&prefix))
+fn tilde_names(env: &TestEnv) -> Vec<String> {
+    let remote = env.remote_path().to_string_lossy().into_owned();
+    let tree = env.git(&["--git-dir", &remote, "ls-tree", "-r", "--name-only", "main"]);
+    let home: Vec<String> = fs::read_dir(env.home())
+        .expect("read $HOME")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
         })
-        .expect("git's renamed copy")
+        .collect();
+    tree.lines()
+        .map(str::to_owned)
+        .chain(home)
+        .filter(|name| name.contains('~'))
+        .collect()
+}
+
+/// The copy that step 2 of the git steps in `err` says holds `whose` version of `path`, quoted as
+/// printed.
+// reason: a shared helper, and clippy.toml exempts `expect` only inside `#[test]` functions.
+#[allow(clippy::expect_used)]
+fn printed_copy(err: &str, whose: &str, path: &str) -> String {
+    let edit = steps(err).get(1).cloned().unwrap_or_default();
+    let suffix = format!(" holds {whose} {path}");
+    edit.lines()
+        .find_map(|line| line.strip_prefix("Copy ")?.strip_suffix(&suffix))
+        .expect("step 2 names the copy")
+        .to_owned()
 }
 
 /// A file or a symlink pointing outside the repo here, against a directory in origin, is a shape
 /// dotman does not settle, even with a flag and beside a conflict it does settle: sync exits 4
-/// with git's steps, which name each path as it stands after the abort and, run as printed, end
-/// in a clean sync.
+/// with git's steps, which name each path as it stands after the abort and git's copy of this
+/// machine's version. Run as printed, after the edit of the file that clashes, they keep this
+/// machine's version, commit no copy, and end in a clean sync.
 #[test]
 fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
     let outside = TestEnv::new();
@@ -3344,29 +3388,84 @@ fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
         let err = exits(&b, 4, &["sync", "--keep-local"]);
         assert!(
             err.contains(&format!(
-                "conflicting paths:\n  .a\n  {name}\n{name} is {kind} here and a directory in origin/main, which dotman cannot settle.\nTo resolve the pull with git:\n"
+                "conflicting paths:\n  .a\n  {name}\n{name} is {kind} here and a directory in origin/main, which dotman cannot settle.\nThe pull puts one version of such a path aside as a copy, which step 2 names: "
             )),
             "{err}"
         );
-        let add = steps(&err).get(2).cloned().unwrap_or_default();
+        let copy = printed_copy(&err, "this machine's", name);
+        assert!(copy.starts_with(&format!("'{name}~")), "{err}");
+        let keep = steps(&err).get(2).cloned().unwrap_or_default();
         assert_eq!(
-            add,
-            format!("dotman git add -- .a {name}\ndotman git add -u")
+            keep,
+            format!(
+                "dotman git checkout --no-overlay REBASE_HEAD -- {name}\ndotman git rm -q -f -- {copy}\ndotman git add -- .a {name}\ndotman git add -u"
+            )
         );
         no_replay_left(&b);
         assert_eq!(b.read(".a"), b"from b\n");
 
         let repo = b.repo();
         run_git_steps(&b, &err, || {
-            // This machine's version of both: the directory goes, and git's copy takes its place.
             fs::write(repo.join(".a"), b"resolved\n").expect("resolve .a");
-            fs::remove_dir_all(repo.join(name)).expect("remove the directory");
-            fs::rename(renamed_copy(&b, name), repo.join(name)).expect("put the copy back");
         });
         no_replay_left(&b);
         assert_eq!(remote_file(&b, ".a"), "resolved\n");
         exits(&b, 0, &["sync"]);
         assert_eq!(b.read(".a"), b"resolved\n");
+        if kind == "a file" {
+            assert_eq!(remote_file(&b, name), "file\n");
+        } else {
+            assert_eq!(fs::read_link(b.home().join(name)).expect("link"), target);
+        }
+        assert_eq!(tilde_names(&b), Vec::<String>::new(), "{err}");
+    }
+}
+
+/// A symlink in origin against a directory here, and a submodule entry in origin against a file
+/// here, are shapes dotman does not settle. Each reason is printed once, and the git steps, run
+/// as printed with no edit, keep this machine's version, commit none of git's copies, and end in
+/// a clean sync.
+#[test]
+fn a_symlink_or_a_submodule_in_origin_exits_4_with_git_steps_that_work_as_printed() {
+    for shape in ["symlink", "submodule"] {
+        let (a, b) = pair(&[(".d/x", b"x\n", 0o644), (".a", b"a\n", 0o644)]);
+        let (path, edited, reason, copy_of) = if shape == "symlink" {
+            a.ok(&["git", "rm", "-rq", "--", ".d"]);
+            std::os::unix::fs::symlink("elsewhere", a.repo().join(".d")).expect("symlink");
+            a.ok(&["git", "add", "--", ".d"]);
+            (
+                ".d",
+                ".d/x",
+                ".d is a directory here and a symlink in origin/main, which dotman cannot settle.",
+                "origin/main's",
+            )
+        } else {
+            let head = a.git(&["-C", &repo_path(&a), "rev-parse", "HEAD"]);
+            a.ok(&["git", "rm", "-q", "--", ".a"]);
+            let entry = format!("160000,{},.a", head.trim());
+            a.ok(&["git", "update-index", "--add", "--cacheinfo", &entry]);
+            (
+                ".a",
+                ".a",
+                ".a is a file here and a submodule in origin/main, which dotman cannot settle.",
+                "this machine's",
+            )
+        };
+        a.ok(&["git", "commit", "-qm", shape]);
+        a.ok(&["git", "push", "-q", "origin", "HEAD:refs/heads/main"]);
+        b.write(edited, b"from b\n", 0o644);
+
+        let err = exits(&b, 4, &["sync", "--keep-local"]);
+        assert_eq!(err.matches(reason).count(), 1, "{err}");
+        assert!(!err.contains("git matched"), "{err}");
+        printed_copy(&err, copy_of, path);
+        no_replay_left(&b);
+        run_git_steps(&b, &err, || {});
+        no_replay_left(&b);
+        assert_eq!(remote_file(&b, edited), "from b\n", "{shape}");
+        exits(&b, 0, &["sync"]);
+        assert_eq!(b.read(edited), b"from b\n", "{shape}");
+        assert_eq!(tilde_names(&b), Vec::<String>::new(), "{shape}: {err}");
     }
 }
 

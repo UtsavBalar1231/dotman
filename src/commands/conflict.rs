@@ -291,8 +291,8 @@ struct Pull<'a> {
     host_copies: Vec<(String, String)>,
     /// `.dotman.toml` stopped with settings on every side.
     settings: bool,
-    /// Every stopped path so far, for the git steps.
-    seen: Vec<PathBuf>,
+    /// Every stop so far, one per path, for the git steps.
+    seen: Vec<Stopped>,
     saved: BTreeSet<PathBuf>,
     backups: Option<PathBuf>,
     temp: Option<TempDir>,
@@ -340,8 +340,8 @@ impl<'a> Pull<'a> {
         let mut questions = Vec::new();
         let mut settled = BTreeMap::new();
         for stop in stopped {
-            if !self.seen.contains(&stop.path) {
-                self.seen.push(stop.path.clone());
+            if !self.seen.iter().any(|seen| seen.path == stop.path) {
+                self.seen.push(stop.clone());
             }
             match self.classify(stop)? {
                 Class::Unmodelled(why) => unmodelled.push(why),
@@ -500,9 +500,11 @@ impl<'a> Pull<'a> {
         let staged = [&stop.base, &stop.ours, &stop.replayed]
             .into_iter()
             .flatten();
+        // A copy git made, such as `x~HEAD`, has the reason of the path it was made from.
         let committed = [&self.base, &self.mine, &self.theirs]
             .into_iter()
-            .filter_map(|tree| tree.get(path));
+            .flat_map(|tree| [tree.get(path), tree.get(&name)])
+            .flatten();
         if staged
             .chain(committed)
             .any(|entry| !MODES.contains(&entry.mode.as_str()))
@@ -568,10 +570,7 @@ impl<'a> Pull<'a> {
         if stands(path) {
             return Some(path.to_path_buf());
         }
-        let name = path.file_name()?.to_str()?;
-        let (stem, _) = name.split_once('~')?;
-        let stem = path.with_file_name(stem);
-        stands(&stem).then_some(stem)
+        stems(path).find(|stem| stands(stem))
     }
 
     fn config(&self, rev: Rev) -> Config {
@@ -1288,7 +1287,10 @@ impl<'a> Pull<'a> {
     /// `[modes]` entry or `[system]` table must follow its winner where git's merge would not;
     /// `Err` names a stopped side that does not parse.
     fn settings_merge(&self) -> Result<Option<Sides>, String> {
-        let decided_as_a_file = self.seen.iter().any(|seen| seen == Path::new(SETTINGS));
+        let decided_as_a_file = self
+            .seen
+            .iter()
+            .any(|seen| seen.path == Path::new(SETTINGS));
         if !self.settings && (self.winners.is_empty() || decided_as_a_file) {
             return Ok(None);
         }
@@ -1474,15 +1476,44 @@ impl<'a> Pull<'a> {
     }
 
     /// The git steps for a shape dotman does not settle. `git add` names every stopped path as it
-    /// stands after the abort. git's renamed copy of a path, such as `x~HEAD`, is named by the
-    /// commit and the backend that made it, and a later stop holds paths of its own, so `git add
-    /// -u` stages those however they were resolved.
+    /// stands after the abort. A copy git made of a path, such as `x~HEAD`, is named by the
+    /// commit being replayed, so the printed pull makes it under the name the stop gave it: step 3
+    /// keeps this machine's version under the path's name and removes the copy. A later stop
+    /// holds paths of its own, so `git add -u` stages those however they were resolved.
     fn report_unmodelled(&self, why: &[String]) {
         let bin = name::bin();
+        let theirs = format!("{REMOTE}/{}", self.branch);
         let mut listed: Vec<PathBuf> = Vec::new();
         let mut add: Vec<&PathBuf> = Vec::new();
-        for path in &self.seen {
-            let found = self.existing(path).unwrap_or_else(|| path.clone());
+        let mut edit = vec![format!(
+            "Edit the conflicting files under {}.",
+            self.ctx.paths.repo.display()
+        )];
+        let mut staging = Vec::new();
+        for stop in &self.seen {
+            let found = self
+                .existing(&stop.path)
+                .unwrap_or_else(|| stop.path.clone());
+            let whose = match (&stop.ours, &stop.replayed) {
+                _ if found == stop.path => None,
+                (None, Some(_)) => Some("this machine's".to_owned()),
+                (Some(_), None) => Some(format!("{theirs}'s")),
+                _ => None,
+            };
+            if let Some(whose) = whose {
+                if stop.ours.is_none() {
+                    staging.push(format!(
+                        "{bin} git checkout --no-overlay REBASE_HEAD -- {}",
+                        quoted(&[&found])
+                    ));
+                }
+                staging.push(format!("{bin} git rm -q -f -- {}", quoted(&[&stop.path])));
+                edit.push(format!(
+                    "Copy {} holds {whose} {}",
+                    quoted(&[&stop.path]),
+                    shown(&found)
+                ));
+            }
             if !listed.contains(&found) {
                 listed.push(found);
             }
@@ -1492,14 +1523,22 @@ impl<'a> Pull<'a> {
                 add.push(path);
             }
         }
-        let shown: Vec<&Path> = listed.iter().map(PathBuf::as_path).collect();
-        output::warning(&self.intro(shown.len()));
-        list_paths(&shown);
+        let paths: Vec<&Path> = listed.iter().map(PathBuf::as_path).collect();
+        output::warning(&self.intro(paths.len()));
+        list_paths(&paths);
+        let mut reasons: Vec<&String> = Vec::new();
         for why in why {
-            output::warning(&format!("{why}, which dotman cannot settle."));
+            if !reasons.contains(&why) {
+                reasons.push(why);
+                output::warning(&format!("{why}, which dotman cannot settle."));
+            }
+        }
+        if !staging.is_empty() {
+            output::warning(&format!(
+                "The pull puts one version of such a path aside as a copy, which step 2 names: step 3 keeps this machine's version under the path's name and removes {theirs}'s. To keep {theirs}'s instead, leave out that path's lines in step 3, put {theirs}'s version under the path's name in place of this machine's, and remove the copy."
+            ));
         }
         output::warning("To resolve the pull with git:");
-        let mut staging = Vec::new();
         if !add.is_empty() {
             staging.push(format!("{bin} git add -- {}", quoted(&add)));
         }
@@ -1509,10 +1548,7 @@ impl<'a> Pull<'a> {
                 "{bin} git pull --rebase {REMOTE} {}",
                 shell_words::quote(self.branch)
             )],
-            vec![format!(
-                "Edit the conflicting files under {}.",
-                self.ctx.paths.repo.display()
-            )],
+            edit,
             staging,
             vec![
                 format!("env GIT_EDITOR=true {bin} git rebase --continue"),

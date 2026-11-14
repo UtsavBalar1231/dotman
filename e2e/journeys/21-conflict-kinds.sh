@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # A pull that conflicts, one file of each kind (plain, {tmpl}, {age}, binary, symlink, an edit against
 # a removal in both directions), answered by --keep-local and by --take-repo, ending converged; then
-# the one shape dotman does not settle, a file against a directory, whose printed steps run as printed.
+# the one shape dotman does not settle, a file against a directory, resolved for origin's directory as
+# the report says, with the other printed steps run as printed.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
@@ -187,7 +188,9 @@ conflict_round --keep-local k
 conflict_round --take-repo t
 
 # A file against a directory is the one shape dotman does not settle. Even with a flag, and beside a
-# conflict it does settle, sync exits 4 and changes nothing; the steps it prints run as printed, with
+# conflict it does settle, sync exits 4 and changes nothing. Step 3 keeps this machine's file, and
+# the report says how to keep origin's directory instead, which b does here: it leaves out step 3's
+# lines for .shape and removes git's copy of its file. The other steps run as printed, with
 # GIT_EDITOR=false exported, and end in a clean sync.
 e2e_write a .shape/y $'y\n'
 e2e_write a .mix "$(edit_lines 2=A2)"$'\n'
@@ -211,15 +214,19 @@ after=$(
     e2e_manifest_dir "$(e2e_home b)"
 )
 e2e_check "an unmodelled stop changes nothing on b" test "$before" = "$after"
+e2e_err_has "holds this machine's .shape"
 mapfile -t steps < <(e2e_recipe)
-e2e_check "the report prints five commands" test "${#steps[@]}" = 5
+e2e_check "the report prints seven commands" test "${#steps[@]}" = 7
 E2E_PRINTED_ENV=(GIT_EDITOR=false)
 e2e_run_printed b "${steps[0]}" 1
-# The user's step 2: .mix with both edits, and the directory over git's copy of the file.
+# The user's step 2: .mix with both edits, and origin's directory kept over git's copy of the file.
 e2e_write_repo b .mix "$(edit_lines '2=A2 B2')"$'\n'
 rm -f -- "$repo"/.shape~*
 rm -f -- "$(e2e_home b)/.shape"
-for i in 1 2 3 4; do e2e_run_printed b "${steps[i]}"; done
+for cmd in "${steps[@]:1}"; do
+    [[ $cmd == *REBASE_HEAD* || $cmd == *" git rm "* ]] && continue
+    e2e_run_printed b "$cmd"
+done
 E2E_PRINTED_ENV=()
 e2e_check "no rebase is left" test ! -e "$repo/.git/rebase-merge" -a ! -e "$repo/.git/rebase-apply"
 e2e_dm_rc 0 a sync
