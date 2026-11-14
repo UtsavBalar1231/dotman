@@ -1,5 +1,5 @@
 //! The conflict flow's edges: its width on a narrow terminal, a path under a symlinked directory,
-//! a sync killed at each step of the replay, and a rebase started by hand.
+//! a sync killed while you decide or at each step of the replay, and a rebase started by hand.
 
 mod common;
 
@@ -344,6 +344,97 @@ fn a_sync_killed_just_before_the_branch_moves_recovers() {
 #[test]
 fn a_sync_killed_just_after_the_branch_moves_recovers() {
     killed_at("*' update-ref '*", false);
+}
+
+/// [`TestEnv::four_trees`] with the repo's `.git` left out but for its objects and refs, since an
+/// aborted pull rewrites the index, the reflogs and `ORIG_HEAD`; with the status in their place.
+fn outside_git(
+    env: &TestEnv,
+) -> (
+    Vec<std::collections::BTreeMap<String, common::Entry>>,
+    String,
+) {
+    let [home, mut repo, state, remote] = env.four_trees();
+    repo.retain(|path, _| {
+        !(path == ".git" || path.starts_with(".git/"))
+            || path.starts_with(".git/objects/")
+            || path.starts_with(".git/refs/")
+    });
+    let status = env.git(&["-C", &env.repo().to_string_lossy(), "status", "--porcelain"]);
+    (vec![home, repo, state, remote], status)
+}
+
+/// A sync killed while you decide, here by the editor `[e]` opens, leaves nothing half merged: no
+/// marker and no rebase, and `$HOME`, the repo, the state and the remote as the last unanswered
+/// run left them. The next sync reports the same conflict, and a flag then settles it.
+#[test]
+fn a_sync_killed_in_the_editor_leaves_nothing_half_merged() {
+    let (a, b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+    exits(&b, 4, &["sync"]);
+    let before = outside_git(&b);
+
+    // The editor's copy goes to the runtime dir, outside the trees compared.
+    let run = b.root().join("run");
+    fs::create_dir(&run).expect("runtime dir");
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("chmod");
+    let editor = b.root().join("editor");
+    fs::write(&editor, "#!/bin/sh\nkill -KILL \"$PPID\"\n").expect("write the editor");
+    fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let (editor, run) = (editor.to_string_lossy(), run.to_string_lossy());
+    let vars = [
+        PLAIN.as_slice(),
+        &[("VISUAL", &*editor), ("XDG_RUNTIME_DIR", &*run)],
+    ]
+    .concat();
+    let seen = common::in_a_terminal(&b, &vars, &["sync"], b"e\n").expect("script(1) runs");
+    assert!(seen.contains(".a [k] keep mine"), "{seen}");
+    // Killed in the editor: no refusal, no stop report and nothing saved was printed.
+    for after in [
+        "nothing was taken",
+        "conflicting paths:",
+        "saved this machine's",
+    ] {
+        assert!(!seen.contains(after), "{after}: {seen}");
+    }
+
+    no_replay_left(&b);
+    assert_eq!(outside_git(&b), before, "{seen}");
+    let err = exits(&b, 4, &["sync"]);
+    assert!(err.contains("conflicting paths:\n  .a\n"), "{err}");
+    exits(&b, 0, &["sync", "--keep-local"]);
+    exits(&a, 0, &["sync"]);
+    common::assert_converged(&a, &b);
+}
+
+/// This machine's version of a file that loses is saved before the replay starts: a sync killed as
+/// the replay's rebase begins has already saved it, and the copy outlasts the recovery.
+#[test]
+fn the_version_that_loses_is_saved_before_the_replay_starts() {
+    let (a, mut b) = pair(&[(".a", b"base\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+    let (pre, post) = kill_once(&b, "*' rebase --onto '*", true);
+    wrap_git(&mut b, &pre, &post);
+    let out = b.run(&["sync", "--take-repo"]);
+    assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(b.repo().join(".git/dotman-pull").exists(), "{err}");
+    let saved = err
+        .lines()
+        .find_map(|line| line.strip_prefix("saved this machine's .a to "))
+        .map(std::path::PathBuf::from)
+        .expect("a saved line");
+    assert!(saved.ends_with(".dotman/repo/.a"), "{}", saved.display());
+    assert_eq!(fs::read(&saved).expect("the saved copy"), b"from b\n");
+
+    exits(&b, 0, &["sync", "--take-repo"]);
+    no_replay_left(&b);
+    assert_eq!(b.read(".a"), b"from a\n");
+    assert_eq!(fs::read(&saved).expect("the saved copy"), b"from b\n");
 }
 
 /// A rebase the user started by hand has no marker: every command refuses it as before, and
