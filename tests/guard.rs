@@ -500,6 +500,34 @@ fn a_rebase_the_marker_does_not_explain_is_refused_with_steps_that_lead_to_a_syn
     assert_eq!(stderr_of(&env, &["status"]).0, Some(0));
 }
 
+/// A marker that does not parse names no branch; recovery refuses, and its two printed steps, run
+/// as printed, end in a clean status.
+#[test]
+fn a_marker_that_does_not_parse_is_refused_with_steps_that_work() {
+    let env = committed();
+    let marker = env.repo().join(".git/dotman-pull");
+    fs::write(&marker, b"not a marker\n").expect("write the marker");
+    let (code, err) = stderr_of(&env, &["sync"]);
+    assert_eq!(code, Some(4), "{err}");
+    assert!(err.contains("cannot be read"), "{err}");
+    let steps = numbered_steps(&err);
+    assert_eq!(
+        steps,
+        [format!("rm {}", marker.display()), "dotman sync".to_owned()],
+        "{err}"
+    );
+    for step in &steps {
+        let out = common::paste(&env, step);
+        assert!(
+            out.status.success(),
+            "{step}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(!marker.exists());
+    assert_eq!(stderr_of(&env, &["status"]).0, Some(0));
+}
+
 /// A repo path that is a linked worktree, whose `.git` is a file naming the real git dir, is
 /// refused by every subcommand with what dotman needs instead of a raw "Not a directory".
 #[test]

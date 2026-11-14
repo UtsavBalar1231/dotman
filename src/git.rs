@@ -3818,7 +3818,10 @@ mod tests {
         change(&a, base, "base");
         a.set_remote_url("origin", utf8(&remote)).expect("remote");
         a.push("origin", "main").expect("push");
-        let b = sb.git("b").with_env([("GIT_CONFIG_PARAMETERS", backend)]);
+        // An editor that fails: only the replay's own `GIT_EDITOR=true` lets `--continue` commit.
+        let b = sb
+            .git("b")
+            .with_env([("GIT_CONFIG_PARAMETERS", backend), ("GIT_EDITOR", "false")]);
         b.clone_from(utf8(a.repo())).expect("clone");
         change(&a, theirs, "theirs");
         a.push("origin", "main").expect("push");
@@ -4362,6 +4365,38 @@ mod tests {
             );
             assert_eq!(blob_at(b, "HEAD", "a.txt"), lines(&[(2, "settled")]));
         }
+    }
+
+    /// `rebase.updateRefs=true` would move a second branch at the local tip along with the first
+    /// pull's rebase.
+    #[test]
+    fn the_first_pull_moves_no_other_branch() {
+        let sb = Sandbox::new();
+        let config = sb.dir.path().join("home/.gitconfig");
+        let mut text = fs::read_to_string(&config).expect("gitconfig");
+        text.push_str("[rebase]\n\tupdateRefs = true\n\tbackend = merge\n");
+        fs::write(&config, text).expect("gitconfig");
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        commit_file(&a, "base", b"b\n", "base");
+        a.set_remote_url("origin", utf8(&remote)).expect("remote");
+        a.push("origin", "main").expect("push");
+        let b = sb.git("b");
+        b.clone_from(utf8(a.repo())).expect("clone");
+        commit_file(&a, "theirs", b"t\n", "theirs");
+        a.push("origin", "main").expect("push");
+        let mine = commit_file(&b, "mine", b"m\n", "mine");
+        sb.raw_ok(b.repo(), &["branch", "keep"]);
+        assert_eq!(
+            b.pull_rebase("origin", "main").expect("pull"),
+            PullOutcome::Ok
+        );
+        assert_ne!(b.head().expect("head"), Some(mine.clone()));
+        assert_eq!(
+            b.resolve_commit("refs/heads/keep").expect("keep"),
+            Some(mine)
+        );
     }
 
     /// git 2.25's `restore` and every git's `rm` delete through a symlinked parent; the settle
