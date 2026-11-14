@@ -4361,7 +4361,7 @@ fn an_edit_taken_before_a_replay_that_fails_is_saved() {
     let (_a, mut b) = clash();
     wrap_git(
         &mut b,
-        "case \" $* \" in *' rebase --merge --onto '*) exit 1 ;; esac",
+        "case \" $* \" in *' rebase --merge -s '*' --onto '*) exit 1 ;; esac",
     );
     let editor = editor(&b, "printf 'edited here\\n' > \"$1\"");
     let seen = sync_in_a_terminal(&b, &[("VISUAL", editor.as_str())], b"e\n");

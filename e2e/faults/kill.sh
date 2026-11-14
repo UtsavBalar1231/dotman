@@ -457,7 +457,7 @@ s6
             when=${kill##*-}
             case ${kill%-*} in
                 detach) pattern="*' checkout '*' --detach'*" ;;
-                rebase) pattern="*' rebase --merge --onto '*" ;;
+                rebase) pattern="*' rebase --merge -s '*' --onto '*" ;;
                 continue) pattern="*' rebase --continue'*|*' rebase --skip'*" ;;
                 correct) pattern="*' commit '*' resolve '*" ;;
                 update-ref) pattern="*' update-ref '*" ;;

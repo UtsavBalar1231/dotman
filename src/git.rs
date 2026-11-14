@@ -1839,8 +1839,7 @@ impl Git {
     /// Runs the rebase to its end, settling each stop. `Some` when a stop has paths with no
     /// decision, which leaves the rebase stopped there.
     fn finish_rebase(&self, marker: &Marker, fork: &str) -> Result<Option<Vec<Stopped>>> {
-        // `--merge`: see `Git::pull_backend` for why never the apply backend.
-        let mut said = self.rebase(&["--merge", "--onto", &marker.onto, fork])?;
+        let mut said = self.start_rebase(marker, fork)?;
         let mut last = None;
         while self.rebase_dir().is_some() {
             let at = (self.head()?, self.resolve_commit("REBASE_HEAD")?);
@@ -1892,6 +1891,17 @@ impl Git {
             .success();
         ensure!(ended, "the rebase did not finish: {said}");
         Ok(None)
+    }
+
+    /// The replay's rebase of the commits after `fork` onto the marker's commit. `--merge`: see
+    /// [`Git::pull_backend`] for why never the apply backend. The strategy is named, as for the
+    /// first pull, since without one the sequencer takes the user's `pull.twohead`, which could
+    /// drop the replayed changes or run a `git-merge-*` program from `PATH`.
+    fn start_rebase(&self, marker: &Marker, fork: &str) -> Result<String> {
+        let mut args = vec!["--merge"];
+        args.extend_from_slice(self.pull_backend()?);
+        args.extend(["--onto", &marker.onto, fork]);
+        self.rebase(&args)
     }
 
     /// `git rebase` with the pins and `GIT_EDITOR=true`; returns what git printed, whether or not
@@ -4709,8 +4719,7 @@ mod tests {
             let (marker, fork) = b
                 .start_replay("origin", "main", &d.onto, &decisions)
                 .expect("start");
-            b.rebase(&["--merge", "--onto", &marker.onto, &fork])
-                .expect("rebase");
+            b.start_rebase(&marker, &fork).expect("rebase");
             let dir = b.rebase_dir().expect("stopped");
             match onto {
                 Some(other) => fs::write(dir.join("onto"), format!("{other}\n")).expect("onto"),
@@ -4770,8 +4779,7 @@ mod tests {
                     .start_replay("origin", "main", &d.onto, &decisions)
                     .expect("start");
                 if kill.starts_with("stop") {
-                    b.rebase(&["--merge", "--onto", &marker.onto, &fork])
-                        .expect("rebase");
+                    b.start_rebase(&marker, &fork).expect("rebase");
                     assert!(b.rebase_dir().is_some(), "{backend} {kill}");
                     if kill == "stop-settled" {
                         let at = decide(vec![("a.txt", set(b, &lines(&[(2, "settled")])))]);
@@ -4844,8 +4852,7 @@ mod tests {
             let (marker, fork) = b
                 .start_replay("origin", "main", &d.onto, &decisions)
                 .expect("start");
-            b.rebase(&["--merge", "--onto", &marker.onto, &fork])
-                .expect("rebase");
+            b.start_rebase(&marker, &fork).expect("rebase");
             let staged = d.sb.raw_ok(b.repo(), &["diff", "--cached", "--name-only"]);
             assert!(staged.contains("b.txt"), "{backend}: {staged}");
             let recovery = b.recover_pull().expect("recover");
@@ -4938,6 +4945,51 @@ mod tests {
                 "{backend}: the second branch did not move"
             );
             assert_eq!(blob_at(b, "HEAD", "a.txt"), lines(&[(2, "settled")]));
+        }
+    }
+
+    /// git's rebase takes the user's `pull.twohead` as its strategy when none is named: `ours`
+    /// would drop this machine's clean edit of `b.txt`, and another name runs `git-merge-<name>`
+    /// from `PATH`. The replay ends as with no such setting, and the program never runs.
+    #[test]
+    fn the_user_s_pull_twohead_is_not_the_replay_s_strategy() {
+        for twohead in ["ours", "evil"] {
+            let config = format!("'pull.twohead={twohead}'");
+            let d = diverged(
+                &config,
+                &[("a.txt", Some(&lines(&[]))), ("b.txt", Some(b"b\n"))],
+                &[("a.txt", Some(&lines(&[(2, "origin2")])))],
+                &[&[
+                    ("a.txt", Some(&lines(&[(2, "local2")]))),
+                    ("b.txt", Some(b"b local\n")),
+                ]],
+            );
+            let stubs = d.sb.dir.path().join("stubs");
+            fs::create_dir(&stubs).expect("mkdir");
+            let ran = d.sb.dir.path().join("ran");
+            let stub = stubs.join(format!("git-merge-{twohead}"));
+            fs::write(
+                &stub,
+                format!("#!/bin/sh\n: > '{}'\nexit 2\n", ran.display()),
+            )
+            .expect("write the stub");
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let path =
+                std::env::join_paths(std::iter::once(stubs).chain(std::env::split_paths(&path)))
+                    .expect("PATH");
+            let b = Git::new(d.b.repo(), "test").with_env(d.sb.env()).with_env([
+                ("GIT_CONFIG_PARAMETERS", OsString::from(config)),
+                ("PATH", path),
+            ]);
+            let decisions = decide(vec![("a.txt", set(&b, &lines(&[(2, "settled")])))]);
+            let replayed = b
+                .replay("origin", "main", &d.onto, &decisions, "beta")
+                .expect("replay");
+            assert_eq!(replayed, Replayed::Done, "{twohead}");
+            assert_eq!(blob_at(&b, "HEAD", "a.txt"), lines(&[(2, "settled")]));
+            assert_eq!(blob_at(&b, "HEAD", "b.txt"), b"b local\n", "{twohead}");
+            assert!(!ran.exists(), "{twohead}: git-merge-{twohead} ran");
         }
     }
 
