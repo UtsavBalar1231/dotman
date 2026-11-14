@@ -888,16 +888,20 @@ impl<'a> Pull<'a> {
             self.decrypt(&mine, "mine.age")?,
             self.decrypt(&theirs, "theirs.age")?,
         ];
-        if sides.iter().any(|side| side.contains(&0)) {
-            return Ok(Err(
-                "the decrypted file is not text, so it cannot be edited".to_owned(),
-            ));
-        }
         // A base this machine cannot decrypt, encrypted to recipients since dropped, merges as
         // an empty one: the whole file is then one clash.
         let base_bytes = base.as_ref().map_or_else(Vec::new, |entry| {
             self.decrypt(entry, "base.age").unwrap_or_default()
         });
+        if sides
+            .iter()
+            .chain([&base_bytes])
+            .any(|text| text.contains(&0))
+        {
+            return Ok(Err(
+                "the decrypted file is not text, so it cannot be edited".to_owned(),
+            ));
+        }
         let recipients = match self.recipients() {
             Ok(recipients) => recipients,
             Err(why) => return Ok(Err(why)),
