@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>@font-face{font-family:"Departure Mono";src:url(fonts/departure-mono.woff) format("woff")}
+html,body{margin:0;background:#e1d7c9}canvas{display:block}</style>
+<canvas id="c"></canvas>
+<script>
+// A title card ({"card": "title", "text"}) or the end card ({"card": "end"}), with the prepare/renderFrame
+// contract render.mjs drives. Sizes are multiples of Departure Mono's 11-pixel em, on whole-pixel baselines;
+// its caps are 8/11 em and its descenders 2/11.
+const spec = window.CLIP_SPEC;
+const FONT = '"Departure Mono", monospace';
+const BG = '#e1d7c9', INK = '#000000';
+const MAX = spec.width - 2 * 175;
+const advance = size => size * 7 / 11;
+
+// Words wrap onto lines that fit MAX, and the block's ink, caps to descenders, is centred on the frame.
+function layout(text, size, pitch) {
+  const lines = [];
+  for (const word of text.split(' ')) {
+    const last = lines.at(-1);
+    if (last && (last.length + 1 + word.length) * advance(size) <= MAX) lines[lines.length - 1] += ' ' + word;
+    else lines.push(word);
+  }
+  const ink = (lines.length - 1) * pitch + size * 10 / 11;
+  const first = Math.round(spec.height / 2 - ink / 2 + size * 8 / 11);
+  return lines.map((line, i) => ({ line, size, baseline: first + i * pitch }));
+}
+
+const TITLE = 121, URL_SIZE = 44;
+const rows = spec.card === 'end'
+  ? [{ line: 'dotman', size: TITLE, baseline: 530 }, { line: 'github.com/UtsavBalar1231/dotman', size: URL_SIZE, baseline: 630 }]
+  : layout(spec.text, TITLE, 132);
+// Title words fade in one after another; the end card arrives whole, by the dissolve into it.
+const words = rows.flatMap(({ line, size, baseline }) => {
+  const x0 = Math.round(spec.width / 2 - line.length * advance(size) / 2);
+  let col = 0;
+  return line.split(' ').map(word => {
+    const w = { word, size, baseline, x: x0 + col * advance(size) };
+    col += word.length + 1;
+    return w;
+  });
+});
+
+const canvas = document.getElementById('c');
+canvas.width = spec.width; canvas.height = spec.height;
+const g = canvas.getContext('2d');
+window.__canvas = canvas;
+window.__total = spec.duration ?? (spec.card === 'end' ? 4.4 : 3);
+
+const easeOut = k => 1 - (1 - k) ** 2;
+
+window.prepare = async () => {};
+window.renderFrame = t => {
+  g.fillStyle = BG; g.fillRect(0, 0, spec.width, spec.height);
+  g.fillStyle = INK;
+  words.forEach(({ word, size, baseline, x }, i) => {
+    g.globalAlpha = spec.card === 'end' ? 1 : easeOut(Math.min(1, Math.max(0, (t - 0.1 - i * 0.13) / 0.4)));
+    g.font = `${size}px ${FONT}`;
+    g.fillText(word, x, baseline);
+  });
+  g.globalAlpha = 1;
+};
+
+(async () => {
+  try {
+    await Promise.all([...new Set(words.map(w => w.size))].map(size => document.fonts.load(`${size}px ${FONT}`)));
+    window.__ready = true;
+  } catch (e) { window.__bootFailed = String(e); }
+})();
+</script>

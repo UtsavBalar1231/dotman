@@ -1,25 +1,31 @@
 <!doctype html>
 <meta charset="utf-8">
 <style>@font-face{font-family:"Departure Mono";src:url(fonts/departure-mono.woff) format("woff")}
-html,body{margin:0;background:#11111b}canvas{display:block}</style>
+html,body{margin:0;background:#faf8f4}canvas{display:block}</style>
 <canvas id="c"></canvas>
 <script>
-// Replays an asciicast v2 recording onto a canvas, with the same prepare/renderFrame contract as
-// huashu's clip.html so render.mjs drives both. Only the escape sequences dotman, git and bash
-// print are interpreted: SGR, erase, cursor moves, cursor visibility; OSC strings are dropped.
-// Departure Mono is a pixel font on an 11-pixel em: sizes that are multiples of 11 on integer
-// baselines keep its pixels sharp, and bold is the glyph drawn again one pixel to the right,
-// because the font has one weight and a synthesized bold smears the grid.
+// Replays an asciicast v2 recording in a terminal window on a flat canvas, with the prepare/renderFrame
+// contract render.mjs drives. Only the escape sequences dotman, git and bash print are interpreted: SGR,
+// erase, cursor moves, cursor visibility; OSC strings are dropped.
+// Departure Mono is a pixel font on an 11-pixel em: sizes that are multiples of 11 on integer baselines
+// keep its pixels sharp, and bold is the glyph drawn again one pixel to the right, because the font has
+// one weight and a synthesized bold smears the grid.
 const spec = window.CLIP_SPEC;
 const lines = spec.cast.trim().split('\n');
 const header = JSON.parse(lines[0]);
 const events = lines.slice(1).map(l => JSON.parse(l)).filter(e => e[1] === 'o');
 const COLS = header.width, ROWS = header.height;
 const FONT = '"Departure Mono", monospace';
-const SIZE = 22, LINE = 30, PAD = 28, BAR = 46;
-const BG = '#1e1e2e', FG = '#cdd6f4';
-const PALETTE = ['#45475a', '#f38ba8', '#a6e3a1', '#f9e2af', '#89b4fa', '#f5c2e7', '#94e2d5', '#bac2de',
-  '#585b70', '#f38ba8', '#a6e3a1', '#f9e2af', '#89b4fa', '#f5c2e7', '#94e2d5', '#a6adc8'];
+const W = spec.window, SIZE = W.size, ADV = W.advance, PITCH = W.pitch;
+const TX = W.x + W.inset;
+// Caps are 8/11 em and descenders 2/11, so this centres the ink in the row.
+const BASE = (PITCH + SIZE * 6 / 11) / 2;
+const BG = '#161616', FG = '#ececec', DIM = '#939393';
+const PALETTE = [DIM, '#e5534b', '#45ae5c', '#d8a640', '#6ea8fe', '#c58af9', '#56c2c9', FG];
+// A close-up frames the window as the reference close-ups do: its left edge at CLOSE_EDGE, the key row at
+// CLOSE_ROW, its top and title bar cut off, and its bottom edge no higher than CLOSE_BOTTOM. Its scale must turn the 3 px font
+// pixels at 33 px into whole pixels: 4/3 or 2.
+const CLOSE_EDGE = 175, CLOSE_ROW = 480, CLOSE_BOTTOM = 950;
 
 const canvas = document.getElementById('c');
 canvas.width = spec.width; canvas.height = spec.height;
@@ -27,7 +33,7 @@ const g = canvas.getContext('2d');
 window.__canvas = canvas;
 
 function xterm256(n) {
-  if (n < 16) return PALETTE[n];
+  if (n < 16) return PALETTE[n % 8];
   if (n >= 232) { const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`; }
   n -= 16;
   const c = [Math.floor(n / 36), Math.floor(n / 6) % 6, n % 6].map(v => (v ? 55 + v * 40 : 0));
@@ -39,9 +45,10 @@ class Screen {
   reset() {
     this.grid = Array.from({ length: ROWS }, () => this.blankRow());
     this.r = 0; this.c = 0; this.attr = {}; this.cursor = true;
-    this.mode = 'text'; this.params = ''; this.next = 0;
+    this.mode = 'text'; this.params = ''; this.next = 0; this.lastOut = 0; this.main = null;
   }
   blankRow() { return Array.from({ length: COLS }, () => ({ ch: ' ', a: {} })); }
+  text(r) { return this.grid[r].map(cell => cell.ch).join(''); }
   newline() {
     if (this.r === ROWS - 1) { this.grid.shift(); this.grid.push(this.blankRow()); } else this.r++;
   }
@@ -62,7 +69,7 @@ class Screen {
       else if (n === 7) a.inverse = true;
       else if (n === 27) a.inverse = false;
       else if (n >= 30 && n <= 37) a.fg = PALETTE[n - 30];
-      else if (n >= 90 && n <= 97) a.fg = PALETTE[n - 82];
+      else if (n >= 90 && n <= 97) a.fg = PALETTE[n - 90];
       else if (n === 39) delete a.fg;
       else if (n >= 40 && n <= 47) a.bg = PALETTE[n - 40];
       else if (n === 49) delete a.bg;
@@ -83,14 +90,28 @@ class Screen {
         for (let i = from; i < Math.min(to, COLS); i++) row[i] = { ch: ' ', a: {} };
         break;
       }
-      case 'J': if ((p[0] || 0) === 2) { this.grid = Array.from({ length: ROWS }, () => this.blankRow()); } break;
+      case 'J':
+        if ((p[0] || 0) === 2) this.grid = Array.from({ length: ROWS }, () => this.blankRow());
+        else if (!p[0]) {
+          for (let i = this.c; i < COLS; i++) this.grid[this.r][i] = { ch: ' ', a: {} };
+          for (let r = this.r + 1; r < ROWS; r++) this.grid[r] = this.blankRow();
+        }
+        break;
       case 'A': this.r = Math.max(0, this.r - n); break;
       case 'B': this.r = Math.min(ROWS - 1, this.r + n); break;
       case 'C': this.c = Math.min(COLS - 1, this.c + n); break;
       case 'D': this.c = Math.max(0, this.c - n); break;
       case 'G': this.c = Math.min(COLS - 1, n - 1); break;
       case 'H': this.r = Math.min(ROWS - 1, (p[0] || 1) - 1); this.c = Math.min(COLS - 1, (p[1] || 1) - 1); break;
-      case 'h': case 'l': if (priv && p[0] === 25) this.cursor = final === 'h'; break;
+      case 'h': case 'l':
+        if (priv && p[0] === 25) this.cursor = final === 'h';
+        // The alternate screen an editor draws on; leaving it restores the shell's screen and cursor.
+        if (priv && p[0] === 1049 && final === 'h') {
+          this.main = { grid: this.grid, r: this.r, c: this.c };
+          this.grid = Array.from({ length: ROWS }, () => this.blankRow());
+        }
+        if (priv && p[0] === 1049 && final === 'l' && this.main) { Object.assign(this, this.main); this.main = null; }
+        break;
     }
   }
   feed(text) {
@@ -114,62 +135,82 @@ class Screen {
   }
   until(t) {
     if (this.next > 0 && events[this.next - 1][0] > t) this.reset();
-    while (this.next < events.length && events[this.next][0] <= t) this.feed(events[this.next++][2]);
+    while (this.next < events.length && events[this.next][0] <= t) {
+      const [at, , text] = events[this.next++];
+      this.feed(text);
+      if (text) this.lastOut = at;
+    }
   }
 }
 
-const screen = new Screen();
-let cw = 0;
+// The close-up is a hard cut, `after` seconds past the moment its pattern first shows on screen, and holds `hold`.
+function closeup(c) {
+  const re = new RegExp(c.match), s = new Screen();
+  for (const [t, , text] of events) {
+    s.feed(text);
+    for (let r = 0; r < ROWS; r++) {
+      if (!re.test(s.text(r))) continue;
+      const k = c.scale ?? 2, at = t + (c.after ?? 0.5);
+      const row = CLOSE_ROW - k * (W.top + r * PITCH + PITCH / 2);
+      const dx = Math.round(CLOSE_EDGE - k * W.x), dy = Math.round(Math.min(-k * (W.top - 10), Math.max(row, CLOSE_BOTTOM - k * (W.y + W.h))));
+      return { at, end: at + (c.hold ?? 3), k, dx, dy };
+    }
+  }
+  throw new Error(`the close-up pattern ${c.match} never appears in the cast`);
+}
+
+const camera = t => (close && t >= close.at ? [close.k, close.dx, close.dy] : [1, 0, 0]);
 
 function roundRect(x, y, w, h, r) {
   g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
   g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
 }
 
+const screen = new Screen();
+let close = null;
+
 window.prepare = async () => {};
 window.renderFrame = t => {
   screen.until(t);
-  const W = COLS * cw + PAD * 2, H = ROWS * LINE + PAD * 2 + BAR;
-  const x0 = Math.round((spec.width - W) / 2), y0 = Math.round((spec.height - H) / 2);
-  g.fillStyle = '#11111b'; g.fillRect(0, 0, spec.width, spec.height);
-  g.save(); g.shadowColor = 'rgba(0,0,0,0.55)'; g.shadowBlur = 48; g.shadowOffsetY = 18;
-  roundRect(x0, y0, W, H, 14); g.fillStyle = BG; g.fill(); g.restore();
-  roundRect(x0, y0, W, BAR, 14); g.fillStyle = '#181825'; g.fill(); g.fillRect(x0, y0 + BAR - 14, W, 14);
-  ['#f38ba8', '#f9e2af', '#a6e3a1'].forEach((col, i) => {
-    g.beginPath(); g.arc(x0 + 26 + i * 24, y0 + BAR / 2, 7, 0, Math.PI * 2); g.fillStyle = col; g.fill();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.fillStyle = '#faf8f4'; g.fillRect(0, 0, spec.width, spec.height);
+  const [s, dx, dy] = camera(t);
+  g.setTransform(s, 0, 0, s, dx, dy);
+  g.save(); g.shadowColor = 'rgba(0,0,0,0.26)'; g.shadowBlur = 42 * s; g.shadowOffsetY = 16 * s;
+  roundRect(W.x, W.y, W.w, W.h, 10); g.fillStyle = BG; g.fill(); g.restore();
+  [[195, '#fb534e'], [224, '#fdb22b'], [254, '#25bf3a']].forEach(([x, col]) => {
+    g.beginPath(); g.arc(x, 95, 9, 0, Math.PI * 2); g.fillStyle = col; g.fill();
   });
-  g.font = `${SIZE}px ${FONT}`; g.fillStyle = '#7f849c'; g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.fillText(spec.title || '', x0 + W / 2, y0 + BAR / 2);
-  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
-  const tx = x0 + PAD, ty = y0 + BAR + PAD;
+  const title = spec.title || '';
+  g.font = `22px ${FONT}`; g.fillStyle = '#8a8a8a';
+  g.fillText(title, Math.round(W.x + W.w / 2 - title.length * 7), 103);
+  g.font = `${SIZE}px ${FONT}`;
   for (let r = 0; r < ROWS; r++) {
-    const row = screen.grid[r], base = ty + r * LINE;
+    const row = screen.grid[r], top = W.top + r * PITCH;
     for (let c = 0; c < COLS; c++) {
       const { ch, a } = row[c];
-      let fg = a.fg || FG, bg = a.bg;
+      let fg = a.fg || (a.dim ? DIM : FG), bg = a.bg;
       if (a.inverse) [fg, bg] = [bg || BG, fg];
-      if (bg) { g.fillStyle = bg; g.fillRect(tx + c * cw, base, cw + 0.5, LINE); }
+      if (bg) { g.fillStyle = bg; g.fillRect(TX + c * ADV, top, ADV, PITCH); }
       if (ch === ' ') continue;
-      g.font = `${SIZE}px ${FONT}`;
-      g.globalAlpha = a.dim ? 0.55 : 1;
       g.fillStyle = fg;
-      g.fillText(ch, tx + c * cw, base + SIZE);
-      if (a.bold) g.fillText(ch, tx + c * cw + 1, base + SIZE);
-      g.globalAlpha = 1;
+      g.fillText(ch, TX + c * ADV, top + BASE);
+      if (a.bold) g.fillText(ch, TX + c * ADV + 1 / s, top + BASE);
     }
   }
-  if (screen.cursor && Math.floor(t / 0.53) % 2 === 0) {
+  if (screen.cursor && Math.floor((t - screen.lastOut) / 0.53) % 2 === 0) {
+    const h = SIZE * 10 / 11;
     g.fillStyle = FG; g.globalAlpha = 0.8;
-    g.fillRect(tx + Math.min(screen.c, COLS - 1) * cw, ty + screen.r * LINE + 3, cw, LINE - 6);
+    g.fillRect(TX + Math.min(screen.c, COLS - 1) * ADV, W.top + screen.r * PITCH + (PITCH - h) / 2, ADV, h);
     g.globalAlpha = 1;
   }
 };
 
 (async () => {
   try {
-    await document.fonts.load(`${SIZE}px ${FONT}`);
-    g.font = `${SIZE}px ${FONT}`;
-    cw = g.measureText('M').width;
+    await Promise.all([document.fonts.load(`${SIZE}px ${FONT}`), document.fonts.load(`22px ${FONT}`)]);
+    close = spec.closeup ? closeup(spec.closeup) : null;
+    window.__total = close ? close.end : events.at(-1)[0];
     window.__ready = true;
   } catch (e) { window.__bootFailed = String(e); }
 })();

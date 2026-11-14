@@ -1,11 +1,13 @@
 """Records a scene of the real dotman binary, run in a demo machine through a pty, as an asciicast v2 file.
 
-A scene is {"on": machine, "cols", "rows", "steps"}; each step is one of
+A scene is {"on": machine, "cols", "rows", "seed", "steps"}; each step is one of
   {"hidden": cmd}                    run on the machine, not recorded; fails the scene if it fails
   {"say": text}                      type a comment line at the prompt
   {"run": cmd, "answers": [[seen, typed], ...], "status": 0}
                                      type cmd, run it, type each answer once `seen` has been printed
   {"wait": seconds}                  hold the screen
+
+Keys are typed at a human cadence drawn from `seed`, so the same scene types the same way every time.
 
 usage: record.py SCENE.json OUT.cast CONTAINER
 """
@@ -14,6 +16,7 @@ import codecs
 import fcntl
 import json
 import os
+import random
 import select
 import struct
 import subprocess
@@ -21,8 +24,8 @@ import sys
 import termios
 import time
 
-TYPE_DELAY = 0.045
-MAX_GAP = 0.6
+MAX_GAP = 0.5
+HOLD = 1.2
 IDLE_LIMIT = 15
 PROMPT = "\x1b[1;32malex@{host}\x1b[0m:\x1b[1;34m~\x1b[0m$ "
 
@@ -36,9 +39,27 @@ def docker_exec(container, cmd, tty):
             "-e", "TERM=xterm-256color", container, "bash", "-c", cmd]
 
 
+class Typist:
+    def __init__(self, seed):
+        self.rng, self.prev = random.Random(seed), " "
+
+    def delay(self, ch):
+        u = self.rng.uniform
+        if ch in "\r\n":
+            d = u(0.35, 0.5)
+        elif self.prev in " /":
+            d = u(0.08, 0.12)
+        elif self.prev.isalnum() and ch.isalnum():
+            d = u(0.04, 0.056)
+        else:
+            d = u(0.045, 0.07)
+        self.prev = ch
+        return d
+
+
 class Cast:
-    def __init__(self, cols, rows):
-        self.events, self.t = [], 0.0
+    def __init__(self, cols, rows, typist):
+        self.events, self.t, self.typist = [], 0.0, typist
         self.header = {"version": 2, "width": cols, "height": rows, "env": {"TERM": "xterm-256color"}}
 
     def out(self, text, gap=0.0):
@@ -47,7 +68,7 @@ class Cast:
 
     def type(self, text):
         for ch in text:
-            self.out(ch, TYPE_DELAY)
+            self.out(ch, self.typist.delay(ch))
 
     def save(self, path):
         with open(path, "w") as f:
@@ -67,9 +88,11 @@ def run(cast, container, cmd, answers, cols, rows):
     os.close(slave)
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     pending, seen, last = list(answers), "", time.monotonic()
+    keys, next_key = [], 0.0
     try:
         while True:
-            ready, _, _ = select.select([master], [], [], 0.05)
+            wait = min(0.05, max(0.0, next_key - time.monotonic())) if keys else 0.05
+            ready, _, _ = select.select([master], [], [], wait)
             if ready:
                 try:
                     data = os.read(master, 4096)
@@ -84,13 +107,15 @@ def run(cast, container, cmd, answers, cols, rows):
             if time.monotonic() - last > IDLE_LIMIT:
                 raise SceneError(f"`{cmd}` printed nothing for {IDLE_LIMIT}s; it may wait on a prompt "
                                  f"with no answer. Last output: {seen[-300:]!r}")
-            if pending and pending[0][0] in seen:
+            # Keys go in one at a time between reads, so an editor's echo is recorded as it is typed.
+            if not keys and pending and pending[0][0] in seen:
                 _, typed = pending.pop(0)
-                seen = ""
-                time.sleep(0.4)
-                for ch in typed:
-                    os.write(master, ch.encode())
-                    time.sleep(TYPE_DELAY)
+                seen, keys = "", list(typed)
+                next_key = time.monotonic() + 0.4 + cast.typist.delay(keys[0])
+            if keys and time.monotonic() >= next_key:
+                os.write(master, keys.pop(0).encode())
+                if keys:
+                    next_key = time.monotonic() + cast.typist.delay(keys[0])
     except SceneError:
         os.kill(pid, 9)
         subprocess.run(["docker", "exec", "-u", "root", container, "pkill", "-x", "dotman"], capture_output=True)
@@ -108,7 +133,7 @@ def record(scene, container, out):
     host = subprocess.run(["docker", "exec", container, "hostname"], capture_output=True, text=True,
                           check=True).stdout.strip()
     prompt = PROMPT.format(host=host)
-    cast = Cast(cols, rows)
+    cast = Cast(cols, rows, Typist(scene.get("seed", 1)))
     cast.out(prompt)
     for step in scene["steps"]:
         if "hidden" in step:
@@ -121,14 +146,14 @@ def record(scene, container, out):
             cast.out("\x1b[0m\r\n" + prompt, 0.8)
         elif "run" in step:
             cast.type(step["run"])
-            cast.out("\r\n", 0.3)
+            cast.out("\r\n", cast.typist.delay("\r"))
             code = run(cast, container, step["run"], step.get("answers", []), cols, rows)
             if code != step.get("status", 0):
                 raise SceneError(f"`{step['run']}` exited {code}, expected {step.get('status', 0)}")
-            cast.out(prompt, 0.4)
+            cast.out(prompt, 0.1)
+            cast.out("", HOLD)
         elif "wait" in step:
             cast.out("", step["wait"])
-    cast.out("", 1.5)
     cast.save(out)
 
 

@@ -80,8 +80,6 @@ e2e-distros *images:
 video *films="setup daily advanced":
     #!/usr/bin/env bash
     set -euo pipefail
-    engine="${HUASHU_ENGINE:-.claude/skills/huashu-art-motion/scripts/engine}"
-    test -f "$engine/clip.html" || { echo "no huashu-art-motion engine at $engine; video/README.md says how to get it" >&2; exit 1; }
     cargo build --release --locked --target x86_64-unknown-linux-musl
     (cd video && npm ci --prefer-offline --no-audit --no-fund)
     for film in {{ films }}; do python3 video/build.py "video/films/$film"; done
