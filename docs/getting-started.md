@@ -2,7 +2,7 @@
 
 Setting up the first machine and the next ones, and what dotman needs. Back to the [README](../README.md).
 
-https://github.com/user-attachments/assets/5a1b549c-4b24-4aad-8043-5cd7a52a45b3
+https://github.com/user-attachments/assets/a9fac84a-79f5-49c9-802e-d13a6b2af84b
 
 ## Quick start
 

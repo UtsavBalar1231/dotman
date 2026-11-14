@@ -2,7 +2,7 @@
 
 The commands, what `status` and `sync` do, backups, ignore patterns and the flags that answer prompts. Back to the [README](../README.md).
 
-https://github.com/user-attachments/assets/8368d460-57bb-469e-b0d4-c3caa5fbe6db
+https://github.com/user-attachments/assets/4068b53a-8dfb-46b2-a1b2-8414b8a904de
 
 ## Commands
 

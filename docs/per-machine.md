@@ -2,7 +2,7 @@
 
 Variants, templates and hooks. Back to the [README](../README.md).
 
-https://github.com/user-attachments/assets/1fe70751-00ad-4450-a434-e7a7c49416ab
+https://github.com/user-attachments/assets/8bde50d1-c0ee-4340-8b72-7202184c55ae
 
 ## Variants
 

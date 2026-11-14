@@ -48,15 +48,15 @@ From then on, edit files where they are and run `dotman sync`. It captures local
 
 Setting up two machines (68 s):
 
-https://github.com/user-attachments/assets/5a1b549c-4b24-4aad-8043-5cd7a52a45b3
+https://github.com/user-attachments/assets/a9fac84a-79f5-49c9-802e-d13a6b2af84b
 
 Daily use: edit, sync, and the backup of what a sync replaced (71 s):
 
-https://github.com/user-attachments/assets/8368d460-57bb-469e-b0d4-c3caa5fbe6db
+https://github.com/user-attachments/assets/4068b53a-8dfb-46b2-a1b2-8414b8a904de
 
 Per-machine files, templates and secrets (88 s):
 
-https://github.com/user-attachments/assets/1fe70751-00ad-4450-a434-e7a7c49416ab
+https://github.com/user-attachments/assets/8bde50d1-c0ee-4340-8b72-7202184c55ae
 
 ## Documentation
 
