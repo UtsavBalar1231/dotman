@@ -3591,22 +3591,29 @@ fn several_unpushed_commits_get_one_answer_per_file() {
     }
 }
 
-/// A template whose source both machines edited: the template text this machine loses is saved,
-/// not only what it rendered.
+/// A template whose source both machines edited: each flag settles the clashing line to its side
+/// and keeps both machines' other edits, and the template text this machine loses is saved, not
+/// only what it rendered.
 #[test]
 fn a_losing_template_edit_is_saved() {
-    let a = first_device(&[(".a", b"a\n", 0o644)]);
-    a.write(".p", b"base\n", 0o644);
-    a.ok(&["add", "--template", ".p"]);
-    exits(&a, 0, &["sync"]);
-    let b = clone_to_new_device(&a);
-    a.write_repo(".p{tmpl}", b"{{ 1 }} from a\n");
-    exits(&a, 0, &["sync"]);
-    b.write_repo(".p{tmpl}", b"{{ 2 }} from b\n");
-    let err = exits(&b, 0, &["sync", "--take-repo"]);
-    assert_eq!(b.read(".p"), b"1 from a\n");
-    let saved = fs::read(saved_copy(&err, ".p{tmpl}")).expect("the saved copy");
-    assert_eq!(saved, b"{{ 2 }} from b\n");
+    for (flag, line) in [("--keep-local", "{{ 3 }} b"), ("--take-repo", "{{ 3 }} a")] {
+        let a = first_device(&[(".a", b"a\n", 0o644)]);
+        a.write(".p", b"1\n2\n3\n4\n5\n", 0o644);
+        a.ok(&["add", "--template", ".p"]);
+        exits(&a, 0, &["sync"]);
+        let b = clone_to_new_device(&a);
+        a.write_repo(".p{tmpl}", b"{{ 1 }} a\n2\n{{ 3 }} a\n4\n5\n");
+        exits(&a, 0, &["sync"]);
+        let mine = b"1\n2\n{{ 3 }} b\n4\n{{ 5 }} b\n";
+        b.write_repo(".p{tmpl}", mine);
+        let err = exits(&b, 0, &["sync", flag]);
+        let merged = format!("{{{{ 1 }}}} a\n2\n{line}\n4\n{{{{ 5 }}}} b\n");
+        assert_eq!(remote_file(&b, ".p{tmpl}"), merged, "{flag}");
+        let rendered = merged.replace("{{ 1 }}", "1").replace("{{ 3 }}", "3");
+        assert_eq!(b.read(".p"), rendered.replace("{{ 5 }}", "5").as_bytes());
+        let saved = fs::read(saved_copy(&err, ".p{tmpl}")).expect("the saved copy");
+        assert_eq!(saved, mine, "{flag}");
+    }
 }
 
 /// A template whose merge under `--keep-local` does not render, though each side does, is refused:
@@ -3664,6 +3671,96 @@ fn on_a_terminal_an_unanswered_conflict_is_reported_as_without_one() {
         out.contains("answer with `dotman sync --keep-local` or `dotman sync --take-repo`"),
         "{out}"
     );
+    no_replay_left(&b);
+    assert_eq!(b.read(".a"), b"from b\n");
+}
+
+/// A `.dotman.toml` key both machines set to different values is the one settings question: the
+/// report lists the file and the key, and each flag takes its side's value.
+#[test]
+fn a_settings_key_set_differently_on_both_is_answered_by_each_flag() {
+    for (flag, kept) in [("--keep-local", "0640"), ("--take-repo", "0600")] {
+        let (a, b) = pair(&[(".a", b"a\n", 0o644)]);
+        for (env, mode) in [(&a, "0600"), (&b, "0640")] {
+            let mut config = env.repo_config();
+            config
+                .modes
+                .insert(".unmanaged".to_owned(), mode.to_owned());
+            config
+                .save(&env.repo().join(".dotman.toml"), false)
+                .expect("save .dotman.toml");
+        }
+        exits(&a, 0, &["sync"]);
+        let err = exits(&b, 4, &["sync"]);
+        assert!(
+            err.contains("conflicting paths:\n  .dotman.toml\n.dotman.toml sets [modes] \".unmanaged\" differently here and in origin/main\nanswer with "),
+            "{err}"
+        );
+        no_replay_left(&b);
+        exits(&b, 0, &["sync", flag]);
+        let mode = b.repo_config().modes.get(".unmanaged").cloned();
+        assert_eq!(mode.as_deref(), Some(kept), "{flag}");
+        exits(&a, 0, &["sync"]);
+        let mode = a.repo_config().modes.get(".unmanaged").cloned();
+        assert_eq!(mode.as_deref(), Some(kept), "{flag}");
+    }
+}
+
+/// Both machines encrypt the same new plaintext, so the ciphertexts differ while the files do not:
+/// sync settles it to origin's with no question, saves this machine's ciphertext, and leaves the
+/// plaintext in no object.
+#[test]
+fn an_encrypted_file_whose_plaintexts_match_settles_with_no_question() {
+    if !common::age_installed() {
+        return;
+    }
+    let (a, b) = sealed_pair();
+    for env in [&a, &b] {
+        env.write(SEALED, b"same_marker\n", 0o600);
+    }
+    exits(&a, 0, &["sync"]);
+    let err = exits(&b, 0, &["sync"]);
+    let saved = fs::read(saved_copy(&err, ".config/app/s{age}.conf")).expect("the saved copy");
+    assert!(saved.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----"));
+    no_replay_left(&b);
+    exits(&a, 0, &["sync"]);
+    assert_eq!(b.read(SEALED), b"same_marker\n");
+    assert_converged(&a, &b);
+    let objects = b.git_raw(&[
+        "-C",
+        &repo_path(&b),
+        "cat-file",
+        "--batch-all-objects",
+        "--batch",
+    ]);
+    assert!(objects.status.success());
+    assert!(!objects.stdout.windows(11).any(|w| w == b"same_marker"));
+}
+
+/// A repo edit that is not committed when the pull conflicts, here one put there while git pulls,
+/// stops sync before anything is settled, even with a flag: exit 4, the uncommitted path named,
+/// and nothing saved or replayed.
+#[test]
+fn an_uncommitted_repo_edit_stops_a_conflicting_pull_before_anything_is_settled() {
+    let (a, mut b) = pair(&[(".a", b"base\n", 0o644), (".b", b"b\n", 0o644)]);
+    a.write(".a", b"from a\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".a", b"from b\n", 0o644);
+    let edited = b.repo().join(".b");
+    wrap_git(
+        &mut b,
+        &format!(
+            "case \" $* \" in *' pull '*) echo stray >> '{}' ;; esac",
+            edited.display()
+        ),
+    );
+    let err = exits(&b, 4, &["sync", "--keep-local"]);
+    assert!(
+        err.contains("so sync stopped before it settled the conflict"),
+        "{err}"
+    );
+    assert!(err.contains("not committed:\n  .b\n"), "{err}");
+    assert!(!err.contains("saved this machine's"), "{err}");
     no_replay_left(&b);
     assert_eq!(b.read(".a"), b"from b\n");
 }
