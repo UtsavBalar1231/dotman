@@ -66,6 +66,8 @@ pub fn run(args: &EditArgs) -> Result<Outcome> {
         bail!("the editor exited with {status}; nothing was applied");
     }
 
+    // A sync killed while the editor was open leaves its marker, which the lock would put back.
+    ctx.refuse_own_pull()?;
     let _lock = ctx.lock(false)?;
     let after = fs::read(&path).with_context(|| format!("cannot read {source}"))?;
     // A sync or apply that ran meanwhile may have written this key with H matching what it saw;

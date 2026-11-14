@@ -914,6 +914,11 @@ const DELETIONS: &[(&str, usize, &str)] = &[
         "the directory `import --swap` staged, and the link or tree it set aside",
     ),
     (
+        "src/git.rs",
+        2,
+        "the `.git/dotman-pull` marker of a replayed pull, and, in the repo worktree only, a file whose decision is absent or that a stopped rebase left as `<path>~<suffix>`",
+    ),
+    (
         "src/import/gittree.rs",
         9,
         "the import's scratch history, a clone in its staging dir that took no commit, entries of its clone it leaves out or renames, and the repo it replaces",

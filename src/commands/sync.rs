@@ -247,7 +247,8 @@ fn pull(ctx: &Context, branch: &str) -> Result<Option<bool>> {
             }
             Ok(Some(true))
         }
-        PullOutcome::Conflict { paths } => {
+        PullOutcome::Conflict { stopped } => {
+            let paths: Vec<PathBuf> = stopped.into_iter().map(|stop| stop.path).collect();
             report_conflict(ctx, branch, &paths);
             Ok(None)
         }

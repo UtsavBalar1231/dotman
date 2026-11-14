@@ -2,7 +2,7 @@
 
 use crate::commands::add::Ignore;
 use crate::config::Config;
-use crate::git::{Git, Operation, StatusKind, UnusableBranch};
+use crate::git::{Git, Operation, Recovery, Refusal, StatusKind, UnusableBranch};
 use crate::identity;
 use crate::lock::Lock;
 use crate::paths::{
@@ -48,6 +48,10 @@ enum Unfinished {
     Operation(Operation),
     /// Left by `git stash pop` and the like, with no operation to continue or abort.
     Conflicts(Vec<PathBuf>),
+    /// A sync was stopped while it replayed a pull; a writing command puts it back.
+    OwnPull,
+    /// Recovery from [`Unfinished::OwnPull`] could not tell how to put the repo back.
+    Refused(Refusal),
 }
 
 impl fmt::Display for InProgress {
@@ -73,6 +77,11 @@ impl fmt::Display for InProgress {
                     "the repo at {repo} has unresolved conflicts in {quoted}, as `git stash pop` leaves them; resolve them and run `{bin} git add -- {quoted}`, or put back the committed version with `{bin} git checkout HEAD -- {quoted}`"
                 )?;
             }
+            Unfinished::OwnPull => write!(
+                f,
+                "an earlier `{bin} sync` was stopped while it finished a pull in {repo}; run `{bin} sync`, which puts the repo back as it was before that pull and pulls again"
+            )?,
+            Unfinished::Refused(refusal) => return write!(f, "{refusal}"),
         }
         if self.locks.is_empty() {
             return Ok(());
@@ -80,9 +89,16 @@ impl fmt::Display for InProgress {
         let locks = quote_all(&self.locks);
         write!(
             f,
-            "\ngit left lock files behind, so those commands fail until they are removed. If no git is running in the repo, recover with:\n  1. rm {locks}"
+            "\ngit left lock files behind, so {} until they are removed. If no git is running in the repo, recover with:\n  1. rm {locks}",
+            if matches!(self.unfinished, Unfinished::OwnPull) {
+                "the sync cannot put the repo back"
+            } else {
+                "those commands fail"
+            }
         )?;
-        if matches!(self.unfinished, Unfinished::Operation(Operation::Rebase)) {
+        if matches!(self.unfinished, Unfinished::OwnPull) {
+            write!(f, "\n  2. {bin} sync")?;
+        } else if matches!(self.unfinished, Unfinished::Operation(Operation::Rebase)) {
             let back = self.branch.as_ref().map_or_else(
                 |_| format!("{bin} git checkout -f -b main ORIG_HEAD"),
                 |branch| {
@@ -316,12 +332,16 @@ impl Context {
         Scope::new(&self.paths, &self.machine)
     }
 
-    /// Takes the lock for a command that writes, then runs [`Context::guard`]. Outside a dry run it
-    /// also brings `.git/info/attributes` up to date in a repo `init` finished, so a repo an older
-    /// dotman made gets git's built-in text merge before anything is merged or checked out. When it
-    /// cannot write the file, it warns and the command goes on.
+    /// Takes the lock for a command that writes, puts back a pull a killed sync left half done
+    /// outside a dry run, then runs [`Context::guard`]. Outside a dry run it also brings
+    /// `.git/info/attributes` up to date in a repo `init` finished, so a repo an older dotman made
+    /// gets git's built-in text merge before anything is merged or checked out. When it cannot
+    /// write the file, it warns and the command goes on.
     pub(crate) fn lock(&self, dry_run: bool) -> Result<Lock> {
         let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;
+        if !dry_run {
+            self.recover_pull()?;
+        }
         self.guard()?;
         let git_dir = self.paths.repo.join(".git");
         if dry_run || !is_real_dir(&git_dir) || !git_dir.join("dotman-id").is_file() {
@@ -349,9 +369,10 @@ impl Context {
     /// Fails when the repo is incomplete, with [`InProgress`] while a git operation or a conflict
     /// is unfinished in it, and when HEAD's `.dotman.toml` has settings and the worktree's none. Every
     /// command except `doctor` and `git` calls it, the writing ones through [`Context::lock`]; `log`,
-    /// which only reads the history, skips all but the first check.
+    /// which only reads the history, skips all but the first two checks.
     pub(crate) fn guard(&self) -> Result<()> {
         self.refuse_incomplete()?;
+        self.refuse_own_pull()?;
         if self.command == "log" || !is_real_dir(&self.paths.repo.join(".git")) {
             return Ok(());
         }
@@ -365,15 +386,55 @@ impl Context {
             None => None,
         };
         if let Some(unfinished) = unfinished {
-            return Err(InProgress {
-                unfinished,
-                repo: self.paths.repo.clone(),
-                locks: self.git.lock_files(),
-                branch: self.git.rebase_branch(),
-            }
-            .into());
+            return Err(self.in_progress(unfinished).into());
         }
         self.refuse_lost_config()
+    }
+
+    /// Fails with [`InProgress`] while a stopped sync's pull marker is in `.git`, which only a
+    /// writing command outside a dry run puts back.
+    pub(crate) fn refuse_own_pull(&self) -> Result<()> {
+        if !self.git.own_pull() {
+            return Ok(());
+        }
+        Err(self.in_progress(Unfinished::OwnPull).into())
+    }
+
+    fn in_progress(&self, unfinished: Unfinished) -> InProgress {
+        InProgress {
+            unfinished,
+            repo: self.paths.repo.clone(),
+            locks: self.git.lock_files(),
+            branch: self.git.rebase_branch(),
+        }
+    }
+
+    /// [`Git::recover_pull`], saying what it did; a refusal or a lock file left by git is
+    /// [`InProgress`]. With no marker it costs one `stat`.
+    fn recover_pull(&self) -> Result<()> {
+        if !self.git.own_pull() {
+            return Ok(());
+        }
+        match self.git.recover_pull()? {
+            Recovery::NoMarker => {}
+            Recovery::Restored => crate::output::info(
+                "an earlier sync was stopped while it finished a pull; the repo is back as it was before that pull",
+            ),
+            Recovery::Finished => crate::output::info(
+                "an earlier sync finished its pull but was stopped before tidying up; nothing was lost",
+            ),
+            Recovery::Locked(locks) => {
+                return Err(InProgress {
+                    locks,
+                    ..self.in_progress(Unfinished::OwnPull)
+                }
+                .into());
+            }
+            Recovery::Refused(refusal) => {
+                return Err(self.in_progress(Unfinished::Refused(refusal)).into());
+            }
+        }
+        Ok(())
     }
 
     /// Fails on a lock file git left in `.git`. While dotman holds its own lock, none of them can

@@ -586,6 +586,18 @@ fn repo_health(ctx: &Context) -> Vec<Check> {
     checks.extend(lost_config(ctx));
     checks.extend(unloadable_config(ctx));
     match ctx.git.operation() {
+        // A rebase under the marker is dotman's own, which sync puts back; git's steps would not.
+        _ if ctx.git.own_pull() => checks.push(fail(
+            "pull",
+            &format!(
+                "an earlier {} sync was stopped while it finished a pull",
+                name::bin()
+            ),
+            &format!(
+                "run {} sync, which puts the repo back as it was before that pull and pulls again",
+                name::bin()
+            ),
+        )),
         Some(op) => checks.push(fail(
             "git operation",
             &format!("a {} is in progress", op.name()),
@@ -937,6 +949,18 @@ fn warnings(ctx: Option<&Context>, git: &Git, git_ok: bool) -> Vec<Check> {
                 "is true; a non-interactive sync may prompt for a passphrase",
             ));
         }
+        let mut cmd = git.command();
+        cmd.args(["config", "--get", "merge.conflictStyle"]);
+        let style = cmd
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+        if let (Ok(version), Some(style)) = (git.version(), style)
+            && let Some(check) = conflict_style(version, &style)
+        {
+            checks.push(check);
+        }
     }
     if std::env::var_os("DOTMAN_SYSTEM_ROOT").is_some() {
         checks.push(warn(
@@ -951,6 +975,21 @@ fn warnings(ctx: Option<&Context>, git: &Git, git_ok: bool) -> Vec<Check> {
         ));
     }
     checks
+}
+
+/// git before 2.35 dies on `merge.conflictStyle=zdiff3` while it reads the config, before any
+/// `-c` override, so every pull fails.
+fn conflict_style(version: (u32, u32, u32), style: &str) -> Option<Check> {
+    let (major, minor, patch) = version;
+    ((major, minor) < (2, 35) && style.eq_ignore_ascii_case("zdiff3")).then(|| {
+        fail(
+            "merge.conflictStyle",
+            &format!(
+                "is zdiff3, which git {major}.{minor}.{patch} does not know, so every pull fails"
+            ),
+            "set it to diff3 in your git config, or install git 2.35 or newer",
+        )
+    })
 }
 
 /// The store and the binary of dotman 0.0.1, which this dotman replaces.
@@ -1138,6 +1177,19 @@ mod tests {
         let two = plaintext_backups(2);
         assert!(two.starts_with("2 of them copy an encrypted file"), "{two}");
         assert!(two.contains("and hold it in plaintext"), "{two}");
+    }
+
+    #[test]
+    fn zdiff3_is_named_only_where_git_does_not_know_it() {
+        let line = conflict_style((2, 25, 1), "zdiff3").map(|check| check.line);
+        assert!(
+            line.as_deref()
+                .is_some_and(|line| line.starts_with("merge.conflictStyle: is zdiff3")),
+            "{line:?}"
+        );
+        assert!(conflict_style((2, 34, 9), "ZDiff3").is_some());
+        assert!(conflict_style((2, 35, 0), "zdiff3").is_none());
+        assert!(conflict_style((2, 25, 1), "diff3").is_none());
     }
 
     /// A ref name can hold what a shell runs; the step quotes it, so a shell reads the name back.

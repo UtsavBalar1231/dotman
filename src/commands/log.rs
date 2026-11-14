@@ -13,8 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// # Errors
 ///
-/// Fails when the repo is not initialised or has a rebase or merge in progress, git is too old or
-/// exits non-zero, or stdout cannot be written.
+/// Fails when the repo is not initialised or holds the marker of a sync stopped during its pull,
+/// git is too old or exits non-zero, or stdout cannot be written. Unlike other commands it runs
+/// through a rebase or merge in progress.
 pub fn run(args: &LogArgs) -> Result<()> {
     let ctx = Context::resolve("log")?;
     ctx.guard()?;

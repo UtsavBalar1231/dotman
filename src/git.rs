@@ -4,7 +4,7 @@
 
 use crate::paths::write_atomic;
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
@@ -163,6 +163,269 @@ impl fmt::Debug for Git {
     }
 }
 
+/// On the first pull and on every rebase of the replay: the user's config must not move another
+/// branch, or the branch itself off a detached `HEAD`, or settle a conflict from a recorded
+/// resolution. On git before 2.38 `rebase.updateRefs` is unknown and ignored.
+const PULL_PINS: [&str; 4] = [
+    "-c",
+    "rebase.updateRefs=false",
+    "-c",
+    "rerere.enabled=false",
+];
+
+/// In `.git`. While it exists, a replay may have moved `HEAD`, the index or the worktree, and
+/// [`Git::recover_pull`] puts them back.
+const PULL_MARKER: &str = "dotman-pull";
+
+/// The first field of the marker, so a file from another version is never misread.
+const MARKER_VERSION: &[u8] = b"dotman-pull 1";
+
+/// One entry of a tree or an index stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// `100644`, `100755`, `120000`, or `160000` for a gitlink.
+    pub mode: String,
+    /// Full object id.
+    pub oid: String,
+}
+
+/// The final content of one path for a whole pull, however many local commits stop on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// The path holds this entry.
+    Set(Entry),
+    /// The path is removed.
+    Absent,
+}
+
+/// Which side of each clash [`Git::merge_file`] takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The first version given.
+    Ours,
+    /// The third version given.
+    Theirs,
+}
+
+fn holds(tree: &BTreeMap<PathBuf, Entry>, path: &Path, decision: &Decision) -> bool {
+    match decision {
+        Decision::Set(entry) => tree.get(path) == Some(entry),
+        Decision::Absent => !tree.contains_key(path),
+    }
+}
+
+/// One path a rebase stopped on, from its stages in the index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stopped {
+    /// Repo-relative, as git reports it.
+    pub path: PathBuf,
+    /// Stage 1, the merge base's version; `None` when the base lacks it.
+    pub base: Option<Entry>,
+    /// Stage 2, the side the rebase builds on: the fetched commit with the local commits replayed
+    /// so far.
+    pub ours: Option<Entry>,
+    /// Stage 3, the local commit being replayed.
+    pub replayed: Option<Entry>,
+    /// A stage is not what `HEAD` or the replayed commit holds at this path: git followed a
+    /// rename into it, or put a copy there that a file against a directory displaced.
+    pub follows_rename: bool,
+}
+
+/// Result of [`Git::replay`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Replayed {
+    /// The branch holds the fetched commit with the local commits on top, every settled path at
+    /// its decision.
+    Done,
+    /// A local commit stopped on paths that have no decision. The replay was undone, and the repo
+    /// is as before it.
+    Stopped(Vec<Stopped>),
+}
+
+/// What [`Git::recover_pull`] did.
+#[derive(Debug)]
+pub enum Recovery {
+    /// There is no marker.
+    NoMarker,
+    /// The pull had not moved the branch; the repo is back as it was before it.
+    Restored,
+    /// The branch already held the finished pull; `HEAD` is on it again.
+    Finished,
+    /// Lock files a killed git left; recovery waits until they are removed.
+    Locked(Vec<PathBuf>),
+    /// The repo is in a state the marker does not explain; nothing was changed.
+    Refused(Refusal),
+}
+
+/// Why [`Git::recover_pull`] left the repo as it was, with the steps that put it back by hand.
+#[derive(Debug)]
+pub struct Refusal {
+    why: String,
+    repo: PathBuf,
+    /// `None` when the marker cannot be read.
+    marker: Option<(String, String)>,
+    head: Option<String>,
+    rebase_dir: bool,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bin = crate::name::bin();
+        let marker = self.repo.join(".git").join(PULL_MARKER);
+        let marker = shell_words::quote(&marker.to_string_lossy()).into_owned();
+        write!(
+            f,
+            "an earlier `{bin} sync` was stopped while it finished a pull in {}, and dotman cannot tell how to put the repo back: {}. Nothing was reset.",
+            self.repo.display(),
+            self.why
+        )?;
+        let Some((branch, old)) = &self.marker else {
+            return write!(
+                f,
+                " To go on, remove the marker and sync:\n  1. rm {marker}\n  2. {bin} sync"
+            );
+        };
+        write!(
+            f,
+            " Before that pull, {branch} was at {old}; HEAD is now at {}. To put the repo on {branch} as it is now, which drops the changes that are not committed in the repo:",
+            self.head.as_deref().unwrap_or("no commit")
+        )?;
+        let mut steps = Vec::new();
+        if self.rebase_dir {
+            steps.push(format!("{bin} git rebase --quit"));
+        }
+        steps.push(format!(
+            "{bin} git checkout -f {}",
+            shell_words::quote(branch)
+        ));
+        steps.push(format!("rm {marker}"));
+        steps.push(format!("{bin} sync"));
+        for (n, step) in (1_u32..).zip(steps) {
+            write!(f, "\n  {n}. {step}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// What the marker holds: the pull being replayed, and what [`Git::recover_pull`] needs to put
+/// the repo back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Marker {
+    branch: String,
+    old: String,
+    onto: String,
+    decisions: BTreeMap<PathBuf, Decision>,
+    /// The untracked files before the replay; a 2.25 rebase leaves its renamed copies as new ones.
+    untracked: BTreeSet<PathBuf>,
+}
+
+impl Marker {
+    /// NUL-terminated fields, so a path may hold any byte but NUL.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut field = |bytes: &[u8]| {
+            out.extend_from_slice(bytes);
+            out.push(0);
+        };
+        field(MARKER_VERSION);
+        for value in [&self.branch, &self.old, &self.onto] {
+            field(value.as_bytes());
+        }
+        for (path, decision) in &self.decisions {
+            field(b"D");
+            match decision {
+                Decision::Set(entry) => {
+                    field(entry.mode.as_bytes());
+                    field(entry.oid.as_bytes());
+                }
+                Decision::Absent => {
+                    field(b"-");
+                    field(b"-");
+                }
+            }
+            field(path.as_os_str().as_bytes());
+        }
+        for path in &self.untracked {
+            field(b"U");
+            field(path.as_os_str().as_bytes());
+        }
+        out
+    }
+
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let mut fields = bytes.strip_suffix(b"\0")?.split(|b| *b == 0);
+        if fields.next()? != MARKER_VERSION {
+            return None;
+        }
+        let mut text = || String::from_utf8(fields.next()?.to_vec()).ok();
+        let (branch, old, onto) = (text()?, text()?, text()?);
+        checked_branch(&branch).ok()?;
+        if !is_oid(&old) || !is_oid(&onto) {
+            return None;
+        }
+        let mut marker = Self {
+            branch,
+            old,
+            onto,
+            decisions: BTreeMap::new(),
+            untracked: BTreeSet::new(),
+        };
+        while let Some(kind) = fields.next() {
+            match kind {
+                b"D" => {
+                    let (mode, oid, path) = (fields.next()?, fields.next()?, fields.next()?);
+                    let decision = if mode == b"-" && oid == b"-" {
+                        Decision::Absent
+                    } else {
+                        Decision::Set(checked_entry(mode, oid)?)
+                    };
+                    marker.decisions.insert(path_from(path), decision);
+                }
+                b"U" => {
+                    marker.untracked.insert(path_from(fields.next()?));
+                }
+                _ => return None,
+            }
+        }
+        Some(marker)
+    }
+}
+
+/// A git object id: 40 or 64 lowercase hex digits.
+fn is_oid(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `mode` and `oid` as an [`Entry`], when each is what git writes; nothing else reaches the
+/// `--index-info` stream.
+fn checked_entry(mode: &[u8], oid: &[u8]) -> Option<Entry> {
+    let mode = std::str::from_utf8(mode).ok()?;
+    let oid = std::str::from_utf8(oid).ok()?;
+    (mode.len() == 6 && mode.bytes().all(|b| b.is_ascii_digit()) && is_oid(oid)).then(|| Entry {
+        mode: mode.to_owned(),
+        oid: oid.to_owned(),
+    })
+}
+
+/// A repo path whose parent in the worktree is a symlink: git 2.25's `restore` and every
+/// version's `rm` delete through one, so dotman never settles, removes or restores such a path.
+#[derive(Debug)]
+struct UnderSymlink(PathBuf);
+
+impl fmt::Display for UnderSymlink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} lies under a symlink in the repo, so dotman does not write it",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for UnderSymlink {}
+
 /// Result of [`Git::pull_rebase`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum PullOutcome {
@@ -170,8 +433,8 @@ pub enum PullOutcome {
     Ok,
     /// The rebase hit conflicts and was aborted; the working tree is as before the pull.
     Conflict {
-        /// Repo-relative, as git reports them.
-        paths: Vec<PathBuf>,
+        /// The paths of the first stop, in git's order.
+        stopped: Vec<Stopped>,
     },
     /// The pull finished, but the uncommitted edits it set aside did not go back cleanly: they
     /// are kept in the stash, and the worktree may hold conflict markers.
@@ -401,6 +664,16 @@ impl Git {
         check_version_text(&String::from_utf8_lossy(&out.stdout))?;
         let _ = self.version_checked.set(());
         Ok(())
+    }
+
+    /// The installed git's `(major, minor, patch)`.
+    pub fn version(&self) -> Result<(u32, u32, u32)> {
+        let mut cmd = self.base();
+        cmd.arg("--version");
+        let out = self.spawn_bounded(cmd, &["--version"])?;
+        let line = String::from_utf8_lossy(&out.stdout);
+        parse_version(&line)
+            .ok_or_else(|| anyhow!("could not read the git version from {:?}", line.trim()))
     }
 
     fn spawn(&self, cmd: Command) -> Result<Output> {
@@ -1057,7 +1330,9 @@ impl Git {
         let stashed_before = self.optional(&stash)?;
         let refname = full_ref(branch);
         let args = ["pull", "--rebase", "--autostash", remote, &refname];
-        let out = self.probe(&args)?;
+        let mut pinned = self.command();
+        pinned.args(PULL_PINS);
+        let out = self.output(pinned, &args)?;
         if out.status.success() {
             // git exits 0 when putting the autostash back conflicts, and keeps it in the stash.
             let paths = self.unmerged_paths()?;
@@ -1069,24 +1344,726 @@ impl Git {
         if !self.operation_in_progress() {
             return Err(self.remote_failure(&args, &out));
         }
-        // Unfiltered: the filter reads `.dotman.toml`, which may hold conflict markers now.
-        let paths: Vec<PathBuf> = self
-            .full_status()?
-            .into_iter()
-            .filter(|e| e.kind == StatusKind::Unmerged)
-            .map(|e| e.path)
-            .collect();
+        let stopped = self.stopped(None);
         self.run(&["rebase", "--abort"])?;
+        let stopped = stopped?;
         // A rebase that stopped with nothing in conflict hit something else, as a lock file in
         // `.git` stops it, and calling it a conflict would leave no step that helps.
-        if paths.is_empty() {
+        if stopped.is_empty() {
             let stopped = self.failure(&args, &out);
             return Err(match self.refuse_locks() {
                 Err(locks) => anyhow!("{locks:#}\n{stopped:#}"),
                 Ok(()) => stopped,
             });
         }
-        Ok(PullOutcome::Conflict { paths })
+        Ok(PullOutcome::Conflict { stopped })
+    }
+
+    /// The unmerged paths of a stopped rebase with their stages, each marked when a stage is not
+    /// what `HEAD` or `REBASE_HEAD` holds at the path. With `decided`, only the paths it lacks.
+    fn stopped(&self, decided: Option<&BTreeMap<PathBuf, Decision>>) -> Result<Vec<Stopped>> {
+        let unmerged = self.unmerged_entries()?;
+        if unmerged.is_empty() {
+            return Ok(Vec::new());
+        }
+        let head = self.tree_entries("HEAD")?;
+        let replayed = match self.resolve_commit("REBASE_HEAD")? {
+            Some(commit) => Some(self.tree_entries(&commit)?),
+            None => None,
+        };
+        Ok(unmerged
+            .into_iter()
+            .filter(|(path, _)| decided.is_none_or(|decided| !decided.contains_key(path)))
+            .map(|(path, [base, ours, theirs])| {
+                let moved = ours.as_ref() != head.get(&path)
+                    || replayed
+                        .as_ref()
+                        .is_some_and(|tree| theirs.as_ref() != tree.get(&path));
+                Stopped {
+                    path,
+                    base,
+                    ours,
+                    replayed: theirs,
+                    follows_rename: moved,
+                }
+            })
+            .collect())
+    }
+
+    /// `ls-files -u`: each unmerged path with its stages 1, 2 and 3.
+    fn unmerged_entries(&self) -> Result<BTreeMap<PathBuf, [Option<Entry>; 3]>> {
+        let out = self.run(&["ls-files", "-u", "-z"])?;
+        let mut found: BTreeMap<PathBuf, [Option<Entry>; 3]> = BTreeMap::new();
+        // One `mode oid stage<TAB>path` record per stage.
+        for record in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            let parsed = record
+                .iter()
+                .position(|b| *b == b'\t')
+                .and_then(|tab| record.split_at_checked(tab))
+                .and_then(|(meta, path)| {
+                    let mut fields = meta.split(|b| *b == b' ');
+                    let entry = checked_entry(fields.next()?, fields.next()?)?;
+                    let stage = match fields.next()? {
+                        b"1" => 0,
+                        b"2" => 1,
+                        b"3" => 2,
+                        _ => return None,
+                    };
+                    Some((path_from(path.get(1..)?), stage, entry))
+                });
+            let Some((path, stage, entry)) = parsed else {
+                bail!(
+                    "unexpected git ls-files record: {}",
+                    String::from_utf8_lossy(record)
+                );
+            };
+            if let Some(slot) = found.entry(path).or_default().get_mut(stage) {
+                *slot = Some(entry);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Every blob, symlink and gitlink of `rev` with its entry. A directory is no entry, so a
+    /// path that is one in `rev` is absent from the map.
+    pub fn tree_entries(&self, rev: &str) -> Result<BTreeMap<PathBuf, Entry>> {
+        let out = self.run(&["ls-tree", "-r", "-z", "--full-tree", rev])?;
+        // One `mode type oid<TAB>path` record per entry.
+        out.stdout
+            .split(|b| *b == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                record
+                    .iter()
+                    .position(|b| *b == b'\t')
+                    .and_then(|tab| record.split_at_checked(tab))
+                    .and_then(|(meta, path)| {
+                        let mut fields = meta.split(|b| *b == b' ');
+                        let mode = fields.next()?;
+                        let entry = checked_entry(mode, fields.nth(1)?)?;
+                        Some((path_from(path.get(1..)?), entry))
+                    })
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "unexpected git ls-tree record: {}",
+                            String::from_utf8_lossy(record)
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// Stores `bytes` as a blob, with no filter, and returns its id.
+    pub fn write_blob(&self, bytes: &[u8]) -> Result<String> {
+        let out = self.run_stdin(&["hash-object", "-w", "--no-filters", "--stdin"], bytes)?;
+        let oid = text(&out);
+        ensure!(is_oid(&oid), "git hash-object printed {oid:?}");
+        Ok(oid)
+    }
+
+    /// `git merge-file -p` of `ours`, `base` and `theirs`, written under those names into `dir`,
+    /// a private directory the caller owns. `side` takes that side of each clash, and the result
+    /// then has no markers. The markers are plain whatever `merge.conflictStyle` the user set, and
+    /// the labels are escaped. Returns the merged bytes and whether the merge was clean.
+    pub fn merge_file(
+        &self,
+        dir: &Path,
+        versions: [&[u8]; 3],
+        labels: [&str; 3],
+        side: Option<Side>,
+    ) -> Result<(Vec<u8>, bool)> {
+        let [ours, base, theirs] = versions;
+        let names = ["ours", "base", "theirs"].map(|name| dir.join(name));
+        for (name, bytes) in names.iter().zip([ours, base, theirs]) {
+            fs::write(name, bytes).with_context(|| format!("cannot write {}", name.display()))?;
+        }
+        let mut args: Vec<OsString> = ["-c", "merge.conflictStyle=merge", "merge-file", "-p"]
+            .map(OsString::from)
+            .to_vec();
+        if let Some(side) = side {
+            args.push(OsString::from(match side {
+                Side::Ours => "--ours",
+                Side::Theirs => "--theirs",
+            }));
+        }
+        for label in labels {
+            args.push(OsString::from("-L"));
+            args.push(OsString::from(
+                crate::output::escape_line(label).into_owned(),
+            ));
+        }
+        args.extend(names.into_iter().map(PathBuf::into_os_string));
+        let out = self.probe(&args)?;
+        // Exit 1 to 127 counts the clashes; above that, or a signal, is a failure.
+        match out.status.code() {
+            Some(0) => Ok((out.stdout, true)),
+            Some(1..=127) => Ok((out.stdout, false)),
+            _ => Err(self.failure(&args, &out)),
+        }
+    }
+
+    /// Whether `.git/dotman-pull` exists: a replay was stopped before it finished.
+    #[must_use]
+    pub fn own_pull(&self) -> bool {
+        fs::symlink_metadata(self.marker_path()).is_ok()
+    }
+
+    fn marker_path(&self) -> PathBuf {
+        self.repo.join(".git").join(PULL_MARKER)
+    }
+
+    fn remove_marker(&self) -> Result<()> {
+        let path = self.marker_path();
+        fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))
+    }
+
+    /// Replays the local commits of `branch` onto `onto`, the commit a pull from `remote` fetched,
+    /// settling every stop with `decisions`, then moves the branch there in one compare-and-swap.
+    /// A settled path that still differs afterwards is corrected in one commit, `sync(<host>):
+    /// resolve <paths>`. SIGINT, SIGTERM and SIGHUP are ignored while it runs, so only a kill
+    /// leaves the marker for [`Git::recover_pull`]. A stop on a path with no decision undoes the
+    /// replay and returns [`Replayed::Stopped`]; any other failure undoes it and fails, or fails
+    /// with a [`Refusal`] when undoing it cannot.
+    pub fn replay(
+        &self,
+        remote: &str,
+        branch: &str,
+        onto: &str,
+        decisions: &BTreeMap<PathBuf, Decision>,
+        host: &str,
+    ) -> Result<Replayed> {
+        let _ignored = crate::sys::ignore_signals(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
+        let (marker, fork) = match self.start_replay(remote, branch, onto, decisions) {
+            Ok(started) => started,
+            Err(e) if self.own_pull() => return Err(self.undo(e)),
+            Err(e) => return Err(e),
+        };
+        let replayed = self.finish_rebase(&marker, &fork).and_then(|stopped| {
+            if stopped.is_none() {
+                self.correct(&marker, host)?;
+                self.move_branch(&marker)?;
+            }
+            Ok(stopped)
+        });
+        match replayed {
+            Ok(Some(stopped)) => {
+                self.undo_quietly()?;
+                Ok(Replayed::Stopped(stopped))
+            }
+            Ok(None) => {
+                self.run(&["symbolic-ref", "HEAD", &full_ref(&marker.branch)])?;
+                self.remove_marker()?;
+                Ok(Replayed::Done)
+            }
+            Err(e) => Err(self.undo(e)),
+        }
+    }
+
+    /// Writes the marker, then detaches `HEAD` at the branch's tip. Returns the marker and the
+    /// commit the replayed commits start after.
+    fn start_replay(
+        &self,
+        remote: &str,
+        branch: &str,
+        onto: &str,
+        decisions: &BTreeMap<PathBuf, Decision>,
+    ) -> Result<(Marker, String)> {
+        let branch = checked_branch(branch)?;
+        let refname = full_ref(&branch);
+        ensure!(
+            self.optional(&["symbolic-ref", "-q", "HEAD"])?.as_deref() == Some(refname.as_str()),
+            "HEAD is not on {branch}, so dotman does not replay the pull"
+        );
+        let old = self
+            .resolve_commit(&refname)?
+            .ok_or_else(|| anyhow!("{branch} has no commit to replay"))?;
+        let onto = self
+            .resolve_commit(onto)?
+            .ok_or_else(|| anyhow!("{onto} is not a commit"))?;
+        for decision in decisions.values() {
+            if let Decision::Set(entry) = decision {
+                ensure!(
+                    checked_entry(entry.mode.as_bytes(), entry.oid.as_bytes()).is_some(),
+                    "not a git entry: {} {}",
+                    entry.mode,
+                    entry.oid
+                );
+            }
+        }
+        let fork = self.fork_point(remote, &branch, &onto, &old)?;
+        let marker = Marker {
+            branch,
+            old,
+            onto,
+            decisions: decisions.clone(),
+            untracked: self.untracked()?,
+        };
+        write_atomic(&self.marker_path(), &marker.to_bytes(), 0o600)
+            .context("cannot write the pull marker")?;
+        self.run(&["checkout", "-q", "--detach"])?;
+        Ok((marker, fork))
+    }
+
+    /// The commit `git pull --rebase` replays after: the fork point of the remote-tracking ref,
+    /// as it computes it, so a force-pushed upstream picks the same commits; else the merge base.
+    fn fork_point(&self, remote: &str, branch: &str, onto: &str, old: &str) -> Result<String> {
+        let tracking = format!("refs/remotes/{remote}/{branch}");
+        let out = self.probe(&["merge-base", "--fork-point", &tracking, old])?;
+        let fork = text(&out);
+        if out.status.success() && is_oid(&fork) {
+            return Ok(fork);
+        }
+        self.merge_base(onto, old)?
+            .ok_or_else(|| anyhow!("{branch} and {onto} have no commit in common"))
+    }
+
+    /// Runs the rebase to its end, settling each stop. `Some` when a stop has paths with no
+    /// decision, which leaves the rebase stopped there.
+    fn finish_rebase(&self, marker: &Marker, fork: &str) -> Result<Option<Vec<Stopped>>> {
+        let mut said = self.rebase(&["--onto", &marker.onto, fork])?;
+        let mut last = None;
+        while self.rebase_dir().is_some() {
+            let at = (self.head()?, self.resolve_commit("REBASE_HEAD")?);
+            ensure!(
+                last.as_ref() != Some(&at),
+                "the rebase stopped again where it was: {said}"
+            );
+            last = Some(at);
+            let unsettled = self.stopped(Some(&marker.decisions))?;
+            if !unsettled.is_empty() {
+                return Ok(Some(unsettled));
+            }
+            let leftovers: Vec<PathBuf> = self
+                .untracked()?
+                .difference(&marker.untracked)
+                .cloned()
+                .collect();
+            if !leftovers.is_empty() {
+                let shown: Vec<String> = leftovers
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                bail!(
+                    "the rebase left files dotman does not settle: {}",
+                    shown.join(", ")
+                );
+            }
+            let settled: Vec<(PathBuf, Decision)> = self
+                .unmerged_entries()?
+                .into_keys()
+                .filter_map(|path| {
+                    let decision = marker.decisions.get(&path)?.clone();
+                    Some((path, decision))
+                })
+                .collect();
+            self.settle(&settled)?;
+            let staged = ["diff", "--cached", "--quiet", "--no-ext-diff"];
+            let out = self.probe(&staged)?;
+            let step = match out.status.code() {
+                Some(0) => "--skip",
+                Some(1) => "--continue",
+                _ => return Err(self.failure(&staged, &out)),
+            };
+            said = self.rebase(&[step])?;
+        }
+        let ended = self
+            .probe(&["merge-base", "--is-ancestor", &marker.onto, "HEAD"])?
+            .status
+            .success();
+        ensure!(ended, "the rebase did not finish: {said}");
+        Ok(None)
+    }
+
+    /// `git rebase` with the pins and `GIT_EDITOR=true`; returns what git printed, whether or not
+    /// it stopped.
+    fn rebase(&self, args: &[&str]) -> Result<String> {
+        let mut cmd = self.command();
+        cmd.args(PULL_PINS).env("GIT_EDITOR", "true");
+        let mut full = vec!["rebase"];
+        full.extend_from_slice(args);
+        let out = self.output(cmd, &full)?;
+        Ok(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+
+    fn rebase_dir(&self) -> Option<PathBuf> {
+        ["rebase-merge", "rebase-apply"]
+            .iter()
+            .map(|dir| self.repo.join(".git").join(dir))
+            .find(|dir| fs::symlink_metadata(dir).is_ok())
+    }
+
+    /// Corrects, in one commit, every settled path that `HEAD` does not hold at its decision,
+    /// then checks them all.
+    fn correct(&self, marker: &Marker, host: &str) -> Result<()> {
+        let wrong = |tree: &BTreeMap<PathBuf, Entry>| -> Vec<(PathBuf, Decision)> {
+            marker
+                .decisions
+                .iter()
+                .filter(|(path, decision)| !holds(tree, path, decision))
+                .map(|(path, decision)| (path.clone(), decision.clone()))
+                .collect()
+        };
+        let wrong_now = wrong(&self.tree_entries("HEAD")?);
+        if !wrong_now.is_empty() {
+            let shown: Vec<String> = wrong_now
+                .iter()
+                .map(|(path, _)| path.to_string_lossy().into_owned())
+                .collect();
+            self.settle(&wrong_now)?;
+            self.commit(&format!("sync({host}): resolve {}", shown.join(", ")))?;
+        }
+        if let Some((path, _)) = wrong(&self.tree_entries("HEAD")?).first() {
+            bail!(
+                "after the replay, {} does not hold the version decided for it",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Moves the branch from the old head to `HEAD`, only if it is still at the old head.
+    fn move_branch(&self, marker: &Marker) -> Result<()> {
+        let head = self
+            .head()?
+            .ok_or_else(|| anyhow!("HEAD has no commit after the replay"))?;
+        let refname = full_ref(&marker.branch);
+        self.run(&[
+            "update-ref",
+            "-m",
+            "dotman: pull",
+            &refname,
+            &head,
+            &marker.old,
+        ])
+        .map(drop)
+    }
+
+    /// [`Git::recover_pull`] after a failed step; the error says what failed, and what recovery
+    /// said when it could not undo it.
+    fn undo(&self, failed: anyhow::Error) -> anyhow::Error {
+        match self.undo_quietly() {
+            Ok(()) => failed.context("the pull was undone, and the repo is as it was before it"),
+            Err(e) => e.context(format!("{failed:#}")),
+        }
+    }
+
+    fn undo_quietly(&self) -> Result<()> {
+        match self.recover_pull()? {
+            Recovery::Restored | Recovery::NoMarker => Ok(()),
+            Recovery::Finished => bail!("the branch moved during the replay"),
+            Recovery::Locked(locks) => {
+                let shown: Vec<String> = locks
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                bail!(
+                    "git's lock files are in the repo: {}; run `{} sync` once they are gone",
+                    shown.join(" "),
+                    crate::name::bin()
+                )
+            }
+            Recovery::Refused(refusal) => Err(refusal.into()),
+        }
+    }
+
+    /// Makes the index and the worktree hold each `(path, decision)`: removals first, then the
+    /// entries through `update-index --index-info` and `checkout-index`. Paths travel on stdin
+    /// only. Refuses, before it changes anything, a path whose worktree parent is a symlink.
+    fn settle(&self, settled: &[(PathBuf, Decision)]) -> Result<()> {
+        for (path, _) in settled {
+            if let Some(link) = self.symlinked_parent(path)? {
+                return Err(UnderSymlink(link).into());
+            }
+        }
+        let mut removed = Vec::new();
+        let mut entries = Vec::new();
+        let mut paths = Vec::new();
+        for (path, decision) in settled {
+            let bytes = path.as_os_str().as_bytes();
+            match decision {
+                Decision::Absent => {
+                    removed.extend_from_slice(bytes);
+                    removed.push(0);
+                }
+                Decision::Set(entry) => {
+                    entries.extend_from_slice(format!("{} {}\t", entry.mode, entry.oid).as_bytes());
+                    entries.extend_from_slice(bytes);
+                    entries.push(0);
+                    paths.extend_from_slice(bytes);
+                    paths.push(0);
+                }
+            }
+        }
+        if !removed.is_empty() {
+            self.run_stdin(
+                &["update-index", "--force-remove", "-z", "--stdin"],
+                &removed,
+            )?;
+            for (path, decision) in settled {
+                if *decision == Decision::Absent {
+                    self.remove_worktree_file(path)?;
+                }
+            }
+        }
+        if !entries.is_empty() {
+            self.run_stdin(
+                &["update-index", "--add", "--replace", "-z", "--index-info"],
+                &entries,
+            )?;
+            // `-f`: at a stop the worktree file holds git's conflict markers.
+            self.run_stdin(&["checkout-index", "-u", "-f", "-z", "--stdin"], &paths)?;
+        }
+        Ok(())
+    }
+
+    fn symlinked_parent(&self, path: &Path) -> Result<Option<PathBuf>> {
+        let mut parents: Vec<&Path> = path
+            .ancestors()
+            .skip(1)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .collect();
+        parents.reverse();
+        for dir in parents {
+            match fs::symlink_metadata(self.repo.join(dir)) {
+                Ok(meta) if meta.file_type().is_symlink() => return Ok(Some(dir.to_path_buf())),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e).with_context(|| format!("cannot stat {}", dir.display())),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Removes the file or symlink at repo path `path`; a directory or nothing there is left.
+    fn remove_worktree_file(&self, path: &Path) -> Result<()> {
+        if let Some(link) = self.symlinked_parent(path)? {
+            return Err(UnderSymlink(link).into());
+        }
+        let full = self.repo.join(path);
+        match fs::symlink_metadata(&full) {
+            Ok(meta) if !meta.is_dir() => {
+                fs::remove_file(&full).with_context(|| format!("cannot remove {}", full.display()))
+            }
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("cannot stat {}", full.display())),
+        }
+    }
+
+    /// Every untracked file in the worktree, ignored ones too.
+    fn untracked(&self) -> Result<BTreeSet<PathBuf>> {
+        let out = self.run(&["ls-files", "-o", "-z"])?;
+        Ok(out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|path| !path.is_empty())
+            .map(path_from)
+            .collect())
+    }
+
+    /// `git <args>` with `input` on stdin, from a file in `.git`, so git exiting early cannot kill
+    /// dotman with SIGPIPE.
+    fn run_stdin(&self, args: &[&str], input: &[u8]) -> Result<Output> {
+        let dir = self.repo.join(".git");
+        let mut file = tempfile::tempfile_in(&dir)
+            .with_context(|| format!("cannot create a temp file in {}", dir.display()))?;
+        file.write_all(input)
+            .and_then(|()| file.rewind())
+            .context("cannot write a temp file")?;
+        self.check_version()?;
+        let mut cmd = self.command();
+        cmd.args(args);
+        let out = self.spawn_with(cmd, Stdio::from(file))?;
+        if out.status.success() {
+            Ok(out)
+        } else {
+            Err(self.failure(args, &out))
+        }
+    }
+
+    /// Puts back a repo that a killed replay left under its marker, by the one rule for every
+    /// state after the marker was written: while the branch is still at the old head, back to
+    /// it; when the branch holds every decision, onto the branch; anything else is refused and
+    /// changes nothing. Dirtiness is judged before anything changes. SIGINT, SIGTERM and SIGHUP
+    /// are ignored while it runs.
+    pub fn recover_pull(&self) -> Result<Recovery> {
+        let path = self.marker_path();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Recovery::NoMarker),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
+        let locks = self.lock_files();
+        if !locks.is_empty() {
+            return Ok(Recovery::Locked(locks));
+        }
+        let _ignored = crate::sys::ignore_signals(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
+        let marker = Marker::parse(&bytes);
+        let refused = |why: String| {
+            Recovery::Refused(Refusal {
+                why,
+                repo: self.repo.clone(),
+                marker: marker
+                    .as_ref()
+                    .map(|marker| (marker.branch.clone(), marker.old.clone())),
+                head: self.head().ok().flatten(),
+                rebase_dir: self.rebase_dir().is_some(),
+            })
+        };
+        let Some(found) = &marker else {
+            return Ok(refused(format!("{} cannot be read", path.display())));
+        };
+        Ok(match self.recover_from(found) {
+            Ok(Ok(recovery)) => recovery,
+            Ok(Err(why)) => refused(why),
+            Err(e) => refused(format!("{e:#}")),
+        })
+    }
+
+    /// [`Git::recover_pull`] with a marker that parsed; `Err` inside says why it refuses.
+    fn recover_from(&self, marker: &Marker) -> Result<Result<Recovery, String>> {
+        let onto = self
+            .rebase_dir()
+            .map(|dir| fs::read_to_string(dir.join("onto")).unwrap_or_default());
+        let matching = match onto.as_deref().map(str::trim) {
+            None => false,
+            Some(onto) if onto == marker.onto => true,
+            Some(_) => {
+                return Ok(Err(
+                    "a rebase dotman did not start is in progress".to_owned()
+                ));
+            }
+        };
+        let refname = full_ref(&marker.branch);
+        let on = self.optional(&["symbolic-ref", "-q", "HEAD"])?;
+        if on.as_ref().is_some_and(|on| *on != refname) {
+            return Ok(Err(format!("HEAD is on {}", on.unwrap_or_default())));
+        }
+        let Some(tip) = self.resolve_commit(&refname)? else {
+            return Ok(Err(format!("{} has no commit", marker.branch)));
+        };
+        let settled = |path: &Path| marker.decisions.contains_key(path);
+        for change in self.changes()? {
+            // At a matching stop, what git staged and the paths in conflict are the rebase's own.
+            let dirty = if matching {
+                change.kind != StatusKind::Unmerged && change.xy.get(1..) != Some(".")
+            } else {
+                true
+            };
+            let paths = std::iter::once(&change.path).chain(&change.orig_path);
+            if dirty && paths.into_iter().any(|path| !settled(path)) {
+                return Ok(Err(format!(
+                    "{} has changes that are not committed",
+                    change.path.display()
+                )));
+            }
+        }
+        let head = self.head()?;
+        if tip != marker.old {
+            let tree = self.tree_entries(&tip)?;
+            let finished = head.as_deref() == Some(tip.as_str())
+                && !matching
+                && marker
+                    .decisions
+                    .iter()
+                    .all(|(path, decision)| holds(&tree, path, decision));
+            if !finished {
+                return Ok(Err(format!(
+                    "{} is at {tip}, which is neither where it was before the pull nor the pull's result",
+                    marker.branch
+                )));
+            }
+            self.run(&["symbolic-ref", "HEAD", &refname])?;
+            self.remove_marker()?;
+            return Ok(Ok(Recovery::Finished));
+        }
+        let Some(head) = head else {
+            return Ok(Err("HEAD has no commit".to_owned()));
+        };
+        self.remove_leftovers(marker)?;
+        if matching {
+            self.run(&["rebase", "--abort"])?;
+        } else {
+            let tree = self.tree_entries(&head)?;
+            let restore: Vec<(PathBuf, Decision)> = marker
+                .decisions
+                .keys()
+                .map(|path| {
+                    let decision = tree
+                        .get(path)
+                        .map_or(Decision::Absent, |entry| Decision::Set(entry.clone()));
+                    (path.clone(), decision)
+                })
+                .collect();
+            self.settle(&restore)?;
+            // `read-tree` refuses a path whose stat data is stale, as `--index-info` leaves it.
+            self.probe(&["update-index", "-q", "--unmerged", "--refresh"])?;
+            self.run(&["read-tree", "-m", "-u", "HEAD", &marker.old])?;
+        }
+        self.remove_leftovers(marker)?;
+        self.run(&["symbolic-ref", "HEAD", &refname])?;
+        if let Some(change) = self.changes()?.first() {
+            return Ok(Err(format!(
+                "{} still differs from {} after the restore",
+                change.path.display(),
+                marker.old
+            )));
+        }
+        self.remove_marker()?;
+        Ok(Ok(Recovery::Restored))
+    }
+
+    /// Tracked changes, staged or not, and unmerged paths; untracked files are left out.
+    fn changes(&self) -> Result<Vec<StatusEntry>> {
+        let mut cmd = self.command();
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        let args = [
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
+        ];
+        parse_status(&self.run_with(cmd, &args)?.stdout)
+    }
+
+    /// Removes the untracked files git 2.25 leaves from a stop, which `rebase --abort` keeps:
+    /// those that were not there before the replay and that are named `<path>~<suffix>` after a
+    /// path or directory of the old head, the fetched commit or a decision. Another new file
+    /// stays.
+    fn remove_leftovers(&self, marker: &Marker) -> Result<()> {
+        let new: Vec<PathBuf> = self
+            .untracked()?
+            .difference(&marker.untracked)
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            return Ok(());
+        }
+        let mut known: BTreeSet<PathBuf> = marker.decisions.keys().cloned().collect();
+        for rev in [&marker.old, &marker.onto] {
+            known.extend(self.tree_entries(rev)?.into_keys());
+        }
+        let dirs: Vec<PathBuf> = known
+            .iter()
+            .flat_map(|path| path.ancestors().skip(1).map(Path::to_path_buf))
+            .collect();
+        known.extend(dirs);
+        for path in new {
+            let stem = path
+                .file_name()
+                .and_then(|name| name.as_bytes().split(|b| *b == b'~').next())
+                .filter(|stem| {
+                    !stem.is_empty() && path.file_name().map(OsStrExt::as_bytes) != Some(*stem)
+                })
+                .map(|stem| path.with_file_name(OsStr::from_bytes(stem)));
+            if stem.is_some_and(|stem| known.contains(&stem))
+                && self.symlinked_parent(&path)?.is_none()
+            {
+                self.remove_worktree_file(&path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Fails naming every lock file of [`Git::lock_files`], with one `rm` step for them all. A
@@ -2579,10 +3556,20 @@ mod tests {
         a.push("origin", "main").expect("push");
         let mine = commit_file(&b, "shared.txt", b"from b\n", "b edits");
         let outcome = b.pull_rebase("origin", "main").expect("pull");
+        let blob = |bytes: &[u8]| Entry {
+            mode: "100644".to_owned(),
+            oid: b.write_blob(bytes).expect("blob"),
+        };
         assert_eq!(
             outcome,
             PullOutcome::Conflict {
-                paths: vec![PathBuf::from("shared.txt")]
+                stopped: vec![Stopped {
+                    path: PathBuf::from("shared.txt"),
+                    base: Some(blob(b"base\n")),
+                    ours: Some(blob(b"from a\n")),
+                    replayed: Some(blob(b"from b\n")),
+                    follows_rename: false,
+                }]
             }
         );
         assert!(!b.operation_in_progress());
@@ -2789,5 +3776,656 @@ mod tests {
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod");
         sb.raw_ok(git.repo(), &["config", "core.hooksPath", ".git/hooks"]);
         commit_file(&git, "a", b"a", "one");
+    }
+
+    /// Where git knows `rebase.backend`; git before 2.26 rebases with apply either way.
+    const BACKENDS: [&str; 2] = ["'rebase.backend=merge'", "'rebase.backend=apply'"];
+
+    /// Writes, or with `None` removes, each file, then commits them all.
+    fn change(repo: &Git, files: &[(&str, Option<&[u8]>)], msg: &str) -> String {
+        for (rel, bytes) in files {
+            let path = repo.repo().join(rel);
+            match bytes {
+                Some(bytes) => {
+                    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+                    fs::write(&path, bytes).expect("write");
+                }
+                None => fs::remove_file(&path).expect("remove"),
+            }
+        }
+        repo.stage_all().expect("stage");
+        repo.commit(msg).expect("commit").expect("a commit")
+    }
+
+    /// Machine `b` whose pull conflicts: `base` is pushed and cloned, origin then commits
+    /// `theirs` and `b` commits `mine`. Returns `b`, its head before the pull, the fetched commit
+    /// and what the pull stopped on.
+    struct Diverged {
+        sb: Sandbox,
+        b: Git,
+        old: String,
+        onto: String,
+        stopped: Vec<Stopped>,
+    }
+
+    type Files<'a> = &'a [(&'a str, Option<&'a [u8]>)];
+
+    fn diverged(backend: &str, base: Files, theirs: Files, mine: &[Files]) -> Diverged {
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        change(&a, base, "base");
+        a.set_remote_url("origin", utf8(&remote)).expect("remote");
+        a.push("origin", "main").expect("push");
+        let b = sb.git("b").with_env([("GIT_CONFIG_PARAMETERS", backend)]);
+        b.clone_from(utf8(a.repo())).expect("clone");
+        change(&a, theirs, "theirs");
+        a.push("origin", "main").expect("push");
+        let mut old = String::new();
+        for (n, files) in mine.iter().enumerate() {
+            old = change(&b, files, &format!("mine {n}"));
+        }
+        let stopped = conflict(b.pull_rebase("origin", "main").expect("pull"));
+        let onto = b
+            .resolve_commit("FETCH_HEAD")
+            .expect("rev-parse")
+            .expect("fetched");
+        Diverged {
+            sb,
+            b,
+            old,
+            onto,
+            stopped,
+        }
+    }
+
+    fn conflict(outcome: PullOutcome) -> Vec<Stopped> {
+        match outcome {
+            PullOutcome::Conflict { stopped } => Some(stopped),
+            _ => None,
+        }
+        .expect("the pull should conflict")
+    }
+
+    fn refused(recovery: Recovery) -> Refusal {
+        match recovery {
+            Recovery::Refused(refusal) => Some(refusal),
+            _ => None,
+        }
+        .expect("recovery refuses")
+    }
+
+    fn set(git: &Git, bytes: &[u8]) -> Decision {
+        Decision::Set(Entry {
+            mode: "100644".to_owned(),
+            oid: git.write_blob(bytes).expect("blob"),
+        })
+    }
+
+    fn decide(pairs: Vec<(&str, Decision)>) -> BTreeMap<PathBuf, Decision> {
+        pairs
+            .into_iter()
+            .map(|(path, decision)| (PathBuf::from(path), decision))
+            .collect()
+    }
+
+    fn lines(changed: &[(usize, &str)]) -> Vec<u8> {
+        (1..=10_usize)
+            .map(|n| {
+                changed
+                    .iter()
+                    .find(|(at, _)| *at == n)
+                    .map_or_else(|| format!("l{n}\n"), |(_, line)| format!("{line}\n"))
+            })
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    /// The repo is as before the pull: on its branch at `old`, clean, nothing left of the replay.
+    fn assert_restored(d: &Diverged) {
+        let b = &d.b;
+        assert!(!b.own_pull(), "the marker is gone");
+        assert_eq!(b.rebase_dir(), None);
+        assert_eq!(b.branch().expect("branch").as_deref(), Some("main"));
+        assert_eq!(b.head().expect("head"), Some(d.old.clone()));
+        let status = d.sb.raw_ok(b.repo(), &["status", "--porcelain", "-uall"]);
+        assert_eq!(status, "", "the worktree is clean");
+        assert_eq!(
+            d.sb.raw_ok(b.repo(), &["write-tree"]),
+            d.sb.raw_ok(b.repo(), &["rev-parse", &format!("{}^{{tree}}", d.old)]),
+            "the index is the old head's tree"
+        );
+    }
+
+    fn blob_at(git: &Git, rev: &str, path: &str) -> Vec<u8> {
+        git.show_blob(rev, path).expect("blob")
+    }
+
+    #[test]
+    fn a_replay_sets_each_settled_path_and_corrects_once() {
+        for backend in BACKENDS {
+            for correct in [false, true] {
+                let conf_base: &[u8] = b"c1\nc2\nc3\nc4\nc5\n";
+                let conf_theirs: &[u8] = b"c1 origin\nc2\nc3\nc4\nc5\n";
+                let base = lines(&[]);
+                let theirs = lines(&[(2, "origin2"), (9, "origin9")]);
+                let mine = lines(&[(2, "local2"), (5, "local5")]);
+                let d = diverged(
+                    backend,
+                    &[("a.txt", Some(&base)), ("conf", Some(conf_base))],
+                    &[("a.txt", Some(&theirs)), ("conf", Some(conf_theirs))],
+                    &[&[
+                        ("a.txt", Some(&mine)),
+                        ("conf", Some(b"c1\nc2\nc3\nc4\nc5 local\n")),
+                    ]],
+                );
+                let paths: Vec<&Path> = d.stopped.iter().map(|s| s.path.as_path()).collect();
+                assert_eq!(paths, [Path::new("a.txt")], "{backend}");
+                let tmp = TempDir::new().expect("tmp");
+                let (merged, clean) =
+                    d.b.merge_file(
+                        tmp.path(),
+                        [&mine, &base, &theirs],
+                        ["this machine (beta)", "base", "origin/main"],
+                        Some(Side::Ours),
+                    )
+                    .expect("merge-file");
+                assert!(clean);
+                let want = lines(&[(2, "local2"), (5, "local5"), (9, "origin9")]);
+                assert_eq!(merged, want);
+                let mut decisions = vec![("a.txt", set(&d.b, &merged))];
+                if correct {
+                    decisions.push(("conf", set(&d.b, conf_theirs)));
+                }
+                let replayed =
+                    d.b.replay("origin", "main", &d.onto, &decide(decisions), "beta")
+                        .expect("replay");
+                assert_eq!(replayed, Replayed::Done, "{backend}");
+                assert!(!d.b.own_pull());
+                assert_eq!(d.b.branch().expect("branch").as_deref(), Some("main"));
+                assert_eq!(blob_at(&d.b, "HEAD", "a.txt"), want);
+                assert_eq!(fs::read(d.b.repo().join("a.txt")).expect("read"), want);
+                let count = d.b.count_commits(Some(&d.onto), "HEAD").expect("count");
+                let subject = d.sb.raw_ok(d.b.repo(), &["log", "-1", "--format=%s"]);
+                if correct {
+                    assert_eq!(count, 2, "{backend}");
+                    assert_eq!(subject, "sync(beta): resolve conf");
+                    assert_eq!(blob_at(&d.b, "HEAD", "conf"), conf_theirs);
+                } else {
+                    assert_eq!(count, 1, "{backend}: no correction commit");
+                    assert_eq!(subject, "mine 0");
+                }
+                let status = d.sb.raw_ok(d.b.repo(), &["status", "--porcelain", "-uall"]);
+                assert_eq!(status, "");
+            }
+        }
+    }
+
+    /// Taking origin's version whole empties the local commit, which the replay drops.
+    #[test]
+    fn a_commit_the_replay_empties_is_skipped() {
+        for backend in BACKENDS {
+            let theirs = lines(&[(2, "origin2")]);
+            let d = diverged(
+                backend,
+                &[("a.txt", Some(&lines(&[])))],
+                &[("a.txt", Some(&theirs))],
+                &[&[("a.txt", Some(&lines(&[(2, "local2")])))]],
+            );
+            let decisions = decide(vec![("a.txt", set(&d.b, &theirs))]);
+            let replayed =
+                d.b.replay("origin", "main", &d.onto, &decisions, "beta")
+                    .expect("replay");
+            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert_eq!(d.b.head().expect("head"), Some(d.onto.clone()), "{backend}");
+            assert_eq!(d.b.branch().expect("branch").as_deref(), Some("main"));
+            assert_eq!(fs::read(d.b.repo().join("a.txt")).expect("read"), theirs);
+        }
+    }
+
+    /// Two local commits stop on two paths; only the first has a decision.
+    #[test]
+    fn an_unsettled_path_leaves_the_repo_as_it_was() {
+        for backend in BACKENDS {
+            let d = diverged(
+                backend,
+                &[("a.txt", Some(b"a\n")), ("b.txt", Some(b"b\n"))],
+                &[
+                    ("a.txt", Some(b"a origin\n")),
+                    ("b.txt", Some(b"b origin\n")),
+                ],
+                &[
+                    &[("a.txt", Some(b"a local\n"))],
+                    &[("b.txt", Some(b"b local\n"))],
+                ],
+            );
+            let decisions = decide(vec![("a.txt", set(&d.b, b"a local\n"))]);
+            let replayed =
+                d.b.replay("origin", "main", &d.onto, &decisions, "beta")
+                    .expect("replay");
+            let stopped = match replayed {
+                Replayed::Stopped(stopped) => Some(stopped),
+                Replayed::Done => None,
+            }
+            .expect("the second commit stops on b.txt");
+            let paths: Vec<&Path> = stopped.iter().map(|s| s.path.as_path()).collect();
+            assert_eq!(paths, [Path::new("b.txt")]);
+            assert_restored(&d);
+            assert_eq!(
+                fs::read(d.b.repo().join("b.txt")).expect("read"),
+                b"b local\n"
+            );
+        }
+    }
+
+    /// git 2.25 leaves its copy of the file as an untracked `x~<subject>`, which the undo
+    /// removes. The first pull's abort leaves one too, which is removed by hand here so that the
+    /// replay's own copy is new.
+    #[test]
+    fn a_file_against_a_directory_stops_and_leaves_nothing_behind() {
+        for backend in BACKENDS {
+            let d = diverged(
+                backend,
+                &[("base", Some(b"b\n"))],
+                &[("x/y", Some(b"dir\n"))],
+                &[&[("x", Some(b"file\n"))]],
+            );
+            d.sb.raw_ok(d.b.repo(), &["clean", "-fq"]);
+            let replayed =
+                d.b.replay("origin", "main", &d.onto, &BTreeMap::new(), "beta")
+                    .expect("replay");
+            assert!(
+                matches!(replayed, Replayed::Stopped(ref stopped) if !stopped.is_empty()),
+                "{backend}: {replayed:?}"
+            );
+            assert_restored(&d);
+        }
+    }
+
+    #[test]
+    fn a_key_named_dash_x_settles_and_is_removed() {
+        for backend in BACKENDS {
+            let d = diverged(
+                backend,
+                &[("-x", Some(b"x\n")), ("-y", Some(b"y\n"))],
+                &[("-x", Some(b"x origin\n")), ("-y", Some(b"y origin\n"))],
+                &[&[("-x", Some(b"x local\n")), ("-y", Some(b"y local\n"))]],
+            );
+            let decisions = decide(vec![
+                ("-x", set(&d.b, b"x settled\n")),
+                ("-y", Decision::Absent),
+            ]);
+            let replayed =
+                d.b.replay("origin", "main", &d.onto, &decisions, "beta")
+                    .expect("replay");
+            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert_eq!(blob_at(&d.b, "HEAD", "-x"), b"x settled\n");
+            let tree = d.b.tree_entries("HEAD").expect("tree");
+            assert!(!tree.contains_key(Path::new("-y")), "{backend}");
+            assert!(!d.b.repo().join("-y").exists(), "{backend}");
+            let status = d.sb.raw_ok(d.b.repo(), &["status", "--porcelain", "-uall"]);
+            assert_eq!(status, "");
+        }
+    }
+
+    /// Origin turns `.p` into a template with an edit to the line this machine edits too, so git
+    /// stops on `.p{tmpl}` with this machine's `.p` as the replayed stage.
+    #[test]
+    fn stopped_marks_a_path_that_followed_a_rename() {
+        let body = lines(&[]);
+        let sb = Sandbox::new();
+        let remote = sb.bare_remote();
+        let a = sb.git("a");
+        a.init().expect("init");
+        change(&a, &[(".p", Some(&body)), ("x", Some(b"x\n"))], "base");
+        a.set_remote_url("origin", utf8(&remote)).expect("remote");
+        a.push("origin", "main").expect("push");
+        let b = sb.git("b");
+        b.clone_from(utf8(a.repo())).expect("clone");
+        sb.raw_ok(a.repo(), &["mv", ".p", ".p{tmpl}"]);
+        change(
+            &a,
+            &[
+                (".p{tmpl}", Some(&lines(&[(1, "{{ origin }}")]))),
+                ("x", Some(b"x origin\n")),
+            ],
+            "theirs",
+        );
+        a.push("origin", "main").expect("push");
+        let local = lines(&[(1, "local")]);
+        change(
+            &b,
+            &[(".p", Some(&local)), ("x", Some(b"x local\n"))],
+            "mine",
+        );
+        let stopped = conflict(b.pull_rebase("origin", "main").expect("pull"));
+        let followed: Vec<(&Path, bool)> = stopped
+            .iter()
+            .map(|s| (s.path.as_path(), s.follows_rename))
+            .collect();
+        assert_eq!(
+            followed,
+            [(Path::new(".p{tmpl}"), true), (Path::new("x"), false)]
+        );
+        let renamed = stopped.first().expect("first");
+        let local_oid = b.write_blob(&local).expect("blob");
+        assert_eq!(
+            renamed.replayed.as_ref().map(|e| e.oid.as_str()),
+            Some(local_oid.as_str())
+        );
+    }
+
+    #[test]
+    fn the_marker_tells_dotmans_rebase_from_one_started_by_hand() {
+        let d = diverged(
+            BACKENDS[0],
+            &[("a.txt", Some(b"a\n"))],
+            &[("a.txt", Some(b"a origin\n"))],
+            &[&[("a.txt", Some(b"a local\n"))]],
+        );
+        let b = &d.b;
+        // By hand: a rebase dir, no marker. Recovery has nothing to do with it.
+        let by_hand = d.sb.raw(b.repo(), &["rebase", &d.onto]);
+        assert!(!by_hand.status.success());
+        assert!(b.rebase_dir().is_some());
+        assert!(!b.own_pull());
+        assert!(matches!(
+            b.recover_pull().expect("recover"),
+            Recovery::NoMarker
+        ));
+        d.sb.raw_ok(b.repo(), &["rebase", "--abort"]);
+
+        // Under the marker, a rebase dir onto another commit, or with no `onto` yet, is refused.
+        let decisions = decide(vec![("a.txt", set(b, b"a local\n"))]);
+        for onto in [Some(d.old.as_str()), None] {
+            let (marker, fork) = b
+                .start_replay("origin", "main", &d.onto, &decisions)
+                .expect("start");
+            b.rebase(&["--onto", &marker.onto, &fork]).expect("rebase");
+            let dir = b.rebase_dir().expect("stopped");
+            match onto {
+                Some(other) => fs::write(dir.join("onto"), format!("{other}\n")).expect("onto"),
+                None => fs::remove_file(dir.join("onto")).expect("no onto"),
+            }
+            let before = d.sb.raw_ok(b.repo(), &["status", "--porcelain", "-uall"]);
+            let refusal = refused(b.recover_pull().expect("recover"));
+            let shown = refusal.to_string();
+            assert!(shown.contains("a rebase dotman did not start"), "{shown}");
+            assert!(shown.contains(&d.old), "{shown}");
+            assert!(shown.contains("dotman git rebase --quit"), "{shown}");
+            assert!(shown.contains("dotman git checkout -f main"), "{shown}");
+            assert!(b.own_pull(), "the marker stays");
+            assert_eq!(
+                d.sb.raw_ok(b.repo(), &["status", "--porcelain", "-uall"]),
+                before,
+                "nothing was reset"
+            );
+            // The printed steps, through plain git.
+            d.sb.raw_ok(b.repo(), &["rebase", "--quit"]);
+            d.sb.raw_ok(b.repo(), &["checkout", "-q", "-f", "main"]);
+            fs::remove_file(b.marker_path()).expect("rm");
+            assert_restored(&d);
+        }
+    }
+
+    /// Each kill point a replay can die at, reached by running its steps and stopping; recovery
+    /// then restores the old head while the branch has not moved, and attaches to the result
+    /// once it has. The replay runs again afterwards.
+    #[test]
+    fn recovery_puts_back_a_replay_killed_at_each_step() {
+        for backend in BACKENDS {
+            for kill in [
+                "stop",
+                "stop-settled",
+                "rebased",
+                "correction-staged",
+                "update-ref",
+                "symbolic-ref",
+            ] {
+                let theirs = lines(&[(2, "origin2")]);
+                let d = diverged(
+                    backend,
+                    &[("a.txt", Some(&lines(&[]))), ("conf", Some(b"c\n"))],
+                    &[("a.txt", Some(&theirs))],
+                    &[&[
+                        ("a.txt", Some(&lines(&[(2, "local2")]))),
+                        ("conf", Some(b"c local\n")),
+                    ]],
+                );
+                let b = &d.b;
+                let decisions = decide(vec![
+                    ("a.txt", set(b, &lines(&[(2, "settled")]))),
+                    ("conf", set(b, b"c settled\n")),
+                ]);
+                let (marker, fork) = b
+                    .start_replay("origin", "main", &d.onto, &decisions)
+                    .expect("start");
+                if kill.starts_with("stop") {
+                    b.rebase(&["--onto", &marker.onto, &fork]).expect("rebase");
+                    assert!(b.rebase_dir().is_some(), "{backend} {kill}");
+                    if kill == "stop-settled" {
+                        let at = decide(vec![("a.txt", set(b, &lines(&[(2, "settled")])))]);
+                        let at: Vec<(PathBuf, Decision)> = at.into_iter().collect();
+                        b.settle(&at).expect("settle");
+                    }
+                } else {
+                    assert_eq!(b.finish_rebase(&marker, &fork).expect("rebase"), None);
+                    if kill == "correction-staged" {
+                        let conf = vec![(PathBuf::from("conf"), set(b, b"c settled\n"))];
+                        b.settle(&conf).expect("settle");
+                    } else {
+                        b.correct(&marker, "beta").expect("correct");
+                    }
+                    if kill == "update-ref" || kill == "symbolic-ref" {
+                        b.move_branch(&marker).expect("update-ref");
+                    }
+                    if kill == "symbolic-ref" {
+                        b.run(&["symbolic-ref", "HEAD", "refs/heads/main"])
+                            .expect("symbolic-ref");
+                    }
+                }
+                let moved = kill == "update-ref" || kill == "symbolic-ref";
+                let result = b.head().expect("head");
+                let recovery = b.recover_pull().expect("recover");
+                if moved {
+                    assert!(
+                        matches!(recovery, Recovery::Finished),
+                        "{backend} {kill}: {recovery:?}"
+                    );
+                    assert!(!b.own_pull());
+                    assert_eq!(b.branch().expect("branch").as_deref(), Some("main"));
+                    assert_eq!(b.head().expect("head"), result);
+                    assert_eq!(blob_at(b, "HEAD", "conf"), b"c settled\n");
+                    let status = d.sb.raw_ok(b.repo(), &["status", "--porcelain", "-uall"]);
+                    assert_eq!(status, "");
+                    continue;
+                }
+                assert!(
+                    matches!(recovery, Recovery::Restored),
+                    "{backend} {kill}: {recovery:?}"
+                );
+                assert_restored(&d);
+                let again = b
+                    .replay("origin", "main", &d.onto, &decisions, "beta")
+                    .expect("replay");
+                assert_eq!(again, Replayed::Done, "{backend} {kill}");
+                assert_eq!(blob_at(b, "HEAD", "a.txt"), lines(&[(2, "settled")]));
+            }
+        }
+    }
+
+    /// The stopped commit also changes `b.txt` cleanly, which git stages: that is the rebase's
+    /// own work, not a change of the user's.
+    #[test]
+    fn a_stop_with_a_second_file_staged_recovers() {
+        for backend in BACKENDS {
+            let d = diverged(
+                backend,
+                &[("a.txt", Some(b"a\n")), ("b.txt", Some(b"b\n"))],
+                &[("a.txt", Some(b"a origin\n"))],
+                &[&[("a.txt", Some(b"a local\n")), ("b.txt", Some(b"b local\n"))]],
+            );
+            let b = &d.b;
+            let decisions = decide(vec![("a.txt", set(b, b"a local\n"))]);
+            let (marker, fork) = b
+                .start_replay("origin", "main", &d.onto, &decisions)
+                .expect("start");
+            b.rebase(&["--onto", &marker.onto, &fork]).expect("rebase");
+            let staged = d.sb.raw_ok(b.repo(), &["diff", "--cached", "--name-only"]);
+            assert!(staged.contains("b.txt"), "{backend}: {staged}");
+            let recovery = b.recover_pull().expect("recover");
+            assert!(matches!(recovery, Recovery::Restored), "{recovery:?}");
+            assert_restored(&d);
+        }
+    }
+
+    /// A change the user made in the worktree after the kill is never dropped: recovery refuses.
+    #[test]
+    fn recovery_refuses_a_change_outside_the_settled_paths() {
+        let d = diverged(
+            BACKENDS[0],
+            &[("a.txt", Some(b"a\n")), ("other", Some(b"o\n"))],
+            &[("a.txt", Some(b"a origin\n"))],
+            &[&[("a.txt", Some(b"a local\n"))]],
+        );
+        let b = &d.b;
+        let decisions = decide(vec![("a.txt", set(b, b"a local\n"))]);
+        b.start_replay("origin", "main", &d.onto, &decisions)
+            .expect("start");
+        write(b, "other", b"edited by hand\n");
+        let refusal = refused(b.recover_pull().expect("recover"));
+        assert!(
+            refusal.to_string().contains("other has changes"),
+            "{refusal}"
+        );
+        assert_eq!(
+            fs::read(b.repo().join("other")).expect("read"),
+            b"edited by hand\n"
+        );
+        assert!(b.own_pull());
+
+        fs::write(b.repo().join(".git/index.lock"), b"").expect("lock");
+        assert!(matches!(
+            b.recover_pull().expect("recover"),
+            Recovery::Locked(locks) if locks.len() == 1
+        ));
+    }
+
+    /// The user's config would move a second branch, answer from a recorded resolution and add a
+    /// base section to the markers; none of it reaches the replay or `merge_file`.
+    #[test]
+    fn the_user_s_rebase_rerere_and_conflict_style_settings_are_pinned() {
+        for backend in BACKENDS {
+            let d = diverged(
+                backend,
+                &[("a.txt", Some(&lines(&[])))],
+                &[("a.txt", Some(&lines(&[(2, "origin2")])))],
+                &[&[("a.txt", Some(&lines(&[(2, "local2")])))]],
+            );
+            let config = d.sb.dir.path().join("home/.gitconfig");
+            let mut text = fs::read_to_string(&config).expect("gitconfig");
+            text.push_str(
+                "[rebase]\n\tupdateRefs = true\n[rerere]\n\tenabled = true\n\tautoUpdate = true\n[merge]\n\tconflictStyle = diff3\n",
+            );
+            fs::write(&config, text).expect("gitconfig");
+            let b = &d.b;
+            d.sb.raw_ok(b.repo(), &["branch", "keep", &d.old]);
+            let tmp = TempDir::new().expect("tmp");
+            let (marked, clean) = b
+                .merge_file(
+                    tmp.path(),
+                    [
+                        &lines(&[(2, "local2")]),
+                        &lines(&[]),
+                        &lines(&[(2, "origin2")]),
+                    ],
+                    ["this machine (b\u{1b}[2Jeta)", "base", "origin/main"],
+                    None,
+                )
+                .expect("merge-file");
+            let marked = String::from_utf8(marked).expect("utf8");
+            assert!(!clean);
+            assert!(!marked.contains("|||||||"), "{marked}");
+            assert!(!marked.contains('\u{1b}'), "{marked}");
+            assert!(marked.contains("<<<<<<< this machine (b"), "{marked}");
+
+            let decisions = decide(vec![("a.txt", set(b, &lines(&[(2, "settled")])))]);
+            let replayed = b
+                .replay("origin", "main", &d.onto, &decisions, "beta")
+                .expect("replay");
+            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert_eq!(
+                b.resolve_commit("refs/heads/keep").expect("keep"),
+                Some(d.old.clone()),
+                "{backend}: the second branch did not move"
+            );
+            assert_eq!(blob_at(b, "HEAD", "a.txt"), lines(&[(2, "settled")]));
+        }
+    }
+
+    /// git 2.25's `restore` and every git's `rm` delete through a symlinked parent; the settle
+    /// refuses before anything runs.
+    #[test]
+    fn the_symlink_parent_guard_refuses_and_leaves_an_outside_file_intact() {
+        let sb = Sandbox::new();
+        let git = sb.git("repo");
+        git.init().expect("init");
+        change(&git, &[("d/f", Some(b"inside\n"))], "base");
+        let outside = sb.dir.path().join("outside");
+        fs::create_dir(&outside).expect("mkdir");
+        fs::write(outside.join("f"), b"outside\n").expect("write");
+        fs::remove_dir_all(git.repo().join("d")).expect("rm d");
+        std::os::unix::fs::symlink(&outside, git.repo().join("d")).expect("symlink");
+        let blob = set(&git, b"settled\n");
+        for decision in [Decision::Absent, blob] {
+            let err = git
+                .settle(&[(PathBuf::from("d/f"), decision)])
+                .expect_err("refused");
+            assert!(err.to_string().contains("lies under a symlink"), "{err}");
+            assert_eq!(fs::read(outside.join("f")).expect("read"), b"outside\n");
+        }
+        assert!(git.remove_worktree_file(Path::new("d/f")).is_err());
+        assert_eq!(fs::read(outside.join("f")).expect("read"), b"outside\n");
+        assert!(
+            fs::symlink_metadata(git.repo().join("d"))
+                .expect("d")
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn the_marker_reads_back_any_path_and_refuses_anything_else() {
+        let oid = "a".repeat(40);
+        let marker = Marker {
+            branch: "main".to_owned(),
+            old: oid.clone(),
+            onto: "b".repeat(40),
+            decisions: decide(vec![
+                (
+                    "tab\tand\nnewline",
+                    Decision::Set(Entry {
+                        mode: "100755".to_owned(),
+                        oid,
+                    }),
+                ),
+                ("-x", Decision::Absent),
+            ]),
+            untracked: std::iter::once(PathBuf::from("x~local")).collect(),
+        };
+        let bytes = marker.to_bytes();
+        assert_eq!(Marker::parse(&bytes), Some(marker));
+        assert_eq!(Marker::parse(b""), None);
+        assert_eq!(Marker::parse(b"dotman-pull 2\0main\0"), None);
+        let bad_mode = bytes
+            .windows(6)
+            .position(|w| w == b"100755")
+            .map(|at| {
+                let mut copy = bytes.clone();
+                copy.splice(at..at.saturating_add(6), *b"10 755");
+                copy
+            })
+            .expect("mode");
+        assert_eq!(Marker::parse(&bad_mode), None);
     }
 }
