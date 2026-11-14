@@ -115,7 +115,7 @@ conflict_round() {
     done
     e2e_file_has b ".plain-$r" B2
     mapfile -t answers < <(e2e_recipe)
-    e2e_check "the report prints the two flag commands" test "${#answers[@]}" = 2
+    e2e_check "the report prints the two flag commands and dotman sync" test "${#answers[@]}" = 3
     e2e_run_printed b "$(e2e_printed "^dotman sync $flag\$")"
     for key in rebase-merge rebase-apply dotman-pull; do
         e2e_check "no $key is left" test ! -e "$(e2e_repo b)/.git/$key"
