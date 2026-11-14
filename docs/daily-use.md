@@ -94,7 +94,7 @@ With no flag, a terminal asks. One file gets this question, with only the answer
 
 Several files get one question first, `[k] all mine  [t] all theirs  [d] diffs  [p] per file  [s] stop`, and `[p]` asks about each file in turn. A key that both machines set differently in `.dotman.toml` is asked in the same list. When a later commit of yours stops on another file, that file is asked as it comes.
 
-A pull is never left half merged while you decide. The repo, `$HOME` and the remote stay as they were until the last answer is in, so a run killed at a question or in the editor leaves nothing to clean up, and the next `sync` asks again.
+A pull is never left half merged while you decide. The repo, `$HOME` and the remote stay as they were until the last answer is in, so a run killed at a question or in the editor leaves the pull undone, and the next `sync` asks again. The editor's private copy stays until a later `sync`, `apply` or `add` removes it, once it is ten minutes old.
 
 The editor opens a copy in a private 0700 directory under `$XDG_RUNTIME_DIR`, or under dotman's state directory when that isn't set, outside the repo and `$HOME`. dotman holds its lock while the editor is open, so another dotman command that writes fails until you close it.
 
@@ -114,7 +114,7 @@ The version that loses is always saved first. Before the replay, this machine's 
 
 Once the last answer is in, dotman replays this machine's commits onto origin's with git. Resolved files go into git's index and git writes them to the repo. `$HOME` is written afterwards, by the usual apply. Your git config's `commit.gpgsign` and `merge.directoryRenames` affect the replay as they affect any pull.
 
-Ctrl-C, a hangup and a terminate signal are ignored while the replay runs. That also means Ctrl-C can't interrupt a `commit.gpgsign` pinentry that hangs. A run killed during the replay leaves `.git/dotman-pull` in the repo. `dotman status` and dry runs then exit 4 and say so, and the next command that writes, such as `dotman sync`, puts the repo back as it was before that pull. `sync` then pulls again and asks again.
+Ctrl-C, a hangup and a terminate signal are ignored while the replay runs. That also means Ctrl-C can't interrupt a `commit.gpgsign` pinentry that hangs. A run killed during the replay leaves `.git/dotman-pull` in the repo. `dotman status` and dry runs then exit 4 and say so, and the next command that writes, such as `dotman sync`, puts the repo back as it was before that pull. `sync` then pulls again.
 
 ### Conflicts dotman doesn't settle
 

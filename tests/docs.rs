@@ -314,6 +314,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         &[
             "a_sync_killed_in_the_editor_leaves_nothing_half_merged",
             "on_a_terminal_stop_or_no_answer_changes_nothing",
+            "on_a_terminal_stop_at_a_later_stop_changes_nothing",
             "an_unanswered_conflict_exits_4_changes_nothing_and_both_printed_answers_work",
         ],
     ),
@@ -519,7 +520,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "The settled repo paths reach git on stdin, never as arguments",
+        "The settled paths reach `update-index` and `checkout-index` on stdin, never as path",
         &[
             "a_key_named_dash_x_settles_and_is_removed",
             "a_conflict_on_a_key_that_starts_with_a_dash_is_settled_by_a_flag",
