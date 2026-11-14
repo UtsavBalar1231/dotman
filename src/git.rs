@@ -4703,7 +4703,8 @@ mod tests {
             let (marker, fork) = b
                 .start_replay("origin", "main", &d.onto, &decisions)
                 .expect("start");
-            b.rebase(&["--onto", &marker.onto, &fork]).expect("rebase");
+            b.rebase(&["--merge", "--onto", &marker.onto, &fork])
+                .expect("rebase");
             let dir = b.rebase_dir().expect("stopped");
             match onto {
                 Some(other) => fs::write(dir.join("onto"), format!("{other}\n")).expect("onto"),
@@ -4763,7 +4764,8 @@ mod tests {
                     .start_replay("origin", "main", &d.onto, &decisions)
                     .expect("start");
                 if kill.starts_with("stop") {
-                    b.rebase(&["--onto", &marker.onto, &fork]).expect("rebase");
+                    b.rebase(&["--merge", "--onto", &marker.onto, &fork])
+                        .expect("rebase");
                     assert!(b.rebase_dir().is_some(), "{backend} {kill}");
                     if kill == "stop-settled" {
                         let at = decide(vec![("a.txt", set(b, &lines(&[(2, "settled")])))]);
@@ -4836,7 +4838,8 @@ mod tests {
             let (marker, fork) = b
                 .start_replay("origin", "main", &d.onto, &decisions)
                 .expect("start");
-            b.rebase(&["--onto", &marker.onto, &fork]).expect("rebase");
+            b.rebase(&["--merge", "--onto", &marker.onto, &fork])
+                .expect("rebase");
             let staged = d.sb.raw_ok(b.repo(), &["diff", "--cached", "--name-only"]);
             assert!(staged.contains("b.txt"), "{backend}: {staged}");
             let recovery = b.recover_pull().expect("recover");
