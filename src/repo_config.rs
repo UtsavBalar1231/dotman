@@ -290,9 +290,8 @@ impl Tie {
 /// this machine's order, add what origin added and drop what either side removed. Maps merge per
 /// key. A settled source's `[modes]` entry and `[system]` table follow `winners` instead, and
 /// `host_copies` (shared source, variant) gives each variant this machine's `[modes]` entry. A
-/// `[modes]` key both sides set differently takes the stricter mode, `git_modes` giving the
-/// source's git tree mode on each side for a side with no entry, and a `[system]` table both set
-/// differently takes the stricter mode; neither mode is left to an answer.
+/// mode both sides set differently, in `[modes]` or a `[system]` table, takes the stricter one,
+/// which no answer changes; `git_modes` gives a source's git tree mode on each side, for a side with no entry.
 pub(crate) fn merge(
     base: &RepoConfig,
     mine: &RepoConfig,
@@ -430,8 +429,8 @@ fn bits(entry: Option<&str>, git_mode: u32) -> u32 {
     entry.map_or(git_mode, |text| parse_mode(text).unwrap_or(0)) & 0o777
 }
 
-// A side with no entry counts as `git` modes' side; the result is no entry when it is that git
-// mode, since an entry would skip the narrowing a file at git's mode gets.
+// A side with no entry counts as its git mode in `git`. The result is no entry when it equals
+// that git mode, since an entry would skip the narrowing a file at git's mode gets.
 fn stricter_entry(
     mine: Option<&String>,
     theirs: Option<&String>,
