@@ -524,6 +524,69 @@ fn an_unreadable_marker_on_a_detached_head_leads_back_to_the_branch() {
     }
 }
 
+/// A marker that does not parse in a repo that syncs `laptop` while `main` is there too, with
+/// `origin`'s `HEAD` naming `main` and with no `origin/HEAD` at all: the refusal checks out
+/// `laptop`, the branch the killed replay detached `HEAD` from. Its steps, run as printed, end in a
+/// clean sync on `laptop`, and nothing reaches `main` on the remote.
+#[test]
+fn an_unreadable_marker_leads_back_to_the_branch_the_replay_left() {
+    for origin_head in [true, false] {
+        let (a, mut b) = pair(&[(".t", b"1\n2\n3\n", 0o644)]);
+        b.ok(&["git", "checkout", "-q", "-b", "laptop"]);
+        exits(&b, 0, &["sync"]);
+        a.ok(&["git", "fetch", "-q", "origin", "laptop"]);
+        a.ok(&["git", "checkout", "-q", "-b", "laptop", "FETCH_HEAD"]);
+        a.write(".t", b"1\nfrom a\n3\n", 0o644);
+        exits(&a, 0, &["sync"]);
+        let remote = b.remote_path().to_string_lossy().into_owned();
+        let main_before = b.git(&["--git-dir", &remote, "rev-parse", "refs/heads/main"]);
+
+        b.write(".t", b"1\nfrom b\n3\n", 0o644);
+        let (pre, post) = kill_once(&b, "*' update-ref '*", true);
+        wrap_git(&mut b, &pre, &post);
+        let out = b.run(&["sync", "--keep-local"]);
+        assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+        if !origin_head {
+            b.ok(&["git", "symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
+        }
+        let marker = b.repo().join(".git/dotman-pull");
+        fs::write(&marker, b"garbage").expect("spoil the marker");
+
+        let err = exits(&b, 4, &["sync", "--keep-local"]);
+        let steps = numbered_steps(&err);
+        assert_eq!(
+            steps,
+            [
+                "dotman git checkout -f laptop".to_owned(),
+                format!("rm {}", marker.display()),
+                "dotman sync".to_owned(),
+            ],
+            "origin/HEAD: {origin_head}: {err}"
+        );
+        for step in &steps {
+            let out = common::paste(&b, step);
+            let code = if step == "dotman sync" { 4 } else { 0 };
+            assert_eq!(out.status.code(), Some(code), "{step}: {}", stderr(&out));
+        }
+        exits(&b, 0, &["sync", "--keep-local"]);
+        no_replay_left(&b);
+        let repo = b.repo().to_string_lossy().into_owned();
+        assert_eq!(
+            b.git(&["-C", &repo, "symbolic-ref", "HEAD"]).trim(),
+            "refs/heads/laptop"
+        );
+        assert_eq!(
+            b.git(&["--git-dir", &remote, "rev-parse", "refs/heads/main"]),
+            main_before,
+            "origin/HEAD: {origin_head}"
+        );
+        assert_eq!(
+            b.git(&["--git-dir", &remote, "show", "refs/heads/laptop:.t"]),
+            "1\nfrom b\n3\n"
+        );
+    }
+}
+
 /// After a kill, the user saves copies in the repo named as git 2.25 names the copies a stop
 /// leaves, `.t~mine`, `.t~home`, `.t~orig` and an editor's `.t~`, each holding a version the replay
 /// had at `.t`: recovery keeps them. A new file named as git names its own copies, `.t~HEAD` or

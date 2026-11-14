@@ -1836,7 +1836,15 @@ impl Git {
         };
         write_atomic(&self.marker_path(), &marker.to_bytes(), 0o600)
             .context("cannot write the pull marker")?;
-        self.run(&["checkout", "-q", "--detach"])?;
+        // Logged whatever the user's config, so `@{-1}` names the branch for a refusal that
+        // cannot read the marker.
+        self.run(&[
+            "-c",
+            "core.logAllRefUpdates=true",
+            "checkout",
+            "-q",
+            "--detach",
+        ])?;
         Ok((marker, fork))
     }
 
@@ -2327,14 +2335,30 @@ impl Git {
         Ok(Ok(Some(Saved { paths, dir })))
     }
 
-    /// The branch `origin`'s `HEAD` names, else the only local branch, when it is a local branch
-    /// whose name [`checked_branch`] takes.
+    /// The branch the replay detached `HEAD` from, as the reflog's `@{-1}` names it; else the one
+    /// `origin`'s `HEAD` names; else the only local branch. Only a local branch whose name
+    /// [`checked_branch`] takes.
     fn synced_branch(&self) -> Result<Option<String>> {
-        let remote_head = self
+        // A missing reflog, or a detached `HEAD` before, is no answer here.
+        let previous = self
+            .probe(&[
+                "rev-parse",
+                "-q",
+                "--verify",
+                "--symbolic-full-name",
+                "@{-1}",
+            ])
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| text(&out).strip_prefix("refs/heads/").map(str::to_owned))
+            .filter(|branch| checked_branch(branch).is_ok());
+        let branch = if previous.is_some() {
+            previous
+        } else if let Some(remote_head) = self
             .optional(&["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])?
-            .and_then(|name| name.strip_prefix("refs/remotes/origin/").map(str::to_owned));
-        let branch = if remote_head.is_some() {
-            remote_head
+            .and_then(|name| name.strip_prefix("refs/remotes/origin/").map(str::to_owned))
+        {
+            Some(remote_head)
         } else {
             let out = self.run(&["for-each-ref", "--format=%(refname)", "refs/heads/"])?;
             let listed = String::from_utf8_lossy(&out.stdout).into_owned();
