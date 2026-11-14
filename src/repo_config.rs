@@ -8,10 +8,12 @@ use crate::engine::parse_mode;
 use crate::name;
 use crate::output;
 use crate::paths::write_atomic;
+use crate::system;
+use crate::variant::Sources;
 use anyhow::{Context, Result, anyhow};
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -223,6 +225,259 @@ impl RepoConfig {
         }
         write_atomic(path, toml::to_string_pretty(self)?.as_bytes(), 0o644)
     }
+}
+
+const MODES: &str = "[modes]";
+const HOOKS: &str = "[hooks]";
+const SYSTEM: &str = "[system]";
+
+/// Which answer settled a source.
+// reason: the conflict flow that builds these is not wired in yet.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Winner {
+    Mine,
+    Theirs,
+    Merged,
+}
+
+/// A source whose conflict was settled, for the follow rules of [`merge`].
+// reason: the conflict flow that builds these is not wired in yet.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Settled {
+    pub winner: Winner,
+    /// The content came from `merge-file` or an edit, so both sides' modes count.
+    pub text_merge: bool,
+    /// The source's git tree mode on each side, such as `0o100644`, for a side with no entry.
+    pub ours_mode: u32,
+    pub theirs_mode: u32,
+}
+
+impl Settled {
+    const fn stricter(&self) -> bool {
+        self.text_merge || matches!(self.winner, Winner::Merged)
+    }
+}
+
+/// A `[modes]`, `[hooks]` or `[system]` key that both sides set differently. The merge keeps
+/// this machine's value and leaves the question to the caller.
+// reason: the conflict flow that builds these is not wired in yet.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tie {
+    pub table: &'static str,
+    pub key: String,
+}
+
+/// Three-way merge of `.dotman.toml`: `mine` is this machine's side, `theirs` origin's. Lists keep
+/// this machine's order, add what origin added and drop what either side removed. Maps merge per
+/// key. A settled source's `[modes]` entry and `[system]` table follow `winners` instead, and
+/// `host_copies` (shared source, variant) gives each variant this machine's `[modes]` entry.
+// reason: the conflict flow that calls this is not wired in yet.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn merge(
+    base: &RepoConfig,
+    mine: &RepoConfig,
+    theirs: &RepoConfig,
+    winners: &BTreeMap<String, Settled>,
+    host_copies: &[(String, String)],
+) -> (RepoConfig, Vec<Tie>) {
+    let mut ties = Vec::new();
+    let mut modes = merge_map(MODES, &base.modes, &mine.modes, &theirs.modes, &mut ties);
+    let hooks = merge_map(HOOKS, &base.hooks, &mine.hooks, &theirs.hooks, &mut ties);
+    let mut system = merge_map(
+        SYSTEM,
+        &base.system,
+        &mine.system,
+        &theirs.system,
+        &mut ties,
+    );
+    follow_modes(&mut modes, mine, theirs, winners);
+    let settled_system = follow_system(&mut system, mine, theirs, winners);
+    ties.retain(|tie| match tie.table {
+        MODES => !winners.contains_key(&tie.key),
+        SYSTEM => !settled_system.contains(&tie.key),
+        _ => true,
+    });
+    for (source, variant) in host_copies {
+        if let Some(mode) = mine.modes.get(source) {
+            modes.insert(variant.clone(), mode.clone());
+        }
+    }
+    let merged = RepoConfig {
+        ignore: Ignore {
+            patterns: merge_list(
+                &base.ignore.patterns,
+                &mine.ignore.patterns,
+                &theirs.ignore.patterns,
+            ),
+        },
+        guard: Guard {
+            secret_names: merge_list(
+                &base.guard.secret_names,
+                &mine.guard.secret_names,
+                &theirs.guard.secret_names,
+            ),
+            allow: merge_list(&base.guard.allow, &mine.guard.allow, &theirs.guard.allow),
+        },
+        dirs: Dirs {
+            paths: merge_list(&base.dirs.paths, &mine.dirs.paths, &theirs.dirs.paths),
+        },
+        modes,
+        hooks,
+        age: RepoAge {
+            recipients: merge_list(
+                &base.age.recipients,
+                &mine.age.recipients,
+                &theirs.age.recipients,
+            ),
+        },
+        system,
+    };
+    (merged, ties)
+}
+
+fn merge_list<T: Clone + PartialEq>(base: &[T], mine: &[T], theirs: &[T]) -> Vec<T> {
+    let mut merged: Vec<T> = mine
+        .iter()
+        .filter(|item| !base.contains(item) || theirs.contains(item))
+        .cloned()
+        .collect();
+    for item in theirs {
+        if !base.contains(item) && !merged.contains(item) {
+            merged.push(item.clone());
+        }
+    }
+    merged
+}
+
+fn merge_map<V: Clone + PartialEq>(
+    table: &'static str,
+    base: &BTreeMap<String, V>,
+    mine: &BTreeMap<String, V>,
+    theirs: &BTreeMap<String, V>,
+    ties: &mut Vec<Tie>,
+) -> BTreeMap<String, V> {
+    let keys: BTreeSet<&String> = base
+        .keys()
+        .chain(mine.keys())
+        .chain(theirs.keys())
+        .collect();
+    let mut merged = BTreeMap::new();
+    for key in keys {
+        let (b, m, t) = (base.get(key), mine.get(key), theirs.get(key));
+        let value = if m == t || t == b {
+            m
+        } else if m == b {
+            t
+        } else {
+            ties.push(Tie {
+                table,
+                key: key.clone(),
+            });
+            m
+        };
+        if let Some(value) = value {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    merged
+}
+
+fn set_or_remove<V>(map: &mut BTreeMap<String, V>, key: &str, value: Option<V>) {
+    match value {
+        Some(value) => {
+            map.insert(key.to_owned(), value);
+        }
+        None => {
+            map.remove(key);
+        }
+    }
+}
+
+// Permission bits only: setuid, setgid and sticky never survive a merge. A side with no entry
+// counts as git's mode, and an entry that does not parse as the strictest.
+fn bits(entry: Option<&str>, git_mode: u32) -> u32 {
+    entry.map_or(git_mode, |text| parse_mode(text).unwrap_or(0)) & 0o777
+}
+
+fn follow_modes(
+    modes: &mut BTreeMap<String, String>,
+    mine: &RepoConfig,
+    theirs: &RepoConfig,
+    winners: &BTreeMap<String, Settled>,
+) {
+    for (source, settled) in winners {
+        if source.starts_with(system::DIR) {
+            continue;
+        }
+        let (m, t) = (mine.modes.get(source), theirs.modes.get(source));
+        let entry = if settled.stricter() {
+            (m.is_some() || t.is_some()).then(|| {
+                let both = bits(m.map(String::as_str), settled.ours_mode)
+                    & bits(t.map(String::as_str), settled.theirs_mode);
+                format!("{both:04o}")
+            })
+        } else if settled.winner == Winner::Mine {
+            m.cloned()
+        } else {
+            t.cloned()
+        };
+        set_or_remove(modes, source, entry);
+    }
+}
+
+// The `[system]` key a `.dotman/system/<path>{...}` source belongs to: the absolute target, with
+// the variant block stripped.
+fn system_key(source: &str) -> Option<String> {
+    let rel = source.strip_prefix(system::DIR)?.strip_prefix('/')?;
+    Sources::group([rel]).keys().next().map(system::key_of)
+}
+
+// Returns the `[system]` keys that have a settled source.
+fn follow_system(
+    tables: &mut BTreeMap<String, SystemFile>,
+    mine: &RepoConfig,
+    theirs: &RepoConfig,
+    winners: &BTreeMap<String, Settled>,
+) -> BTreeSet<String> {
+    let mut by_key: BTreeMap<String, Vec<&Settled>> = BTreeMap::new();
+    for (source, settled) in winners {
+        if let Some(key) = system_key(source) {
+            by_key.entry(key).or_default().push(settled);
+        }
+    }
+    for (key, settled) in &by_key {
+        let (m, t) = (mine.system.get(key), theirs.system.get(key));
+        let Some(first) = settled.first() else {
+            continue;
+        };
+        let agree = settled.iter().all(|s| s.winner == first.winner);
+        let table = if agree && !settled.iter().any(|s| s.stricter()) {
+            if first.winner == Winner::Mine { m } else { t }.cloned()
+        } else {
+            // Owner, group and `package_owned` never merge: the winner's table supplies them, this
+            // machine's for a merged file and for variants settled with different winners.
+            let from = if agree && first.winner == Winner::Theirs {
+                t
+            } else {
+                m
+            };
+            let git =
+                |side: fn(&Settled) -> u32| settled.iter().fold(0o777, |all, s| all & side(s));
+            from.map(|table| SystemFile {
+                mode: format!(
+                    "{:04o}",
+                    bits(m.map(|f| f.mode.as_str()), git(|s| s.ours_mode))
+                        & bits(t.map(|f| f.mode.as_str()), git(|s| s.theirs_mode))
+                ),
+                ..table.clone()
+            })
+        };
+        set_or_remove(tables, key, table);
+    }
+    by_key.into_keys().collect()
 }
 
 /// toml's error, its message on one line. The message quotes keys and values from the file, which
@@ -438,5 +693,358 @@ mode = "0644"
         let path = tmp.path().join(".dotman.toml");
         RepoConfig::default().save(&path, true).unwrap();
         assert!(!path.exists());
+    }
+
+    fn cfg(text: &str) -> RepoConfig {
+        RepoConfig::parse(text).unwrap()
+    }
+
+    fn settled(winner: Winner, text_merge: bool) -> Settled {
+        Settled {
+            winner,
+            text_merge,
+            ours_mode: 0o100_644,
+            theirs_mode: 0o100_644,
+        }
+    }
+
+    fn winners(entries: &[(&str, Settled)]) -> BTreeMap<String, Settled> {
+        entries
+            .iter()
+            .map(|(source, settled)| ((*source).to_owned(), *settled))
+            .collect()
+    }
+
+    fn plain(base: &RepoConfig, mine: &RepoConfig, theirs: &RepoConfig) -> (RepoConfig, Vec<Tie>) {
+        merge(base, mine, theirs, &BTreeMap::new(), &[])
+    }
+
+    fn system_of(config: &RepoConfig, key: &str) -> Option<SystemFile> {
+        config.system.get(key).cloned()
+    }
+
+    fn mode_of(config: &RepoConfig, key: &str) -> Option<String> {
+        config.modes.get(key).cloned()
+    }
+
+    #[test]
+    fn each_sides_additions_and_removals_survive() {
+        let base = cfg(
+            "[ignore]\npatterns = [\"a\", \"b\", \"c\"]\n[dirs]\npaths = [\"x\", \"y\"]\n\
+             [age]\nrecipients = [\"age1one\"]\n[guard]\nsecret_names = [\"s1\", \"s2\"]\n\
+             [modes]\n\"m1\" = \"0600\"\n\"m2\" = \"0700\"\n[hooks]\n\"h1\" = \"one\"\n\"h2\" = \"two\"\n",
+        );
+        let mine = cfg(
+            "[ignore]\npatterns = [\"c\", \"a\", \"mine\"]\n[dirs]\npaths = [\"y\", \"x\", \"mine\"]\n\
+             [age]\nrecipients = [\"age1one\", \"age1mine\"]\n[guard]\nsecret_names = [\"s1\", \"s2\"]\n\
+             [modes]\n\"m1\" = \"0600\"\n\"mine\" = \"0640\"\n[hooks]\n\"h1\" = \"one\"\n",
+        );
+        let theirs = cfg(
+            "[ignore]\npatterns = [\"a\", \"b\", \"c\", \"theirs\"]\n[dirs]\npaths = [\"x\"]\n\
+             [age]\nrecipients = [\"age1one\", \"age1theirs\"]\n[guard]\nsecret_names = [\"s1\", \"s2\", \"s3\"]\n\
+             [modes]\n\"m1\" = \"0600\"\n\"m2\" = \"0700\"\n\"theirs\" = \"0644\"\n\
+             [hooks]\n\"h1\" = \"one\"\n\"h2\" = \"two\"\n\"h3\" = \"three\"\n",
+        );
+        let (merged, ties) = plain(&base, &mine, &theirs);
+        assert_eq!(ties, []);
+        assert_eq!(merged.ignore.patterns, ["c", "a", "mine", "theirs"]);
+        assert_eq!(merged.dirs.paths, ["x", "mine"]);
+        assert_eq!(merged.age.recipients, ["age1one", "age1mine", "age1theirs"]);
+        assert_eq!(merged.guard.secret_names, ["s1", "s2", "s3"]);
+        let keys = |map: &BTreeMap<String, String>| map.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&merged.modes), ["m1", "mine", "theirs"]);
+        assert_eq!(keys(&merged.hooks), ["h1", "h3"]);
+    }
+
+    #[test]
+    fn a_key_set_differently_on_both_sides_is_a_tie() {
+        let base = cfg(
+            "[modes]\n\"a\" = \"0600\"\n\"gone\" = \"0600\"\n[hooks]\n\"h\" = \"one\"\n\
+             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"root\"\nmode = \"0644\"\n",
+        );
+        let mine = cfg(
+            "[modes]\n\"a\" = \"0640\"\n\"new\" = \"0600\"\n[hooks]\n\"h\" = \"mine\"\n\
+             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"wheel\"\nmode = \"0644\"\n",
+        );
+        let theirs = cfg(
+            "[modes]\n\"a\" = \"0660\"\n\"gone\" = \"0640\"\n\"new\" = \"0644\"\n\
+             [hooks]\n\"h\" = \"theirs\"\n[system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"adm\"\nmode = \"0644\"\n",
+        );
+        let (merged, ties) = plain(&base, &mine, &theirs);
+        let tie = |table, key: &str| Tie {
+            table,
+            key: key.to_owned(),
+        };
+        assert_eq!(
+            ties,
+            [
+                tie(MODES, "a"),
+                tie(MODES, "gone"),
+                tie(MODES, "new"),
+                tie(HOOKS, "h"),
+                tie(SYSTEM, "/etc/x"),
+            ]
+        );
+        assert_eq!(mode_of(&merged, "a").as_deref(), Some("0640"));
+        assert_eq!(mode_of(&merged, "gone"), None);
+        assert_eq!(merged.hooks.get("h").map(String::as_str), Some("mine"));
+        assert_eq!(
+            system_of(&merged, "/etc/x").map(|f| f.group).as_deref(),
+            Some("wheel")
+        );
+    }
+
+    #[test]
+    fn merging_with_a_side_equal_to_base_or_to_the_other_gives_that_side() {
+        let base = cfg("[dirs]\npaths = [\"x\"]\n[modes]\n\"a\" = \"0600\"\n");
+        let x = cfg(
+            "[ignore]\npatterns = [\"keep\"]\n[dirs]\npaths = [\"x\", \"z\"]\n[modes]\n\"b\" = \"0700\"\n\
+             [hooks]\n\"h\" = \"run\"\n[age]\nrecipients = [\"age1x\"]\n\
+             [guard]\nallow = [{ path = \"p\", rule = \"r\" }]\n\
+             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"root\"\nmode = \"0644\"\n",
+        );
+        assert_eq!(plain(&base, &x, &base), (x.clone(), vec![]));
+        assert_eq!(plain(&base, &x, &x), (x, vec![]));
+    }
+
+    #[test]
+    fn guard_allow_entries_merge_as_a_list() {
+        let allow = |path: &str| Allow {
+            path: path.to_owned(),
+            rule: "r".to_owned(),
+        };
+        let mut base = RepoConfig::default();
+        base.guard.allow = vec![allow("kept"), allow("dropped")];
+        let mut mine = base.clone();
+        mine.guard.allow = vec![allow("kept"), allow("mine")];
+        let mut theirs = base.clone();
+        theirs.guard.allow = vec![allow("kept"), allow("dropped"), allow("theirs")];
+        let (merged, _) = plain(&base, &mine, &theirs);
+        assert_eq!(
+            merged.guard.allow,
+            [allow("kept"), allow("mine"), allow("theirs")]
+        );
+    }
+
+    #[test]
+    fn the_result_reparses_equal() {
+        let base = cfg("[modes]\n\"a\" = \"0600\"\n");
+        let mine = cfg(
+            "[modes]\n\"a\" = \"0600\"\n\"b\" = \"0755\"\n[guard]\nallow = [{ path = \"p\", rule = \"r\" }]\n\
+             [system.\"/etc/x\"]\nowner = \"root\"\ngroup = \"root\"\nmode = \"0644\"\npackage_owned = true\n",
+        );
+        let theirs = cfg("[modes]\n\"a\" = \"0600\"\n\"c\" = \"0700\"\n[dirs]\npaths = [\"d\"]\n");
+        let (merged, _) = plain(&base, &mine, &theirs);
+        let saved = toml::to_string_pretty(&merged).unwrap();
+        assert_eq!(RepoConfig::parse(&saved).unwrap(), merged);
+    }
+
+    #[test]
+    fn a_whole_version_takes_the_winners_modes_entry() {
+        let base = cfg("[modes]\n\"a\" = \"0600\"\n\"b\" = \"0600\"\n");
+        let mine = cfg("[modes]\n\"a\" = \"0640\"\n");
+        let theirs = cfg("[modes]\n\"a\" = \"0660\"\n\"b\" = \"0660\"\n\"c\" = \"0700\"\n");
+        let run = |winner| {
+            let won = winners(&[
+                ("a", settled(winner, false)),
+                ("b", settled(winner, false)),
+                ("c", settled(winner, false)),
+            ]);
+            merge(&base, &mine, &theirs, &won, &[])
+        };
+        let (merged, ties) = run(Winner::Mine);
+        assert_eq!(ties, [], "a settled source is no tie");
+        assert_eq!(mode_of(&merged, "a").as_deref(), Some("0640"));
+        assert_eq!(mode_of(&merged, "b"), None, "mine had no entry");
+        assert_eq!(mode_of(&merged, "c"), None);
+        let (merged, _) = run(Winner::Theirs);
+        assert_eq!(mode_of(&merged, "a").as_deref(), Some("0660"));
+        assert_eq!(mode_of(&merged, "b").as_deref(), Some("0660"));
+        assert_eq!(mode_of(&merged, "c").as_deref(), Some("0700"));
+    }
+
+    #[test]
+    fn a_merged_text_takes_the_stricter_mode() {
+        let mine = cfg("[modes]\n\"a\" = \"0664\"\n\"s\" = \"4755\"\n");
+        let theirs = cfg("[modes]\n\"a\" = \"0640\"\n\"s\" = \"0777\"\n");
+        let base = RepoConfig::default();
+        for (winner, text_merge) in [
+            (Winner::Mine, true),
+            (Winner::Theirs, true),
+            (Winner::Merged, true),
+            (Winner::Merged, false),
+        ] {
+            let won = winners(&[
+                ("a", settled(winner, text_merge)),
+                ("s", settled(winner, text_merge)),
+            ]);
+            let (merged, ties) = merge(&base, &mine, &theirs, &won, &[]);
+            assert_eq!(ties, []);
+            assert_eq!(mode_of(&merged, "a").as_deref(), Some("0640"), "{winner:?}");
+            assert_eq!(
+                mode_of(&merged, "s").as_deref(),
+                Some("0755"),
+                "special bits drop"
+            );
+        }
+    }
+
+    #[test]
+    fn a_0600_entry_on_one_side_stays_0600_under_both_winners() {
+        let base = RepoConfig::default();
+        let with = cfg("[modes]\n\"secret\" = \"0600\"\n");
+        let without = RepoConfig::default();
+        for winner in [Winner::Mine, Winner::Theirs] {
+            let won = winners(&[("secret", settled(winner, true))]);
+            for (mine, theirs) in [(&with, &without), (&without, &with)] {
+                let (merged, _) = merge(&base, mine, theirs, &won, &[]);
+                assert_eq!(
+                    mode_of(&merged, "secret").as_deref(),
+                    Some("0600"),
+                    "{winner:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_entry_counts_as_the_git_mode_and_two_missing_stay_missing() {
+        let base = RepoConfig::default();
+        let theirs = cfg("[modes]\n\"run\" = \"0755\"\n");
+        let won = winners(&[
+            (
+                "run",
+                Settled {
+                    winner: Winner::Merged,
+                    text_merge: true,
+                    ours_mode: 0o100_644,
+                    theirs_mode: 0o100_755,
+                },
+            ),
+            ("none", settled(Winner::Merged, true)),
+        ]);
+        let (merged, _) = merge(&base, &RepoConfig::default(), &theirs, &won, &[]);
+        assert_eq!(mode_of(&merged, "run").as_deref(), Some("0644"));
+        assert_eq!(mode_of(&merged, "none"), None);
+    }
+
+    #[test]
+    fn host_copies_give_the_variant_this_machines_modes_entry() {
+        let base = cfg("[modes]\n\"rc\" = \"0600\"\n");
+        let mine = cfg("[modes]\n\"rc\" = \"0640\"\n");
+        let theirs = cfg("[modes]\n\"rc\" = \"0600\"\n");
+        let won = winners(&[("rc", settled(Winner::Theirs, false))]);
+        let copies = [("rc".to_owned(), "rc{host=laptop}".to_owned())];
+        let (merged, _) = merge(&base, &mine, &theirs, &won, &copies);
+        assert_eq!(mode_of(&merged, "rc").as_deref(), Some("0600"));
+        assert_eq!(mode_of(&merged, "rc{host=laptop}").as_deref(), Some("0640"));
+        let (merged, _) = merge(&base, &theirs, &theirs, &won, &copies[..0]);
+        assert_eq!(mode_of(&merged, "rc{host=laptop}"), None);
+    }
+
+    fn table(owner: &str, group: &str, mode: &str) -> String {
+        format!("owner = \"{owner}\"\ngroup = \"{group}\"\nmode = \"{mode}\"\n")
+    }
+
+    fn system_cfg(tables: &[(&str, String)]) -> RepoConfig {
+        let parts: Vec<String> = tables
+            .iter()
+            .map(|(path, body)| format!("[system.\"{path}\"]\n{body}"))
+            .collect();
+        cfg(&parts.concat())
+    }
+
+    #[test]
+    fn a_system_source_follows_the_winner_through_its_mapped_key() {
+        let base = system_cfg(&[("/etc/hosts", table("root", "root", "0644"))]);
+        let mine = system_cfg(&[
+            ("/etc/hosts", table("root", "wheel", "0640")),
+            ("/etc/other", table("root", "root", "0600")),
+        ]);
+        let theirs = system_cfg(&[("/etc/hosts", table("root", "adm", "0664"))]);
+        let source = ".dotman/system/etc/hosts{host=laptop}";
+        let run = |winner| {
+            let won = winners(&[(source, settled(winner, false))]);
+            merge(&base, &mine, &theirs, &won, &[])
+        };
+        let (merged, ties) = run(Winner::Theirs);
+        assert_eq!(ties, [], "a settled system source is no tie");
+        assert_eq!(
+            system_of(&merged, "/etc/hosts"),
+            system_of(&theirs, "/etc/hosts")
+        );
+        assert_eq!(
+            system_of(&merged, "/etc/other"),
+            system_of(&mine, "/etc/other")
+        );
+        let (merged, _) = run(Winner::Mine);
+        assert_eq!(
+            system_of(&merged, "/etc/hosts"),
+            system_of(&mine, "/etc/hosts")
+        );
+
+        let without = RepoConfig::default();
+        let won = winners(&[(".dotman/system/etc/hosts", settled(Winner::Theirs, false))]);
+        let (merged, _) = merge(&base, &mine, &without, &won, &[]);
+        assert!(!merged.system.contains_key("/etc/hosts"), "theirs had none");
+        assert!(merged.system.contains_key("/etc/other"));
+    }
+
+    #[test]
+    fn a_merged_system_text_takes_the_stricter_mode_and_the_winners_owner() {
+        let base = RepoConfig::default();
+        let mine = system_cfg(&[("/etc/x", table("root", "wheel", "0664"))]);
+        let theirs = system_cfg(&[("/etc/x", table("app", "adm", "0640"))]);
+        let source = ".dotman/system/etc/x";
+        let run = |winner, text_merge| {
+            let won = winners(&[(source, settled(winner, text_merge))]);
+            system_of(&merge(&base, &mine, &theirs, &won, &[]).0, "/etc/x")
+        };
+        let want = |owner: &str, group: &str| SystemFile {
+            owner: owner.to_owned(),
+            group: group.to_owned(),
+            mode: "0640".to_owned(),
+            package_owned: false,
+        };
+        assert_eq!(run(Winner::Mine, true), Some(want("root", "wheel")));
+        assert_eq!(run(Winner::Theirs, true), Some(want("app", "adm")));
+        assert_eq!(run(Winner::Merged, true), Some(want("root", "wheel")));
+        assert_eq!(run(Winner::Merged, false), Some(want("root", "wheel")));
+    }
+
+    #[test]
+    fn two_variants_of_a_system_path_with_different_winners_take_this_machines_table() {
+        let base = RepoConfig::default();
+        let mine = system_cfg(&[("/etc/x", table("root", "wheel", "0664"))]);
+        let theirs = system_cfg(&[("/etc/x", table("app", "adm", "0640"))]);
+        let won = winners(&[
+            (".dotman/system/etc/x{host=a}", settled(Winner::Mine, false)),
+            (
+                ".dotman/system/etc/x{host=b}",
+                settled(Winner::Theirs, false),
+            ),
+        ]);
+        let (merged, _) = merge(&base, &mine, &theirs, &won, &[]);
+        assert_eq!(
+            system_of(&merged, "/etc/x"),
+            Some(SystemFile {
+                owner: "root".to_owned(),
+                group: "wheel".to_owned(),
+                mode: "0640".to_owned(),
+                package_owned: false,
+            })
+        );
+        let same = winners(&[
+            (
+                ".dotman/system/etc/x{host=a}",
+                settled(Winner::Theirs, false),
+            ),
+            (
+                ".dotman/system/etc/x{host=b}",
+                settled(Winner::Theirs, false),
+            ),
+        ]);
+        let (merged, _) = merge(&base, &mine, &theirs, &same, &[]);
+        assert_eq!(system_of(&merged, "/etc/x"), system_of(&theirs, "/etc/x"));
     }
 }
