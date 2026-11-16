@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-dotman 0.1.0 is the first release. Only the latest release receives fixes.
+Only the latest release on the [releases page](https://github.com/UtsavBalar1231/dotman/releases) receives fixes.
 
 ## Reporting a vulnerability
 
