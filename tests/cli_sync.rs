@@ -1727,6 +1727,40 @@ fn a_remote_with_unrelated_history_is_refused_before_the_pull() {
     assert!(log.lines().any(|oid| oid == head.trim()), "{log}");
 }
 
+/// The printed merge of two unrelated histories runs as printed, with its strategy named so that
+/// the user's `pull.twohead` cannot pick another, and the sync after it pushes both histories.
+#[test]
+fn the_printed_merge_of_unrelated_histories_runs_as_printed() {
+    let (a, _b) = pair(&[(".a", b"a\n", 0o644)]);
+    let elsewhere = a.root().join("rewrite");
+    let dir = elsewhere.to_string_lossy().into_owned();
+    a.git(&["init", "-q", &dir]);
+    fs::write(elsewhere.join(".c"), b"from the other history\n").expect("write");
+    a.git(&["-C", &dir, "add", "."]);
+    a.git(&["-C", &dir, "commit", "-q", "-m", "other root"]);
+    let remote = a.remote_path().to_string_lossy().into_owned();
+    a.git(&[
+        "-C",
+        &dir,
+        "push",
+        "-q",
+        "-f",
+        &remote,
+        "HEAD:refs/heads/main",
+    ]);
+    a.git(&["config", "--global", "pull.twohead", "ours"]);
+
+    let err = a.fails(&["sync"]);
+    let line = common::hint_line(&err, "git pull --no-rebase");
+    assert!(line.contains(" -s "), "{line}");
+    let out = paste(&a, &line);
+    assert!(out.status.success(), "{line}: {}", stderr(&out));
+    exits(&a, 0, &["sync"]);
+    let tree = a.git(&["--git-dir", &remote, "ls-tree", "--name-only", "main"]);
+    assert!(tree.lines().any(|name| name == ".a"), "{tree}");
+    assert!(tree.lines().any(|name| name == ".c"), "{tree}");
+}
+
 /// A bare repo whose `HEAD` is `main`, and an origin for it: `~/dots.git`, which git expands
 /// itself, or a URL with credentials.
 fn odd_origin(env: &TestEnv, tilde: bool) -> (String, std::path::PathBuf) {

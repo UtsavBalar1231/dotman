@@ -812,8 +812,10 @@ fn refuse_unrelated(ctx: &Context, branch: &str) -> Result<()> {
         ),
     };
     let quoted = shell_words::quote(branch);
+    // Named, so the user's `pull.twohead` cannot pick the merge strategy.
+    let strategy = ctx.git.pull_backend()?.join(" ");
     bail!(
-        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. {start_over}To merge the two histories anyway: `{bin} git pull --no-rebase --allow-unrelated-histories {REMOTE} {quoted}`, then `{bin} sync`"
+        "{REMOTE}/{branch} shares no history with the repo at {repo}: the remote's history was replaced, or it is another repo. Nothing was pulled or pushed, and your files are as they were. {start_over}To merge the two histories anyway: `{bin} git pull --no-rebase {strategy} --allow-unrelated-histories {REMOTE} {quoted}`, then `{bin} sync`"
     )
 }
 
