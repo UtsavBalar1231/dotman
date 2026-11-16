@@ -69,7 +69,7 @@ const TRACKED_TEMP_DIRS: &str = ":(glob)**/.dotman-tmp-*/**";
 /// target, and status calls it clean.
 /// Each `color.<command>` switch beats `color.ui`, so a user's `color.diff=always` would color
 /// the `git log` output that dotman parses unless it is turned off too.
-const ISOLATION: [&str; 40] = [
+const ISOLATION: [&str; 44] = [
     "-c",
     "core.excludesFile=",
     "-c",
@@ -110,6 +110,12 @@ const ISOLATION: [&str; 40] = [
     "status.renames=true",
     "-c",
     "core.symlinks=true",
+    // git's defaults, pinned so a pull dotman runs, or prints for the user to run, stops where
+    // dotman expects instead of moving a new file into a directory renamed on the other side.
+    "-c",
+    "merge.directoryRenames=conflict",
+    "-c",
+    "merge.renames=true",
 ];
 
 /// How long a short local probe, such as `git --version`, may take before it counts as hung.
@@ -167,20 +173,15 @@ impl fmt::Debug for Git {
 }
 
 /// On the first pull and on every rebase of the replay: the user's config must not move another
-/// branch, or the branch itself off a detached `HEAD`, settle a conflict from a recorded
-/// resolution, or change how renames are matched, which would move a new file into a renamed
-/// directory, or keep a rename from stopping, with no conflict. On git before 2.38
+/// branch, or the branch itself off a detached `HEAD`, or settle a conflict from a recorded
+/// resolution; how renames are matched is pinned in [`ISOLATION`]. On git before 2.38
 /// `rebase.updateRefs` is unknown and ignored. The user's `rebase.backend` is overridden by
 /// [`Git::pull_backend`] and the replay's `--merge`.
-const PULL_PINS: [&str; 8] = [
+const PULL_PINS: [&str; 4] = [
     "-c",
     "rebase.updateRefs=false",
     "-c",
     "rerere.enabled=false",
-    "-c",
-    "merge.directoryRenames=conflict",
-    "-c",
-    "merge.renames=true",
 ];
 
 /// In `.git`. While it exists, a replay may have moved `HEAD`, the index or the worktree, and
