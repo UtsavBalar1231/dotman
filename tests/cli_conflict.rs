@@ -516,6 +516,49 @@ fn the_refusal_saves_each_uncommitted_edit_itself_whatever_its_name() {
     );
 }
 
+/// A sync killed while the replay is stopped on a conflict, then a hand edit of the file still in
+/// conflict and of another file: the refusal saves both, since its printed `checkout -f` drops
+/// the worktree, the file in conflict included.
+#[test]
+fn the_refusal_saves_a_hand_edit_of_a_path_still_in_conflict() {
+    let a = first_device(&[(".t", b"1\n2\n3\n", 0o644)]);
+    commit_in_repo(&a, ".other", b"base\n");
+    exits(&a, 0, &["sync"]);
+    let mut b = a.second_device();
+    exits(
+        &b,
+        0,
+        &["init", &b.remote_url(), "--take-repo", "--host", "beta"],
+    );
+    a.write(".t", b"1\nfrom a\n3\n", 0o644);
+    exits(&a, 0, &["sync"]);
+    b.write(".t", b"1\nfrom b\n3\n", 0o644);
+    let (pre, post) = kill_once(&b, "*' rebase --merge '*", false);
+    wrap_git(&mut b, &pre, &post);
+    let out = b.run(&["sync", "--keep-local"]);
+    assert_eq!(out.status.code(), None, "killed: {}", stderr(&out));
+    let unmerged = b.git(&["-C", &b.repo().to_string_lossy(), "ls-files", "-u"]);
+    assert!(
+        unmerged.contains(".t"),
+        "the kill left .t in conflict: {unmerged}"
+    );
+
+    fs::write(b.repo().join(".t"), b"resolved by hand\n").expect("edit by hand");
+    fs::write(b.repo().join(".other"), b"hand edit\n").expect("edit by hand");
+    let err = exits(&b, 4, &["sync", "--keep-local"]);
+    let dir = err
+        .lines()
+        .find_map(|line| line.strip_prefix("saved the uncommitted edits of the repo's "))
+        .and_then(|line| line.rsplit_once(" to "))
+        .map(|(_, dir)| std::path::PathBuf::from(dir))
+        .expect("a saved line");
+    assert_eq!(
+        fs::read(dir.join(".t")).expect("saved"),
+        b"resolved by hand\n"
+    );
+    assert_eq!(fs::read(dir.join(".other")).expect("saved"), b"hand edit\n");
+}
+
 /// Names with an escape sequence and a newline, which dotman reports and never applies.
 #[test]
 fn the_refusal_saves_an_edit_whose_name_holds_a_control_character() {

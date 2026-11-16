@@ -2427,14 +2427,15 @@ impl Git {
     }
 
     /// The files in the worktree whose content `checkout -f` would drop: with a rebase dir, those
-    /// that differ from the index outside the paths in conflict, as what git staged is its own;
-    /// else every changed path. A path deleted from disk or under a symlink has nothing to copy.
+    /// that differ from the index, as what git staged is its own, and every path in conflict,
+    /// whose file may hold a hand edit; else every changed path. A path deleted from disk or under
+    /// a symlink has nothing to copy.
     fn dirty_files(&self) -> Result<Vec<PathBuf>> {
         let rebase = self.rebase_dir().is_some();
         let mut dirty = Vec::new();
         for change in self.changes()? {
             let own =
-                rebase && (change.kind == StatusKind::Unmerged || change.xy.get(1..) == Some("."));
+                rebase && change.kind != StatusKind::Unmerged && change.xy.get(1..) == Some(".");
             if !own && self.worktree_bytes(&change.path)?.is_some() {
                 dirty.push(change.path);
             }
