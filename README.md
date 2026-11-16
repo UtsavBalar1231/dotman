@@ -24,7 +24,7 @@ cd packaging/arch && makepkg -si
 
 The [releases page](https://github.com/UtsavBalar1231/dotman/releases) has tarballs for Linux on x86_64 and aarch64. The glibc builds need glibc 2.39 or newer. The static musl builds run on any Linux, so the installer uses those.
 
-There are no macOS builds yet, and dotman hasn't been built or tested on a Mac, so `install.sh` won't work there. Build it from source instead: `cargo install --git https://github.com/UtsavBalar1231/dotman --tag v0.1.0 --locked dotman-cli`.
+There are no macOS builds yet, and dotman hasn't been built or tested on a Mac, so `install.sh` won't work there. Build it from source instead: `cargo install --git https://github.com/UtsavBalar1231/dotman --tag v0.2.0 --locked dotman-cli`.
 
 ## Quick start
 

@@ -7,7 +7,7 @@ set -euo pipefail
 REPO_URL="https://github.com/UtsavBalar1231/dotman"
 API_URL="https://api.github.com/repos/UtsavBalar1231/dotman"
 DOWNLOAD_BASE="${DOTMAN_INSTALL_BASE_URL:-}"
-FALLBACK_VERSION="0.1.0"
+FALLBACK_VERSION="0.2.0"
 BINARY_NAME="dotman"
 INSTALL_DIR="${DOTMAN_INSTALL_DIR:-$HOME/.local/bin}"
 

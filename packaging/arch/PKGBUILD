@@ -1,7 +1,7 @@
 # Maintainer: Utsav Balar <utsavbalar1231@gmail.com>
 
 pkgname=dotman-cli
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="A dotfiles manager with no learning curve, safe by default"
 arch=('x86_64' 'aarch64')
@@ -62,5 +62,6 @@ package() {
     install -Dm644 completions/dotman.fish "$pkgdir/usr/share/fish/vendor_completions.d/dotman.fish"
 
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 docs/*.md -t "$pkgdir/usr/share/doc/$pkgname/docs/"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
