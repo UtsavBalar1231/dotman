@@ -84,6 +84,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
         }
         'dotman;add' {
             [CompletionResult]::new('--for', '--for', [CompletionResultType]::ParameterName, 'Add the files as variants that apply only where these `+`-joined conditions hold, such as `host=laptop+os!=macos`')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print experimental schema-versioned NDJSON outcomes')
             [CompletionResult]::new('--encrypt', '--encrypt', [CompletionResultType]::ParameterName, 'Store the files encrypted to the `[age] recipients` in .dotman.toml')
             [CompletionResult]::new('--template', '--template', [CompletionResultType]::ParameterName, 'Store the files as templates, which each machine renders; put the expressions in with `dotman edit`')
             [CompletionResult]::new('--allow-plain', '--allow-plain', [CompletionResultType]::ParameterName, 'Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key')
@@ -128,6 +129,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
         }
         'dotman;status' {
             [CompletionResult]::new('--porcelain', '--porcelain', [CompletionResultType]::ParameterName, 'Print `<status>\t<key>\0` records for every managed path')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print experimental schema-versioned NDJSON for desktop clients')
             [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress informational messages')
@@ -139,6 +141,8 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             break
         }
         'dotman;apply' {
+            [CompletionResult]::new('--decide-from', '--decide-from', [CompletionResultType]::ParameterName, 'Read experimental versioned, snapshot-bound decisions from stdin only')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print experimental schema-versioned NDJSON outcomes')
             [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync''s pull conflicts, keep this machine''s side of each clash: a text file keeps origin''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync''s question about a pull conflict also offers `[h]` for that')
             [CompletionResult]::new('--take-repo', '--take-repo', [CompletionResultType]::ParameterName, 'Take the repo version of conflicting and existing files, after backing them up. When sync''s pull conflicts, take origin''s side of each clash: a text file keeps this machine''s edits elsewhere in it, other files are taken whole, and this machine''s version is saved first')
             [CompletionResult]::new('--forget-deleted', '--forget-deleted', [CompletionResultType]::ParameterName, 'Stop managing files deleted locally; they stay deleted')
@@ -183,8 +187,10 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             break
         }
         'dotman;sync' {
+            [CompletionResult]::new('--decide-from', '--decide-from', [CompletionResultType]::ParameterName, 'Read experimental versioned, snapshot-bound decisions from stdin only')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'Commit message, replacing the generated `sync(<host>): ...` line')
             [CompletionResult]::new('--message', '--message', [CompletionResultType]::ParameterName, 'Commit message, replacing the generated `sync(<host>): ...` line')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print experimental schema-versioned NDJSON outcomes and an outgoing dry-run review')
             [CompletionResult]::new('--keep-local', '--keep-local', [CompletionResultType]::ParameterName, 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync''s pull conflicts, keep this machine''s side of each clash: a text file keeps origin''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync''s question about a pull conflict also offers `[h]` for that')
             [CompletionResult]::new('--take-repo', '--take-repo', [CompletionResultType]::ParameterName, 'Take the repo version of conflicting and existing files, after backing them up. When sync''s pull conflicts, take origin''s side of each clash: a text file keeps this machine''s edits elsewhere in it, other files are taken whole, and this machine''s version is saved first')
             [CompletionResult]::new('--forget-deleted', '--forget-deleted', [CompletionResultType]::ParameterName, 'Stop managing files deleted locally; they stay deleted')

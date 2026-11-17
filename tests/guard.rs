@@ -266,8 +266,14 @@ fn a_stash_pop_conflict_is_refused_and_nothing_reaches_home() {
         let (code, err) = stderr_of(&env, args);
         assert_eq!(code, Some(4), "{args:?}: {err}");
         assert!(err.contains("unresolved conflicts in .bashrc"), "{err}");
-        assert!(err.contains("dotman git add -- .bashrc"), "{err}");
-        assert!(err.contains("dotman git checkout HEAD -- .bashrc"), "{err}");
+        assert!(
+            err.contains("dotman git add -- ':(literal).bashrc'"),
+            "{err}"
+        );
+        assert!(
+            err.contains("dotman git checkout HEAD -- ':(literal).bashrc'"),
+            "{err}"
+        );
     }
     assert_eq!(stderr_of(&env, &["log"]).0, Some(0));
     assert_eq!(env.read(".bashrc"), b"x\n");
@@ -290,7 +296,7 @@ fn the_printed_add_resolves_a_stash_pop_conflict_on_a_key_that_starts_with_a_das
 
     let (code, err) = stderr_of(&env, &["status"]);
     assert_eq!(code, Some(4), "{err}");
-    assert!(err.contains("`dotman git add -- -x`"), "{err}");
+    assert!(err.contains("`dotman git add -- ':(literal)-x'`"), "{err}");
     fs::write(env.repo().join("-x"), b"resolved\n").expect("resolve");
     let out = common::run_hint(&env, &err, "git add");
     assert!(

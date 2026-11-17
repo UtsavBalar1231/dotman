@@ -4,10 +4,24 @@
 .SH NAME
 dotman\-apply \- Write the repo\*(Aqs files into $HOME
 .SH SYNOPSIS
-\fBdotman apply\fR [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-in\-place\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
+\fBdotman apply\fR [\fB\-\-decide\-from\fR] [\fB\-\-json\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-in\-place\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
 .SH DESCRIPTION
 Write the repo\*(Aqs files into $HOME
 .SH OPTIONS
+.TP
+\fB\-\-decide\-from\fR \fI<DECIDE_FROM>\fR
+Read experimental versioned, snapshot\-bound decisions from stdin only
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+\-
+.RE
+.TP
+\fB\-\-json\fR
+Print experimental schema\-versioned NDJSON outcomes
 .TP
 \fB\-\-in\-place\fR
 Rewrite files in place when a rename cannot replace them, as on a bind mount

@@ -5,7 +5,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
 
-e2e_begin journeys/02-conflict
+e2e_begin journeys/02-conflict jq
 e2e_machines a b
 
 e2e_write a .bashrc $'alias ll="ls -l"\n'
@@ -39,5 +39,30 @@ e2e_file_is a .bashrc $'alias ll="ls -la"\n'
 e2e_check "b's version is saved on b" grep -rqF 'alias ll="ls -lh"' "$(e2e_backups b)"
 e2e_dm_rc 0 b status
 e2e_err_has '1 managed, 1 clean, 0 to look at'
+
+e2e_write_repo b .bashrc $'repo-reviewed\n'
+e2e_write b .bashrc $'home-reviewed\n'
+review="$E2E_ROOT/conflict-decisions.json"
+e2e_review b apply "$review" .bashrc take_repo
+e2e_write b .bashrc $'home-later\n'
+e2e_decided 3 b apply "$review"
+e2e_file_is b .bashrc $'home-later\n'
+e2e_review b apply "$review" .bashrc take_repo
+e2e_decided 0 b apply "$review"
+e2e_file_is b .bashrc $'repo-reviewed\n'
+e2e_check "the decided write backed up the losing home bytes" grep -rqF home-later "$(e2e_backups b)"
+
+rm -- "$(e2e_home b)/.bashrc"
+e2e_review b apply "$review" .bashrc restore
+e2e_decided 0 b apply "$review"
+e2e_file_is b .bashrc $'repo-reviewed\n'
+e2e_git b add -- .bashrc
+e2e_git b -c core.hooksPath=/dev/null commit -qm restored-version
+rm -- "$(e2e_home b)/.bashrc"
+e2e_write_repo b .bashrc $'repo-before-forget\n'
+e2e_review b apply "$review" .bashrc forget
+e2e_decided 0 b apply "$review"
+e2e_check "the reviewed forget removed the repo source" test ! -e "$(e2e_repo b)/.bashrc"
+e2e_check "the reviewed forget saved its uncommitted repo edit" grep -rqF repo-before-forget "$(e2e_backups b)"
 
 e2e_finish

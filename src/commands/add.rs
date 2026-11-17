@@ -5,11 +5,12 @@
 use crate::cli::AddArgs;
 use crate::commands::Outcome;
 use crate::commands::apply::{Classified, classify_key};
+use crate::commands::review::Stored;
 use crate::config::{Allow, Config};
 use crate::context::{Context, TEMP_PREFIX, is_real_dir, is_under};
 use crate::engine::status::{Variants, Worktree};
 use crate::engine::{
-    Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
+    Home, Node, Tuple, parents, portable_link_target, read_node, recorded_mode, safe_mode,
 };
 use crate::name;
 use crate::output;
@@ -221,7 +222,8 @@ impl Ignore {
 pub fn run(args: &AddArgs) -> Result<Outcome> {
     let mut ctx = Context::resolve("add")?;
     let dry_run = args.dry_run;
-    let _lock = ctx.lock(dry_run)?;
+    let _lock = ctx.start(args.json, dry_run)?;
+    ctx.stage("add", dry_run)?;
     if !dry_run {
         ctx.sweep_temp_files()?;
     }
@@ -271,9 +273,7 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
     guarded.warn(&ctx, public, args.for_conditions.as_deref());
     warn_content_held(&ctx, &content.held);
     let specials = warn_held(&ctx, &plan, &targets.sources);
-    for dir in &plan.dirs {
-        warn_still_ignored(&ctx.paths.home, &dir.still_ignored);
-    }
+    report_add_attention(&ctx, &guarded, &content, &plan)?;
     let outcome = if guarded.held.is_empty() && content.held.is_empty() && specials == 0 {
         Outcome::Done
     } else {
@@ -323,6 +323,30 @@ pub fn run(args: &AddArgs) -> Result<Outcome> {
         output::success(&format!("added {}", crate::import::count(added, "path")));
     }
     finish(failed, items.len(), outcome)
+}
+
+fn report_add_attention(
+    ctx: &Context,
+    guarded: &Guarded,
+    content: &ContentGuard,
+    plan: &Plan,
+) -> Result<()> {
+    for (key, _) in &guarded.held {
+        ctx.attention("name_held", Some(key), "home", true)?;
+    }
+    for (key, _) in &content.held {
+        ctx.attention("content_held", Some(key), "home", true)?;
+    }
+    for dir in &plan.dirs {
+        warn_still_ignored(&ctx.paths.home, &dir.still_ignored);
+        for key in dir.held.keys() {
+            ctx.attention("special_held", Some(key), "home", true)?;
+        }
+        for key in dir.still_ignored.keys() {
+            ctx.attention("unlisted_ignore", Some(key), "home", false)?;
+        }
+    }
+    Ok(())
 }
 
 /// Takes the files a directory already manages, unchanged, out of its plan, so that adding it
@@ -1749,7 +1773,7 @@ pub(crate) fn capture_hold(
     node_hold(ctx, &node, key, source, encrypted)
 }
 
-fn node_hold(
+pub(crate) fn node_hold(
     ctx: &Context,
     node: &Node,
     key: &str,
@@ -1895,6 +1919,16 @@ fn commit_stored(
         return Err(OwnPath::new(key, what).into());
     }
     let node = read_node(home, key)?;
+    if let Some(review) = &ctx.reviewed {
+        let stored = Stored::read(repo, Path::new(source))?;
+        if !review.capture(key).is_some_and(|capture| {
+            capture.source == source
+                && capture.raw_h.home(&node.home())
+                && capture.stored_before.stored(&stored)
+        }) {
+            return Err(crate::context::ReviewChanged.into());
+        }
+    }
     if let Some(found) = node_hold(ctx, &node, key, source, encrypted) {
         return Err(Held(found).into());
     }
@@ -1930,7 +1964,7 @@ fn commit_stored(
             None
         }
         (Kind::File, Node::File { bytes, mode, .. }) if encrypted => {
-            store_encrypted(ctx, &repo_config.age.recipients, source, &bytes)?;
+            store_encrypted(ctx, &repo_config.age.recipients, key, source, &bytes)?;
             Some(Tuple::of_file(&bytes, safe_mode(mode)).entry(source))
         }
         (Kind::File, Node::File { bytes, mode, .. }) => {
@@ -1963,6 +1997,10 @@ fn commit_stored(
         || written.clone(),
         |bytes| Tuple::of_file(&bytes, written.mode),
     );
+    Ok(captured_entry(source, &written, file_mode))
+}
+
+pub(crate) fn captured_entry(source: &str, written: &Tuple, file_mode: Option<u32>) -> Entry {
     let mut entry = written.entry(source);
     // A mode `[modes]` leaves out stays this machine's: S holds it against the repo's, as for a
     // mode apply keeps, so the file stays clean here.
@@ -1973,7 +2011,7 @@ fn commit_stored(
         entry.mode = format!("{mode:04o}");
         entry.repo_mode = Some(format!("{:04o}", written.mode));
     }
-    Ok(entry)
+    entry
 }
 
 /// Whether the repo's template `source` renders to `bytes` on this machine.
@@ -2027,14 +2065,14 @@ fn template_text(
     Ok(wrapped.into_bytes())
 }
 
-const fn stored_mode(mode: u32) -> u32 {
+pub(crate) const fn stored_mode(mode: u32) -> u32 {
     if mode & 0o111 == 0 { 0o644 } else { 0o755 }
 }
 
 /// Puts in `[modes]` what capturing `key` as `source` adds or changes, for a file at `file_mode`
 /// and the directories above it. Returns whether anything changed, and whether the file's entry
 /// is to go, which waits for the content: until then the old content would apply at the default.
-fn record_ahead(
+pub(crate) fn record_ahead(
     repo_config: &mut RepoConfig,
     dir_modes: &mut BTreeMap<String, u32>,
     home: &Path,
@@ -2096,20 +2134,65 @@ fn keep_private(repo_config: &mut RepoConfig, key: &str, source: &str, mode: u32
 fn store_encrypted(
     ctx: &Context,
     recipients: &[String],
+    key: &str,
     source: &str,
     plaintext: &[u8],
 ) -> Result<()> {
     let repo = &ctx.paths.repo;
-    let unchanged = matches!(read_node(repo, source)?, Node::File { .. })
+    let previous = read_node(repo, source)?;
+    let unchanged = matches!(previous, Node::File { .. })
         && ctx
             .age()
             .decrypt(&repo.join(source))
             .is_ok_and(|old| old == plaintext);
     if unchanged {
+        let _ = check_encrypted_source(ctx, key, source)?;
+        if let Some(review) = &ctx.reviewed {
+            let Node::File { bytes, mode, .. } = previous else {
+                return Err(crate::context::ReviewChanged.into());
+            };
+            review
+                .captured
+                .borrow_mut()
+                .insert(PathBuf::from(source), Stored::File { bytes, mode });
+        }
         return Ok(());
     }
     let ciphertext = ctx.age().encrypt(plaintext, recipients)?;
-    secrets::write_ciphertext(ctx, source, &ciphertext)
+    let expected = check_encrypted_source(ctx, key, source)?;
+    match expected {
+        Some(expected) => secrets::write_ciphertext_expected(ctx, source, &ciphertext, &expected)?,
+        None => secrets::write_ciphertext(ctx, source, &ciphertext)?,
+    }
+    if let Some(review) = &ctx.reviewed {
+        review.captured.borrow_mut().insert(
+            PathBuf::from(source),
+            Stored::File {
+                bytes: ciphertext,
+                mode: 0o644,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn check_encrypted_source(ctx: &Context, key: &str, source: &str) -> Result<Option<Home>> {
+    let Some(review) = &ctx.reviewed else {
+        return Ok(None);
+    };
+    review.check_head(ctx)?;
+    let sources = ctx.sources()?;
+    let selected = matches!(sources.select(key, ctx.identity()),
+        Selection::Winner(current) if current == source);
+    let stored = read_node(&ctx.paths.repo, source)?.home();
+    if !selected
+        || !review
+            .capture(key)
+            .is_some_and(|capture| capture.source == source && capture.stored_before.home(&stored))
+    {
+        return Err(crate::context::ReviewChanged.into());
+    }
+    Ok(Some(stored))
 }
 
 /// Group and other write bits, which a umask of 002 gives every new file and directory. A capture
@@ -2298,6 +2381,7 @@ fn add_system(ctx: &Context, args: &AddArgs) -> Result<Outcome> {
         .filter_map(|file| system::offered_root(&file.key, scope.macos()))
         .collect();
     if !missing.is_empty() && !settle_roots(ctx, &scope, &missing, args)? {
+        report_unapproved_roots(ctx, &scope, &files)?;
         return Ok(Outcome::Attention);
     }
 
@@ -2377,6 +2461,16 @@ struct Prepared {
     file: Planned,
     /// A package manager answered.
     checked: bool,
+}
+
+fn report_unapproved_roots(ctx: &Context, scope: &system::Scope, files: &[Planned]) -> Result<()> {
+    ctx.attention("system_root_approval", None, "context", true)?;
+    for file in files {
+        if scope.standing(&file.key) == Standing::Off {
+            ctx.attention("system_root_approval", Some(&file.key), "system", true)?;
+        }
+    }
+    Ok(())
 }
 
 fn read_system_file(
@@ -2654,6 +2748,7 @@ mod tests {
 
     fn args(encrypt: bool, allow_plain: bool) -> AddArgs {
         AddArgs {
+            json: false,
             paths: Vec::new(),
             for_conditions: None,
             encrypt,

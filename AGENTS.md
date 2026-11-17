@@ -30,6 +30,7 @@ src/proc.rs             every child process starts here
 src/name.rs             the invoked name (`dot` or `dotman`) for hints
 src/sys.rs              the only module with `unsafe`
 src/output/             stderr status output and its escaping
+src/output/json.rs      experimental NDJSON text/path transport and final status result
 src/bootstrap.rs        writes and refreshes the install.sh at the repo root
 src/bootstrap/          the install.sh template written by `init`
 tests/                  integration tests; tests/common is the harness

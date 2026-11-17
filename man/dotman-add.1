@@ -4,10 +4,13 @@
 .SH NAME
 dotman\-add \- Start managing files or directories
 .SH SYNOPSIS
-\fBdotman add\fR [\fB\-\-for\fR] [\fB\-\-encrypt\fR] [\fB\-\-template\fR] [\fB\-\-allow\-plain\fR] [\fB\-\-yes\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-package\-owned\fR] [\fB\-\-add\-root\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIPATHS\fR>
+\fBdotman add\fR [\fB\-\-json\fR] [\fB\-\-for\fR] [\fB\-\-encrypt\fR] [\fB\-\-template\fR] [\fB\-\-allow\-plain\fR] [\fB\-\-yes\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-package\-owned\fR] [\fB\-\-add\-root\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIPATHS\fR>
 .SH DESCRIPTION
 Start managing files or directories
 .SH OPTIONS
+.TP
+\fB\-\-json\fR
+Print experimental schema\-versioned NDJSON outcomes
 .TP
 \fB\-\-for\fR \fI<CONDITIONS>\fR
 Add the files as variants that apply only where these `+`\-joined conditions hold, such as `host=laptop+os!=macos`

@@ -55,7 +55,9 @@ start=$SECONDS
 for file in "${scenarios[@]}"; do
     name="$(basename "$(dirname "$file")")/$(basename "$file" .sh)"
     began=$(date +%s%N)
-    if ! bash "$file"; then
+    parity=0
+    [[ $file != "$here/journeys/"* ]] || parity=1
+    if ! E2E_STATUS_PARITY=$parity bash "$file"; then
         failed+=("$name")
     fi
     ended=$(date +%s%N)

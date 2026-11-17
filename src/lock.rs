@@ -2,7 +2,7 @@
 
 use crate::output;
 use crate::paths::create_private_dir;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use fs4::{FileExt, TryLockError};
 use std::fs::{File, OpenOptions, Permissions};
 use std::io;
@@ -13,6 +13,18 @@ use std::time::Duration;
 /// One second in all.
 const LOCK_RETRIES: u32 = 100;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
+
+/// Another process owns the per-user lock.
+#[derive(Debug)]
+pub struct Held;
+
+impl std::fmt::Display for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "another {} process is running", crate::name::bin())
+    }
+}
+
+impl std::error::Error for Held {}
 
 /// Held for as long as the value lives. The lock is an `flock` on the open file, so dropping
 /// the value releases it.
@@ -76,9 +88,7 @@ impl Lock {
         };
         match locked {
             Ok(()) => Ok(Self { file: Some(file) }),
-            Err(TryLockError::WouldBlock) => {
-                bail!("another {} process is running", crate::name::bin())
-            }
+            Err(TryLockError::WouldBlock) => Err(Held.into()),
             Err(TryLockError::Error(e)) if cannot_lock(&e) => {
                 output::warning(&format!(
                     "{} does not support locking; continuing without the lock",

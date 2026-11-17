@@ -15,14 +15,6 @@ fn main() {
     #[cfg(unix)]
     dotman::sys::restore_sigpipe();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_target(false)
-        .compact()
-        .init();
-
     name::init(std::env::args_os().next().as_deref());
     let cli = Cli::from_arg_matches(&Cli::command().bin_name(name::bin()).get_matches())
         .unwrap_or_else(|e| e.exit());
@@ -37,12 +29,33 @@ fn main() {
 
     // The helper is the one command meant to run as root, under sudo, doas or run0.
     let helper = matches!(cli.command, Commands::SystemWrite(_));
+    let json = match &cli.command {
+        Commands::Status(args) => args.json,
+        Commands::Apply(args) => args.json,
+        Commands::Sync(args) => args.json,
+        Commands::Add(args) => args.json,
+        _ => false,
+    };
+    let tracing = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
+        .with_target(false)
+        .compact();
+    if json {
+        tracing.with_writer(std::io::stderr).init();
+    } else {
+        tracing.init();
+    }
     if let Err(e) = paths::ensure_not_root(
         sys::geteuid(),
         cli.allow_root || helper,
         std::env::var_os("DOTMAN_ALLOW_ROOT").as_deref(),
     ) {
         output::error(&format!("{e:#}"));
+        if json && let Err(error) = output::json::finish(1, Some("root_refused")) {
+            output::error(&format!("{error:#}"));
+        }
         std::process::exit(1);
     }
 
@@ -75,13 +88,32 @@ fn main() {
         Commands::Git(args) => git::run(&args).map(|code| -> Outcome { std::process::exit(code) }),
         Commands::SystemWrite(args) => done(system::helper::run(&args.plan)),
     };
-    match result {
-        Ok(Outcome::Done) => {}
-        Ok(Outcome::Attention) => std::process::exit(3),
-        Ok(Outcome::Conflict) => std::process::exit(4),
+    let (exit, kind, recovery) = match result {
+        Ok(Outcome::Done) => (0, None, None),
+        Ok(Outcome::Attention) => (3, None, None),
+        Ok(Outcome::Conflict) => (4, Some("pull_conflict"), None),
         Err(e) => {
-            output::error(&format!("{e:#}"));
-            std::process::exit(if e.is::<InProgress>() { 4 } else { 1 });
+            if !e.is::<output::json::PullConflict>() {
+                output::error(&format!("{e:#}"));
+            }
+            match (
+                e.downcast_ref::<InProgress>(),
+                e.downcast_ref::<output::json::PullConflict>(),
+            ) {
+                (Some(stopped), _) => (4, Some("in_progress"), Some(stopped.recovery())),
+                (_, Some(stopped)) => (4, Some("pull_conflict"), Some(stopped.recovery.clone())),
+                _ if e.is::<dotman::lock::Held>() => (1, Some("lock_held"), None),
+                _ if e.is::<dotman::context::ReviewChanged>() => (3, None, None),
+                _ if e.is::<sync::MassDelete>() => (1, Some("mass_delete"), None),
+                _ => (1, Some("other"), None),
+            }
         }
+    };
+    if json && let Err(e) = output::json::finish_with_recovery(exit, kind, recovery.as_deref()) {
+        output::error(&format!("{e:#}"));
+        std::process::exit(1);
+    }
+    if exit != 0 {
+        std::process::exit(exit);
     }
 }

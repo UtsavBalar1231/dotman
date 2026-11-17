@@ -17,9 +17,9 @@ use crate::system::{self, Scope};
 use crate::template::Vars;
 use crate::variant::Sources;
 use anyhow::{Context as _, Result, bail};
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -30,6 +30,18 @@ use walkdir::WalkDir;
 
 /// Leftover temp files of the write engine; never managed.
 pub const TEMP_PREFIX: &str = ".dotman-tmp-";
+
+/// The reviewed repository or identity changed before a decided run could start.
+#[derive(Debug)]
+pub struct ReviewChanged;
+
+impl std::fmt::Display for ReviewChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the reviewed context or HEAD changed; review again")
+    }
+}
+
+impl std::error::Error for ReviewChanged {}
 
 /// A git operation or a conflict is unfinished in the repo. `main` maps it to exit code 4.
 #[derive(Debug)]
@@ -72,9 +84,12 @@ impl fmt::Display for InProgress {
             }
             Unfinished::Conflicts(paths) => {
                 let quoted = quote_all(paths);
+                let paths: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
+                let add = crate::git::recovery_path_command(&["add"], &paths);
+                let checkout = crate::git::recovery_path_command(&["checkout", "HEAD"], &paths);
                 write!(
                     f,
-                    "the repo at {repo} has unresolved conflicts in {quoted}, as `git stash pop` leaves them; resolve them and run `{bin} git add -- {quoted}`, or put back the committed version with `{bin} git checkout HEAD -- {quoted}`"
+                    "the repo at {repo} has unresolved conflicts in {quoted}, as `git stash pop` leaves them; resolve them and run `{add}`, or put back the committed version with `{checkout}`"
                 )?;
             }
             Unfinished::OwnPull => write!(
@@ -153,8 +168,116 @@ fn quote_all(paths: &[PathBuf]) -> String {
 
 impl std::error::Error for InProgress {}
 
+impl InProgress {
+    /// Terminal-only commands and manual steps for the state this guard observed.
+    #[must_use]
+    pub fn recovery(&self) -> Vec<crate::output::json::RecoveryStep> {
+        use crate::output::json::RecoveryStep as Step;
+        let bin = crate::name::bin();
+        if let Unfinished::Refused(refusal) = &self.unfinished {
+            return refusal.recovery();
+        }
+        let mut steps = Vec::new();
+        if !self.locks.is_empty() {
+            steps.push(Step::instruction(
+                "Remove these lock files only if no git process is running in this repository.",
+            ));
+            let mut argv = vec![OsString::from("rm"), OsString::from("--")];
+            argv.extend(self.locks.iter().map(|path| path.as_os_str().to_owned()));
+            steps.push(Step::command(argv));
+        }
+        match &self.unfinished {
+            Unfinished::OwnPull => steps.push(Step::command([bin, "sync"])),
+            Unfinished::Operation(Operation::Bisect) => {
+                steps.push(Step::command([bin, "git", "bisect", "reset"]));
+            }
+            Unfinished::Operation(operation) => {
+                let name = operation.name();
+                if self.locks.is_empty() {
+                    steps.push(Step::instruction(
+                        "Finish the operation, or abort it instead.",
+                    ));
+                    steps.push(
+                        Step::command([bin, "git", "-c", "core.editor=true", name, "--continue"])
+                            .when("after resolving the operation"),
+                    );
+                }
+                steps.push(Step::command([bin, "git", name, "--abort"]).when(
+                    if self.locks.is_empty() {
+                        "to undo instead"
+                    } else {
+                        "after removing the stale locks"
+                    },
+                ));
+                if !self.locks.is_empty() && matches!(operation, Operation::Rebase) {
+                    steps.push(
+                        Step::command([bin, "git", "rebase", "--quit"])
+                            .when("only if rebase --abort failed"),
+                    );
+                    match &self.branch {
+                        Err(_) => steps.push(
+                            Step::command([
+                                bin,
+                                "git",
+                                "checkout",
+                                "-f",
+                                "-b",
+                                "main",
+                                "ORIG_HEAD",
+                            ])
+                            .when("after the fallback rebase --quit succeeds"),
+                        ),
+                        Ok(branch) => {
+                            steps.push(
+                                Step::command([
+                                    bin,
+                                    "git",
+                                    "checkout",
+                                    "-f",
+                                    branch.as_deref().unwrap_or("main"),
+                                ])
+                                .when("after the fallback rebase --quit succeeds"),
+                            );
+                            steps.push(
+                                Step::command([bin, "git", "reset", "--hard", "ORIG_HEAD"])
+                                    .when("after the fallback checkout succeeds"),
+                            );
+                        }
+                    }
+                    steps.push(
+                        Step::command([bin, "sync"]).when("after the repository is recovered"),
+                    );
+                }
+            }
+            Unfinished::Conflicts(paths) => {
+                steps.push(Step::instruction(
+                    "Resolve the files and stage them, or restore the committed versions instead.",
+                ));
+                let mut argv = vec![
+                    OsString::from(bin),
+                    OsString::from("git"),
+                    OsString::from("add"),
+                    OsString::from("--"),
+                ];
+                argv.extend(paths.iter().map(|path| crate::git::literal_pathspec(path)));
+                steps.push(Step::command(argv).when("after resolving the files"));
+                let mut argv = [bin, "git", "checkout", "HEAD", "--"]
+                    .map(OsString::from)
+                    .to_vec();
+                argv.extend(paths.iter().map(|path| crate::git::literal_pathspec(path)));
+                steps.push(Step::command(argv).when("to restore committed versions instead"));
+            }
+            Unfinished::Refused(_) => {}
+        }
+        steps
+    }
+}
+
 /// Resolved locations, with the machine config applied, and the git handle for one run.
 pub struct Context {
+    pub(crate) reviewed: Option<crate::decisions::Reviewed>,
+    pub(crate) json: bool,
+    pub(crate) recovery: RefCell<Vec<crate::output::json::RecoveryStep>>,
     /// Where everything lives.
     pub paths: Paths,
     /// Git in the repo.
@@ -164,9 +287,10 @@ pub struct Context {
     command: &'static str,
     /// Keys already warned about in this run.
     warned: RefCell<BTreeSet<String>>,
+    warnings: RefCell<Vec<(String, String)>>,
     keys: KeyRules,
     /// The last look at the worktree found a tracked file whose key is refused.
-    refused: Cell<bool>,
+    refused: RefCell<Vec<String>>,
     identity: OnceCell<IdentitySnapshot>,
     template_vars: OnceCell<Vars>,
     age: OnceCell<Age>,
@@ -188,6 +312,9 @@ impl Context {
         let leave_out =
             move |git: &Git, untracked: &[PathBuf]| left_out(git, &state_file, untracked);
         Self {
+            reviewed: None,
+            json: false,
+            recovery: RefCell::new(Vec::new()),
             git: Git::new(paths.repo.clone(), dot_command)
                 .leaving_out(Box::new(leave_out))
                 .backing_up_into(paths.state_dir.join("backups")),
@@ -196,19 +323,89 @@ impl Context {
             machine,
             command: dot_command,
             warned: RefCell::new(BTreeSet::new()),
-            refused: Cell::new(false),
+            warnings: RefCell::new(Vec::new()),
+            refused: RefCell::new(Vec::new()),
             identity: OnceCell::new(),
             template_vars: OnceCell::new(),
             age: OnceCell::new(),
         }
     }
 
+    pub(crate) fn start(&mut self, json: bool, dry_run: bool) -> Result<Lock> {
+        self.json = json;
+        let locked = self.lock(dry_run);
+        if self.json {
+            let id = locked.as_ref().ok().map(|_| self.repo_id()).transpose();
+            crate::commands::status::write_context(
+                self,
+                self.command,
+                id.as_ref().ok().and_then(|id| id.as_deref()),
+            )?;
+            let lock = locked?;
+            id?;
+            self.report_reviewed()?;
+            return Ok(lock);
+        }
+        let lock = locked?;
+        self.report_reviewed()?;
+        Ok(lock)
+    }
+
+    fn report_reviewed(&self) -> Result<()> {
+        if let Some(review) = &self.reviewed {
+            for key in review.stale_files.borrow().iter() {
+                review.stale(self, Some(key))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn emit(&self, record: &impl serde::Serialize) -> Result<()> {
+        if self.json {
+            crate::output::json::write(&mut std::io::stdout().lock(), record)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stage(&self, stage: &'static str, dry_run: bool) -> Result<()> {
+        self.emit(&crate::output::json::PhaseEvent {
+            record: "stage",
+            stage,
+            dry_run,
+        })
+    }
+
+    pub(crate) fn attention(
+        &self,
+        reason: &'static str,
+        key: Option<&str>,
+        scope: &'static str,
+        attention: bool,
+    ) -> Result<()> {
+        self.emit(&crate::output::json::UndecidedEvent {
+            record: "undecided",
+            reason,
+            key: key.map(crate::output::json::Text::new),
+            scope,
+            pass: self.command,
+            attention,
+            skip_next_pass: false,
+        })
+    }
+
     /// Prints `message` as a warning, unless one was already printed for `key` in this run, such
     /// as by `sync`'s pass before the pull.
     pub(crate) fn warn_once(&self, key: &str, message: &str) {
         if self.warned.borrow_mut().insert(key.to_owned()) {
+            self.warnings
+                .borrow_mut()
+                .push((key.to_owned(), message.to_owned()));
             crate::output::warning(message);
         }
+    }
+
+    pub(crate) fn warnings(&self) -> Vec<(String, String)> {
+        self.warnings.borrow().clone()
     }
 
     /// [`KeyRules::check`] with this machine's own paths.
@@ -240,8 +437,30 @@ impl Context {
 
     /// Whether the worktree, as last read, has a tracked file whose key is refused, which is left
     /// for the user. A pull can remove it, so only the latest read counts.
-    pub(crate) const fn refused_any(&self) -> bool {
-        self.refused.get()
+    pub(crate) fn refused_any(&self) -> bool {
+        !self.refused.borrow().is_empty()
+    }
+
+    pub(crate) fn refused_paths(&self) -> Vec<String> {
+        self.refused.borrow().clone()
+    }
+
+    pub(crate) fn projected_exclusions(
+        &self,
+        untracked: &[PathBuf],
+        patterns: &[String],
+        kept: &BTreeSet<String>,
+    ) -> Result<Vec<PathBuf>> {
+        let index: BTreeSet<_> = self.git.index_paths()?.into_iter().collect();
+        let mut dropped = Dropped {
+            ignore: Ignore::compile(patterns)?,
+            kept: index.clone(),
+            index,
+        };
+        dropped.kept.extend(kept.iter().cloned());
+        let (mut roots, unnamed) = sort_with_policy(untracked, &dropped);
+        roots.extend(unnamed);
+        Ok(roots)
     }
 
     /// Names a tracked repo file that is never applied or captured here, with the commands that
@@ -341,6 +560,9 @@ impl Context {
     /// write the file, it warns and the command goes on.
     pub(crate) fn lock(&self, dry_run: bool) -> Result<Lock> {
         let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;
+        if let Some(reviewed) = &self.reviewed {
+            reviewed.recheck(self)?;
+        }
         if !dry_run {
             self.recover_pull()?;
         }
@@ -694,7 +916,8 @@ impl Context {
                 }
             }
         }
-        self.refused.set(!refused.is_empty());
+        self.refused
+            .replace(refused.iter().map(|(path, _)| path.clone()).collect());
         for (path, why) in &refused {
             self.report_refused(path, why);
         }
@@ -992,6 +1215,10 @@ fn sort_untracked(
     untracked: &[PathBuf],
 ) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let dropped = Dropped::load(git, state_file)?;
+    Ok(sort_with_policy(untracked, &dropped))
+}
+
+fn sort_with_policy(untracked: &[PathBuf], dropped: &Dropped) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let temp = |path: &str| {
         path.rsplit('/')
             .next()
@@ -1024,7 +1251,7 @@ fn sort_untracked(
             None => {}
         }
     }
-    Ok((roots.into_iter().collect(), unnamed))
+    (roots.into_iter().collect(), unnamed)
 }
 
 /// `$XDG_RUNTIME_DIR` when it is set to an absolute path.

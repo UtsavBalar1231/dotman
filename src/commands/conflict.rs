@@ -11,9 +11,10 @@ use crate::commands::sync::{REMOTE, print_steps, quoted};
 use crate::context::{Context, TEMP_PREFIX, holds_no_settings};
 use crate::engine::status::Content as Shown;
 use crate::engine::write::{back_up_bytes, backup_run_dir};
-use crate::git::{Decision, Entry, Refusal, Replayed, Side, Stopped};
+use crate::git::{Decision, Entry, Refusal, Replayed, Side, Stopped, TipReceipt};
 use crate::name;
 use crate::output;
+use crate::output::json::RecoveryStep as Step;
 use crate::paths::{is_reserved_root_name, private_temp_dir, validate_key};
 use crate::proc;
 use crate::prompt;
@@ -214,7 +215,7 @@ struct Merged {
 }
 
 /// Settles the conflicting pull of `branch` onto `onto`, the commit the pull fetched, starting
-/// from the paths of its first stop. True when the pull was replayed; false when it was reported,
+/// from the paths of its first stop. Its branch receipt when replayed; `None` when reported,
 /// with nothing changed. A replay that cannot be undone fails with
 /// [`crate::context::InProgress`].
 pub fn resolve(
@@ -223,19 +224,25 @@ pub fn resolve(
     onto: &str,
     stopped: Vec<Stopped>,
     answer: Option<Answer>,
-) -> Result<bool> {
+) -> Result<Option<TipReceipt>> {
     let mut pull = Pull::new(ctx, branch, onto, answer)?;
     let mut stopped = stopped;
-    loop {
+    let receipt = loop {
         if !pull.decide(&stopped)? {
-            return Ok(false);
+            return Ok(None);
         }
         let host = match ctx.identity().host.as_str() {
             "" => "unknown",
             host => host,
         };
-        let replayed = match ctx.git.replay(REMOTE, branch, onto, &pull.decisions, host) {
+        let replayed = match if ctx.reviewed.is_some() {
+            ctx.git
+                .replay_reviewed(REMOTE, branch, onto, &pull.decisions, host)
+        } else {
+            ctx.git.replay(REMOTE, branch, onto, &pull.decisions, host)
+        } {
             Ok(replayed) => replayed,
+            Err(e) if e.is::<crate::context::ReviewChanged>() => return Err(e),
             Err(e) => {
                 if let Err(save) = pull.save_edits() {
                     output::warning(&format!("cannot save the edited files: {save:#}"));
@@ -244,7 +251,7 @@ pub fn resolve(
             }
         };
         match replayed {
-            Replayed::Done => break,
+            Replayed::Done(receipt) => break receipt,
             Replayed::Stopped(more) => {
                 if more.is_empty() || more.iter().any(|s| pull.decisions.contains_key(&s.path)) {
                     bail!("the replay of the pull stopped on paths it had already settled");
@@ -252,7 +259,7 @@ pub fn resolve(
                 stopped = more;
             }
         }
-    }
+    };
     if let Some(n) = pull.from_origin.filter(|n| *n > 0) {
         output::info(&format!(
             "merged {SETTINGS}: {} from {REMOTE}/{branch}",
@@ -262,7 +269,7 @@ pub fn resolve(
     for path in &pull.edited {
         output::action("resolve", &format!("{} (edited)", shown(path)));
     }
-    Ok(true)
+    Ok(Some(receipt))
 }
 
 /// `main` exits 4 on [`crate::context::InProgress`], which carries the steps that put the repo
@@ -1118,9 +1125,12 @@ impl<'a> Pull<'a> {
             .open(&copy)
             .and_then(|mut file| file.write_all(opened))
             .with_context(|| format!("cannot write {}", copy.display()))?;
-        let mut child = proc::command(&program)
-            .args(rest)
-            .arg(&copy)
+        let mut command = proc::command(&program);
+        command.args(rest).arg(&copy);
+        if self.ctx.json {
+            command.stdout(crate::output::json::child_stdout()?);
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("cannot run the editor `{program}`"))?;
         // As in `diff`, only after the spawn, so the editor keeps the default actions and dotman
@@ -1468,6 +1478,14 @@ impl<'a> Pull<'a> {
             output::warning(&line);
         }
         let bin = name::bin();
+        if self.ctx.json {
+            self.ctx.recovery.borrow_mut().extend([
+                Step::instruction("Choose one answer, or run sync in a terminal to answer each stop. Nothing resumes automatically."),
+                Step::command([bin, "sync", "--keep-local"]).when("to keep this machine's side"),
+                Step::command([bin, "sync", "--take-repo"]).when("to take origin's side instead"),
+                Step::command([bin, "sync"]).when("to answer in a terminal instead"),
+            ]);
+        }
         output::warning(&format!(
             "answer with `{bin} sync --keep-local` or `{bin} sync --take-repo`, or run `{bin} sync` in a terminal to decide file by file"
         ));
@@ -1492,11 +1510,14 @@ impl<'a> Pull<'a> {
             self.ctx.paths.repo.display()
         )];
         let mut staging = Vec::new();
+        let mut recovery = Vec::new();
         let mut copied = false;
         for stop in &self.seen {
             let copy = stop.aside.as_ref().unwrap_or(&stop.path);
             let found = self.existing(copy).unwrap_or_else(|| copy.clone());
-            if let Some((holds, steps)) = copy_steps(stop, &found, &self.ctx.paths.repo, &theirs) {
+            if let Some((holds, steps)) =
+                copy_steps(stop, &found, &self.ctx.paths.repo, &theirs, &mut recovery)
+            {
                 copied |= found != *copy;
                 edit.push(holds);
                 staging.extend(steps);
@@ -1527,12 +1548,37 @@ impl<'a> Pull<'a> {
         }
         output::warning("To resolve the pull with git:");
         if !add.is_empty() {
-            staging.push(format!("{bin} git add -- {}", quoted(&add)));
+            staging.push(crate::git::recovery_path_command(
+                &["add"],
+                &add.iter().map(|path| path.as_path()).collect::<Vec<_>>(),
+            ));
+            let mut argv = [bin, "git", "add", "--"].map(OsString::from).to_vec();
+            argv.extend(add.iter().map(|path| crate::git::literal_pathspec(path)));
+            recovery.push(Step::command(argv));
         }
         staging.push(format!("{bin} git add -u"));
         // The same backend as dotman's pull, so the stop and its copies are the ones named here.
         let mut pull = vec!["git", "pull", "--rebase"];
         pull.extend_from_slice(self.ctx.git.pull_backend().unwrap_or_default());
+        if self.ctx.json {
+            let mut argv = vec![bin];
+            argv.extend(pull.iter().copied());
+            argv.extend([REMOTE, self.branch]);
+            let mut recipe = vec![
+                Step::command(argv),
+                Step::instruction(
+                    "Resolve the reported paths and settings under the repository, removing conflict markers. The copy commands below keep this machine's side. To choose origin's side instead, omit those commands and place origin's version under the path's name, then remove the copy.",
+                ),
+            ];
+            recipe.extend(recovery);
+            recipe.extend([
+                Step::command([bin, "git", "add", "-u"]),
+                Step::instruction("Continue after resolving this stop. If the rebase stops again, resolve that stop and repeat add and rebase --continue."),
+                Step::command(["env", "GIT_EDITOR=true", bin, "git", "rebase", "--continue"]),
+                Step::command([bin, "sync"]).when("after the rebase finishes"),
+            ]);
+            self.ctx.recovery.borrow_mut().extend(recipe);
+        }
         print_steps(&[
             vec![format!(
                 "{bin} {} {REMOTE} {}",
@@ -1551,6 +1597,12 @@ impl<'a> Pull<'a> {
 
     fn report_refused(&self, path: &Path, why: &str, answer: Answer) {
         let bin = name::bin();
+        if self.ctx.json {
+            self.ctx.recovery.borrow_mut().extend([
+                Step::instruction("Correct the reported problem in this machine's source or settings, then commit the settings change if applicable and retry the same answer."),
+                Step::command([bin, "sync", answer.flag()]).when("after correcting the reported problem"),
+            ]);
+        }
         refusal(path, why);
         let source = source(path);
         let fix = if path == Path::new(SETTINGS) {
@@ -1769,11 +1821,12 @@ fn copy_steps(
     found: &Path,
     repo: &Path,
     theirs: &str,
+    recovery: &mut Vec<Step>,
 ) -> Option<(String, Vec<String>)> {
     let bin = name::bin();
     let copy = stop.aside.as_ref().unwrap_or(&stop.path);
     if found == copy.as_path() {
-        return unwritten_steps(stop, found);
+        return unwritten_steps(stop, found, recovery);
     }
     let whose = match (&stop.ours, &stop.replayed) {
         (None, Some(_)) => "this machine's".to_owned(),
@@ -1783,13 +1836,43 @@ fn copy_steps(
     let found = found.to_path_buf();
     let mut steps = Vec::new();
     if stop.ours.is_none() {
-        steps.push(format!(
-            "{bin} git checkout --no-overlay REBASE_HEAD -- {}",
-            quoted(&[&found])
+        recovery.push(Step::command([
+            OsStr::new(bin),
+            OsStr::new("git"),
+            OsStr::new("checkout"),
+            OsStr::new("--no-overlay"),
+            OsStr::new("REBASE_HEAD"),
+            OsStr::new("--"),
+            crate::git::literal_pathspec(&found).as_os_str(),
+        ]));
+        steps.push(crate::git::recovery_path_command(
+            &["checkout", "--no-overlay", "REBASE_HEAD"],
+            &[&found],
         ));
     }
+    recovery.push(stop.aside.as_ref().map_or_else(
+        || {
+            Step::command([
+                OsStr::new(bin),
+                OsStr::new("git"),
+                OsStr::new("rm"),
+                OsStr::new("-q"),
+                OsStr::new("-f"),
+                OsStr::new("--"),
+                crate::git::literal_pathspec(copy).as_os_str(),
+            ])
+        },
+        |copy| {
+            Step::command([
+                OsStr::new("rm"),
+                OsStr::new("-f"),
+                OsStr::new("--"),
+                repo.join(copy).as_os_str(),
+            ])
+        },
+    ));
     steps.push(stop.aside.as_ref().map_or_else(
-        || format!("{bin} git rm -q -f -- {}", quoted(&[copy])),
+        || crate::git::recovery_path_command(&["rm", "-q", "-f"], &[copy]),
         |copy| format!("rm -f -- {}", quoted(&[&repo.join(copy)])),
     ));
     let holds = format!("Copy {} holds {whose} {}", quoted(&[copy]), shown(&found));
@@ -1799,21 +1882,33 @@ fn copy_steps(
 /// For a file here against a submodule in origin, which git 2.25 stops on with no copy and only
 /// an empty directory at `found`, the step 2 line saying so and the step 3 line that checks out
 /// this machine's version: `git add` of the empty directory would stage the path's removal.
-fn unwritten_steps(stop: &Stopped, found: &Path) -> Option<(String, Vec<String>)> {
+fn unwritten_steps(
+    stop: &Stopped,
+    found: &Path,
+    recovery: &mut Vec<Step>,
+) -> Option<(String, Vec<String>)> {
     let gitlink = |entry: &Option<Entry>| entry.as_ref().is_some_and(|entry| entry.mode == GITLINK);
     if !gitlink(&stop.ours) || stop.replayed.is_none() || gitlink(&stop.replayed) {
         return None;
     }
     let path = found.to_path_buf();
+    recovery.push(Step::command([
+        OsStr::new(name::bin()),
+        OsStr::new("git"),
+        OsStr::new("checkout"),
+        OsStr::new("--no-overlay"),
+        OsStr::new("REBASE_HEAD"),
+        OsStr::new("--"),
+        crate::git::literal_pathspec(found).as_os_str(),
+    ]));
     Some((
         format!(
             "{} is left empty: step 3 checks out this machine's version",
             shown(found)
         ),
-        vec![format!(
-            "{} git checkout --no-overlay REBASE_HEAD -- {}",
-            name::bin(),
-            quoted(&[&path])
+        vec![crate::git::recovery_path_command(
+            &["checkout", "--no-overlay", "REBASE_HEAD"],
+            &[&path],
         )],
     ))
 }
@@ -1879,14 +1974,15 @@ mod tests {
             aside: aside.map(PathBuf::from),
         };
         let repo = Path::new("/r");
-        let steps = |stop: &Stopped| copy_steps(stop, Path::new("x"), repo, "origin/main");
+        let steps =
+            |stop: &Stopped| copy_steps(stop, Path::new("x"), repo, "origin/main", &mut Vec::new());
         assert_eq!(
             steps(&stop("x~HEAD", None, false)),
             Some((
                 "Copy 'x~HEAD' holds this machine's x".to_owned(),
                 vec![
-                    "dotman git checkout --no-overlay REBASE_HEAD -- x".to_owned(),
-                    "dotman git rm -q -f -- 'x~HEAD'".to_owned(),
+                    "dotman git checkout --no-overlay REBASE_HEAD -- ':(literal)x'".to_owned(),
+                    "dotman git rm -q -f -- ':(literal)x~HEAD'".to_owned(),
                 ]
             ))
         );
@@ -1895,7 +1991,7 @@ mod tests {
             Some((
                 "Copy 'x~1a2b3c4... sync(b): x' holds this machine's x".to_owned(),
                 vec![
-                    "dotman git checkout --no-overlay REBASE_HEAD -- x".to_owned(),
+                    "dotman git checkout --no-overlay REBASE_HEAD -- ':(literal)x'".to_owned(),
                     "rm -f -- '/r/x~1a2b3c4... sync(b): x'".to_owned(),
                 ]
             ))
@@ -1924,13 +2020,20 @@ mod tests {
             follows_rename: false,
             aside: None,
         };
-        let steps =
-            |stop: &Stopped| copy_steps(stop, Path::new("x"), Path::new("/r"), "origin/main");
+        let steps = |stop: &Stopped| {
+            copy_steps(
+                stop,
+                Path::new("x"),
+                Path::new("/r"),
+                "origin/main",
+                &mut Vec::new(),
+            )
+        };
         assert_eq!(
             steps(&stop(Some(file.clone()))),
             Some((
                 "x is left empty: step 3 checks out this machine's version".to_owned(),
-                vec!["dotman git checkout --no-overlay REBASE_HEAD -- x".to_owned()]
+                vec!["dotman git checkout --no-overlay REBASE_HEAD -- ':(literal)x'".to_owned()]
             ))
         );
         assert_eq!(steps(&stop(None)), None);

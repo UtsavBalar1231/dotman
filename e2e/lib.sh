@@ -67,6 +67,9 @@ e2e_begin() {
         found=$(dirname "$found")
         case ":$E2E_PATH:" in *":$found:"*) ;; *) E2E_PATH="$E2E_PATH:$found" ;; esac
     done
+    if [[ ${E2E_STATUS_PARITY:-0} == 1 || ${E2E_OUTCOME_JSON:-0} == 1 ]]; then
+        command -v jq >/dev/null || e2e_die "jq is needed for JSON parity"
+    fi
     E2E_PATH="$E2E_PATH:/usr/local/bin:/usr/bin:/bin"
     printf '=== %s\n' "$E2E_NAME"
 }
@@ -203,20 +206,183 @@ e2e_git() {
 
 # Runs dotman on machine M with stdin closed; sets E2E_RC, E2E_OUT and E2E_ERR, never fails.
 e2e_dm() {
-    local m=$1
+    local m=$1 json=0
     shift
+    local args=("$@")
+    if [[ ${E2E_OUTCOME_JSON:-0} == 1 ]]; then
+        case ${1:-} in
+            apply | sync | add) args=("$1" --json "${@:2}"); json=1 ;;
+        esac
+    fi
     E2E_LAST_MACHINE=$m
     E2E_LAST_CMD="dotman $*"
     E2E_RC=0
     # Checked here as well, so a refusal is not lost in the redirected output below.
     e2e_guard "$m"
-    e2e_on "$m" dotman "$@" </dev/null >"$E2E_ROOT/last.out" 2>"$E2E_ROOT/last.err" || E2E_RC=$?
+    e2e_on "$m" dotman "${args[@]}" </dev/null >"$E2E_ROOT/last.out" 2>"$E2E_ROOT/last.err" || E2E_RC=$?
     E2E_OUT=$(<"$E2E_ROOT/last.out")
     E2E_ERR=$(<"$E2E_ROOT/last.err")
     {
         printf '\n[%s] $ %s  (exit %s)\n' "$m" "$E2E_LAST_CMD" "$E2E_RC"
         cat "$E2E_ROOT/last.out" "$E2E_ROOT/last.err"
     } >>"$E2E_ROOT/log"
+    if [[ ${E2E_STATUS_PARITY:-0} == 1 ]]; then
+        e2e_status_parity "$m"
+    fi
+    if [[ $json == 1 ]]; then
+        e2e_outcome_json "$m"
+    fi
+}
+
+# Checks the writer's own LF frames and decision records against the refreshed status.
+e2e_outcome_json() {
+    local m=$1 status_rc=0
+    if [[ ${E2E_STATUS_PARITY:-0} != 1 ]]; then
+        e2e_on "$m" dotman status --json >"$E2E_ROOT/status.json" 2>"$E2E_ROOT/status.j.err" || status_rc=$?
+        if [[ $E2E_RC == 3 && $status_rc != 0 ]]; then
+            e2e_fail "$m: exit-3 outcome could not refresh status (exit $status_rc)"
+            return
+        fi
+    fi
+    if e2e_json_frames "$E2E_ROOT/last.out" "$E2E_RC" >"$E2E_ROOT/outcome.records" &&
+        { [[ $E2E_RC != 3 ]] || {
+            e2e_json_frames "$E2E_ROOT/status.json" 0 >"$E2E_ROOT/status.records" &&
+                jq -en --slurpfile o "$E2E_ROOT/outcome.records" --slurpfile s "$E2E_ROOT/status.records" '
+                    $o[0] as $r | $s[0] as $s |
+                    def ids: unique;
+                    [$r[] | select(.record == "undecided" and .attention and .key != null) | [.scope, .key.raw]] | ids as $actual |
+                    any($r[]; .stage == "blocked_by_repo_hold") as $blocked |
+                    ["forgotten-edited", "deleted-locally", "deleted-changed-upstream", "existing",
+                     "both-changed", "template-drift", "blocked", "symlink-at-target",
+                     "identity-changed", "ambiguous", "invalid", "held", "held-in-home", "held-in-repo"] as $wanted |
+                    [$s[] | select(.record == "entry" and (.status as $x | $wanted | index($x)) != null and
+                        (($blocked | not) or .scope == "repo_source")) | [.scope, .key.raw]] | ids as $expected |
+                    [$r[] | select(.record == "resolved") | [.scope, .key.raw]] | ids as $resolved |
+                    [$r[] | select(.record == "undecided" and .reason == "refused_tracked" and .key != null) | [.scope, .key.raw]] | ids as $refused |
+                    [$s[] | select(.record == "review_context") | .warnings[] | select(.key != null) | .key.raw] | ids as $warned |
+                    (($refused | map(.[1]) | ids) - $warned == []) and
+                    ((($expected - ($resolved - $actual)) + $refused | ids) == $actual) and
+                    (($actual | length) > 0 or any($r[]; (.record == "undecided" and .key == null) or .record == "hook" or .record == "refusal"))
+                ' >/dev/null
+        }; }
+    then
+        e2e_pass "$m: outcome JSON framing, mapped exit and evaluated decision parity"
+    else
+        e2e_fail "$m: outcome JSON framing, mapped exit and evaluated decision parity"
+    fi
+}
+
+# Builds a decision document from real read-only reports, with an optional single file choice.
+e2e_review() {
+    local m=$1 command=$2 target=$3 key=${4:-} action=${5:-} rc=0
+    local args=("$command" --dry-run --json)
+    if [[ -n $key ]]; then
+        case $action in
+            take_repo) args+=(--take-repo) ;;
+            restore) args+=(--restore-deleted) ;;
+            keep_local) args+=(--keep-local) ;;
+            forget) args+=(--forget-deleted) ;;
+            *) e2e_die "unsupported review action: $action" ;;
+        esac
+        [[ $command != apply ]] || args+=(-- "$(e2e_home "$m")/$key")
+    fi
+    e2e_on "$m" dotman status --json >"$target.status"
+    e2e_json_frames "$target.status" 0 >"$target.status.records"
+    e2e_on "$m" dotman "${args[@]}" >"$target.plan" 2>"$target.plan.err" || rc=$?
+    e2e_json_frames "$target.plan" "$rc" >"$target.plan.records"
+    jq -en --arg command "$command" --arg key "$key" --arg action "$action" \
+        --slurpfile s "$target.status.records" --slurpfile p "$target.plan.records" '
+        def path: if has("raw") then {raw} else {bytes} end;
+        def machine: map_values(if type == "array" then map(.raw) else .raw end);
+        $s[0] as $s | $p[0] as $p |
+        ($s[] | select(.record == "context")) as $c |
+        {
+            schema_version: 1, repo_id: $c.repo_id.raw,
+            home: ($c.home | path), repo: ($c.repo | path), machine: ($c.machine | machine),
+            files: (if $key == "" then [] else
+                [$s[] | select(.record == "entry" and .scope == "home" and .key.raw == $key and .row != null) |
+                    {key: .key.raw, source: .source.raw, r, source_tuple, h, raw_h, action: $action}]
+                | if length == 1 then . else error("missing or ambiguous file observation") end end),
+            approvals: ([$p[] | select(.record == "hooks")] |
+                if length == 0 then {} else .[0] |
+                    {hooks: {canonical: .canonical.raw, commands: [.commands[].raw], pending_keys: [.pending_keys[].raw]}} end)
+        } +
+        (if $command != "sync" then {} else
+            ($p[] | select(.record == "outgoing")) as $o |
+            {sync: {
+                head: $o.head.raw, tracking_ref: $o.tracking_ref.raw,
+                captures: [$p[] | select(.record == "capture") |
+                    {key: .key.raw, source: .source.raw, logical_r, raw_h, stored_before}],
+                outgoing: [$p[] | select(.record == "repo_edit" or .record == "own") |
+                    {path: (.path | path), stored}]
+            }} end)
+    ' >"$target"
+}
+
+# Runs reviewed stdin and checks strict framing; each caller checks its reviewed-set effects.
+e2e_decided() {
+    local expected=$1 m=$2 command=$3 input=$4 accepted=0
+    shift 4
+    e2e_guard "$m"
+    E2E_RC=0
+    e2e_on "$m" dotman "$command" --json --decide-from - "$@" \
+        <"$input" >"$E2E_ROOT/last.out" 2>"$E2E_ROOT/last.err" || E2E_RC=$?
+    E2E_OUT=$(<"$E2E_ROOT/last.out")
+    E2E_ERR=$(<"$E2E_ROOT/last.err")
+    {
+        printf '\n[%s] $ dotman %s --json --decide-from - (exit %s)\n' "$m" "$command" "$E2E_RC"
+        cat "$E2E_ROOT/last.out" "$E2E_ROOT/last.err"
+    } >>"$E2E_ROOT/log"
+    case "|$expected|" in *"|$E2E_RC|"*) accepted=1 ;; esac
+    e2e_check "$m: reviewed $command exits $expected" test "$accepted" = 1
+    if e2e_json_frames "$E2E_ROOT/last.out" "$E2E_RC" >"$E2E_ROOT/decided.records"; then
+        e2e_pass "$m: reviewed writer has strict JSON frames and matching final exit"
+    else
+        e2e_fail "$m: reviewed writer has strict JSON frames and matching final exit"
+    fi
+    if [[ ${E2E_STATUS_PARITY:-0} == 1 ]]; then e2e_status_parity "$m"; fi
+}
+
+# Parses only complete LF-delimited JSON frames and verifies the terminal result.
+e2e_json_frames() {
+    jq -Rsj . "$1" | cmp -s "$1" - || return 1
+    jq -eRs --argjson code "$2" '
+        if (endswith("\n") | not) then error("missing final LF") else . end |
+        split("\n") | .[:-1] |
+        map(if length == 0 then error("empty frame") else fromjson end) |
+        if length == 0 or any(.[]; type != "object") then error("invalid records") else . end |
+        if .[-1].record != "result" or (.[-1].exit_code | type) != "number" or
+           .[-1].exit_code != $code or ([.[] | select(.record == "result")] | length) != 1
+        then error("invalid result") else . end
+    ' "$1"
+}
+
+# Compares occurrence counts, framing and exits after each journey command without replacing its output.
+e2e_status_parity() {
+    local m=$1 p=0 j=0
+    e2e_on "$m" dotman status --porcelain >"$E2E_ROOT/status.porcelain" 2>"$E2E_ROOT/status.p.err" || p=$?
+    e2e_on "$m" dotman status --json >"$E2E_ROOT/status.json" 2>"$E2E_ROOT/status.j.err" || j=$?
+    if [[ $p == "$j" ]] &&
+        e2e_json_frames "$E2E_ROOT/status.json" "$j" >"$E2E_ROOT/status.records" &&
+        jq -Rsj . "$E2E_ROOT/status.porcelain" | cmp -s "$E2E_ROOT/status.porcelain" - &&
+        jq -eRs --slurpfile records "$E2E_ROOT/status.records" --argjson code "$j" '
+            ($records[0]) as $r |
+            (split("\u0000") | map(select(length > 0) | index("\t") as $i |
+                if $i == null then error("invalid porcelain row") else [.[0:$i], .[$i+1:]] end) | sort) as $expected |
+            ([$r[] | select(.record == "entry") | [.status, .key.raw]] | sort) as $actual |
+            ($expected == $actual) and
+            ($code != 0 or ($r[0].record == "context" and $r[0].schema_version == 1 and $r[0].experimental == true))
+        ' "$E2E_ROOT/status.porcelain" >/dev/null
+    then
+        e2e_pass "$m: status JSON occurrence parity and final exit"
+    else
+        e2e_fail "$m: status JSON occurrence parity and final exit"
+    fi
+    if cmp -s "$E2E_ROOT/status.p.err" "$E2E_ROOT/status.j.err"; then
+        e2e_pass "$m: status JSON and porcelain stderr parity"
+    else
+        e2e_fail "$m: status JSON and porcelain stderr parity"
+    fi
 }
 
 # Runs dotman on machine M and asserts exit RC: e2e_dm_rc RC M ARGS...

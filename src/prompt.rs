@@ -4,11 +4,25 @@
 use crate::output;
 use anyhow::{Context, Result};
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static REVIEWED: AtomicBool = AtomicBool::new(false);
+
+/// Stdin contains a decision document, not interactive answers.
+pub fn reviewed() {
+    REVIEWED.store(true, Ordering::Relaxed);
+}
+
+/// Whether stdin was reserved for a reviewed decision document.
+pub fn is_reviewed() -> bool {
+    REVIEWED.load(Ordering::Relaxed)
+}
 
 /// Whether this run may ask questions.
 #[must_use]
 pub fn interactive() -> bool {
-    io::stdin().is_terminal()
+    !is_reviewed()
+        && io::stdin().is_terminal()
         && std::env::var_os("DOTMAN_NON_INTERACTIVE").is_none_or(|v| v.is_empty())
 }
 

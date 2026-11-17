@@ -32,17 +32,50 @@ const RISK: &str = "Approval covers these command lines, not the scripts they ca
 /// Fails after running every hook when any of them failed. [`Outcome::Attention`] when
 /// `--approve-hooks` approved nothing, because the table changed since it was shown.
 pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<Outcome> {
+    run_inner(ctx, changed, policy, &BTreeSet::new())
+}
+
+/// Projects pending hooks after hypothetical removals without saving approvals or running commands.
+pub fn preview(
+    ctx: &Context,
+    changed: &BTreeSet<String>,
+    policy: Policy,
+    forgotten: &BTreeSet<String>,
+) -> Result<Outcome> {
+    anyhow::ensure!(policy.dry_run, "hook preview requires a dry run");
+    run_inner(ctx, changed, policy, forgotten)
+}
+
+fn run_inner(
+    ctx: &Context,
+    changed: &BTreeSet<String>,
+    policy: Policy,
+    forgotten: &BTreeSet<String>,
+) -> Result<Outcome> {
+    if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+    }
+    ctx.stage("hooks", policy.dry_run)?;
     if policy.no_hooks {
+        hook_event(ctx, None, "disabled", None)?;
         return Ok(Outcome::Done);
     }
     let table = ctx.repo_config()?.hooks;
-    if table.is_empty() {
+    if table.is_empty()
+        && ctx
+            .reviewed
+            .as_ref()
+            .is_none_or(|review| review.input.approvals.hooks.is_none())
+    {
         return Ok(Outcome::Done);
     }
     validate(&table)?;
     let json = canonical(&table)?;
     let mut state = ctx.state(&ctx.repo_id()?)?;
     let dropped = drop_unmanaged(ctx, &mut state.hooks.pending)?;
+    let before = state.hooks.pending.len();
+    state.hooks.pending.retain(|key| !forgotten.contains(key));
+    let dropped = dropped || before != state.hooks.pending.len();
     let standing = approval(&json, &state);
     let recorded = standing == Standing::Approved;
     // The flag approves the table last shown here, never one that has changed since: the user
@@ -54,21 +87,33 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
             .pending_table
             .as_deref()
             .is_some_and(|shown| shown != json);
-    let mut approved = recorded || (policy.approve && !unshown);
+    let approved = recorded || (policy.approve && !unshown);
     let due_now = due(&table, changed)?;
     let with_pending = due(
         &table,
         &changed.union(&state.hooks.pending).cloned().collect(),
     )?;
+    let (mut approved, unshown) =
+        reviewed_approval(ctx, &json, &state, &with_pending, approved, unshown)?;
     // Approving would run this table for the pending keys, though it is not the one shown with
     // them.
     let swapped = !approved
         && state.hooks.pending_table.as_deref() != Some(json.as_str())
         && !due(&table, &state.hooks.pending)?.is_empty();
+    if ctx.json {
+        ctx.emit(&hook_plan(
+            &table,
+            &json,
+            &state,
+            &with_pending,
+            approved,
+            unshown,
+            policy.dry_run,
+        )?)?;
+    }
     if policy.dry_run {
-        let would_ask = !approved && !unshown && !policy.never_ask && prompt::interactive();
         let due = if approved { with_pending } else { due_now };
-        return Ok(dry_run(&due, approved, would_ask, unshown));
+        return preview_hooks(ctx, &due, approved, unshown, policy);
     }
 
     let asked =
@@ -88,6 +133,7 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
         }
     }
     if !approved {
+        report_unapproved(ctx, &with_pending, unshown)?;
         if due_now.is_empty() && !swapped && !unshown {
             if dropped {
                 state.save(&file, false)?;
@@ -101,39 +147,174 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
             state.save(&file, false)?;
         }
         if unshown {
+            ctx.attention("hook_table_unshown", None, "hooks", true)?;
             show_unshown(&table, with_pending.len());
             return Ok(Outcome::Attention);
         }
-        let why = if swapped {
-            "the [hooks] table in .dotman.toml changed while hooks for paths changed earlier waited for approval, and the new table, below, is not approved on this machine. Read it; then"
-        } else if standing == (Standing::Changed { old_format: true }) {
-            "the approval format changed, so the approval an older dotman saved for the [hooks] table in .dotman.toml no longer counts. Read the table; then"
-        } else {
-            "the [hooks] table in .dotman.toml is not approved on this machine. Read it; then"
-        };
-        // The whole table, not only the commands due: it is what `pending_table` records, and so
-        // what the printed command approves.
-        output::warning(&format!(
-            "{} not run: {why} `{} apply --approve-hooks` approves it and runs {} once:",
-            count(with_pending.len()),
-            crate::name::bin(),
-            if with_pending.len() == 1 {
-                "it"
-            } else {
-                "them"
-            }
-        ));
-        show_entries(&table);
+        show_unapproved(&table, standing, swapped, with_pending.len());
         return Ok(Outcome::Done);
     }
 
     let ran = run_all(ctx, &with_pending);
+    finish_approved(ctx, &mut state, dropped, !with_pending.is_empty())?;
+    ran.map(|()| Outcome::Done)
+}
+
+fn finish_approved(ctx: &Context, state: &mut State, dropped: bool, ran_any: bool) -> Result<()> {
+    if ran_any && let Some(review) = &ctx.reviewed {
+        *review.expected_head.borrow_mut() = ctx.git.head()?;
+    }
     if dropped || !state.hooks.pending.is_empty() || state.hooks.pending_table.is_some() {
         state.hooks.pending.clear();
         state.hooks.pending_table = None;
-        state.save(&file, false)?;
+        state.save(&ctx.paths.state_file(), false)?;
     }
-    ran.map(|()| Outcome::Done)
+    Ok(())
+}
+
+fn reviewed_approval(
+    ctx: &Context,
+    json: &str,
+    state: &State,
+    commands: &[&str],
+    approved: bool,
+    unshown: bool,
+) -> Result<(bool, bool)> {
+    let Some(review) = &ctx.reviewed else {
+        return Ok((approved, unshown));
+    };
+    if let Some(approval) = &review.input.approvals.hooks {
+        let pending: BTreeSet<_> = approval.pending_keys.iter().cloned().collect();
+        if approval.canonical == json
+            && pending == state.hooks.pending
+            && approval
+                .commands
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                == commands
+        {
+            return Ok((true, false));
+        }
+    } else if approved && commands.is_empty() {
+        return Ok((approved, unshown));
+    }
+    review.stale(ctx, None)?;
+    Ok((false, true))
+}
+
+fn report_unapproved(ctx: &Context, commands: &[&str], unshown: bool) -> Result<()> {
+    for command in commands {
+        hook_event(
+            ctx,
+            Some(command),
+            if unshown { "unshown" } else { "unapproved" },
+            None,
+        )?;
+    }
+    if unshown && commands.is_empty() {
+        hook_event(ctx, None, "unshown", None)?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct HookPlan {
+    record: &'static str,
+    canonical: crate::output::json::Text,
+    commands: Vec<crate::output::json::Text>,
+    pending_commands: Vec<crate::output::json::Text>,
+    pending_keys: Vec<crate::output::json::Text>,
+    approved: bool,
+    unshown: bool,
+    dry_run: bool,
+}
+
+fn hook_plan(
+    table: &BTreeMap<String, String>,
+    json: &str,
+    state: &State,
+    commands: &[&str],
+    approved: bool,
+    unshown: bool,
+    dry_run: bool,
+) -> Result<HookPlan> {
+    Ok(HookPlan {
+        record: "hooks",
+        canonical: crate::output::json::Text::new(json),
+        commands: commands
+            .iter()
+            .map(|command| crate::output::json::Text::new(*command))
+            .collect(),
+        pending_commands: due(table, &state.hooks.pending)?
+            .into_iter()
+            .map(crate::output::json::Text::new)
+            .collect(),
+        pending_keys: state
+            .hooks
+            .pending
+            .iter()
+            .map(crate::output::json::Text::new)
+            .collect(),
+        approved,
+        unshown,
+        dry_run,
+    })
+}
+
+fn preview_hooks(
+    ctx: &Context,
+    due: &[&str],
+    approved: bool,
+    unshown: bool,
+    policy: Policy,
+) -> Result<Outcome> {
+    let would_ask = !approved && !unshown && !policy.never_ask && prompt::interactive();
+    for command in due {
+        hook_event(
+            ctx,
+            Some(command),
+            if approved {
+                "would_run"
+            } else if unshown {
+                "unshown"
+            } else {
+                "would_hold"
+            },
+            None,
+        )?;
+    }
+    if unshown && due.is_empty() {
+        hook_event(ctx, None, "unshown", None)?;
+    }
+    if unshown {
+        ctx.attention("hook_table_unshown", None, "hooks", true)?;
+    }
+    Ok(dry_run(due, approved, would_ask, unshown))
+}
+
+fn show_unapproved(
+    table: &BTreeMap<String, String>,
+    standing: Standing,
+    swapped: bool,
+    due_count: usize,
+) {
+    let why = if swapped {
+        "the [hooks] table in .dotman.toml changed while hooks for paths changed earlier waited for approval, and the new table, below, is not approved on this machine. Read it; then"
+    } else if standing == (Standing::Changed { old_format: true }) {
+        "the approval format changed, so the approval an older dotman saved for the [hooks] table in .dotman.toml no longer counts. Read the table; then"
+    } else {
+        "the [hooks] table in .dotman.toml is not approved on this machine. Read it; then"
+    };
+    // The whole table, not only the commands due: it is what `pending_table` records, and so
+    // what the printed command approves.
+    output::warning(&format!(
+        "{} not run: {why} `{} apply --approve-hooks` approves it and runs {} once:",
+        count(due_count),
+        crate::name::bin(),
+        if due_count == 1 { "it" } else { "them" }
+    ));
+    show_entries(table);
 }
 
 const CHANGED_SINCE_SHOWN: &str =
@@ -195,15 +376,20 @@ fn drop_unmanaged(ctx: &Context, pending: &mut BTreeSet<String>) -> Result<bool>
 fn run_all(ctx: &Context, due: &[&str]) -> Result<()> {
     let mut failed = 0_usize;
     for command in due {
+        hook_event(ctx, Some(command), "started", None)?;
         output::action("hook", command);
         let shown = output::escape_line(command);
         match spawn(ctx, command) {
-            Ok(status) if status.success() => {}
+            Ok(status) if status.success() => {
+                hook_event(ctx, Some(command), "succeeded", status.code())?;
+            }
             Ok(status) => {
+                hook_event(ctx, Some(command), "failed", status.code())?;
                 failed = failed.saturating_add(1);
                 output::warning(&format!("hook `{shown}` failed: {status}"));
             }
             Err(e) => {
+                hook_event(ctx, Some(command), "spawn_failed", None)?;
                 failed = failed.saturating_add(1);
                 output::warning(&format!("hook `{shown}` could not start: {e}"));
             }
@@ -217,6 +403,27 @@ fn run_all(ctx: &Context, due: &[&str]) -> Result<()> {
 
 fn count(n: usize) -> String {
     format!("{n} {}", if n == 1 { "hook" } else { "hooks" })
+}
+
+fn hook_event(
+    ctx: &Context,
+    command: Option<&str>,
+    outcome: &'static str,
+    exit_code: Option<i32>,
+) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct HookEvent {
+        record: &'static str,
+        command: Option<crate::output::json::Text>,
+        outcome: &'static str,
+        exit_code: Option<i32>,
+    }
+    ctx.emit(&HookEvent {
+        record: "hook",
+        command: command.map(crate::output::json::Text::new),
+        outcome,
+        exit_code,
+    })
 }
 
 /// The commands to run, each once, in the table's key order.
@@ -325,6 +532,37 @@ fn char_name(c: char) -> String {
 /// glob and command, so two tables never share it.
 fn canonical(table: &BTreeMap<String, String>) -> Result<String> {
     serde_json::to_string(table).context("cannot encode the [hooks] table")
+}
+
+/// The exact table and pending work an approval would release.
+pub struct Review {
+    pub(crate) standing: Option<Standing>,
+    pub(crate) canonical: String,
+    pub(crate) pending: BTreeSet<String>,
+    pub(crate) commands: Vec<String>,
+}
+
+/// Invalid tables release no commands; reading this projection grants no approval.
+pub fn review(ctx: &Context, table: &BTreeMap<String, String>, state: &State) -> Result<Review> {
+    let standing = standing(table, state)
+        .ok()
+        .filter(|_| table.keys().all(|glob| Pattern::new(glob).is_ok()));
+    let mut pending = state.hooks.pending.clone();
+    drop_unmanaged(ctx, &mut pending)?;
+    let commands = if standing.is_some() {
+        due(table, &pending)?
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(Review {
+        standing,
+        canonical: canonical(table)?,
+        pending,
+        commands,
+    })
 }
 
 /// Where this machine stands on the repo's `[hooks]` table.

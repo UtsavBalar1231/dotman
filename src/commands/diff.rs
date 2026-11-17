@@ -189,7 +189,7 @@ fn show_all(
     } else {
         [sides.home, sides.repo]
     };
-    run_diff(tmp.path(), order, no_pager)
+    run_diff(tmp.path(), order, no_pager, ctx.json)
 }
 
 /// One version of a path for [`show_versions`]: its content and its git mode.
@@ -222,10 +222,10 @@ pub(crate) fn show_versions(
             }
         }
     }
-    run_diff(tmp.path(), ["origin", "here"], true)
+    run_diff(tmp.path(), ["origin", "here"], true, ctx.json)
 }
 
-fn run_diff(tmp: &Path, [old, new]: [&str; 2], no_pager: bool) -> Result<()> {
+fn run_diff(tmp: &Path, [old, new]: [&str; 2], no_pager: bool, json: bool) -> Result<()> {
     for side in [old, new] {
         let side = tmp.join(side);
         create_private_dir(&side, false)
@@ -233,6 +233,9 @@ fn run_diff(tmp: &Path, [old, new]: [&str; 2], no_pager: bool) -> Result<()> {
     }
     let git = Git::new(tmp, "diff");
     let mut cmd = git.command();
+    if json {
+        cmd.stdout(crate::output::json::child_stdout()?);
+    }
     if no_pager || (std::io::stdout().is_terminal() && pager_missing(&git)) {
         cmd.arg("--no-pager");
     }

@@ -111,6 +111,22 @@ pub(crate) fn remove_keys(
     for key in keys {
         for source in sources.sources_of(key) {
             remove_source(&ctx.paths.repo, source)?;
+        }
+    }
+    remove_metadata(repo_config, state, keys, &sources)?;
+    let remaining = ctx.managed()?.into_keys().collect();
+    prune_dir_modes(repo_config, &remaining);
+    Ok(())
+}
+
+pub(crate) fn remove_metadata(
+    repo_config: &mut RepoConfig,
+    state: &mut State,
+    keys: &BTreeSet<String>,
+    sources: &crate::variant::Sources,
+) -> Result<()> {
+    for key in keys {
+        for source in sources.sources_of(key) {
             repo_config.modes.remove(source);
         }
         repo_config.modes.remove(key);
@@ -119,11 +135,13 @@ pub(crate) fn remove_keys(
             ignore_forgotten(repo_config, &Pattern::escape(key), key, false)?;
         }
     }
-    let remaining = ctx.managed()?;
-    repo_config.modes.retain(|key, _| {
-        !key.ends_with('/') || remaining.keys().any(|k| k.starts_with(key.as_str()))
-    });
     Ok(())
+}
+
+pub(crate) fn prune_dir_modes(repo_config: &mut RepoConfig, remaining: &BTreeSet<String>) {
+    repo_config.modes.retain(|key, _| {
+        !key.ends_with('/') || remaining.iter().any(|k| k.starts_with(key.as_str()))
+    });
 }
 
 /// Removes system `keys`, every variant included, from `.dotman/system`, `[system]` and the state.
@@ -141,10 +159,20 @@ pub(crate) fn remove_system_keys(
         for source in sources.sources_of(system::rel(key)?) {
             remove_source(&ctx.paths.repo, &system::source_path(source))?;
         }
+    }
+    remove_system_metadata(repo_config, state, keys);
+    Ok(())
+}
+
+pub(crate) fn remove_system_metadata(
+    repo_config: &mut RepoConfig,
+    state: &mut State,
+    keys: &BTreeSet<String>,
+) {
+    for key in keys {
         repo_config.system.remove(key);
         state.system.remove(key);
     }
-    Ok(())
 }
 
 /// Copies every repo file of `keys` whose bytes are nowhere else, not in HEAD, not in `$HOME` and

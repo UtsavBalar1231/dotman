@@ -3,6 +3,8 @@
 
 use crate::cli::{ApplyArgs, Decisions};
 use crate::commands::add::{self, Scan};
+use crate::commands::review::{Delta, PostCapture, StagePolicy, Stored};
+use crate::commands::status::Observation;
 use crate::commands::status::token;
 use crate::commands::{Outcome, diff, forget};
 use crate::context::{Context, is_real_dir};
@@ -13,11 +15,13 @@ use crate::engine::write::{
 };
 use crate::engine::{
     Home, Node, Tuple, hash_hex, never_widen, observe, observe_portable, parse_mode, read_node,
+    recorded_mode, safe_mode,
 };
 use crate::hooks::{self, Policy};
 use crate::identity;
 use crate::name;
 use crate::output;
+use crate::output::json::{Text, UndecidedEvent};
 use crate::paths::OwnPath;
 use crate::prompt;
 use crate::repo_config::RepoConfig;
@@ -42,8 +46,10 @@ use std::time::SystemTime;
 /// Fails when the repo is not initialised, a rebase or merge is in progress, another process holds
 /// the lock, two keys collide by case or normalization, a path cannot be applied, or a hook fails.
 pub fn run(args: &ApplyArgs) -> Result<Outcome> {
-    let ctx = Context::resolve("apply")?;
-    let _lock = ctx.lock(args.dry_run)?;
+    let input = crate::decisions::Input::stdin(args.decide_from.as_deref())?;
+    let mut ctx = Context::resolve("apply")?;
+    ctx.reviewed = input.map(|input| input.bind(&ctx, false)).transpose()?;
+    let _lock = ctx.start(args.json, args.dry_run)?;
     // Before git is asked about the index, which needs a repo to exist.
     ctx.repo_id()?;
     ctx.refuse_collisions()?;
@@ -77,13 +83,25 @@ pub fn run(args: &ApplyArgs) -> Result<Outcome> {
 
 /// Runs the hooks for what `applied` wrote, then fails if a path or a hook failed.
 pub(crate) fn finish(ctx: &Context, applied: &Applied, policy: Policy) -> Result<Outcome> {
-    let hooked = hooks::run(ctx, &applied.written, policy);
-    let hooked = applied.check().and(hooked)?;
-    Ok(if applied.outcome == Outcome::Done {
-        hooked
+    let hooked = if policy.dry_run && ctx.json {
+        hooks::preview(ctx, &applied.written, policy, &applied.forgotten)
     } else {
-        applied.outcome
-    })
+        hooks::run(ctx, &applied.written, policy)
+    };
+    let hooked = applied.check().and(hooked)?;
+    Ok(
+        if ctx
+            .reviewed
+            .as_ref()
+            .is_some_and(|review| review.attention.get())
+        {
+            Outcome::Attention
+        } else if applied.outcome == Outcome::Done {
+            hooked
+        } else {
+            applied.outcome
+        },
+    )
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +118,8 @@ pub(crate) enum Pass {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 pub(crate) struct Options {
+    pub incoming: bool,
+    pub project: bool,
     pub dry_run: bool,
     pub in_place: bool,
     pub decisions: Decisions,
@@ -123,6 +143,10 @@ pub(crate) struct Options {
 }
 
 pub(crate) struct Applied {
+    pub delta: Delta,
+    pub stage_policy: Option<StagePolicy>,
+    pub post_capture: Option<PostCapture>,
+    pub forgotten: BTreeSet<String>,
     pub outcome: Outcome,
     /// Keys that were asked about and left unanswered, reported as template drift or held, or
     /// that a capture could not read.
@@ -200,15 +224,27 @@ fn drop_unlisted_ignores(state: &mut State, listed: &[String], dry_run: bool) {
 
 /// Applies the keys under `inputs` (every key when empty). The caller holds the lock.
 pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result<Applied> {
+    apply_projected(ctx, inputs, opts, None)
+}
+
+pub(crate) fn apply_projected(
+    ctx: &Context,
+    inputs: &[PathBuf],
+    opts: &Options,
+    post_capture: Option<&PostCapture>,
+) -> Result<Applied> {
+    start_pass(ctx, opts)?;
     let repo_id = ctx.repo_id()?;
     let mut repo_config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
+    if let Some(snapshot) = post_capture {
+        anyhow::ensure!(opts.dry_run, "projected capture requires a dry run");
+        snapshot.restore(&mut repo_config, &mut state);
+    }
     let sources = ctx.sources()?;
     let mut keys: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     keys.extend(state.files.keys().cloned());
-    if opts.drop_unlisted_ignores {
-        drop_unlisted_ignores(&mut state, &repo_config.ignore.patterns, opts.dry_run);
-    }
+    decide_ignores(ctx, opts, &mut state, &repo_config)?;
     // Only a whole-repo capture looks for new files; `apply <path>` has no R for them.
     let mut scan = if opts.pass == Pass::Capture && inputs.is_empty() {
         add::scan_dirs(ctx, &repo_config, &keys, &state)?
@@ -228,33 +264,10 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     };
     keys.retain(|key| !opts.skip.contains(key));
 
-    let mut run = Run {
-        ctx,
-        opts,
-        sources: &sources,
-        modes: repo_config.modes.clone(),
-        backups: backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?,
-        backed_up: false,
-        mode_file: None,
-        attention: false,
-        failed: 0,
-        uncaptured: 0,
-        forget: BTreeSet::new(),
-        undecided: BTreeSet::new(),
-        captured: BTreeSet::new(),
-        written: BTreeSet::new(),
-        dir_modes: BTreeMap::new(),
-        accepted: false,
-        locked: Vec::new(),
-        system_writes: Vec::new(),
-        forget_system: BTreeSet::new(),
-        announced: 0,
-        left: 0,
-        kept: Vec::new(),
-    };
-    let mut items = run.classify(&sources, &state, &keys);
+    let mut run = Run::new(ctx, opts, &sources, &repo_config.modes)?;
+    let mut items = run.classify(&sources, &state, &keys, post_capture);
     // A pull can take a refused file out of the repo, so `sync` leaves it to the pass after.
-    run.attention |= ctx.refused_any() && (opts.pass == Pass::Apply || opts.dry_run);
+    run.report_refused();
     if opts.system && (inputs.is_empty() || !system_filters.is_empty()) {
         items.extend(run.system_items(&state, &repo_config, &system_filters)?);
     }
@@ -266,6 +279,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     let actions = run.plan(&items)?;
     // Asked with the other questions, before anything is written.
     run.approve_dirs(&mut scan, &mut state)?;
+    run.flush_reports()?;
     for (item, action) in items.iter().zip(actions) {
         if let Some(action) = action {
             run.execute(item, action, &mut state, &mut repo_config);
@@ -276,6 +290,7 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     }
     run.write_system(&mut state, &repo_config);
     run.capture_new(&scan, &mut state, &mut repo_config);
+    run.flush_reports()?;
     run.report_backups();
     run.report_kept();
 
@@ -285,7 +300,21 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     }
     state.save(&ctx.paths.state_file(), opts.dry_run)?;
     repo_saved?;
+    let stage_policy = ((ctx.json || opts.project) && opts.dry_run && opts.pass == Pass::Capture)
+        .then(|| run.stage_policy(&repo_config, &state));
+    let post_capture = ((ctx.json || opts.project) && opts.dry_run && opts.pass == Pass::Capture)
+        .then(|| run.post_capture(&repo_config, &state))
+        .transpose()?;
     Ok(Applied {
+        forgotten: run
+            .forget
+            .iter()
+            .chain(&run.forget_system)
+            .cloned()
+            .collect(),
+        delta: run.delta,
+        stage_policy,
+        post_capture,
         outcome: if run.attention {
             Outcome::Attention
         } else {
@@ -301,6 +330,90 @@ pub(crate) fn apply(ctx: &Context, inputs: &[PathBuf], opts: &Options) -> Result
     })
 }
 
+fn start_pass(ctx: &Context, opts: &Options) -> Result<()> {
+    if opts.incoming
+        && let Some(review) = &ctx.reviewed
+    {
+        review.check_head(ctx)?;
+    }
+    ctx.stage(
+        if opts.pass == Pass::Capture {
+            "capture"
+        } else {
+            "apply"
+        },
+        opts.dry_run,
+    )
+}
+
+fn decide_ignores(
+    ctx: &Context,
+    opts: &Options,
+    state: &mut State,
+    config: &RepoConfig,
+) -> Result<()> {
+    if opts.drop_unlisted_ignores {
+        drop_unlisted_ignores(state, &config.ignore.patterns, opts.dry_run);
+    } else if opts.pass == Pass::Capture
+        && let Some(review) = &ctx.reviewed
+    {
+        let retained: BTreeSet<_> = state
+            .ignore_seen
+            .iter()
+            .filter(|pattern| !config.ignore.patterns.contains(pattern))
+            .cloned()
+            .collect();
+        if let Some(approval) = &review.input.approvals.ignores {
+            if approval.retained.iter().cloned().collect::<BTreeSet<_>>() == retained
+                && approval.current == config.ignore.patterns
+            {
+                drop_unlisted_ignores(state, &config.ignore.patterns, opts.dry_run);
+            } else {
+                review.stale(ctx, None)?;
+            }
+        } else if !retained.is_empty() {
+            review.stale(ctx, None)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn expected_writes(
+    ctx: &Context,
+    opts: &Options,
+    post_capture: Option<&PostCapture>,
+) -> Result<(BTreeSet<String>, bool)> {
+    anyhow::ensure!(opts.dry_run, "expected writes require a dry run");
+    let mut config = ctx.repo_config()?;
+    let mut state = ctx.state(&ctx.repo_id()?)?;
+    if let Some(snapshot) = post_capture {
+        snapshot.restore(&mut config, &mut state);
+    }
+    let sources = ctx.sources()?;
+    let keys = sources
+        .keys()
+        .map(str::to_owned)
+        .chain(state.files.keys().cloned())
+        .filter(|key| !opts.skip.contains(key))
+        .collect();
+    let mut run = Run::new(ctx, opts, &sources, &config.modes)?;
+    let mut items = run.classify(&sources, &state, &keys, post_capture);
+    if opts.system {
+        items.extend(run.system_items(&state, &config, &[])?);
+    }
+    run.decide_identity(&mut items, state.identity.as_ref())?;
+    let actions = run.plan(&items)?;
+    for (item, action) in items.iter().zip(actions) {
+        if action == Some(Action::Write) {
+            run.execute(item, Action::Write, &mut state, &mut config);
+        }
+    }
+    run.write_system(&mut state, &config);
+    run.flush_reports()?;
+    check_failed(run.failed, run.uncaptured)?;
+    Ok((run.written, run.attention))
+}
+
 pub(crate) struct Item {
     key: String,
     row: Row,
@@ -308,6 +421,7 @@ pub(crate) struct Item {
     /// H as the write path reads it again before renaming. It differs from the classified H only
     /// for an absolute link into `$HOME`, which classification compares in its relative form.
     raw: Home,
+    comparison: Home,
     /// The repo's own mode, when `r` carries the mode this machine keeps instead.
     repo_mode: Option<u32>,
     /// The repo's mode when S was recorded, for a home key.
@@ -339,6 +453,34 @@ struct Ready {
 }
 
 impl Item {
+    pub(crate) fn matches_review(&self, answer: &crate::decisions::FileDecision) -> bool {
+        let source = self.r.as_ref().map(|r| r.source.as_str());
+        let r = self.r.as_ref().map(|r| &r.tuple);
+        let source_tuple = r.map(|tuple| Tuple {
+            mode: self.kept().map_or(tuple.mode, |(_, repo)| repo),
+            ..tuple.clone()
+        });
+        answer.source.as_deref() == source
+            && answer.r.matches(r)
+            && answer.source_tuple.matches(source_tuple.as_ref())
+            && answer.h.home(&self.comparison)
+            && answer.raw_h.home(&self.raw)
+    }
+
+    pub(crate) fn source_metadata(&self) -> Option<(&str, &Tuple, bool, bool)> {
+        self.r
+            .as_ref()
+            .map(|r| (r.source.as_str(), &r.tuple, r.encrypted, r.template))
+    }
+
+    pub(crate) const fn observations(&self) -> (&Home, &Home) {
+        (&self.comparison, &self.raw)
+    }
+
+    pub(crate) const fn identity_changed(&self) -> bool {
+        self.identity
+    }
+
     /// What the content guard would hold if `sync` captured this key's edit, which only a
     /// `changed-locally` row of a home key is. `status` reports it; the capture enforces it.
     pub(crate) fn capture_hold(&self, ctx: &Context) -> Option<Finding> {
@@ -537,6 +679,8 @@ impl Keeping<'_> {
 }
 
 struct Run<'a> {
+    delta: Delta,
+    projected_sources: BTreeMap<String, SourceEntry>,
     ctx: &'a Context,
     opts: &'a Options,
     sources: &'a Sources,
@@ -547,6 +691,8 @@ struct Run<'a> {
     /// The run's `modes.txt`, once a mode was, or would be, recorded in it.
     mode_file: Option<PathBuf>,
     attention: bool,
+    reports: Vec<UndecidedEvent>,
+    capture_reports: Vec<CaptureReview>,
     failed: usize,
     uncaptured: usize,
     forget: BTreeSet<String>,
@@ -564,10 +710,284 @@ struct Run<'a> {
     kept: Vec<String>,
 }
 
-impl Run<'_> {
+#[derive(Clone, Copy)]
+enum Reason {
+    Ambiguous,
+    InvalidSource,
+    CaptureUnreadable,
+    Identity,
+    Decision(Row),
+    TemplateDrift,
+    ForgottenEdited,
+    RefusedTracked,
+    SystemRefused,
+    SystemUnreadable,
+    ChangedDuringWrite,
+    SystemConfirmation,
+    CaptureHeld,
+    NewHeld,
+    CaptureShape,
+    CaptureOwn,
+    WriteSkipped,
+    Locked,
+    DirectoryApproval,
+    UnlistedIgnore,
+    SystemOff,
+}
+
+#[derive(serde::Serialize)]
+struct CaptureReview {
+    record: &'static str,
+    key: Text,
+    source: crate::output::json::PathValue,
+    scope: &'static str,
+    raw_h: Observation,
+    portable_h: Observation,
+    stored_before: Observation,
+    stored_after: Observation,
+    logical_r: Observation,
+    kept_mode: Option<String>,
+    repo_mode: Option<String>,
+    hypothetical: bool,
+    encrypted: bool,
+}
+
+impl Reason {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ambiguous => "ambiguous",
+            Self::InvalidSource => "invalid_source",
+            Self::CaptureUnreadable => "capture_unreadable",
+            Self::Identity => "identity_changed",
+            Self::Decision(row) => token(row),
+            Self::TemplateDrift => "template_drift",
+            Self::ForgottenEdited => "forgotten_edited",
+            Self::RefusedTracked => "refused_tracked",
+            Self::SystemRefused => "system_refused",
+            Self::SystemUnreadable => "system_unreadable",
+            Self::ChangedDuringWrite => "changed_during_write",
+            Self::SystemConfirmation => "system_confirmation",
+            Self::CaptureHeld => "capture_held",
+            Self::NewHeld => "new_held",
+            Self::CaptureShape => "capture_shape",
+            Self::CaptureOwn => "capture_own_path",
+            Self::WriteSkipped => "write_skipped",
+            Self::Locked => "locked",
+            Self::DirectoryApproval => "directory_approval",
+            Self::UnlistedIgnore => "unlisted_ignore",
+            Self::SystemOff => "system_off",
+        }
+    }
+
+    const fn attention(self) -> bool {
+        !matches!(
+            self,
+            Self::CaptureUnreadable
+                | Self::Locked
+                | Self::DirectoryApproval
+                | Self::UnlistedIgnore
+                | Self::SystemOff
+        )
+    }
+
+    const fn skips(self) -> bool {
+        matches!(
+            self,
+            Self::CaptureUnreadable
+                | Self::Identity
+                | Self::Decision(_)
+                | Self::TemplateDrift
+                | Self::SystemConfirmation
+                | Self::CaptureHeld
+                | Self::CaptureShape
+                | Self::CaptureOwn
+        )
+    }
+}
+
+impl<'a> Run<'a> {
+    fn report_refused(&mut self) {
+        if self.ctx.refused_any() && (self.opts.pass == Pass::Apply || self.opts.dry_run) {
+            self.attend(Reason::RefusedTracked, None);
+            for path in self.ctx.refused_paths() {
+                self.attend(Reason::RefusedTracked, Some(&path));
+            }
+        }
+    }
+
+    fn post_capture(&self, config: &RepoConfig, state: &State) -> Result<PostCapture> {
+        let mut snapshot = PostCapture {
+            modes: config.modes.clone(),
+            ..PostCapture::default()
+        };
+        for (key, entry) in &self.projected_sources {
+            let mut source = entry.clone();
+            if source.tuple.kind == Kind::File {
+                let default = if source.encrypted {
+                    0o600
+                } else if let Some(Stored::File { mode, .. }) =
+                    self.delta.get(Path::new(&source.source))
+                {
+                    *mode
+                } else {
+                    bail!("captured source has no projected file");
+                };
+                source.tuple.mode =
+                    safe_mode(recorded_mode(&config.modes, &source.source)?.unwrap_or(default));
+            }
+            snapshot.sources.insert(key.clone(), source);
+            snapshot.files.insert(
+                key.clone(),
+                state
+                    .files
+                    .get(key)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("captured source has no projected state"))?,
+            );
+        }
+        Ok(snapshot)
+    }
+
+    fn stage_policy(&self, config: &RepoConfig, state: &State) -> StagePolicy {
+        let mut kept: BTreeSet<_> = state
+            .files
+            .values()
+            .map(|entry| entry.source.clone())
+            .collect();
+        kept.extend(
+            self.delta
+                .iter()
+                .filter(|(_, stored)| !matches!(stored, Stored::Missing))
+                .filter_map(|(path, _)| path.to_str())
+                .filter(|path| {
+                    !crate::paths::is_reserved_root_name(path.split('/').next().unwrap_or(path))
+                })
+                .map(str::to_owned),
+        );
+        StagePolicy {
+            patterns: config.ignore.patterns.clone(),
+            kept,
+        }
+    }
+    fn new(
+        ctx: &'a Context,
+        opts: &'a Options,
+        sources: &'a Sources,
+        modes: &BTreeMap<String, String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            delta: Delta::new(),
+            projected_sources: BTreeMap::new(),
+            ctx,
+            opts,
+            sources,
+            modes: modes.clone(),
+            backups: backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?,
+            backed_up: false,
+            mode_file: None,
+            attention: false,
+            reports: Vec::new(),
+            capture_reports: Vec::new(),
+            failed: 0,
+            uncaptured: 0,
+            forget: BTreeSet::new(),
+            undecided: BTreeSet::new(),
+            captured: BTreeSet::new(),
+            written: BTreeSet::new(),
+            dir_modes: BTreeMap::new(),
+            accepted: false,
+            locked: Vec::new(),
+            system_writes: Vec::new(),
+            forget_system: BTreeSet::new(),
+            announced: 0,
+            left: 0,
+            kept: Vec::new(),
+        })
+    }
+
+    fn attend(&mut self, reason: Reason, key: Option<&str>) {
+        self.attention |= reason.attention();
+        if reason.skips()
+            && let Some(key) = key
+        {
+            self.undecided.insert(key.to_owned());
+        }
+        if self.ctx.json {
+            self.reports.push(UndecidedEvent {
+                record: "undecided",
+                reason: reason.name(),
+                key: key.map(Text::new),
+                scope: key.map_or("context", |key| {
+                    if matches!(reason, Reason::RefusedTracked) {
+                        return "repo_source";
+                    }
+                    if key.starts_with('/') {
+                        "system"
+                    } else {
+                        "home"
+                    }
+                }),
+                pass: if self.opts.pass == Pass::Capture {
+                    "capture"
+                } else {
+                    "apply"
+                },
+                attention: reason.attention(),
+                skip_next_pass: reason.skips(),
+            });
+        }
+    }
+
+    fn flush_reports(&mut self) -> Result<()> {
+        for report in self.reports.drain(..) {
+            self.ctx.emit(&report)?;
+        }
+        for report in self.capture_reports.drain(..) {
+            self.ctx.emit(&report)?;
+        }
+        if self.ctx.json {
+            self.resolved_records()?;
+        }
+        Ok(())
+    }
+
+    fn resolved_records(&self) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct Resolved {
+            record: &'static str,
+            key: Text,
+            scope: &'static str,
+            effect: &'static str,
+            hypothetical: bool,
+        }
+        for (effect, keys) in [
+            ("captured", self.captured.iter().collect::<Vec<_>>()),
+            ("written", self.written.iter().collect()),
+            (
+                "forgotten",
+                self.forget.iter().chain(&self.forget_system).collect(),
+            ),
+            ("kept", self.kept.iter().collect()),
+        ] {
+            for key in keys {
+                self.ctx.emit(&Resolved {
+                    record: "resolved",
+                    key: Text::new(key),
+                    scope: if key.starts_with('/') {
+                        "system"
+                    } else {
+                        "home"
+                    },
+                    effect,
+                    hypothetical: self.opts.dry_run,
+                })?;
+            }
+        }
+        Ok(())
+    }
     /// Removes what this run forgets and saves `.dotman.toml`, when the run changed the repo. A
     /// dry run only says where an uncommitted edit that forgetting removes would be saved.
-    fn save_repo(&self, repo_config: &mut RepoConfig, state: &mut State) -> Result<()> {
+    fn save_repo(&mut self, repo_config: &mut RepoConfig, state: &mut State) -> Result<()> {
         let (ctx, backups) = (self.ctx, &self.backups);
         let (forget, system) = (&self.forget, &self.forget_system);
         if forget.is_empty() && system.is_empty() && self.captured.is_empty() {
@@ -575,7 +995,18 @@ impl Run<'_> {
         }
         if self.opts.dry_run {
             forget::save_repo_edits(ctx, state, forget, backups, true)?;
-            return forget::save_system_edits(ctx, system, backups, true);
+            forget::save_system_edits(ctx, system, backups, true)?;
+            if ctx.json || self.opts.project {
+                self.project_forgets(repo_config, state)?;
+                self.delta.insert(
+                    PathBuf::from(".dotman.toml"),
+                    Stored::File {
+                        bytes: toml::to_string_pretty(repo_config)?.into_bytes(),
+                        mode: 0o644,
+                    },
+                );
+            }
+            return Ok(());
         }
         if !forget.is_empty() {
             forget::remove_keys(ctx, repo_config, state, forget, backups)?;
@@ -584,33 +1015,92 @@ impl Run<'_> {
         repo_config.save(&ctx.repo_config_file(), false)
     }
 
-    fn classify(&mut self, sources: &Sources, state: &State, keys: &BTreeSet<String>) -> Vec<Item> {
-        let worktree = Worktree::new(&self.ctx.paths.repo, &self.modes);
-        let variants = Variants::new(
-            worktree,
-            sources,
-            self.ctx.identity(),
-            self.ctx.template_vars(),
-            self.ctx.age(),
-        );
+    fn project_forgets(&mut self, config: &mut RepoConfig, state: &mut State) -> Result<()> {
+        for key in &self.forget {
+            for source in self.sources.sources_of(key) {
+                self.delta.insert(PathBuf::from(source), Stored::Missing);
+            }
+        }
+        if !self.forget.is_empty() {
+            forget::remove_metadata(config, state, &self.forget, self.sources)?;
+            let mut remaining = self
+                .ctx
+                .managed()?
+                .into_keys()
+                .filter(|source| {
+                    !matches!(self.delta.get(Path::new(source)), Some(Stored::Missing))
+                })
+                .collect::<BTreeSet<_>>();
+            remaining.extend(
+                self.delta
+                    .iter()
+                    .filter(|(_, node)| !matches!(node, Stored::Missing))
+                    .filter_map(|(path, _)| path.to_str())
+                    .filter(|source| {
+                        !crate::paths::is_reserved_root_name(
+                            source.split('/').next().unwrap_or(source),
+                        )
+                    })
+                    .map(str::to_owned),
+            );
+            forget::prune_dir_modes(config, &remaining);
+        }
+        let sources = self.ctx.system_sources()?;
+        for key in &self.forget_system {
+            for source in sources.sources_of(system::rel(key)?) {
+                self.delta
+                    .insert(PathBuf::from(system::source_path(source)), Stored::Missing);
+            }
+        }
+        forget::remove_system_metadata(config, state, &self.forget_system);
+        Ok(())
+    }
+
+    fn classify(
+        &mut self,
+        sources: &Sources,
+        state: &State,
+        keys: &BTreeSet<String>,
+        snapshot: Option<&PostCapture>,
+    ) -> Vec<Item> {
         let mut items = Vec::new();
         for key in keys {
-            match classify_key(self.ctx, &variants, state, key) {
+            let classified = {
+                let worktree = Worktree::new(&self.ctx.paths.repo, &self.modes);
+                let variants = Variants::new(
+                    worktree,
+                    sources,
+                    self.ctx.identity(),
+                    self.ctx.template_vars(),
+                    self.ctx.age(),
+                );
+                classify_projected_key(
+                    self.ctx,
+                    &variants,
+                    state,
+                    key,
+                    snapshot.and_then(|snapshot| snapshot.sources.get(key)),
+                )
+            };
+            match classified {
                 Ok(Classified::Item(item)) => items.push(item),
                 Ok(Classified::Unmanaged) => {}
                 // Reported by the pass that applies, like the rows that are only reported.
                 Ok(Classified::Ambiguous(_) | Classified::Invalid(_) | Classified::Locked(_))
                     if self.opts.pass == Pass::Capture => {}
-                Ok(Classified::Locked(reason)) => self.locked.push((key.clone(), reason)),
+                Ok(Classified::Locked(reason)) => {
+                    self.attend(Reason::Locked, Some(key));
+                    self.locked.push((key.clone(), reason));
+                }
                 Ok(Classified::Ambiguous(tied)) => {
-                    self.attention = true;
+                    self.attend(Reason::Ambiguous, Some(key));
                     output::warning(&format!(
                         "{key}: {} are equally specific here; skipped until one is removed",
                         tied.join(", ")
                     ));
                 }
                 Ok(Classified::Invalid(problems)) => {
-                    self.attention = true;
+                    self.attend(Reason::InvalidSource, Some(key));
                     for (source, reason) in problems {
                         output::warning(&format!("{key}: skipped, {source}: {reason}"));
                     }
@@ -621,7 +1111,7 @@ impl Run<'_> {
                     output::warning(&format!("{key}: cannot be captured: {e:#}"));
                     self.failed = self.failed.saturating_add(1);
                     self.uncaptured = self.uncaptured.saturating_add(1);
-                    self.undecided.insert(key.clone());
+                    self.attend(Reason::CaptureUnreadable, Some(key));
                 }
                 Err(e) => {
                     output::warning(&format!("{key}: skipped: {e:#}"));
@@ -675,7 +1165,26 @@ impl Run<'_> {
         let change = snapshot
             .map(|old| identity::describe_change(old, self.ctx.identity()))
             .unwrap_or_default();
-        let accepted = if self.opts.decisions.accept_identity {
+        let accepted = if let Some(review) = &self.ctx.reviewed {
+            let accepted = review
+                .input
+                .approvals
+                .identity
+                .as_ref()
+                .is_some_and(|approval| {
+                    approval.current.matches(self.ctx.identity())
+                        && match (&approval.recorded, snapshot) {
+                            (None, None) => true,
+                            (Some(expected), Some(actual)) => expected.matches(actual),
+                            _ => false,
+                        }
+                });
+            if review.input.approvals.identity.is_some() && !accepted {
+                review.stale(self.ctx, None)?;
+                self.attention = true;
+            }
+            accepted
+        } else if self.opts.decisions.accept_identity {
             true
         } else if pending.is_empty() || self.opts.dry_run || !prompt::interactive() {
             false
@@ -699,7 +1208,6 @@ impl Run<'_> {
         if pending.is_empty() {
             return Ok(());
         }
-        self.attention = true;
         output::warning(&format!(
             "identity changed ({change}): {} left undecided; answer with `{} {} --accept-identity`:",
             output::count(pending.len(), "path"),
@@ -708,12 +1216,15 @@ impl Run<'_> {
         ));
         for key in pending {
             output::warning(&format!("  {key}"));
-            self.undecided.insert(key);
+            self.attend(Reason::Identity, Some(&key));
         }
         Ok(())
     }
 
     fn plan(&mut self, items: &[Item]) -> Result<Vec<Option<Action>>> {
+        if self.ctx.reviewed.is_some() && !self.opts.incoming {
+            return items.iter().map(|item| self.plan_reviewed(item)).collect();
+        }
         let mut actions: Vec<Option<Action>> = items
             .iter()
             .map(|item| {
@@ -738,7 +1249,7 @@ impl Run<'_> {
                     Choice::Repo => Some(Action::Write),
                     Choice::Skip => {
                         undecided.push(item);
-                        self.undecided.insert(item.key.clone());
+                        self.attend(Reason::Decision(item.row), Some(&item.key));
                         None
                     }
                 };
@@ -747,7 +1258,6 @@ impl Run<'_> {
                 }
             }
             if !undecided.is_empty() {
-                self.attention = true;
                 let [local, repo] = question.flags;
                 output::warning(&format!(
                     "{} left undecided ({}); answer with `{bin} {command} {local}` or `{bin} {command} {repo}`:",
@@ -774,6 +1284,80 @@ impl Run<'_> {
             }
         }
         Ok(actions)
+    }
+
+    fn plan_reviewed(&mut self, item: &Item) -> Result<Option<Action>> {
+        let Some(review) = &self.ctx.reviewed else {
+            return Ok(None);
+        };
+        if review.stale_files.borrow().contains(&item.key) {
+            self.attention = true;
+            self.undecided.insert(item.key.clone());
+            return Ok(None);
+        }
+        if item.identity {
+            return Ok(None);
+        }
+        if self.opts.pass == Pass::Capture && item.row == Row::ChangedLocally {
+            return Ok(Some(Action::Capture));
+        }
+        if self.opts.pass == Pass::Capture
+            && item.row != Row::TemplateDrift
+            && !QUESTIONS.iter().any(|question| (question.rows)(item.row))
+        {
+            return Ok(None);
+        }
+        if matches!(item.row, Row::Clean { .. } | Row::GoneEverywhere) {
+            if review
+                .file(&item.key)
+                .is_some_and(|answer| !item.matches_review(answer))
+            {
+                review.stale(self.ctx, Some(&item.key))?;
+                self.attention = true;
+                self.undecided.insert(item.key.clone());
+            }
+            return Ok(None);
+        }
+        let answer = review
+            .file(&item.key)
+            .filter(|answer| item.matches_review(answer));
+        let action = answer.and_then(|answer| {
+            use crate::decisions::Action as InputAction;
+            if item.row == Row::TemplateDrift {
+                return matches!(answer.action, InputAction::TakeRepo | InputAction::Restore)
+                    .then_some(Action::Write);
+            }
+            if let Some(question) = QUESTIONS.iter().find(|question| (question.rows)(item.row)) {
+                return match answer.action {
+                    InputAction::TakeRepo | InputAction::Restore => Some(Action::Write),
+                    InputAction::KeepLocal if question.local_action != Action::Forget => {
+                        Some(self.keep(question.local_action, item))
+                    }
+                    InputAction::Forget if question.local_action == Action::Forget => {
+                        Some(Action::Forget)
+                    }
+                    _ => None,
+                };
+            }
+            match (item.row, answer.action) {
+                (
+                    Row::NotApplied | Row::ChangedInRepo,
+                    InputAction::TakeRepo | InputAction::Restore,
+                ) => Some(Action::Write),
+                _ => None,
+            }
+        });
+        let unchanged_local = item.row == Row::ChangedLocally
+            && (review.file(&item.key).is_none()
+                || answer.is_some_and(|answer| {
+                    matches!(answer.action, crate::decisions::Action::KeepLocal)
+                }));
+        if action.is_none() && !unchanged_local {
+            review.stale(self.ctx, Some(&item.key))?;
+            self.undecided.insert(item.key.clone());
+            self.attention = true;
+        }
+        Ok(action)
     }
 
     /// The command whose flags answer what this pass leaves undecided.
@@ -806,9 +1390,8 @@ impl Run<'_> {
         match item.row {
             Row::TemplateDrift if take_drift => Some(Action::Write),
             Row::TemplateDrift => {
-                self.attention = true;
                 // `sync` reports it in its capture pass; the pass after the pull leaves it alone.
-                self.undecided.insert(key.clone());
+                self.attend(Reason::TemplateDrift, Some(key));
                 output::warning(&format!(
                     "{key}: template-drift; edit the template with `{bin} edit {path}`, or discard the local change with `{bin} apply --take-repo {path}`",
                     bin = name::bin(),
@@ -824,7 +1407,7 @@ impl Run<'_> {
                 Some(Action::DropState)
             }
             Row::ForgottenEdited => {
-                self.attention = true;
+                self.attend(Reason::ForgottenEdited, Some(key));
                 output::warning(&format!(
                     "{key}: forgotten upstream but edited here; `{bin} add {path}` keeps it, `{bin} forget {path}` accepts the removal",
                     bin = name::bin(),
@@ -843,7 +1426,6 @@ impl Run<'_> {
                 None
             }
             Row::Blocked => {
-                self.attention = true;
                 if let Home::Blocked(obstacle) = &item.raw {
                     self.skipped(key, &Skip::Blocked(obstacle.clone()));
                 }
@@ -971,6 +1553,21 @@ impl Run<'_> {
                 let encrypted = item.r.as_ref().is_some_and(|r| r.encrypted);
                 let before = repo_config.modes.get(source).cloned();
                 if self.capture(key, source, h.kind, encrypted, state, repo_config) {
+                    if let Some(review) = self.capture_reports.last_mut() {
+                        review.logical_r = item
+                            .r
+                            .as_ref()
+                            .map_or(Observation::Missing, |r| Observation::tuple(&r.tuple));
+                        if let Some((mode, repo)) = item.kept().filter(|(mode, _)| *mode == h.mode)
+                        {
+                            review.kept_mode = Some(format!("{mode:04o}"));
+                            review.repo_mode = Some(format!("{repo:04o}"));
+                        }
+                        if encrypted && item.r.as_ref().is_some_and(|r| r.tuple.hash == h.hash) {
+                            review.stored_after = review.stored_before.clone();
+                            self.delta.remove(Path::new(source));
+                        }
+                    }
                     // Row 9 is an edit made here; any other row got here by keep-local.
                     if item.row == Row::ChangedLocally {
                         self.announce("capture", key);
@@ -986,18 +1583,7 @@ impl Run<'_> {
                 }
                 // An edit to a file whose own mode is kept here travels as content only, so
                 // other machines keep the repo's mode.
-                let kept = item.kept().filter(|(mode, _)| *mode == h.mode);
-                if let (Some((mode, repo)), Some(entry), false) =
-                    (kept, state.files.get_mut(key), self.opts.dry_run)
-                    && self.captured.contains(key)
-                {
-                    match before {
-                        Some(value) => repo_config.modes.insert(source.to_owned(), value),
-                        None => repo_config.modes.remove(source),
-                    };
-                    entry.mode = format!("{mode:04o}");
-                    entry.repo_mode = Some(format!("{repo:04o}"));
-                }
+                self.restore_capture_mode(item, h, before, state, repo_config);
             }
             Action::Record | Action::KeepLocal | Action::Write => {
                 let Some(r) = &item.r else { return };
@@ -1026,6 +1612,42 @@ impl Run<'_> {
         }
     }
 
+    fn restore_capture_mode(
+        &self,
+        item: &Item,
+        home: &Tuple,
+        before: Option<String>,
+        state: &mut State,
+        config: &mut RepoConfig,
+    ) {
+        let key = &item.key;
+        let source = item.r.as_ref().map_or(key.as_str(), |r| r.source.as_str());
+        let kept = item.kept().filter(|(mode, _)| *mode == home.mode);
+        if self.opts.dry_run && self.ctx.json && kept.is_some() && self.captured.contains(key) {
+            match &before {
+                Some(value) => {
+                    config.modes.insert(source.to_owned(), value.clone());
+                }
+                None => {
+                    config.modes.remove(source);
+                }
+            }
+        }
+        if let (Some((mode, repo)), Some(entry), true) = (
+            kept,
+            state.files.get_mut(key),
+            !self.opts.dry_run || self.ctx.json || self.opts.project,
+        ) && self.captured.contains(key)
+        {
+            match before {
+                Some(value) => config.modes.insert(source.to_owned(), value),
+                None => config.modes.remove(source),
+            };
+            entry.mode = format!("{mode:04o}");
+            entry.repo_mode = Some(format!("{repo:04o}"));
+        }
+    }
+
     /// System files are never written here. `sync`'s capture pass copies edits made to them into
     /// the repo, and any other pass says once that the rest needs `apply --system`.
     fn system(&mut self, state: &mut State, repo_config: &mut RepoConfig) {
@@ -1045,7 +1667,7 @@ impl Run<'_> {
                     row: Row::ChangedLocally,
                     r: Some(r),
                     ..
-                } if capturing => self.capture_system(&key, &r.source, state, repo_config),
+                } if capturing => self.capture_system(&key, &r, state, repo_config),
                 Verdict::Row { row, .. } if !capturing && !item.off && system::needs_write(row) => {
                     pending = pending.saturating_add(1);
                 }
@@ -1086,29 +1708,30 @@ impl Run<'_> {
             }
             match item.verdict {
                 Verdict::Refused(why) => {
-                    self.attention = true;
+                    self.attend(Reason::SystemRefused, Some(&key));
                     output::warning(&format!("{key}: skipped, {why}"));
                 }
                 Verdict::Invalid(problems) => {
-                    self.attention = true;
+                    self.attend(Reason::InvalidSource, Some(&key));
                     for (source, reason) in problems {
                         output::warning(&format!("{key}: skipped, {source}: {reason}"));
                     }
                 }
                 Verdict::Ambiguous(tied) => {
-                    self.attention = true;
+                    self.attend(Reason::Ambiguous, Some(&key));
                     output::warning(&format!(
                         "{key}: {} are equally specific here; skipped until one is removed",
                         tied.join(", ")
                     ));
                 }
                 _ if item.off => {
+                    self.attend(Reason::SystemOff, Some(&key));
                     output::info(&format!(
                         "{key}: system-off, outside [system] roots; skipped"
                     ));
                 }
                 Verdict::Unreadable(why) => {
-                    self.attention = true;
+                    self.attend(Reason::SystemUnreadable, Some(&key));
                     output::warning(&format!(
                         "{key}: refused, it cannot be read: {why}; {}",
                         system::SECRETS_NOTE
@@ -1119,6 +1742,7 @@ impl Run<'_> {
                         key,
                         row,
                         r,
+                        comparison: h.clone(),
                         raw: h,
                         repo_mode: None,
                         basis: None,
@@ -1177,6 +1801,9 @@ impl Run<'_> {
         if self.opts.dry_run {
             for item in &ready {
                 self.announce("write", &item.key);
+                if self.ctx.json && self.opts.yes {
+                    self.written.insert(item.key.clone());
+                }
             }
             if !self.opts.yes {
                 self.unconfirmed(&ready);
@@ -1273,12 +1900,12 @@ impl Run<'_> {
             }) => Some((bytes, mode & 0o777, uid, gid)),
             Ok(Node::Missing) => None,
             Ok(_) => {
-                self.attention = true;
+                self.attend(Reason::ChangedDuringWrite, Some(&key));
                 output::warning(&format!("{key}: {}", Skip::Changed));
                 return None;
             }
             Err(e) if system::is_unreadable(&e) => {
-                self.attention = true;
+                self.attend(Reason::SystemUnreadable, Some(&key));
                 output::warning(&format!(
                     "{key}: refused, you cannot read it: {}",
                     system::SECRETS_NOTE
@@ -1298,7 +1925,7 @@ impl Run<'_> {
             return None;
         };
         if now != write.h {
-            self.attention = true;
+            self.attend(Reason::ChangedDuringWrite, Some(&key));
             output::warning(&format!("{key}: {}", Skip::Changed));
             return None;
         }
@@ -1360,7 +1987,6 @@ impl Run<'_> {
     }
 
     fn unconfirmed(&mut self, ready: &[Ready]) {
-        self.attention = true;
         output::warning(&format!(
             "{} left unwritten; answer with `{} apply --system --yes`:",
             system_files(ready.len()),
@@ -1368,7 +1994,7 @@ impl Run<'_> {
         ));
         for item in ready {
             output::warning(&format!("  {}", item.key));
-            self.undecided.insert(item.key.clone());
+            self.attend(Reason::SystemConfirmation, Some(&item.key));
         }
     }
 
@@ -1402,22 +2028,42 @@ impl Run<'_> {
     fn capture_system(
         &mut self,
         key: &str,
-        source: &str,
+        r: &SourceEntry,
         state: &mut State,
         repo_config: &mut RepoConfig,
     ) {
         let dry_run = self.opts.dry_run;
-        match system::capture(self.ctx, key, source, repo_config, dry_run) {
-            Ok(tuple) => {
+        let captured = system::capture(self.ctx, key, &r.source, repo_config, dry_run).and_then(
+            |(tuple, bytes)| {
+                let review = (dry_run && self.ctx.json)
+                    .then(|| self.system_capture_review(key, r, &tuple))
+                    .transpose()?;
+                Ok((tuple, bytes, review))
+            },
+        );
+        match captured {
+            Err(e) if e.is::<crate::context::ReviewChanged>() => {
+                self.attend(Reason::SystemRefused, Some(key));
+            }
+            Ok((tuple, bytes, review)) => {
+                self.capture_reports.extend(review);
+                if dry_run && self.ctx.json {
+                    self.delta.insert(
+                        PathBuf::from(&r.source),
+                        Stored::File {
+                            bytes,
+                            mode: system::stored_mode(tuple.mode),
+                        },
+                    );
+                }
                 self.announce("capture", key);
                 if !dry_run {
-                    state.system.insert(key.to_owned(), tuple.entry(source));
+                    state.system.insert(key.to_owned(), tuple.entry(&r.source));
                 }
                 self.captured.insert(key.to_owned());
             }
             Err(e) if e.is::<HoldsKey>() => {
-                self.attention = true;
-                self.undecided.insert(key.to_owned());
+                self.attend(Reason::CaptureHeld, Some(key));
                 output::warning(&format!(
                     "{key}: held, {}, and system scope does not encrypt",
                     secrets::system_finding(self.ctx, key)
@@ -1431,10 +2077,48 @@ impl Run<'_> {
         }
     }
 
+    fn system_capture_review(
+        &self,
+        key: &str,
+        r: &SourceEntry,
+        tuple: &Tuple,
+    ) -> Result<CaptureReview> {
+        let mut stored = tuple.clone();
+        stored.mode = system::stored_mode(tuple.mode);
+        Ok(CaptureReview {
+            record: "capture",
+            key: Text::new(key),
+            source: crate::output::json::PathValue::new(Path::new(&r.source)),
+            scope: "system",
+            raw_h: Observation::tuple(tuple),
+            portable_h: Observation::tuple(tuple),
+            stored_before: crate::output::json::stored(&self.ctx.paths.repo, Path::new(&r.source))?,
+            stored_after: Observation::tuple(&stored),
+            logical_r: Observation::tuple(&r.tuple),
+            kept_mode: None,
+            repo_mode: None,
+            hypothetical: true,
+            encrypted: false,
+        })
+    }
+
     /// Settles the `[dirs]` entries this machine has not approved. `--approve-dirs` approves every
     /// one of them; otherwise, when new files wait under them, an interactive run asks once and a
     /// yes approves them all. Unapproved, their files stay held.
-    fn approve_dirs(&self, scan: &mut Scan, state: &mut State) -> Result<()> {
+    fn approve_dirs(&mut self, scan: &mut Scan, state: &mut State) -> Result<()> {
+        if self.opts.pass == Pass::Capture
+            && let Some(review) = &self.ctx.reviewed
+            && let Some(dirs) = &review.input.approvals.directories
+        {
+            if dirs.iter().collect::<BTreeSet<_>>() == scan.unapproved.iter().collect() {
+                state.approve_dirs(&scan.unapproved);
+                scan.release_waiting();
+            } else {
+                review.stale(self.ctx, None)?;
+                self.attention = true;
+            }
+            return Ok(());
+        }
         if scan.unapproved.is_empty() {
             return Ok(());
         }
@@ -1477,6 +2161,10 @@ impl Run<'_> {
             state.approve_dirs(&scan.unapproved);
             scan.release_waiting();
         } else if !scan.waiting.is_empty() {
+            for key in scan.waiting.keys() {
+                self.attend(Reason::DirectoryApproval, Some(key));
+            }
+            self.attend(Reason::DirectoryApproval, None);
             // Every entry the printed command approves is named, files under it or not.
             let entries: Vec<String> = lines.iter().map(|line| line.trim().to_owned()).collect();
             output::warning(&format!(
@@ -1507,14 +2195,17 @@ impl Run<'_> {
             output::warning(note);
         }
         add::warn_still_ignored(&self.ctx.paths.home, &scan.still_ignored);
+        for key in scan.still_ignored.keys() {
+            self.attend(Reason::UnlistedIgnore, Some(key));
+        }
         if !scan.held.is_empty() {
-            self.attention = true;
             output::warning(&format!(
                 "{} held back{}:",
                 crate::import::count(scan.held.len(), "new file"),
                 crate::commands::status::held_note(scan.held.values().copied()),
             ));
             for (key, hold) in &scan.held {
+                self.attend(Reason::NewHeld, Some(key));
                 let path = add::pasteable(&self.ctx.paths.home, key);
                 output::warning(&format!("  {key} ({})", hold.listed(&path)));
             }
@@ -1531,9 +2222,24 @@ impl Run<'_> {
         state: &mut State,
         repo_config: &mut RepoConfig,
     ) -> bool {
+        if self.ctx.reviewed.is_some() {
+            match self.reviewed_capture(key, source, state, repo_config) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.undecided.insert(key.to_owned());
+                    self.attention = true;
+                    return false;
+                }
+                Err(error) => {
+                    self.failed = self.failed.saturating_add(1);
+                    self.uncaptured = self.uncaptured.saturating_add(1);
+                    output::warning(&format!("{key}: cannot validate capture: {error:#}"));
+                    return false;
+                }
+            }
+        }
         if is_real_dir(&self.ctx.paths.repo.join(source)) {
-            self.attention = true;
-            self.undecided.insert(key.to_owned());
+            self.attend(Reason::CaptureShape, Some(key));
             output::warning(&format!(
                 "{key}: a file here, but a directory of managed files in the repo; skipped. To manage the file instead: `{bin} forget {path}`, then `{bin} add {path}`",
                 bin = name::bin(),
@@ -1543,6 +2249,22 @@ impl Run<'_> {
         }
         let managed = self.sources.contains(key) || state.files.contains_key(key);
         if self.opts.dry_run {
+            if self.ctx.json || self.opts.project {
+                match self.preview_capture(key, source, kind, encrypted, repo_config, state) {
+                    Ok(Some(review)) => self.capture_reports.push(review),
+                    Ok(None) => {
+                        return false;
+                    }
+                    Err(e) => {
+                        self.failed = self.failed.saturating_add(1);
+                        self.uncaptured = self.uncaptured.saturating_add(1);
+                        output::warning(&format!("{key}: cannot be captured: {e:#}"));
+                        return false;
+                    }
+                }
+                self.captured.insert(key.to_owned());
+                return true;
+            }
             // Only a dry run reads H here; a real capture checks what it is about to store.
             if let Some(found) = add::capture_hold(self.ctx, key, source, encrypted) {
                 self.held_key(key, found, managed);
@@ -1559,18 +2281,35 @@ impl Run<'_> {
             source,
             kind,
             encrypted,
-        );
+        )
+        .and_then(|entry| {
+            if !encrypted && let Some(review) = &self.ctx.reviewed {
+                let stored = Stored::read(&self.ctx.paths.repo, Path::new(source))?;
+                review
+                    .captured
+                    .borrow_mut()
+                    .insert(PathBuf::from(source), stored);
+            }
+            Ok(entry)
+        });
         match done {
             Ok(entry) => {
                 state.files.insert(key.to_owned(), entry);
                 self.captured.insert(key.to_owned());
                 return true;
             }
+            Err(e) if e.is::<crate::context::ReviewChanged>() => {
+                self.attention = true;
+                self.undecided.insert(key.to_owned());
+                if let Some(review) = &self.ctx.reviewed {
+                    review.attention.set(true);
+                }
+                output::warning(&format!("{key}: capture changed since review"));
+            }
             Err(e) => match e.downcast::<Held>() {
                 Ok(Held(found)) => self.held_key(key, found, managed),
                 Err(e) if e.is::<OwnPath>() => {
-                    self.attention = true;
-                    self.undecided.insert(key.to_owned());
+                    self.attend(Reason::CaptureOwn, Some(key));
                     output::warning(&format!("{key}: not captured: {e:#}"));
                 }
                 Err(e) => {
@@ -1583,11 +2322,242 @@ impl Run<'_> {
         false
     }
 
+    fn reviewed_capture(
+        &self,
+        key: &str,
+        source: &str,
+        state: &State,
+        config: &RepoConfig,
+    ) -> Result<bool> {
+        let Some(review) = &self.ctx.reviewed else {
+            return Ok(true);
+        };
+        review.check_head(self.ctx)?;
+        if !review.capture_settings.get() {
+            review.stale(self.ctx, Some(key))?;
+            return Ok(false);
+        }
+        let answer = review.capture(key);
+        let raw = observe(&self.ctx.paths.home, key)?;
+        let stored = Stored::read(&self.ctx.paths.repo, Path::new(source))?;
+        let sources = self.ctx.sources()?;
+        let variants = Variants::new(
+            Worktree::new(&self.ctx.paths.repo, &config.modes),
+            &sources,
+            self.ctx.identity(),
+            self.ctx.template_vars(),
+            self.ctx.age(),
+        );
+        let logical = match classify_key(self.ctx, &variants, state, key)? {
+            Classified::Item(item)
+                if item.r.as_ref().map_or(key, |entry| entry.source.as_str()) == source =>
+            {
+                item.r.map(|r| r.tuple)
+            }
+            Classified::Unmanaged => None,
+            _ => {
+                review.stale(self.ctx, Some(key))?;
+                return Ok(false);
+            }
+        };
+        let matches = answer.is_some_and(|answer| {
+            answer.source == source
+                && answer.raw_h.home(&raw)
+                && answer.logical_r.matches(logical.as_ref())
+                && answer.stored_before.stored(&stored)
+        });
+        if !matches {
+            review.stale(self.ctx, Some(key))?;
+        }
+        Ok(matches)
+    }
+
+    fn new_capture_observation(
+        &self,
+        key: &str,
+        source: &str,
+        state: &State,
+        stored: &Observation,
+    ) -> Observation {
+        if source == key
+            && !self.sources.contains(key)
+            && !state.files.contains_key(key)
+            && matches!(stored, Observation::Missing)
+        {
+            Observation::Missing
+        } else {
+            Observation::Unavailable {
+                reason: "not_observed",
+            }
+        }
+    }
+
+    fn preview_capture(
+        &mut self,
+        key: &str,
+        source: &str,
+        kind: Kind,
+        encrypted: bool,
+        config: &mut RepoConfig,
+        state: &mut State,
+    ) -> Result<Option<CaptureReview>> {
+        let node = read_node(&self.ctx.paths.home, key)?;
+        if let Some(review) = &self.ctx.reviewed
+            && !review
+                .capture(key)
+                .is_some_and(|capture| capture.raw_h.home(&node.home()))
+        {
+            review.stale(self.ctx, Some(key))?;
+            self.undecided.insert(key.to_owned());
+            self.attention = true;
+            return Ok(None);
+        }
+        if let Some(found) = add::node_hold(self.ctx, &node, key, source, encrypted) {
+            self.held_key(key, found, self.sources.contains(key));
+            return Ok(None);
+        }
+        let raw = node.home();
+        let Home::Present(tuple) = &raw else {
+            bail!("it changed while being captured");
+        };
+        anyhow::ensure!(tuple.kind == kind, "it changed while being captured");
+        let stored_before = crate::output::json::stored(&self.ctx.paths.repo, Path::new(source))?;
+        let logical_r = self.new_capture_observation(key, source, state, &stored_before);
+        let file_mode = match &node {
+            Node::File { mode, .. } => Some(*mode),
+            _ => None,
+        };
+        let (_, remove_later) = add::record_ahead(
+            config,
+            &mut self.dir_modes,
+            &self.ctx.paths.home,
+            key,
+            source,
+            file_mode,
+            encrypted,
+        )?;
+        if remove_later || kind == Kind::Symlink {
+            config.modes.remove(source);
+        }
+        let portable = match &node {
+            Node::Symlink(target) => Tuple::of_link(&crate::engine::portable_link_target(
+                target,
+                key,
+                &self.ctx.paths.home,
+                self.ctx.paths.home_real.as_deref(),
+            )),
+            _ => tuple.clone(),
+        };
+        let portable_h = Observation::tuple(&portable);
+        self.record_preview(key, source, &node, config, encrypted, state)?;
+        let after = if encrypted {
+            Observation::Unavailable {
+                reason: "hypothetical_ciphertext",
+            }
+        } else {
+            let mut stored = portable;
+            if stored.kind == Kind::File {
+                stored.mode = if stored.mode & 0o111 == 0 {
+                    0o644
+                } else {
+                    0o755
+                };
+            }
+            Observation::tuple(&stored)
+        };
+        self.delta.insert(
+            PathBuf::from(source),
+            match node {
+                Node::File { bytes, mode, .. } if !encrypted => Stored::File {
+                    bytes,
+                    mode: add::stored_mode(mode),
+                },
+                Node::File { .. } => Stored::Ciphertext,
+                Node::Symlink(target) => Stored::Link(crate::engine::portable_link_target(
+                    &target,
+                    key,
+                    &self.ctx.paths.home,
+                    self.ctx.paths.home_real.as_deref(),
+                )),
+                _ => bail!("it changed while being captured"),
+            },
+        );
+        Ok(Some(CaptureReview {
+            record: "capture",
+            key: Text::new(key),
+            source: crate::output::json::PathValue::new(Path::new(source)),
+            scope: "home",
+            raw_h: Observation::home(&raw),
+            portable_h,
+            stored_before,
+            stored_after: after,
+            logical_r,
+            kept_mode: None,
+            repo_mode: None,
+            hypothetical: true,
+            encrypted,
+        }))
+    }
+
+    fn record_preview(
+        &mut self,
+        key: &str,
+        source: &str,
+        node: &Node,
+        config: &RepoConfig,
+        encrypted: bool,
+        state: &mut State,
+    ) -> Result<()> {
+        let (mut logical, content, file_mode) = match node {
+            Node::File { bytes, mode, .. } => (
+                Tuple::of_file(bytes, *mode),
+                Content::Bytes(bytes.clone()),
+                Some(*mode),
+            ),
+            Node::Symlink(target) => {
+                let target = crate::engine::portable_link_target(
+                    target,
+                    key,
+                    &self.ctx.paths.home,
+                    self.ctx.paths.home_real.as_deref(),
+                );
+                (Tuple::of_link(&target), Content::Link(target), None)
+            }
+            _ => bail!("it changed while being captured"),
+        };
+        let mut raw = logical.clone();
+        raw.mode = safe_mode(raw.mode);
+        if let Some(mode) = file_mode {
+            let default = if encrypted {
+                0o600
+            } else {
+                add::stored_mode(mode)
+            };
+            logical.mode = safe_mode(recorded_mode(&config.modes, source)?.unwrap_or(default));
+        }
+        let recorded = if encrypted {
+            raw.entry(source)
+        } else {
+            add::captured_entry(source, &logical, file_mode)
+        };
+        self.projected_sources.insert(
+            key.to_owned(),
+            SourceEntry {
+                source: source.to_owned(),
+                tuple: logical,
+                content,
+                template: false,
+                encrypted,
+            },
+        );
+        state.files.insert(key.to_owned(), recorded);
+        Ok(())
+    }
+
     /// Never staged or committed; the pass after the pull leaves it alone too. An `[ignore]`
     /// pattern keeps out only a file that is not managed yet.
     fn held_key(&mut self, key: &str, found: Finding, managed: bool) {
-        self.attention = true;
-        self.undecided.insert(key.to_owned());
+        self.attend(Reason::CaptureHeld, Some(key));
         let path = add::pasteable(&self.ctx.paths.home, key);
         let keep_out = if managed {
             add::forget_hint(&self.ctx.paths.home, self.sources, key)
@@ -1920,7 +2890,7 @@ impl Run<'_> {
     /// Reports a write left undone. What stays in the way of one is the user's, so forgetting the
     /// key is named as a way out.
     fn skipped(&mut self, key: &str, skip: &Skip) {
-        self.attention = true;
+        self.attend(Reason::WriteSkipped, Some(key));
         let way_out = if matches!(skip, Skip::Blocked(_) | Skip::Symlink) {
             format!(
                 ". {}",
@@ -1972,7 +2942,20 @@ pub(crate) fn classify_key(
     state: &State,
     key: &str,
 ) -> Result<Classified> {
-    let selection = match variants.get(key) {
+    classify_projected_key(ctx, variants, state, key, None)
+}
+
+fn classify_projected_key(
+    ctx: &Context,
+    variants: &Variants<'_>,
+    state: &State,
+    key: &str,
+    projected: Option<&SourceEntry>,
+) -> Result<Classified> {
+    let selection = match projected.map_or_else(
+        || variants.get(key),
+        |entry| Ok(Selection::Winner(entry.clone())),
+    ) {
         Ok(selection) => selection,
         Err(e) => {
             return e
@@ -2030,13 +3013,14 @@ pub(crate) fn classify_key(
     };
     let raw = match &h {
         Home::Present(tuple) if tuple.kind == Kind::Symlink => observe(home, key)?,
-        _ => h,
+        _ => h.clone(),
     };
     Ok(Classified::Item(Item {
         key: key.to_owned(),
         row,
         r,
         raw,
+        comparison: h,
         repo_mode,
         basis,
         identity,

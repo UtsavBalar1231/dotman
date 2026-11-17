@@ -4,7 +4,7 @@
 use crate::config::{Allow, Config};
 use crate::context::Context;
 use crate::engine::write::{WriteOptions, WriteOutcome, safe_write};
-use crate::engine::{Node, observe};
+use crate::engine::{Home, Node, observe};
 use crate::name;
 use crate::output;
 use crate::paths::{Paths, write_atomic};
@@ -38,7 +38,8 @@ const PROBE_POLL: Duration = Duration::from_millis(10);
 const PROBE_TEXT: &[u8] = b"dotman probe\n";
 // The recipient set the `{age}` sources were last all encrypted to. `.dotman/` is reserved, so
 // this is never a managed key.
-const RECORD: &str = ".dotman/age-recipients";
+/// The recipient set used for the repository's ciphertext.
+pub const RECORD: &str = ".dotman/age-recipients";
 const RELEASES: &str = "https://github.com/FiloSottile/age/releases";
 /// Where a key can come from, for messages about a missing one.
 #[must_use]
@@ -669,6 +670,15 @@ impl Age {
         Err(failure(&reader.program, "-d", &out))
     }
 
+    fn decrypt_bytes(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let mut snapshot = tempfile::Builder::new()
+            .prefix(crate::context::TEMP_PREFIX)
+            .tempfile()?;
+        snapshot.write_all(ciphertext)?;
+        snapshot.flush()?;
+        self.decrypt(snapshot.path())
+    }
+
     /// Armored ciphertext of `plaintext` for every recipient.
     pub fn encrypt(&self, plaintext: &[u8], recipients: &[String]) -> Result<Vec<u8>> {
         let recipients = recipient_set(recipients);
@@ -1030,17 +1040,32 @@ pub fn write_record(repo: &Path, recipients: &[String]) -> Result<()> {
 pub fn write_ciphertext(ctx: &Context, source: &str, ciphertext: &[u8]) -> Result<()> {
     let repo = &ctx.paths.repo;
     let expected = observe(repo, source)?;
+    write_ciphertext_expected(ctx, source, ciphertext, &expected)
+}
+
+/// Keeps the caller's source observation bound through the write engine's final check.
+pub fn write_ciphertext_expected(
+    ctx: &Context,
+    source: &str,
+    ciphertext: &[u8],
+    expected: &Home,
+) -> Result<()> {
+    let repo = &ctx.paths.repo;
     let modes = BTreeMap::new();
     let opts = WriteOptions {
         dry_run: false,
         in_place: false,
         backup: None,
-        expected: &expected,
+        expected,
         modes: &modes,
         own: ctx.keys(),
     };
     match safe_write(repo, source, ciphertext, 0o644, &opts)? {
         WriteOutcome::Written(_) => Ok(()),
+        WriteOutcome::Skipped(skip) if ctx.reviewed.is_some() => {
+            Err(anyhow!(crate::context::ReviewChanged)
+                .context(format!("{source} in the repo {skip}")))
+        }
         WriteOutcome::Skipped(skip) => bail!("{source} in the repo {skip}"),
     }
 }
@@ -1068,23 +1093,32 @@ pub fn encrypted_sources(ctx: &Context) -> Result<Vec<String>> {
 /// current set and rewrites the record. All or nothing: if one source cannot be decrypted here,
 /// nothing changes. Returns how many sources were rewritten.
 pub fn reencrypt(ctx: &Context, dry_run: bool) -> Result<usize> {
+    reencrypt_paths(ctx, dry_run).map(|paths| paths.len().saturating_sub(1))
+}
+
+/// Exact replaced sources and the recipients record, empty when re-encryption was held or only previewed.
+pub fn reencrypt_paths(ctx: &Context, dry_run: bool) -> Result<Vec<std::path::PathBuf>> {
+    if ctx.reviewed.is_some() {
+        return reencrypt_reviewed(ctx, dry_run)
+            .map(|batch| batch.map_or_else(Vec::new, |batch| batch.files.into_keys().collect()));
+    }
     let repo = &ctx.paths.repo;
     let recipients = ctx.repo_config()?.age.recipients;
     let current = recipient_set(&recipients);
     if read_record(repo)?.is_none_or(|record| record == current) {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let sources = encrypted_sources(ctx)?;
     let count = sources.len();
     if count == 0 {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     if dry_run {
         output::info(&format!(
             "would re-encrypt {count} {} to the recipients in .dotman.toml",
             files(count)
         ));
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let age = ctx.age();
     let mut plain = Vec::new();
@@ -1105,7 +1139,7 @@ pub fn reencrypt(ctx: &Context, dry_run: bool) -> Result<usize> {
         for line in unreadable {
             output::warning(&format!("  {line}"));
         }
-        return Ok(0);
+        return Ok(Vec::new());
     }
     for (source, bytes) in &plain {
         let ciphertext = age
@@ -1115,7 +1149,267 @@ pub fn reencrypt(ctx: &Context, dry_run: bool) -> Result<usize> {
         output::action("re-encrypt", source);
     }
     write_record(repo, &current)?;
-    Ok(plain.len())
+    let mut rewritten = sources
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
+    rewritten.push(std::path::PathBuf::from(RECORD));
+    Ok(rewritten)
+}
+
+fn reencrypt_clean(ctx: &Context, written: &std::collections::BTreeSet<PathBuf>) -> Result<bool> {
+    let Some(review) = &ctx.reviewed else {
+        return Ok(true);
+    };
+    let mut dirty = std::collections::BTreeSet::new();
+    for entry in ctx.git.full_status()? {
+        if entry.kind == crate::git::StatusKind::Ordinary
+            && entry.xy.starts_with('.')
+            && written.contains(&entry.path)
+        {
+            continue;
+        }
+        for path in std::iter::once(entry.path).chain(entry.orig_path) {
+            if reencrypt_path(&path) {
+                dirty.insert(path);
+            }
+        }
+    }
+    for path in &dirty {
+        review.stale(ctx, path.to_str())?;
+        output::warning(&format!(
+            "{}: re-encryption held; uncommitted source or recipients edit",
+            crate::output::escape_line(&path.to_string_lossy())
+        ));
+    }
+    Ok(dirty.is_empty())
+}
+
+fn reencrypt_path(path: &Path) -> bool {
+    path == Path::new(".dotman.toml")
+        || path == Path::new(RECORD)
+        || path.to_str().is_some_and(|source| {
+            let sources = crate::variant::Sources::group([source]);
+            sources
+                .keys()
+                .any(|key| sources.flag(key, source) == Flag::Age)
+        })
+}
+
+fn reencrypt_index(ctx: &Context) -> Result<BTreeMap<PathBuf, crate::git::Entry>> {
+    Ok(ctx
+        .git
+        .index_entries(&[PathBuf::from(".")])?
+        .into_iter()
+        .filter(|(_, _, path)| reencrypt_path(path))
+        .map(|(mode, oid, path)| (path, crate::git::Entry { mode, oid }))
+        .collect())
+}
+
+/// Freezes reviewed inputs before encryption and returns only the bytes this batch produced.
+pub fn reencrypt_reviewed(
+    ctx: &Context,
+    dry_run: bool,
+) -> Result<Option<crate::commands::review::Reencrypted>> {
+    use crate::commands::review::{Delta, Reencrypted, Stored};
+    let repo = &ctx.paths.repo;
+    let settings = Stored::read(repo, Path::new(".dotman.toml"))?;
+    let Stored::File { bytes, .. } = &settings else {
+        return Err(crate::context::ReviewChanged.into());
+    };
+    let config = crate::repo_config::RepoConfig::parse(std::str::from_utf8(bytes)?)?;
+    let current = recipient_set(&config.age.recipients);
+    let record = Stored::read(repo, Path::new(RECORD))?;
+    let Stored::File { bytes, .. } = &record else {
+        return Ok(None);
+    };
+    if recipient_set(
+        &std::str::from_utf8(bytes)?
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+    ) == current
+    {
+        return Ok(None);
+    }
+    let sources = encrypted_sources(ctx)?;
+    let mut frozen = BTreeMap::from([
+        (".dotman.toml".to_owned(), settings.clone()),
+        (RECORD.to_owned(), record),
+    ]);
+    for source in &sources {
+        frozen.insert(source.clone(), Stored::read(repo, Path::new(source))?);
+    }
+    let index = reencrypt_index(ctx)?;
+    let mut written = std::collections::BTreeSet::new();
+    if sources.is_empty() || !reencrypt_clean(ctx, &written)? {
+        return Ok(None);
+    }
+    if dry_run {
+        output::info(&format!(
+            "would re-encrypt {} {} to the recipients in .dotman.toml",
+            sources.len(),
+            files(sources.len())
+        ));
+        return Ok(None);
+    }
+    let mut produced = Delta::new();
+    for source in &sources {
+        let Some(Stored::File { bytes, .. }) = frozen.get(source) else {
+            return Err(crate::context::ReviewChanged.into());
+        };
+        let plaintext = match ctx.age().decrypt_bytes(bytes) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                output::warning(&format!(
+                    "cannot decrypt {source}; none was re-encrypted: {error:#}"
+                ));
+                return Ok(None);
+            }
+        };
+        let bytes = ctx.age().encrypt(&plaintext, &config.age.recipients)?;
+        produced.insert(PathBuf::from(source), Stored::File { bytes, mode: 0o644 });
+    }
+    let mut bytes = current.join("\n").into_bytes();
+    bytes.push(b'\n');
+    produced.insert(PathBuf::from(RECORD), Stored::File { bytes, mode: 0o644 });
+    if !reencrypt_clean(ctx, &written)? {
+        return Ok(None);
+    }
+    if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+    }
+    // The record is last: a refusal cannot claim recipients for an incomplete batch.
+    for source in sources
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(RECORD))
+    {
+        check_reencrypt_inputs(ctx, &frozen, &index, &written)?;
+        let expected = frozen.get(source).ok_or(crate::context::ReviewChanged)?;
+        let stored = produced
+            .get(Path::new(source))
+            .ok_or(crate::context::ReviewChanged)?;
+        let Stored::File { bytes, .. } = stored else {
+            return Err(crate::context::ReviewChanged.into());
+        };
+        if source == RECORD {
+            write_record_expected(ctx, bytes, &frozen, &index, &written)?;
+        } else {
+            write_ciphertext_expected(ctx, source, bytes, &stored_home(expected)?)?;
+        }
+        frozen.insert(source.to_owned(), stored.clone());
+        written.insert(PathBuf::from(source));
+        if source != RECORD {
+            output::action("re-encrypt", source);
+        }
+    }
+    Ok(Some(Reencrypted {
+        files: produced,
+        settings,
+        index,
+    }))
+}
+
+fn stored_home(stored: &crate::commands::review::Stored) -> Result<Home> {
+    use crate::commands::review::Stored;
+    match stored {
+        Stored::File { bytes, mode } => {
+            Ok(Home::Present(crate::engine::Tuple::of_file(bytes, *mode)))
+        }
+        Stored::Missing => Ok(Home::Missing),
+        _ => Err(crate::context::ReviewChanged.into()),
+    }
+}
+
+fn check_reencrypt_inputs(
+    ctx: &Context,
+    frozen: &BTreeMap<String, crate::commands::review::Stored>,
+    index: &BTreeMap<PathBuf, crate::git::Entry>,
+    written: &std::collections::BTreeSet<PathBuf>,
+) -> Result<()> {
+    check_reencrypt_inventory(ctx, frozen.keys().map(String::as_str), index, written)?;
+    for (source, expected) in frozen {
+        if crate::commands::review::Stored::read(&ctx.paths.repo, Path::new(source))? != *expected {
+            return Err(crate::context::ReviewChanged.into());
+        }
+    }
+    Ok(())
+}
+
+fn check_reencrypt_inventory<'a>(
+    ctx: &Context,
+    paths: impl Iterator<Item = &'a str>,
+    index: &BTreeMap<PathBuf, crate::git::Entry>,
+    written: &std::collections::BTreeSet<PathBuf>,
+) -> Result<()> {
+    if !reencrypt_clean(ctx, written)? || reencrypt_index(ctx)? != *index {
+        return Err(crate::context::ReviewChanged.into());
+    }
+    let expected: std::collections::BTreeSet<_> = paths
+        .filter(|path| *path != RECORD && *path != ".dotman.toml")
+        .map(str::to_owned)
+        .collect();
+    let actual: std::collections::BTreeSet<_> = encrypted_sources(ctx)?.into_iter().collect();
+    if actual != expected
+        || index
+            .keys()
+            .filter(|path| {
+                path.as_path() != Path::new(RECORD) && path.as_path() != Path::new(".dotman.toml")
+            })
+            .any(|path| path.to_str().is_none_or(|path| !expected.contains(path)))
+    {
+        return Err(crate::context::ReviewChanged.into());
+    }
+    Ok(())
+}
+
+/// Validates a produced batch without deriving authorization from its current filesystem contents.
+pub fn check_reencrypted(
+    ctx: &Context,
+    batch: &crate::commands::review::Reencrypted,
+) -> Result<()> {
+    use crate::commands::review::Stored;
+    let written = batch.files.keys().cloned().collect();
+    check_reencrypt_inventory(
+        ctx,
+        batch.files.keys().filter_map(|path| path.to_str()),
+        &batch.index,
+        &written,
+    )?;
+    if Stored::read(&ctx.paths.repo, Path::new(".dotman.toml"))? != batch.settings {
+        return Err(crate::context::ReviewChanged.into());
+    }
+    for (path, expected) in &batch.files {
+        if Stored::read(&ctx.paths.repo, path)? != *expected {
+            return Err(crate::context::ReviewChanged.into());
+        }
+    }
+    Ok(())
+}
+
+fn write_record_expected(
+    ctx: &Context,
+    bytes: &[u8],
+    frozen: &BTreeMap<String, crate::commands::review::Stored>,
+    index: &BTreeMap<PathBuf, crate::git::Entry>,
+    written: &std::collections::BTreeSet<PathBuf>,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let repo = &ctx.paths.repo;
+    crate::commands::add::ensure_worktree_parents(repo, RECORD)?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(crate::context::TEMP_PREFIX)
+        .tempfile_in(repo.join(".dotman"))?;
+    temp.write_all(bytes)?;
+    temp.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o644))?;
+    temp.as_file().sync_all()?;
+    check_reencrypt_inputs(ctx, frozen, index, written)?;
+    temp.persist(repo.join(RECORD))
+        .map_err(|error| error.error)?;
+    fs::File::open(repo.join(".dotman"))?.sync_all()?;
+    Ok(())
 }
 
 const fn files(n: usize) -> &'static str {

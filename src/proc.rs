@@ -18,6 +18,9 @@ pub const AGE_KEY_VAR: &str = "DOTMAN_AGE_KEY";
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
     cmd.env_remove(AGE_KEY_VAR);
+    if crate::prompt::is_reviewed() {
+        cmd.stdin(Stdio::null());
+    }
     cmd
 }
 

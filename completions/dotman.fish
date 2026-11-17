@@ -74,6 +74,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand init" -l no-pager -d 'Disa
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand init" -s h -l help -d 'Print help'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l for -d 'Add the files as variants that apply only where these `+`-joined conditions hold, such as `host=laptop+os!=macos`' -r
+complete -c dotman -n "__fish_dotman_using_subcommand add" -l json -d 'Print experimental schema-versioned NDJSON outcomes'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l encrypt -d 'Store the files encrypted to the `[age] recipients` in .dotman.toml'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l template -d 'Store the files as templates, which each machine renders; put the expressions in with `dotman edit`'
 complete -c dotman -n "__fish_dotman_using_subcommand add" -l allow-plain -d 'Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key'
@@ -100,11 +101,14 @@ complete -c dotman -n "__fish_dotman_using_subcommand list" -l no-pager -d 'Disa
 complete -c dotman -n "__fish_dotman_using_subcommand list" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c dotman -n "__fish_dotman_using_subcommand status" -l porcelain -d 'Print `<status>\\t<key>\\0` records for every managed path'
+complete -c dotman -n "__fish_dotman_using_subcommand status" -l json -d 'Print experimental schema-versioned NDJSON for desktop clients'
 complete -c dotman -n "__fish_dotman_using_subcommand status" -s v -l verbose -d 'Show verbose output'
 complete -c dotman -n "__fish_dotman_using_subcommand status" -s q -l quiet -d 'Suppress informational messages'
 complete -c dotman -n "__fish_dotman_using_subcommand status" -l no-pager -d 'Disable pager output'
 complete -c dotman -n "__fish_dotman_using_subcommand status" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand status" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c dotman -n "__fish_dotman_using_subcommand apply" -l decide-from -d 'Read experimental versioned, snapshot-bound decisions from stdin only' -r -f -a "-\t''"
+complete -c dotman -n "__fish_dotman_using_subcommand apply" -l json -d 'Print experimental schema-versioned NDJSON outcomes'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l keep-local -d 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync\'s pull conflicts, keep this machine\'s side of each clash: a text file keeps origin\'s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync\'s question about a pull conflict also offers `[h]` for that'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l take-repo -d 'Take the repo version of conflicting and existing files, after backing them up. When sync\'s pull conflicts, take origin\'s side of each clash: a text file keeps this machine\'s edits elsewhere in it, other files are taken whole, and this machine\'s version is saved first'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l forget-deleted -d 'Stop managing files deleted locally; they stay deleted'
@@ -131,7 +135,9 @@ complete -c dotman -n "__fish_dotman_using_subcommand edit" -s q -l quiet -d 'Su
 complete -c dotman -n "__fish_dotman_using_subcommand edit" -l no-pager -d 'Disable pager output'
 complete -c dotman -n "__fish_dotman_using_subcommand edit" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand edit" -s h -l help -d 'Print help'
+complete -c dotman -n "__fish_dotman_using_subcommand sync" -l decide-from -d 'Read experimental versioned, snapshot-bound decisions from stdin only' -r -f -a "-\t''"
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -s m -l message -d 'Commit message, replacing the generated `sync(<host>): ...` line' -r
+complete -c dotman -n "__fish_dotman_using_subcommand sync" -l json -d 'Print experimental schema-versioned NDJSON outcomes and an outgoing dry-run review'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l keep-local -d 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync\'s pull conflicts, keep this machine\'s side of each clash: a text file keeps origin\'s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync\'s question about a pull conflict also offers `[h]` for that'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l take-repo -d 'Take the repo version of conflicting and existing files, after backing them up. When sync\'s pull conflicts, take origin\'s side of each clash: a text file keeps this machine\'s edits elsewhere in it, other files are taken whole, and this machine\'s version is saved first'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l forget-deleted -d 'Stop managing files deleted locally; they stay deleted'

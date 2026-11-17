@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Seek, Write};
+use std::io::{self, BufRead as _, Read as _, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -271,7 +271,7 @@ pub struct Stopped {
 pub enum Replayed {
     /// The branch holds the fetched commit with the local commits on top, every settled path at
     /// its decision.
-    Done,
+    Done(TipReceipt),
     /// A local commit stopped on paths that have no decision. The replay was undone, and the repo
     /// is as before it.
     Stopped(Vec<Stopped>),
@@ -325,6 +325,41 @@ pub struct Refusal {
 }
 
 impl Refusal {
+    /// Source-built terminal recovery for this marker refusal.
+    #[must_use]
+    pub fn recovery(&self) -> Vec<crate::output::json::RecoveryStep> {
+        use crate::output::json::RecoveryStep as Step;
+        let bin = crate::name::bin();
+        let mut steps = Vec::new();
+        if !self.dirty.is_empty() {
+            steps.push(Step::instruction("First copy the reported uncommitted files outside the repository; the following commands discard them."));
+        }
+        if let Some(Ok(saved)) = &self.saved {
+            steps.push(Step::instruction(&format!(
+                "Copies already saved at {}.",
+                crate::output::escape_line(&saved.to_string_lossy())
+            )));
+        }
+        if let Some(branch) = self
+            .marker
+            .as_ref()
+            .map(|(branch, _)| branch)
+            .or(self.detached_from.as_ref())
+        {
+            if self.rebase_dir {
+                steps.push(Step::command([bin, "git", "rebase", "--quit"]));
+            }
+            steps.push(Step::command([bin, "git", "checkout", "-f", branch]));
+        }
+        steps.push(Step::command([
+            OsStr::new("rm"),
+            OsStr::new("--"),
+            self.repo.join(".git/dotman-pull").as_os_str(),
+        ]));
+        steps.push(Step::command([bin, "sync"]));
+        steps
+    }
+
     fn checkout_steps(&self, branch: &str) -> Vec<String> {
         let bin = crate::name::bin();
         let mut steps = Vec::new();
@@ -565,6 +600,158 @@ pub enum PullOutcome {
     },
 }
 
+/// The exact branch transition produced by a successful pull or replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TipReceipt {
+    pub reference: String,
+    pub old: Option<String>,
+    pub new: Option<String>,
+}
+
+struct PullLog {
+    _scope: tempfile::TempDir,
+    path: PathBuf,
+    before: Vec<u8>,
+    action: String,
+    reference: String,
+    expected: Option<String>,
+}
+
+impl PullLog {
+    fn begin(repo: &Path, branch: &str, expected: Option<&str>) -> Result<Self> {
+        Self::begin_ref(repo, full_ref(branch), expected)
+    }
+
+    fn begin_ref(repo: &Path, reference: String, expected: Option<&str>) -> Result<Self> {
+        let scope = tempfile::Builder::new()
+            .prefix(".dotman-tmp-pull-")
+            .tempdir_in(repo.join(".git"))?;
+        let path = repo.join(".git/logs").join(&reference);
+        let before = Self::read(&path)?;
+        ensure!(
+            before.is_empty() || before.ends_with(b"\n"),
+            crate::context::ReviewChanged
+        );
+        let action = format!(
+            "dotman-reviewed:{}",
+            scope
+                .path()
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or(crate::context::ReviewChanged)?
+        );
+        Ok(Self {
+            _scope: scope,
+            path,
+            before,
+            action,
+            reference,
+            expected: expected.map(str::to_owned),
+        })
+    }
+
+    fn read(path: &Path) -> Result<Vec<u8>> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(anyhow!(crate::context::ReviewChanged)
+                .context(format!("cannot read the pull's branch reflog: {error}"))),
+        }
+    }
+
+    fn receipt(&self) -> Result<TipReceipt> {
+        let after = Self::read(&self.path)?;
+        let tail = after
+            .strip_prefix(self.before.as_slice())
+            .ok_or(crate::context::ReviewChanged)?;
+        ensure!(
+            tail.is_empty() || tail.ends_with(b"\n"),
+            crate::context::ReviewChanged
+        );
+        let mut found = None;
+        for line in tail
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let mut parts = line.splitn(2, |byte| *byte == b'\t');
+            let fields = parts.next().ok_or(crate::context::ReviewChanged)?;
+            let message = parts.next().ok_or(crate::context::ReviewChanged)?;
+            if !message
+                .strip_prefix(self.action.as_bytes())
+                .is_some_and(|rest| rest.starts_with(b":") || rest.starts_with(b" ("))
+            {
+                continue;
+            }
+            let mut fields = fields.split(|byte| *byte == b' ');
+            let old = std::str::from_utf8(fields.next().ok_or(crate::context::ReviewChanged)?)
+                .map_err(|_| crate::context::ReviewChanged)?;
+            let new = std::str::from_utf8(fields.next().ok_or(crate::context::ReviewChanged)?)
+                .map_err(|_| crate::context::ReviewChanged)?;
+            ensure!(
+                is_oid(old) && is_oid(new) && !new.bytes().all(|byte| byte == b'0'),
+                crate::context::ReviewChanged
+            );
+            let old = (!old.bytes().all(|byte| byte == b'0')).then_some(old);
+            ensure!(
+                old == self.expected.as_deref() && found.is_none(),
+                crate::context::ReviewChanged
+            );
+            found = Some(new.to_owned());
+        }
+        ensure!(
+            found.is_some() || tail.is_empty(),
+            crate::context::ReviewChanged
+        );
+        Ok(TipReceipt {
+            reference: self.reference.clone(),
+            old: self.expected.clone(),
+            new: found.or_else(|| self.expected.clone()),
+        })
+    }
+
+    fn configure(&self, command: &mut Command) {
+        command
+            .args(["-c", "core.logAllRefUpdates=true"])
+            .env("GIT_REFLOG_ACTION", &self.action);
+    }
+
+    fn replay_tip(&self) -> Result<String> {
+        let after = Self::read(&self.path)?;
+        let tail = after
+            .strip_prefix(self.before.as_slice())
+            .ok_or(crate::context::ReviewChanged)?;
+        ensure!(
+            tail.is_empty() || tail.ends_with(b"\n"),
+            crate::context::ReviewChanged
+        );
+        let mut expected = self.expected.clone().ok_or(crate::context::ReviewChanged)?;
+        for line in tail
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let mut parts = line.splitn(2, |byte| *byte == b'\t');
+            let fields = parts.next().ok_or(crate::context::ReviewChanged)?;
+            let message = parts.next().ok_or(crate::context::ReviewChanged)?;
+            ensure!(
+                message
+                    .strip_prefix(self.action.as_bytes())
+                    .is_some_and(|rest| rest.starts_with(b":") || rest.starts_with(b" (")),
+                crate::context::ReviewChanged
+            );
+            let mut fields = fields.split(|byte| *byte == b' ');
+            let old = fields.next().ok_or(crate::context::ReviewChanged)?;
+            let new = std::str::from_utf8(fields.next().ok_or(crate::context::ReviewChanged)?)
+                .map_err(|_| crate::context::ReviewChanged)?;
+            ensure!(
+                old == expected.as_bytes() && is_oid(new),
+                crate::context::ReviewChanged
+            );
+            new.clone_into(&mut expected);
+        }
+        Ok(expected)
+    }
+}
+
 /// An unfinished git operation that blocks dotman commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
@@ -659,6 +846,16 @@ pub struct StatusEntry {
     pub path: PathBuf,
     /// Set only for [`StatusKind::Renamed`].
     pub orig_path: Option<PathBuf>,
+}
+
+/// Inputs for projecting `stage_all_except` without changing an index or object.
+pub struct StagingReview {
+    pub paths: BTreeSet<PathBuf>,
+    pub excluded: Vec<PathBuf>,
+    pub temporary: BTreeSet<PathBuf>,
+    pub head: BTreeMap<PathBuf, Entry>,
+    pub index: BTreeMap<PathBuf, Entry>,
+    pub filemode: bool,
 }
 
 /// One blob, symlink or gitlink from [`Git::ls_tree`].
@@ -1177,9 +1374,87 @@ impl Git {
     /// Like [`Git::stage_all`], leaving out `held`, repo-relative paths taken literally, and the
     /// untracked paths the [`LeaveOut`] picks. A tracked path is staged whatever it picks.
     pub fn stage_all_except(&self, held: &[PathBuf]) -> Result<()> {
-        let mut left_out = self.left_out(&self.full_status()?)?;
-        left_out.extend_from_slice(held);
+        let left_out = self.staging_exclusions(&self.full_status()?, held, None)?;
         self.stage(&left_out)
+    }
+
+    fn staging_exclusions(
+        &self,
+        entries: &[StatusEntry],
+        held: &[PathBuf],
+        projected: Option<&[PathBuf]>,
+    ) -> Result<Vec<PathBuf>> {
+        let mut left_out =
+            projected.map_or_else(|| self.left_out(entries), |paths| Ok(paths.to_vec()))?;
+        left_out.extend_from_slice(held);
+        Ok(left_out)
+    }
+
+    pub(crate) fn staging_review(
+        &self,
+        blocked_paths: &[PathBuf],
+        projected: &[PathBuf],
+    ) -> Result<StagingReview> {
+        let entries = self.full_status()?;
+        let excluded = self.staging_exclusions(&entries, blocked_paths, Some(projected))?;
+        let head = if self.head()?.is_some() {
+            self.tree_entries("HEAD")?
+        } else {
+            BTreeMap::new()
+        };
+        let index: BTreeMap<_, _> = self
+            .index_entries(&[PathBuf::from(".")])?
+            .into_iter()
+            .map(|(mode, oid, path)| (path, Entry { mode, oid }))
+            .collect();
+        let mut paths: BTreeSet<_> = entries
+            .into_iter()
+            .flat_map(|entry| std::iter::once(entry.path).chain(entry.orig_path))
+            .collect();
+        paths.extend(
+            head.keys()
+                .chain(index.keys())
+                .filter(|path| head.get(*path) != index.get(*path))
+                .cloned(),
+        );
+        let temporary = self
+            .run(&[
+                "ls-files",
+                "--cached",
+                "--others",
+                "-z",
+                "--",
+                TRACKED_TEMP_FILES,
+                TRACKED_TEMP_DIRS,
+            ])?
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(path_from)
+            .collect::<BTreeSet<_>>();
+        paths.extend(temporary.iter().cloned());
+        Ok(StagingReview {
+            paths,
+            excluded,
+            temporary,
+            head,
+            index,
+            filemode: self.filemode()?,
+        })
+    }
+
+    fn filemode(&self) -> Result<bool> {
+        let args = ["config", "--bool", "--get", "core.filemode"];
+        let out = self.probe(&args)?;
+        match out.status.code() {
+            Some(0) => match text(&out).trim() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => bail!("git config printed an invalid core.filemode"),
+            },
+            Some(1) => Ok(true),
+            _ => Err(self.failure(&args, &out)),
+        }
     }
 
     fn stage(&self, left_out: &[PathBuf]) -> Result<()> {
@@ -1316,6 +1591,244 @@ impl Git {
         self.head()
     }
 
+    pub(crate) fn commit_reviewed(
+        &self,
+        expected: Option<&str>,
+        expected_branch: Option<&str>,
+        edits: &BTreeMap<PathBuf, crate::commands::review::Stored>,
+        message: &str,
+    ) -> Result<String> {
+        anyhow::ensure!(
+            self.head()?.as_deref() == expected,
+            crate::context::ReviewChanged
+        );
+        let branch = self.branch()?;
+        anyhow::ensure!(
+            branch.as_deref() == expected_branch,
+            crate::context::ReviewChanged
+        );
+        let branch = branch.ok_or(crate::context::ReviewChanged)?;
+        let directory = tempfile::Builder::new()
+            .prefix(".dotman-tmp-index-")
+            .tempdir_in(self.repo.join(".git"))?;
+        let index = directory.path().join("commit");
+        let original = self.repo.join(".git/index");
+        let old_index = match fs::read(&original) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        self.run_index(&index, &["read-tree", expected.unwrap_or("--empty")], &[])?;
+        let info = self.reviewed_index_info(edits)?;
+        self.run_index(&index, &["update-index", "-z", "--index-info"], &info)?;
+        let tree = self.run_index(&index, &["write-tree"], &[])?;
+        let tree = text(&tree).trim().to_owned();
+        let reconciled = directory.path().join("reconciled");
+        if let Some(bytes) = &old_index {
+            fs::write(&reconciled, bytes)?;
+        } else {
+            self.run_index(&reconciled, &["read-tree", "--empty"], &[])?;
+        }
+        self.run_index(&reconciled, &["update-index", "-z", "--index-info"], &info)?;
+        let mut args = vec!["commit-tree", tree.as_str()];
+        if let Some(head) = expected {
+            args.extend(["-p", head]);
+        }
+        let commit = self.run_stdin(&args, message.as_bytes())?;
+        let commit = text(&commit).trim().to_owned();
+        anyhow::ensure!(
+            is_oid(&commit),
+            "git commit-tree printed an invalid object id"
+        );
+        self.publish_reviewed_index(
+            expected,
+            &branch,
+            &commit,
+            &reconciled,
+            old_index.as_deref(),
+        )?;
+        Ok(commit)
+    }
+
+    fn reviewed_index_info(
+        &self,
+        edits: &BTreeMap<PathBuf, crate::commands::review::Stored>,
+    ) -> Result<Vec<u8>> {
+        use crate::commands::review::Stored;
+        let zero = "0".repeat(self.hash_object(b"", false)?.len());
+        let mut info = Vec::new();
+        for path in edits.keys() {
+            info.extend_from_slice(format!("0 {zero}\t").as_bytes());
+            info.extend_from_slice(path.as_os_str().as_bytes());
+            info.push(0);
+        }
+        for (path, stored) in edits {
+            let (mode, bytes) = match stored {
+                Stored::Missing => continue,
+                Stored::File { bytes, mode } => (
+                    if mode & 0o100 == 0 {
+                        "100644"
+                    } else {
+                        "100755"
+                    },
+                    bytes.as_slice(),
+                ),
+                Stored::Link(target) => ("120000", target.as_os_str().as_bytes()),
+                Stored::Ciphertext => bail!("hypothetical ciphertext cannot be committed"),
+            };
+            let oid = self.hash_object(bytes, true)?;
+            info.extend_from_slice(format!("{mode} {oid}\t").as_bytes());
+            info.extend_from_slice(path.as_os_str().as_bytes());
+            info.push(0);
+        }
+        Ok(info)
+    }
+
+    fn run_index(&self, index: &Path, args: &[&str], input: &[u8]) -> Result<Output> {
+        let mut file = tempfile::tempfile_in(self.repo.join(".git"))?;
+        file.write_all(input)?;
+        file.rewind()?;
+        let mut command = self.command();
+        command.env("GIT_INDEX_FILE", index).args(args);
+        let out = self.spawn_with(command, Stdio::from(file))?;
+        if out.status.success() {
+            Ok(out)
+        } else {
+            Err(self.failure(args, &out))
+        }
+    }
+
+    fn publish_reviewed_index(
+        &self,
+        expected: Option<&str>,
+        branch: &str,
+        commit: &str,
+        reconciled: &Path,
+        original: Option<&[u8]>,
+    ) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let path = self.repo.join(".git/index");
+        let lock_path = self.repo.join(".git/index.lock");
+        let mut lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&lock_path)?;
+        let result = (|| {
+            let current = match fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            anyhow::ensure!(
+                current.as_deref() == original && self.branch()?.as_deref() == Some(branch),
+                crate::context::ReviewChanged
+            );
+            lock.write_all(&fs::read(reconciled)?)?;
+            lock.sync_all()?;
+            anyhow::ensure!(
+                self.head()?.as_deref() == expected,
+                crate::context::ReviewChanged
+            );
+            let reference = full_ref(branch);
+            if let Err(error) =
+                self.publish_ref(&reference, commit, expected, "dotman: reviewed commit")
+            {
+                if self.branch()?.as_deref() != Some(branch)
+                    || self.resolve_commit(&reference)?.as_deref() != expected
+                {
+                    return Err(crate::context::ReviewChanged.into());
+                }
+                return Err(error);
+            }
+            ensure!(
+                self.branch()?.as_deref() == Some(branch)
+                    && self.head()?.as_deref() == Some(commit),
+                crate::context::ReviewChanged
+            );
+            fs::rename(&lock_path, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            fs::remove_file(lock_path)?;
+        }
+        result
+    }
+
+    fn publish_ref(
+        &self,
+        reference: &str,
+        new: &str,
+        expected: Option<&str>,
+        message: &str,
+    ) -> Result<()> {
+        let _ignored = crate::sys::ignore_signals(&[libc::SIGPIPE]);
+        let mut command = self.command();
+        command
+            .args(["update-ref", "--no-deref", "-m", message, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|error| self.spawn_error(error))?;
+        let stderr = child.stderr.take();
+        std::thread::scope(|scope| -> Result<()> {
+            let errors = scope.spawn(move || -> io::Result<Vec<u8>> {
+                let mut pipe = stderr.ok_or_else(|| io::Error::other("missing Git stderr"))?;
+                let mut bytes = Vec::new();
+                pipe.read_to_end(&mut bytes)?;
+                Ok(bytes)
+            });
+            let mut input = child.stdin.take();
+            let result = (|| {
+                let input = input.as_mut().ok_or(crate::context::ReviewChanged)?;
+                let output = child.stdout.take().ok_or(crate::context::ReviewChanged)?;
+                let mut output = io::BufReader::new(output);
+                let mut exchange = |request: &str, reply: &str| -> Result<()> {
+                    input.write_all(request.as_bytes())?;
+                    input.flush()?;
+                    let mut line = String::new();
+                    output.read_line(&mut line)?;
+                    ensure!(line == reply, crate::context::ReviewChanged);
+                    Ok(())
+                };
+                exchange("start\n", "start: ok\n")?;
+                let old = expected.map_or_else(|| "0".repeat(new.len()), str::to_owned);
+                exchange(
+                    &format!("update {reference} {new} {old}\nprepare\n"),
+                    "prepare: ok\n",
+                )?;
+                // `--no-deref` alone also replaces a symbolic ref. Inspect it while Git holds
+                // its prepared lock, before permitting any publication.
+                ensure!(
+                    self.optional(&["symbolic-ref", "-q", reference])?.is_none(),
+                    crate::context::ReviewChanged
+                );
+                exchange("commit\n", "commit: ok\n")
+            })();
+            if result.is_err() && let Some(input) = &mut input {
+                let _ = input.write_all(b"abort\n").and_then(|()| input.flush());
+            }
+            drop(input);
+            let status = child.wait();
+            if status.is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let errors = errors.join().map_err(|_| io::Error::other("reading Git stderr panicked"))
+                .and_then(std::convert::identity);
+            let status = status?;
+            let errors = errors?;
+            result.map_err(|error: anyhow::Error| {
+                anyhow!(crate::context::ReviewChanged).context(format!(
+                    "cannot prove a direct-ref publication with a prepared Git transaction: {error:#}; {}",
+                    String::from_utf8_lossy(&errors)
+                ))
+            })?;
+            ensure!(status.success(), crate::context::ReviewChanged);
+            Ok(())
+        }).map_err(|error| anyhow!(crate::context::ReviewChanged).context(error))
+    }
+
     /// Parsed `git status --porcelain=v2`, including every untracked file, ignored ones too,
     /// except those the [`LeaveOut`] picks. Never rewrites the index, so it is safe in a dry run.
     pub fn status(&self) -> Result<Vec<StatusEntry>> {
@@ -1347,7 +1860,7 @@ impl Git {
     /// untracked files must see it. `traditional` with `--untracked-files=all` lists each file
     /// under an ignored directory, where `matching` lists only the directory, which the content
     /// guard cannot read.
-    fn full_status(&self) -> Result<Vec<StatusEntry>> {
+    pub(crate) fn full_status(&self) -> Result<Vec<StatusEntry>> {
         let mut cmd = self.command();
         cmd.env("GIT_OPTIONAL_LOCKS", "0");
         let args = [
@@ -1463,6 +1976,38 @@ impl Git {
     /// `git pull --rebase --autostash`. On conflict the rebase is aborted, the copies git 2.25
     /// left removed, and the paths returned.
     pub fn pull_rebase(&self, remote: &str, branch: &str) -> Result<PullOutcome> {
+        self.pull_rebase_inner(remote, branch, None)
+    }
+
+    pub(crate) fn pull_reviewed(
+        &self,
+        remote: &str,
+        branch: &str,
+        expected: Option<&str>,
+    ) -> Result<(PullOutcome, Option<TipReceipt>)> {
+        ensure!(
+            self.head()?.as_deref() == expected && self.branch()?.as_deref() == Some(branch),
+            crate::context::ReviewChanged
+        );
+        let log = PullLog::begin(&self.repo, branch, expected)?;
+        let outcome = self.pull_rebase_inner(remote, branch, Some(&log))?;
+        let receipt = if outcome == PullOutcome::Ok {
+            Some(
+                log.receipt()
+                    .context("the pull has no unique attributable branch-ref transition")?,
+            )
+        } else {
+            None
+        };
+        Ok((outcome, receipt))
+    }
+
+    fn pull_rebase_inner(
+        &self,
+        remote: &str,
+        branch: &str,
+        log: Option<&PullLog>,
+    ) -> Result<PullOutcome> {
         let stash = ["rev-parse", "-q", "--verify", "refs/stash"];
         let stashed_before = self.optional(&stash)?;
         let untracked = self.untracked()?;
@@ -1472,6 +2017,9 @@ impl Git {
         args.extend([remote, refname.as_str()]);
         let mut pinned = self.command();
         pinned.args(PULL_PINS);
+        if let Some(log) = log {
+            log.configure(&mut pinned);
+        }
         let mut out = self.output(pinned, &args)?;
         // git before 2.26 stops on a commit the pull leaves empty, which later gits drop.
         let mut last = None;
@@ -1483,6 +2031,9 @@ impl Git {
             last = Some(at);
             let mut cmd = self.command();
             cmd.args(PULL_PINS);
+            if let Some(log) = log {
+                log.configure(&mut cmd);
+            }
             out = self.output(cmd, &["rebase", "--skip"])?;
         }
         if out.status.success() {
@@ -1768,29 +2319,70 @@ impl Git {
         decisions: &BTreeMap<PathBuf, Decision>,
         host: &str,
     ) -> Result<Replayed> {
+        self.replay_inner(remote, branch, onto, decisions, host, false)
+    }
+
+    pub(crate) fn replay_reviewed(
+        &self,
+        remote: &str,
+        branch: &str,
+        onto: &str,
+        decisions: &BTreeMap<PathBuf, Decision>,
+        host: &str,
+    ) -> Result<Replayed> {
+        self.replay_inner(remote, branch, onto, decisions, host, true)
+    }
+
+    fn replay_inner(
+        &self,
+        remote: &str,
+        branch: &str,
+        onto: &str,
+        decisions: &BTreeMap<PathBuf, Decision>,
+        host: &str,
+        reviewed: bool,
+    ) -> Result<Replayed> {
         let _ignored = crate::sys::ignore_signals(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
         let (marker, fork) = match self.start_replay(remote, branch, onto, decisions) {
             Ok(started) => started,
             Err(e) if self.own_pull() => return Err(self.undo(e)),
             Err(e) => return Err(e),
         };
-        let replayed = self.finish_rebase(&marker, &fork).and_then(|stopped| {
-            if stopped.is_none() {
-                self.correct(&marker, host)?;
-                self.move_branch(&marker)?;
-            }
-            Ok(stopped)
-        });
+        let log = reviewed
+            .then(|| PullLog::begin_ref(&self.repo, "HEAD".to_owned(), Some(&marker.old)))
+            .transpose()?;
+        let replayed = self
+            .finish_rebase(&marker, &fork, log.as_ref())
+            .and_then(|stopped| {
+                if let Some(stopped) = stopped {
+                    return Ok(Replayed::Stopped(stopped));
+                }
+                let tip = if let Some(log) = &log {
+                    let tip = log.replay_tip()?;
+                    ensure!(
+                        self.head()?.as_deref() == Some(&tip),
+                        crate::context::ReviewChanged
+                    );
+                    self.correct_reviewed(&marker, host, &tip, log)?
+                } else {
+                    self.correct(&marker, host)?;
+                    self.head()?
+                        .ok_or_else(|| anyhow!("HEAD has no commit after the replay"))?
+                };
+                self.move_branch(&marker, &tip, reviewed)
+                    .map(Replayed::Done)
+            });
         match replayed {
-            Ok(Some(stopped)) => {
+            Ok(Replayed::Stopped(stopped)) => {
                 self.undo_quietly()?;
                 Ok(Replayed::Stopped(stopped))
             }
-            Ok(None) => {
+            Ok(done @ Replayed::Done(_)) => {
                 self.run(&["symbolic-ref", "HEAD", &full_ref(&marker.branch)])?;
                 self.remove_marker()?;
-                Ok(Replayed::Done)
+                Ok(done)
             }
+            Err(e) if reviewed && e.is::<crate::context::ReviewChanged>() => Err(e),
             Err(e) => Err(self.undo(e)),
         }
     }
@@ -1863,8 +2455,13 @@ impl Git {
 
     /// Runs the rebase to its end, settling each stop. `Some` when a stop has paths with no
     /// decision, which leaves the rebase stopped there.
-    fn finish_rebase(&self, marker: &Marker, fork: &str) -> Result<Option<Vec<Stopped>>> {
-        let mut said = self.start_rebase(marker, fork)?;
+    fn finish_rebase(
+        &self,
+        marker: &Marker,
+        fork: &str,
+        log: Option<&PullLog>,
+    ) -> Result<Option<Vec<Stopped>>> {
+        let mut said = self.start_rebase(marker, fork, log)?;
         let mut last = None;
         while self.rebase_dir().is_some() {
             let at = (self.head()?, self.resolve_commit("REBASE_HEAD")?);
@@ -1908,7 +2505,7 @@ impl Git {
                 Some(1) => "--continue",
                 _ => return Err(self.failure(&staged, &out)),
             };
-            said = self.rebase(&[step])?;
+            said = self.rebase(&[step], log)?;
         }
         let ended = self
             .probe(&["merge-base", "--is-ancestor", &marker.onto, "HEAD"])?
@@ -1922,18 +2519,21 @@ impl Git {
     /// [`Git::pull_backend`] for why never the apply backend. The strategy is named, as for the
     /// first pull, since without one the sequencer takes the user's `pull.twohead`, which could
     /// drop the replayed changes or run a `git-merge-*` program from `PATH`.
-    fn start_rebase(&self, marker: &Marker, fork: &str) -> Result<String> {
+    fn start_rebase(&self, marker: &Marker, fork: &str, log: Option<&PullLog>) -> Result<String> {
         let mut args = vec!["--merge"];
         args.extend_from_slice(self.pull_backend()?);
         args.extend(["--onto", &marker.onto, fork]);
-        self.rebase(&args)
+        self.rebase(&args, log)
     }
 
     /// `git rebase` with the pins and `GIT_EDITOR=true`; returns what git printed, whether or not
     /// it stopped.
-    fn rebase(&self, args: &[&str]) -> Result<String> {
+    fn rebase(&self, args: &[&str], log: Option<&PullLog>) -> Result<String> {
         let mut cmd = self.command();
         cmd.args(PULL_PINS).env("GIT_EDITOR", "true");
+        if let Some(log) = log {
+            log.configure(&mut cmd);
+        }
         let mut full = vec!["rebase"];
         full.extend_from_slice(args);
         let out = self.output(cmd, &full)?;
@@ -1977,20 +2577,118 @@ impl Git {
     }
 
     /// Moves the branch from the old head to `HEAD`, only if it is still at the old head.
-    fn move_branch(&self, marker: &Marker) -> Result<()> {
-        let head = self
-            .head()?
-            .ok_or_else(|| anyhow!("HEAD has no commit after the replay"))?;
+    fn move_branch(&self, marker: &Marker, head: &str, reviewed: bool) -> Result<TipReceipt> {
+        ensure!(
+            self.head()?.as_deref() == Some(head),
+            crate::context::ReviewChanged
+        );
         let refname = full_ref(&marker.branch);
-        self.run(&[
-            "update-ref",
-            "-m",
-            "dotman: pull",
-            &refname,
-            &head,
-            &marker.old,
-        ])
-        .map(drop)
+        if reviewed {
+            self.publish_ref(&refname, head, Some(&marker.old), "dotman: pull")?;
+        } else {
+            self.run(&[
+                "update-ref",
+                "-m",
+                "dotman: pull",
+                &refname,
+                head,
+                &marker.old,
+            ])?;
+        }
+        Ok(TipReceipt {
+            reference: refname,
+            old: Some(marker.old.clone()),
+            new: Some(head.to_owned()),
+        })
+    }
+
+    fn correct_reviewed(
+        &self,
+        marker: &Marker,
+        host: &str,
+        tip: &str,
+        log: &PullLog,
+    ) -> Result<String> {
+        let tree = self.tree_entries(tip)?;
+        let wrong: Vec<_> = marker
+            .decisions
+            .iter()
+            .filter(|(path, decision)| !holds(&tree, path, decision))
+            .map(|(path, decision)| (path.clone(), decision.clone()))
+            .collect();
+        ensure!(
+            self.head()?.as_deref() == Some(tip),
+            crate::context::ReviewChanged
+        );
+        let produced = if wrong.is_empty() {
+            tip.to_owned()
+        } else {
+            let paths = wrong
+                .iter()
+                .map(|(path, _)| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = format!("sync({host}): resolve {paths}");
+            let commit = self.correction_commit(tip, &wrong, &message)?;
+            ensure!(
+                self.head()?.as_deref() == Some(tip),
+                crate::context::ReviewChanged
+            );
+            self.settle(&wrong)?;
+            self.publish_ref(
+                "HEAD",
+                &commit,
+                Some(tip),
+                &format!("{}: {message}", log.action),
+            )?;
+            commit
+        };
+        ensure!(log.replay_tip()? == produced, crate::context::ReviewChanged);
+        ensure!(
+            self.head()?.as_deref() == Some(&produced),
+            crate::context::ReviewChanged
+        );
+        let tree = self.tree_entries(&produced)?;
+        ensure!(
+            marker
+                .decisions
+                .iter()
+                .all(|(path, decision)| holds(&tree, path, decision)),
+            crate::context::ReviewChanged
+        );
+        Ok(produced)
+    }
+
+    fn correction_commit(
+        &self,
+        tip: &str,
+        wrong: &[(PathBuf, Decision)],
+        message: &str,
+    ) -> Result<String> {
+        let directory = tempfile::Builder::new()
+            .prefix(".dotman-tmp-correction-")
+            .tempdir_in(self.repo.join(".git"))?;
+        let index = directory.path().join("index");
+        self.run_index(&index, &["read-tree", tip], &[])?;
+        let mut entries = Vec::new();
+        let zero = "0".repeat(tip.len());
+        for (path, _) in wrong {
+            entries.extend_from_slice(format!("0 {zero}\t").as_bytes());
+            entries.extend_from_slice(path.as_os_str().as_bytes());
+            entries.push(0);
+        }
+        for (path, decision) in wrong {
+            if let Decision::Set(entry) = decision {
+                entries.extend_from_slice(format!("{} {}\t", entry.mode, entry.oid).as_bytes());
+                entries.extend_from_slice(path.as_os_str().as_bytes());
+                entries.push(0);
+            }
+        }
+        self.run_index(&index, &["update-index", "-z", "--index-info"], &entries)?;
+        let tree = text(&self.run_index(&index, &["write-tree"], &[])?);
+        let commit = text(&self.run_stdin(&["commit-tree", &tree, "-p", tip], message.as_bytes())?);
+        ensure!(is_oid(&commit), crate::context::ReviewChanged);
+        Ok(commit)
     }
 
     /// [`Git::recover_pull`] after a failed step; the error says what failed, and what recovery
@@ -2725,6 +3423,17 @@ impl Git {
             .map(drop)
     }
 
+    pub(crate) fn push_reviewed(&self, remote: &str, branch: &str, tip: &str) -> Result<()> {
+        self.run_remote(&["push", remote, &format!("{tip}:refs/heads/{branch}")])?;
+        self.run(&["config", &format!("branch.{branch}.remote"), remote])?;
+        self.run(&[
+            "config",
+            &format!("branch.{branch}.merge"),
+            &format!("refs/heads/{branch}"),
+        ])
+        .map(drop)
+    }
+
     /// How many commits `tip` has that `base` lacks; every commit of `tip` when `base` is `None`.
     pub fn count_commits(&self, base: Option<&str>, tip: &str) -> Result<u64> {
         let range = base.map_or_else(|| tip.to_owned(), |base| format!("{base}..{tip}"));
@@ -2732,6 +3441,46 @@ impl Git {
         text(&out)
             .parse()
             .context("git rev-list printed a bad count")
+    }
+
+    pub(crate) fn outgoing_commits(
+        &self,
+        base: Option<&str>,
+        tip: &str,
+    ) -> Result<Vec<(String, String, Vec<PathBuf>)>> {
+        let range = base.map_or_else(|| tip.to_owned(), |base| format!("{base}..{tip}"));
+        let out = self.run(&["rev-list", "--reverse", &range, "--"])?;
+        let mut commits = Vec::new();
+        for id in text(&out).lines() {
+            let subject = self.run(&["show", "-s", "--format=%s", id, "--"])?;
+            let paths = self.run(&[
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "-z",
+                "-m",
+                id,
+                "--",
+            ])?;
+            let paths = paths
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(path_from)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            commits.push((
+                id.to_owned(),
+                String::from_utf8_lossy(&subject.stdout)
+                    .trim_end_matches('\n')
+                    .to_owned(),
+                paths,
+            ));
+        }
+        Ok(commits)
     }
 
     /// The paths `tip` holds that differ from `base` or that `base` lacks; every path of `tip`
@@ -2979,6 +3728,39 @@ fn with_pinned_last(attributes: &[u8]) -> Vec<u8> {
         out.push(b'\n');
     }
     out
+}
+
+/// `--` does not disable Git's wildcard matching; this preserves literal path bytes.
+pub fn literal_pathspec(path: &Path) -> OsString {
+    pathspec(":(literal)", path)
+}
+
+/// Shell recovery text and argv use the same literal pathspecs, including non-UTF-8 names.
+pub fn recovery_path_command(args: &[&str], paths: &[&Path]) -> String {
+    let specs: Vec<_> = paths.iter().map(|path| literal_pathspec(path)).collect();
+    let command = format!("{} git {} --", crate::name::bin(), args.join(" "));
+    if specs.iter().all(|spec| {
+        spec.to_str()
+            .is_some_and(|text| crate::output::escape_line(text) == text && !text.contains('`'))
+    }) {
+        let paths = specs
+            .iter()
+            .map(|spec| shell_words::quote(&spec.to_string_lossy()).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        return format!("{command} {paths}");
+    }
+    let mut input = String::new();
+    for byte in specs
+        .iter()
+        .flat_map(|spec| spec.as_bytes().iter().copied().chain([0]))
+    {
+        input.push('\\');
+        for shift in [6, 3, 0] {
+            input.push(char::from(b'0'.saturating_add((byte >> shift) & 7)));
+        }
+    }
+    format!("printf '{input}' | xargs -0 {command}")
 }
 
 fn pathspec(magic: &str, path: &Path) -> OsString {
@@ -4403,62 +5185,148 @@ mod tests {
 
     #[test]
     fn a_replay_sets_each_settled_path_and_corrects_once() {
-        for backend in BACKENDS {
-            for correct in [false, true] {
-                let conf_base: &[u8] = b"c1\nc2\nc3\nc4\nc5\n";
-                let conf_theirs: &[u8] = b"c1 origin\nc2\nc3\nc4\nc5\n";
-                let base = lines(&[]);
-                let theirs = lines(&[(2, "origin2"), (9, "origin9")]);
-                let mine = lines(&[(2, "local2"), (5, "local5")]);
-                let d = diverged(
-                    backend,
-                    &[("a.txt", Some(&base)), ("conf", Some(conf_base))],
-                    &[("a.txt", Some(&theirs)), ("conf", Some(conf_theirs))],
-                    &[&[
-                        ("a.txt", Some(&mine)),
-                        ("conf", Some(b"c1\nc2\nc3\nc4\nc5 local\n")),
-                    ]],
-                );
-                let paths: Vec<&Path> = d.stopped.iter().map(|s| s.path.as_path()).collect();
-                assert_eq!(paths, [Path::new("a.txt")], "{backend}");
-                let tmp = TempDir::new().expect("tmp");
-                let (merged, clean) =
-                    d.b.merge_file(
-                        tmp.path(),
-                        [&mine, &base, &theirs],
-                        ["this machine (beta)", "base", "origin/main"],
-                        Some(Side::Ours),
-                    )
-                    .expect("merge-file");
-                assert!(clean);
-                let want = lines(&[(2, "local2"), (5, "local5"), (9, "origin9")]);
-                assert_eq!(merged, want);
-                let mut decisions = vec![("a.txt", set(&d.b, &merged))];
-                if correct {
-                    decisions.push(("conf", set(&d.b, conf_theirs)));
+        for reviewed in [false, true] {
+            for backend in BACKENDS {
+                for correct in [false, true] {
+                    let conf_base: &[u8] = b"c1\nc2\nc3\nc4\nc5\n";
+                    let conf_theirs: &[u8] = b"c1 origin\nc2\nc3\nc4\nc5\n";
+                    let base = lines(&[]);
+                    let theirs = lines(&[(2, "origin2"), (9, "origin9")]);
+                    let mine = lines(&[(2, "local2"), (5, "local5")]);
+                    let d = diverged(
+                        backend,
+                        &[("a.txt", Some(&base)), ("conf", Some(conf_base))],
+                        &[("a.txt", Some(&theirs)), ("conf", Some(conf_theirs))],
+                        &[&[
+                            ("a.txt", Some(&mine)),
+                            ("conf", Some(b"c1\nc2\nc3\nc4\nc5 local\n")),
+                        ]],
+                    );
+                    let paths: Vec<&Path> = d.stopped.iter().map(|s| s.path.as_path()).collect();
+                    assert_eq!(paths, [Path::new("a.txt")], "{backend}");
+                    let tmp = TempDir::new().expect("tmp");
+                    let (merged, clean) =
+                        d.b.merge_file(
+                            tmp.path(),
+                            [&mine, &base, &theirs],
+                            ["this machine (beta)", "base", "origin/main"],
+                            Some(Side::Ours),
+                        )
+                        .expect("merge-file");
+                    assert!(clean);
+                    let want = lines(&[(2, "local2"), (5, "local5"), (9, "origin9")]);
+                    assert_eq!(merged, want);
+                    let mut decisions = vec![("a.txt", set(&d.b, &merged))];
+                    if correct {
+                        decisions.push(("conf", set(&d.b, conf_theirs)));
+                    }
+                    let replayed = if reviewed {
+                        d.b.replay_reviewed("origin", "main", &d.onto, &decide(decisions), "beta")
+                    } else {
+                        d.b.replay("origin", "main", &d.onto, &decide(decisions), "beta")
+                    }
+                    .expect("replay");
+                    assert!(matches!(replayed, Replayed::Done(_)), "{backend}");
+                    assert!(!d.b.own_pull());
+                    assert_eq!(d.b.branch().expect("branch").as_deref(), Some("main"));
+                    assert_eq!(blob_at(&d.b, "HEAD", "a.txt"), want);
+                    assert_eq!(fs::read(d.b.repo().join("a.txt")).expect("read"), want);
+                    let count = d.b.count_commits(Some(&d.onto), "HEAD").expect("count");
+                    let subject = d.sb.raw_ok(d.b.repo(), &["log", "-1", "--format=%s"]);
+                    if correct {
+                        assert_eq!(count, 2, "{backend}");
+                        assert_eq!(subject, "sync(beta): resolve conf");
+                        assert_eq!(blob_at(&d.b, "HEAD", "conf"), conf_theirs);
+                    } else {
+                        assert_eq!(count, 1, "{backend}: no correction commit");
+                        assert_eq!(subject, "mine 0");
+                    }
+                    let status = d.sb.raw_ok(d.b.repo(), &["status", "--porcelain", "-uall"]);
+                    assert_eq!(status, "");
                 }
-                let replayed =
-                    d.b.replay("origin", "main", &d.onto, &decide(decisions), "beta")
-                        .expect("replay");
-                assert_eq!(replayed, Replayed::Done, "{backend}");
-                assert!(!d.b.own_pull());
-                assert_eq!(d.b.branch().expect("branch").as_deref(), Some("main"));
-                assert_eq!(blob_at(&d.b, "HEAD", "a.txt"), want);
-                assert_eq!(fs::read(d.b.repo().join("a.txt")).expect("read"), want);
-                let count = d.b.count_commits(Some(&d.onto), "HEAD").expect("count");
-                let subject = d.sb.raw_ok(d.b.repo(), &["log", "-1", "--format=%s"]);
-                if correct {
-                    assert_eq!(count, 2, "{backend}");
-                    assert_eq!(subject, "sync(beta): resolve conf");
-                    assert_eq!(blob_at(&d.b, "HEAD", "conf"), conf_theirs);
-                } else {
-                    assert_eq!(count, 1, "{backend}: no correction commit");
-                    assert_eq!(subject, "mine 0");
-                }
-                let status = d.sb.raw_ok(d.b.repo(), &["status", "--porcelain", "-uall"]);
-                assert_eq!(status, "");
             }
         }
+    }
+
+    #[test]
+    fn reviewed_correction_never_publishes_through_a_switched_head() {
+        let d = diverged(
+            "'rebase.backend=merge'",
+            &[
+                ("a.txt", Some(b"base\n")),
+                ("conf", Some(b"c1\nc2\nc3\nc4\nc5\n")),
+            ],
+            &[
+                ("a.txt", Some(b"origin\n")),
+                ("conf", Some(b"c1 origin\nc2\nc3\nc4\nc5\n")),
+            ],
+            &[&[
+                ("a.txt", Some(b"local\n")),
+                ("conf", Some(b"c1\nc2\nc3\nc4\nc5 local\n")),
+            ]],
+        );
+        let decisions = decide(vec![
+            ("a.txt", set(&d.b, b"settled\n")),
+            ("conf", set(&d.b, b"c1 origin\nc2\nc3\nc4\nc5\n")),
+        ]);
+        let (marker, fork) =
+            d.b.start_replay("origin", "main", &d.onto, &decisions)
+                .expect("start");
+        let log =
+            PullLog::begin_ref(d.b.repo(), "HEAD".to_owned(), Some(&marker.old)).expect("log");
+        assert_eq!(
+            d.b.finish_rebase(&marker, &fork, Some(&log))
+                .expect("rebase"),
+            None
+        );
+        let tip = log.replay_tip().expect("tip");
+        let real_git = crate::proc::find_program("git").expect("git");
+        let wrapper = d.sb.dir.path().join("wrapper");
+        fs::create_dir(&wrapper).expect("wrapper");
+        let saved_index = d.sb.dir.path().join("saved-index");
+        let script = format!(
+            "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\ncase \"$arg\" in\n*'resolve conf'*)\n{git} -C {repo} branch other HEAD\n{git} -C {repo} symbolic-ref HEAD refs/heads/other\nprintf external-stage > {repo}/outside\n{git} -C {repo} add -- outside\ncp -- {repo}/.git/index {saved}\n;;\nesac\ndone\nexec {git} \"$@\"\n",
+            git = shell_words::quote(utf8(&real_git)),
+            repo = shell_words::quote(utf8(d.b.repo())),
+            saved = shell_words::quote(utf8(&saved_index)),
+        );
+        let program = wrapper.join("git");
+        fs::write(&program, script).expect("script");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("mode");
+        let path = std::env::join_paths(std::iter::once(wrapper).chain(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH"),
+        )))
+        .expect("PATH");
+        let b = d.b.with_env([("PATH", path)]);
+        let error = b
+            .correct_reviewed(&marker, "beta", &tip, &log)
+            .expect_err("refuse");
+        assert!(error.is::<crate::context::ReviewChanged>(), "{error:#}");
+        assert_eq!(
+            d.sb.raw_ok(b.repo(), &["rev-parse", "refs/heads/other"]),
+            tip
+        );
+        assert_eq!(
+            d.sb.raw_ok(b.repo(), &["rev-parse", "refs/heads/main"]),
+            d.old
+        );
+        assert_eq!(
+            d.sb.raw_ok(b.repo(), &["symbolic-ref", "HEAD"]),
+            "refs/heads/other"
+        );
+        assert_eq!(
+            fs::read(b.repo().join(".git/index")).expect("index"),
+            fs::read(saved_index).expect("saved")
+        );
+        assert!(b.own_pull());
+        assert!(!b.repo().join(".git/HEAD.lock").exists());
+        assert_eq!(
+            d.sb.raw_ok(
+                &d.sb.dir.path().join("remote.git"),
+                &["rev-parse", "refs/heads/main"]
+            ),
+            d.onto
+        );
     }
 
     /// Taking origin's version whole empties the local commit, which the replay drops.
@@ -4476,7 +5344,7 @@ mod tests {
             let replayed =
                 d.b.replay("origin", "main", &d.onto, &decisions, "beta")
                     .expect("replay");
-            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert!(matches!(replayed, Replayed::Done(_)), "{backend}");
             assert_eq!(d.b.head().expect("head"), Some(d.onto.clone()), "{backend}");
             assert_eq!(d.b.branch().expect("branch").as_deref(), Some("main"));
             assert_eq!(fs::read(d.b.repo().join("a.txt")).expect("read"), theirs);
@@ -4505,7 +5373,7 @@ mod tests {
                     .expect("replay");
             let stopped = match replayed {
                 Replayed::Stopped(stopped) => Some(stopped),
-                Replayed::Done => None,
+                Replayed::Done(_) => None,
             }
             .expect("the second commit stops on b.txt");
             let paths: Vec<&Path> = stopped.iter().map(|s| s.path.as_path()).collect();
@@ -4615,7 +5483,7 @@ mod tests {
             let replayed =
                 d.b.replay("origin", "main", &d.onto, &decisions, "beta")
                     .expect("replay");
-            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert!(matches!(replayed, Replayed::Done(_)), "{backend}");
             assert_eq!(blob_at(&d.b, "HEAD", "gone"), b"edited\n", "{backend}");
             assert_eq!(blob_at(&d.b, "HEAD", "twin"), b"same\n", "{backend}");
             assert_eq!(fs::read(d.b.repo().join("twin")).expect("twin"), b"same\n");
@@ -4715,7 +5583,7 @@ mod tests {
             let replayed =
                 d.b.replay("origin", "main", &d.onto, &decisions, "beta")
                     .expect("replay");
-            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert!(matches!(replayed, Replayed::Done(_)), "{backend}");
             assert_eq!(blob_at(&d.b, "HEAD", "-x"), b"x settled\n");
             let tree = d.b.tree_entries("HEAD").expect("tree");
             assert!(!tree.contains_key(Path::new("-y")), "{backend}");
@@ -4798,7 +5666,7 @@ mod tests {
             let (marker, fork) = b
                 .start_replay("origin", "main", &d.onto, &decisions)
                 .expect("start");
-            b.start_rebase(&marker, &fork).expect("rebase");
+            b.start_rebase(&marker, &fork, None).expect("rebase");
             let dir = b.rebase_dir().expect("stopped");
             match onto {
                 Some(other) => fs::write(dir.join("onto"), format!("{other}\n")).expect("onto"),
@@ -4858,7 +5726,7 @@ mod tests {
                     .start_replay("origin", "main", &d.onto, &decisions)
                     .expect("start");
                 if kill.starts_with("stop") {
-                    b.start_rebase(&marker, &fork).expect("rebase");
+                    b.start_rebase(&marker, &fork, None).expect("rebase");
                     assert!(b.rebase_dir().is_some(), "{backend} {kill}");
                     if kill == "stop-settled" {
                         let at = decide(vec![("a.txt", set(b, &lines(&[(2, "settled")])))]);
@@ -4866,7 +5734,7 @@ mod tests {
                         b.settle(&at).expect("settle");
                     }
                 } else {
-                    assert_eq!(b.finish_rebase(&marker, &fork).expect("rebase"), None);
+                    assert_eq!(b.finish_rebase(&marker, &fork, None).expect("rebase"), None);
                     if kill == "correction-staged" {
                         let conf = vec![(PathBuf::from("conf"), set(b, b"c settled\n"))];
                         b.settle(&conf).expect("settle");
@@ -4874,7 +5742,8 @@ mod tests {
                         b.correct(&marker, "beta").expect("correct");
                     }
                     if kill == "update-ref" || kill == "symbolic-ref" {
-                        b.move_branch(&marker).expect("update-ref");
+                        let tip = b.head().expect("HEAD").expect("commit");
+                        b.move_branch(&marker, &tip, false).expect("update-ref");
                     }
                     if kill == "symbolic-ref" {
                         b.run(&["symbolic-ref", "HEAD", "refs/heads/main"])
@@ -4909,7 +5778,7 @@ mod tests {
                 let again = b
                     .replay("origin", "main", &d.onto, &decisions, "beta")
                     .expect("replay");
-                assert_eq!(again, Replayed::Done, "{backend} {kill}");
+                assert!(matches!(again, Replayed::Done(_)), "{backend} {kill}");
                 assert_eq!(blob_at(b, "HEAD", "a.txt"), lines(&[(2, "settled")]));
             }
         }
@@ -4931,7 +5800,7 @@ mod tests {
             let (marker, fork) = b
                 .start_replay("origin", "main", &d.onto, &decisions)
                 .expect("start");
-            b.start_rebase(&marker, &fork).expect("rebase");
+            b.start_rebase(&marker, &fork, None).expect("rebase");
             let staged = d.sb.raw_ok(b.repo(), &["diff", "--cached", "--name-only"]);
             assert!(staged.contains("b.txt"), "{backend}: {staged}");
             let recovery = b.recover_pull().expect("recover");
@@ -5046,7 +5915,7 @@ mod tests {
             let replayed = b
                 .replay("origin", "main", &d.onto, &decisions, "beta")
                 .expect("replay");
-            assert_eq!(replayed, Replayed::Done, "{backend}");
+            assert!(matches!(replayed, Replayed::Done(_)), "{backend}");
             assert_eq!(
                 b.resolve_commit("refs/heads/keep").expect("keep"),
                 Some(d.old.clone()),
@@ -5094,7 +5963,7 @@ mod tests {
             let replayed = b
                 .replay("origin", "main", &d.onto, &decisions, "beta")
                 .expect("replay");
-            assert_eq!(replayed, Replayed::Done, "{twohead}");
+            assert!(matches!(replayed, Replayed::Done(_)), "{twohead}");
             assert_eq!(blob_at(&b, "HEAD", "a.txt"), lines(&[(2, "settled")]));
             assert_eq!(blob_at(&b, "HEAD", "b.txt"), b"b local\n", "{twohead}");
             assert!(!ran.exists(), "{twohead}: git-merge-{twohead} ran");

@@ -283,6 +283,31 @@ fn every_flag_the_docs_name_exists() -> R {
 /// Each never, always or every claim in README.md, `docs/*.md` and SECURITY.md, by a piece of its
 /// sentence that no other claim shares, with the tests that prove it.
 const CLAIMS: &[(&str, &[&str])] = &[
+    (
+        "The CLI never starts a child before parsing and checking the syntax of the complete document",
+        &["malformed_decisions_are_rejected_before_children_or_writes"],
+    ),
+    (
+        "It never falls back to standing approval for a stale supplied token",
+        &["stale_hook_tokens_cannot_fall_through_to_standing_approval"],
+    ),
+    (
+        "Outcome observations never include file contents or decrypted bytes",
+        &[
+            "json_outgoing_review_binds_observed_captures_stored_edits_head_and_messages",
+            "json_outgoing_encryption_is_hypothetical_and_hooks_stay_off_stdout",
+            "interactive_diff_child_stdout_is_not_a_json_frame",
+            "system_diff_preview_and_helper_output_do_not_contaminate_json",
+        ],
+    ),
+    (
+        "Entry projection preserves every porcelain",
+        &[
+            "status_json_keeps_duplicate_hold_occurrences_without_file_content",
+            "status_json_preserves_deleted_sources_and_filter_parity",
+            "status_json_escapes_hostile_names_and_keeps_case_unicode_collisions",
+        ],
+    ),
     // README.md
     (
         "It never writes through a symlink, runs a hook you haven't approved",
@@ -965,8 +990,8 @@ const DELETIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/git.rs",
-        2,
-        "the `.git/dotman-pull` marker of a replayed pull, and, in the repo worktree only, a file whose decision is absent or that a stopped rebase left as `<path>~HEAD` or `<path>~<commit> (<subject>)`, as git names its copies, holding a blob the replay had at `<path>`",
+        3,
+        "the `.git/dotman-pull` marker of a replayed pull; in the repo worktree only, a file whose decision is absent or that a stopped rebase left as `<path>~HEAD` or `<path>~<commit> (<subject>)`, as git names its copies, holding a blob the replay had at `<path>`; and the `.git/index.lock` created exclusively by a failed reviewed commit",
     ),
     (
         "src/import/gittree.rs",

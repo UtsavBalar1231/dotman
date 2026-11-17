@@ -71,6 +71,7 @@ _arguments "${_arguments_options[@]}" : \
 (add)
 _arguments "${_arguments_options[@]}" : \
 '--for=[Add the files as variants that apply only where these \`+\`-joined conditions hold, such as \`host=laptop+os!=macos\`]:CONDITIONS:_default' \
+'--json[Print experimental schema-versioned NDJSON outcomes]' \
 '--encrypt[Store the files encrypted to the \`\[age\] recipients\` in .dotman.toml]' \
 '(--encrypt --system)--template[Store the files as templates, which each machine renders; put the expressions in with \`dotman edit\`]' \
 '(--encrypt)--allow-plain[Store in plain text what the guard holds back\: files whose names match \`\[guard\] secret_names\`, and credentials in files named here, not ones found in a directory; never an age secret key]' \
@@ -120,6 +121,7 @@ _arguments "${_arguments_options[@]}" : \
 (status)
 _arguments "${_arguments_options[@]}" : \
 '--porcelain[Print \`<status>\\t<key>\\0\` records for every managed path]' \
+'(--porcelain)--json[Print experimental schema-versioned NDJSON for desktop clients]' \
 '-v[Show verbose output]' \
 '--verbose[Show verbose output]' \
 '-q[Suppress informational messages]' \
@@ -133,6 +135,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (apply)
 _arguments "${_arguments_options[@]}" : \
+'(--keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --system --yes)--decide-from=[Read experimental versioned, snapshot-bound decisions from stdin only]:DECIDE_FROM:(-)' \
+'--json[Print experimental schema-versioned NDJSON outcomes]' \
 '(--take-repo)--keep-local[Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync'\''s pull conflicts, keep this machine'\''s side of each clash\: a text file keeps origin'\''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run \`add --for host=<host> <file>\` instead, or \`add --encrypt --for host=<host> <file>\` when any of its sources is encrypted; on a terminal, sync'\''s question about a pull conflict also offers \`\[h\]\` for that]' \
 '--take-repo[Take the repo version of conflicting and existing files, after backing them up. When sync'\''s pull conflicts, take origin'\''s side of each clash\: a text file keeps this machine'\''s edits elsewhere in it, other files are taken whole, and this machine'\''s version is saved first]' \
 '(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \
@@ -183,8 +187,10 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (sync)
 _arguments "${_arguments_options[@]}" : \
+'(--keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --approve-dirs --drop-unlisted-ignores --allow-mass-delete --system --yes)--decide-from=[Read experimental versioned, snapshot-bound decisions from stdin only]:DECIDE_FROM:(-)' \
 '-m+[Commit message, replacing the generated \`sync(<host>)\: ...\` line]:MSG:_default' \
 '--message=[Commit message, replacing the generated \`sync(<host>)\: ...\` line]:MSG:_default' \
+'--json[Print experimental schema-versioned NDJSON outcomes and an outgoing dry-run review]' \
 '(--take-repo)--keep-local[Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync'\''s pull conflicts, keep this machine'\''s side of each clash\: a text file keeps origin'\''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run \`add --for host=<host> <file>\` instead, or \`add --encrypt --for host=<host> <file>\` when any of its sources is encrypted; on a terminal, sync'\''s question about a pull conflict also offers \`\[h\]\` for that]' \
 '--take-repo[Take the repo version of conflicting and existing files, after backing them up. When sync'\''s pull conflicts, take origin'\''s side of each clash\: a text file keeps this machine'\''s edits elsewhere in it, other files are taken whole, and this machine'\''s version is saved first]' \
 '(--restore-deleted)--forget-deleted[Stop managing files deleted locally; they stay deleted]' \

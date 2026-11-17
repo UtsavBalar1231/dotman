@@ -4,7 +4,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
 
-e2e_begin journeys/12-mass-delete
+e2e_begin journeys/12-mass-delete jq
 e2e_machines a b
 
 for i in $(seq 1 12); do
@@ -39,5 +39,20 @@ e2e_dm_rc 0 b sync
 e2e_file_is b .config/many/f12 $'file 12\n'
 e2e_dm_rc 0 a status
 e2e_err_has '1 managed, 1 clean, 0 to look at'
+
+e2e_dm_rc 0 a add .config/many
+e2e_dm_rc 0 a sync
+rm -rf -- "$(e2e_repo a)/.config"
+review="$E2E_ROOT/mass-delete-decisions.json"
+e2e_review a sync "$review"
+jq '.approvals.mass_delete = [.sync.outgoing[] | select(.stored.state == "missing") | .path]' \
+    "$review" >"$review.exact"
+jq '.approvals.mass_delete |= .[1:]' "$review.exact" >"$review"
+remote_before=$(e2e_tool git --git-dir="$(e2e_remote)" rev-parse main)
+e2e_decided 3 a sync "$review"
+e2e_check "a changed deletion set pushed no commit" test "$(e2e_tool git --git-dir="$(e2e_remote)" rev-parse main)" = "$remote_before"
+e2e_decided 0 a sync "$review.exact"
+e2e_remote_lacks .config/many/f12
+e2e_file_is a .config/many/f12 $'file 12\n'
 
 e2e_finish

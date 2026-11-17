@@ -14,6 +14,7 @@ pub mod key;
 pub mod list;
 pub mod log;
 pub mod restore;
+pub(crate) mod review;
 pub mod status;
 pub mod sync;
 pub(crate) mod wizard;

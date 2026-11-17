@@ -4,6 +4,7 @@
 //! move the cursor, retitle the terminal or overwrite a line already printed. On a terminal at
 //! least 40 columns wide, a long message is also wrapped at spaces outside backticks.
 
+pub mod json;
 mod progress;
 
 use colored::Colorize;

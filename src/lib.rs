@@ -8,6 +8,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod context;
+pub(crate) mod decisions;
 pub(crate) mod engine;
 pub(crate) mod git;
 pub(crate) mod hooks;

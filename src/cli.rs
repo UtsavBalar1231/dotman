@@ -341,6 +341,12 @@ pub struct Decisions {
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct ApplyArgs {
+    /// Read experimental versioned, snapshot-bound decisions from stdin only
+    #[arg(long, value_parser = ["-"], conflicts_with_all = ["keep_local", "take_repo", "forget_deleted", "restore_deleted", "accept_identity", "approve_hooks", "system", "yes"])]
+    pub decide_from: Option<String>,
+    /// Print experimental schema-versioned NDJSON outcomes
+    #[arg(long)]
+    pub json: bool,
     /// Apply only these files or directories, with --system system files too; every managed path when none are given
     pub paths: Vec<PathBuf>,
     /// Answers that replace the prompts, which a non-interactive run never shows.
@@ -375,6 +381,12 @@ pub struct EditArgs {
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct SyncArgs {
+    /// Read experimental versioned, snapshot-bound decisions from stdin only
+    #[arg(long, value_parser = ["-"], conflicts_with_all = ["keep_local", "take_repo", "forget_deleted", "restore_deleted", "accept_identity", "approve_hooks", "approve_dirs", "drop_unlisted_ignores", "allow_mass_delete", "system", "yes"])]
+    pub decide_from: Option<String>,
+    /// Print experimental schema-versioned NDJSON outcomes and an outgoing dry-run review
+    #[arg(long)]
+    pub json: bool,
     /// Commit message, replacing the generated `sync(<host>): ...` line
     #[arg(short = 'm', long, value_name = "MSG")]
     pub message: Option<String>,
@@ -416,6 +428,9 @@ pub struct DiffArgs {
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct AddArgs {
+    /// Print experimental schema-versioned NDJSON outcomes
+    #[arg(long)]
+    pub json: bool,
     /// Files, symlinks or directories under $HOME; with --system, files outside it
     #[arg(required = true)]
     pub paths: Vec<PathBuf>,
@@ -476,6 +491,9 @@ pub struct StatusArgs {
     /// Print `<status>\t<key>\0` records for every managed path
     #[arg(long)]
     pub porcelain: bool,
+    /// Print experimental schema-versioned NDJSON for desktop clients
+    #[arg(long, conflicts_with = "porcelain")]
+    pub json: bool,
 }
 
 /// Arguments of `dotman log`.

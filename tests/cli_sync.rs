@@ -403,7 +403,10 @@ fn a_conflict_in_dotman_toml_is_aborted_with_junk_in_the_worktree() {
         edit,
         format!("Edit the conflicting files under {}.", repo_path(&b))
     );
-    assert_eq!(add, "dotman git add -- .dotman.toml\ndotman git add -u");
+    assert_eq!(
+        add,
+        "dotman git add -- ':(literal).dotman.toml'\ndotman git add -u"
+    );
     assert_eq!(
         resume,
         "env GIT_EDITOR=true dotman git rebase --continue\nRepeat 2 to 4 while the rebase keeps stopping."
@@ -2792,7 +2795,7 @@ fn an_edit_that_does_not_go_back_after_the_pull_stops_before_home_is_written() {
     let [put_back, show, drop, sync]: [String; 4] = steps(&err).try_into().expect("four steps");
     assert_eq!(
         put_back,
-        "dotman git checkout HEAD -- .zshrc\nputs back the pulled version"
+        "dotman git checkout HEAD -- ':(literal).zshrc'\nputs back the pulled version"
     );
     assert!(
         show.starts_with("dotman git stash show -p\nshows the edits"),
@@ -3443,11 +3446,14 @@ fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
         let copy = printed_copy(&err, "this machine's", name);
         assert!(copy.starts_with(&format!("'{name}~")), "{err}");
         // git with `ort` tracks the copy; git 2.25's `recursive` leaves it untracked.
+        let bare = shell_words::split(&copy).expect("the copy as one word");
+        let [bare]: [String; 1] = bare.try_into().expect("one word");
         let remove = if common::pull_strategy(&b) == "ort" {
-            format!("dotman git rm -q -f -- {copy}")
+            format!(
+                "dotman git rm -q -f -- {}",
+                shell_words::quote(&format!(":(literal){bare}"))
+            )
         } else {
-            let bare = shell_words::split(&copy).expect("the copy as one word");
-            let [bare]: [String; 1] = bare.try_into().expect("one word");
             let path = b.repo().join(bare).to_string_lossy().into_owned();
             format!("rm -f -- {}", shell_words::quote(&path))
         };
@@ -3455,7 +3461,7 @@ fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
         assert_eq!(
             keep,
             format!(
-                "dotman git checkout --no-overlay REBASE_HEAD -- {name}\n{remove}\ndotman git add -- .a {name}\ndotman git add -u"
+                "dotman git checkout --no-overlay REBASE_HEAD -- ':(literal){name}'\n{remove}\ndotman git add -- ':(literal).a' ':(literal){name}'\ndotman git add -u"
             )
         );
         no_replay_left(&b);

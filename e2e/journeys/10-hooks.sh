@@ -4,7 +4,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
 
-e2e_begin journeys/10-hooks
+e2e_begin journeys/10-hooks jq
 e2e_machines a b
 
 e2e_write a .config/app/app.conf $'v=1\n'
@@ -56,5 +56,21 @@ e2e_check "nothing ran for the swapped table" test "$(hook_log)" = one
 e2e_run_printed b "$approve"
 e2e_check "the second approval runs the shown table once" test "$(hook_log)" = $'one\nthree'
 e2e_check_not "the unseen table never ran" grep -q two "$(e2e_home b)/hook.log"
+
+review="$E2E_ROOT/hook-decisions.json"
+e2e_review b apply "$review"
+sed -i 's/echo three/echo four/' "$(e2e_repo b)/.dotman.toml"
+e2e_write_repo b .config/app/app.conf $'v=4\n'
+e2e_decided 3 b apply "$review"
+e2e_check "a stale reviewed table ran no hook" test "$(hook_log)" = $'one\nthree'
+e2e_file_is b .config/app/app.conf $'v=3\n'
+e2e_review b apply "$review" .config/app/app.conf take_repo
+e2e_decided 0 b apply "$review"
+e2e_check "the exact refreshed table and due-command token runs once" test "$(hook_log)" = $'one\nthree\nfour'
+
+e2e_write_repo b .dotman.toml $'[hooks]\n"[" = "true"\n"unicode" = "true # \u2028"\n'
+e2e_dm_rc 0 b status
+e2e_check "invalid hook metadata stays LF-framed JSON" grep -qF '"standing":"invalid"' "$E2E_ROOT/status.json"
+e2e_check "status ran no hook" test "$(hook_log)" = $'one\nthree\nfour'
 
 e2e_finish

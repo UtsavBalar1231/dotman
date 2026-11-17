@@ -79,6 +79,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
         }
         &'dotman;add'= {
             cand --for 'Add the files as variants that apply only where these `+`-joined conditions hold, such as `host=laptop+os!=macos`'
+            cand --json 'Print experimental schema-versioned NDJSON outcomes'
             cand --encrypt 'Store the files encrypted to the `[age] recipients` in .dotman.toml'
             cand --template 'Store the files as templates, which each machine renders; put the expressions in with `dotman edit`'
             cand --allow-plain 'Store in plain text what the guard holds back: files whose names match `[guard] secret_names`, and credentials in files named here, not ones found in a directory; never an age secret key'
@@ -120,6 +121,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
         }
         &'dotman;status'= {
             cand --porcelain 'Print `<status>\t<key>\0` records for every managed path'
+            cand --json 'Print experimental schema-versioned NDJSON for desktop clients'
             cand -v 'Show verbose output'
             cand --verbose 'Show verbose output'
             cand -q 'Suppress informational messages'
@@ -130,6 +132,8 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'dotman;apply'= {
+            cand --decide-from 'Read experimental versioned, snapshot-bound decisions from stdin only'
+            cand --json 'Print experimental schema-versioned NDJSON outcomes'
             cand --keep-local 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync''s pull conflicts, keep this machine''s side of each clash: a text file keeps origin''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync''s question about a pull conflict also offers `[h]` for that'
             cand --take-repo 'Take the repo version of conflicting and existing files, after backing them up. When sync''s pull conflicts, take origin''s side of each clash: a text file keeps this machine''s edits elsewhere in it, other files are taken whole, and this machine''s version is saved first'
             cand --forget-deleted 'Stop managing files deleted locally; they stay deleted'
@@ -171,8 +175,10 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --help 'Print help'
         }
         &'dotman;sync'= {
+            cand --decide-from 'Read experimental versioned, snapshot-bound decisions from stdin only'
             cand -m 'Commit message, replacing the generated `sync(<host>): ...` line'
             cand --message 'Commit message, replacing the generated `sync(<host>): ...` line'
+            cand --json 'Print experimental schema-versioned NDJSON outcomes and an outgoing dry-run review'
             cand --keep-local 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync''s pull conflicts, keep this machine''s side of each clash: a text file keeps origin''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync''s question about a pull conflict also offers `[h]` for that'
             cand --take-repo 'Take the repo version of conflicting and existing files, after backing them up. When sync''s pull conflicts, take origin''s side of each clash: a text file keeps this machine''s edits elsewhere in it, other files are taken whole, and this machine''s version is saved first'
             cand --forget-deleted 'Stop managing files deleted locally; they stay deleted'

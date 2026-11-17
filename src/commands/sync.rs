@@ -10,6 +10,7 @@ use crate::commands::Outcome;
 use crate::commands::add;
 use crate::commands::apply::{self, Applied, Options, Pass};
 use crate::commands::conflict::{self, Answer};
+use crate::commands::review::{Delta, StagePolicy, Stored};
 use crate::config::Allow;
 use crate::context::{Context, TEMP_PREFIX, is_under};
 use crate::engine::{Node, read_node};
@@ -18,14 +19,15 @@ use crate::hooks::{self, Policy};
 use crate::import::{OriginArg, clone_arg};
 use crate::name;
 use crate::output;
+use crate::output::json::{PathValue, RecoveryStep as Step, Text};
 use crate::paths::shown_key;
 use crate::prompt;
 use crate::remote;
 use crate::secrets::{self, Finding};
 use crate::template;
 use crate::variant::{Flag, Sources};
-use anyhow::{Result, anyhow, bail};
-use std::collections::BTreeSet;
+use anyhow::{Result, anyhow, bail, ensure};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
@@ -40,6 +42,18 @@ const LISTED: usize = 3;
 // A commit that deletes this many tracked files, and at least half of them, looks like a broken
 // checkout or a lost worktree rather than an edit.
 const MASS_DELETE: usize = 10;
+
+/// The mass-deletion guard refused a commit.
+#[derive(Debug)]
+pub struct MassDelete(String);
+
+impl std::fmt::Display for MassDelete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MassDelete {}
 
 pub(crate) fn identity_fix() -> String {
     format!(
@@ -64,35 +78,29 @@ pub(crate) fn identity_steps() -> String {
 /// Fails when the message is empty, the lock is held, keys collide, HEAD is detached, a hook fails,
 /// or git cannot commit, pull or push.
 pub fn run(args: &SyncArgs) -> Result<Outcome> {
+    let input = crate::decisions::Input::stdin(args.decide_from.as_deref())?;
     if args.message.as_deref().is_some_and(|m| m.trim().is_empty()) {
         bail!("the commit message is empty");
     }
-    let ctx = Context::resolve("sync")?;
+    let mut ctx = Context::resolve("sync")?;
+    ctx.reviewed = input.map(|input| input.bind(&ctx, true)).transpose()?;
     let dry_run = args.dry_run;
-    let _lock = ctx.lock(dry_run)?;
+    let _lock = ctx.start(args.json, dry_run)?;
     // Before git is asked about the index, which needs a repo to exist.
     ctx.repo_id()?;
     ctx.refuse_git_locks()?;
     ctx.refuse_collisions()?;
+    if dry_run && ctx.json {
+        review_head(&ctx)?;
+    }
     if !dry_run {
         ctx.sweep_temp_files()?;
     }
-    if holds_back_the_pull(&ctx)? {
+    if holds_back_the_pull(&ctx, dry_run)? {
         return Ok(finish(true, dry_run));
     }
 
-    let first = apply::apply(
-        &ctx,
-        &[],
-        &Options {
-            dry_run,
-            decisions: args.decisions,
-            pass: Pass::Capture,
-            approve_dirs: args.approve_dirs,
-            drop_unlisted_ignores: args.drop_unlisted_ignores,
-            ..Options::default()
-        },
-    )?;
+    let first = capture_local(&ctx, args)?;
     let policy = Policy {
         approve: args.decisions.approve_hooks,
         no_hooks: args.no_hooks,
@@ -105,6 +113,8 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         dry_run,
         args.allow_mass_delete,
         &first.captured,
+        &first.delta,
+        first.stage_policy.as_ref(),
     )?;
 
     let branch = match ctx.git.remote_url(REMOTE)? {
@@ -122,41 +132,95 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
         let outcome = without_remote(&ctx, args, first, policy, committed.held);
         return refused(committed.refusal).and(outcome);
     };
+    with_remote(&ctx, args, first, policy, committed, &branch)
+}
+
+fn with_remote(
+    ctx: &Context,
+    args: &SyncArgs,
+    first: Applied,
+    policy: Policy,
+    committed: Committed,
+    branch: &str,
+) -> Result<Outcome> {
+    let dry_run = args.dry_run;
     if !dry_run {
-        remote::note_origin(&ctx, true);
+        remote::note_origin(ctx, true);
     }
     // A failed path never stops the sync; the failure is reported after the push.
     let (first_failed, uncaptured) = (first.failed, first.uncaptured);
     let mut attention = first.outcome == Outcome::Attention || committed.held;
-    let written = first.written;
+    let (mut written, expected_attention) = review_writes(ctx, args, &first)?;
+    attention |= expected_attention;
+    written.extend(first.written);
     if dry_run {
         output::info(&format!(
             "would pull {REMOTE} {branch}, apply what arrived and push"
         ));
-        secrets::reencrypt(&ctx, true)?;
-        let hooked = hooks::run(&ctx, &written, policy);
+        secrets::reencrypt(ctx, true)?;
+        let hooked = if ctx.json {
+            hooks::preview(ctx, &written, policy, &first.forgotten)
+        } else {
+            hooks::run(ctx, &written, policy)
+        };
         let hooked = apply::check_failed(first_failed, uncaptured)
             .and(hooked)
             .and_then(|hooked| refused(committed.refusal).map(|()| hooked))?;
-        return Ok(finish(attention || hooked == Outcome::Attention, true));
+        return Ok(finish(
+            attention
+                || hooked == Outcome::Attention
+                || ctx
+                    .reviewed
+                    .as_ref()
+                    .is_some_and(|review| review.attention.get()),
+            true,
+        ));
     }
 
     let reached = |err| remote_error(err, committed.new_commit);
-    let answer = Answer::from_flags(args.decisions.keep_local, args.decisions.take_repo);
-    let Some(pulled) = pull(&ctx, &branch, committed.held, answer).map_err(reached)? else {
-        apply::check_failed(first_failed, uncaptured)?;
-        return Ok(Outcome::Conflict);
+    if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+    }
+    let saved_index = if ctx.reviewed.is_some() {
+        let plan = ctx.git.staging_review(&[], &[])?;
+        let paths: BTreeSet<_> = plan
+            .head
+            .keys()
+            .chain(plan.index.keys())
+            .filter(|path| plan.head.get(*path) != plan.index.get(*path))
+            .cloned()
+            .collect();
+        let paths: Vec<_> = paths.into_iter().collect();
+        let entries = ctx.git.index_entries(&paths)?;
+        Some((paths, entries))
+    } else {
+        None
     };
+    let answer = Answer::from_flags(args.decisions.keep_local, args.decisions.take_repo);
+    let pulled = pull(ctx, branch, committed.held, answer);
+    if let Some((paths, entries)) = saved_index {
+        restore_reviewed_index(ctx, &paths, &entries)?;
+    }
+    let Some(pulled) = pulled.map_err(reached)? else {
+        apply::check_failed(first_failed, uncaptured)?;
+        return conflict_outcome(ctx);
+    };
+    if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+    }
     // The pull can bring a pair that only a case-sensitive filesystem holds; the pulled commits
     // stay, and nothing is written for any key.
     ctx.refuse_collisions()?;
 
+    let mut skip = first.undecided;
+    skip.extend(blocked_keys(ctx)?);
     let mut second = apply::apply(
-        &ctx,
+        ctx,
         &[],
         &Options {
+            incoming: true,
             decisions: args.decisions,
-            skip: first.undecided,
+            skip,
             system: args.system,
             yes: args.yes,
             ..Options::default()
@@ -164,13 +228,166 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     )?;
     attention |= second.outcome == Outcome::Attention;
     second.written.extend(written);
-    let reencrypted = reencrypt(&ctx, args, false);
-    let hooked = hooks::run(&ctx, &second.written, policy);
+    let reencrypted = reencrypt(ctx, args, false);
+    let hooked = hooks::run(ctx, &second.written, policy);
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured), uncaptured);
 
-    attention |= !push(&ctx, &branch, pulled).map_err(reached)?;
+    attention |= !push(ctx, branch, pulled).map_err(reached)?;
     let hooked = failed.and(reencrypted).and(hooked)?;
-    Ok(finish(attention || hooked == Outcome::Attention, false))
+    Ok(finish(
+        attention
+            || hooked == Outcome::Attention
+            || ctx
+                .reviewed
+                .as_ref()
+                .is_some_and(|review| review.attention.get()),
+        false,
+    ))
+}
+
+fn restore_reviewed_index(
+    ctx: &Context,
+    paths: &[PathBuf],
+    entries: &[(String, String, PathBuf)],
+) -> Result<()> {
+    let unmerged = ctx.git.unmerged_paths()?;
+    let safe = |path: &Path| {
+        !unmerged.iter().any(|other| {
+            path.ancestors().any(|parent| parent == other)
+                || other.ancestors().any(|parent| parent == path)
+        })
+    };
+    let paths: Vec<_> = paths.iter().filter(|path| safe(path)).cloned().collect();
+    let entries: Vec<_> = entries
+        .iter()
+        .filter(|(_, _, path)| safe(path))
+        .cloned()
+        .collect();
+    ctx.git.restore_index(&paths, &entries)
+}
+
+fn capture_local(ctx: &Context, args: &SyncArgs) -> Result<Applied> {
+    if let Some(review) = &ctx.reviewed {
+        let planned = apply::apply(
+            ctx,
+            &[],
+            &Options {
+                dry_run: true,
+                project: true,
+                pass: Pass::Capture,
+                ..Options::default()
+            },
+        )?;
+        if let Some(sync) = &review.input.sync {
+            for capture in &sync.captures {
+                if !planned.captured.contains(&capture.key) {
+                    review.stale(ctx, Some(&capture.key))?;
+                }
+            }
+        }
+        let (_, excluded) = projected_status(ctx, planned.stage_policy.as_ref())?;
+        let edits = projected_edits(ctx, &[], &planned.delta, &excluded)?;
+        for edit in edits
+            .iter()
+            .filter(|edit| edit.path == Path::new(".dotman.toml"))
+        {
+            if !review
+                .outgoing(&edit.path)
+                .is_some_and(|expected| expected.matches(edit.tuple.as_ref()))
+            {
+                review.capture_settings.set(false);
+                review.stale(ctx, Some(".dotman.toml"))?;
+            }
+        }
+        if args.dry_run {
+            return Ok(planned);
+        }
+    }
+    apply::apply(
+        ctx,
+        &[],
+        &Options {
+            dry_run: args.dry_run,
+            decisions: args.decisions,
+            pass: Pass::Capture,
+            approve_dirs: args.approve_dirs,
+            drop_unlisted_ignores: args.drop_unlisted_ignores,
+            ..Options::default()
+        },
+    )
+}
+
+fn conflict_outcome(ctx: &Context) -> Result<Outcome> {
+    if ctx.json {
+        Err(crate::output::json::PullConflict {
+            recovery: ctx.recovery.take(),
+        }
+        .into())
+    } else {
+        Ok(Outcome::Conflict)
+    }
+}
+
+fn review_writes(
+    ctx: &Context,
+    args: &SyncArgs,
+    first: &Applied,
+) -> Result<(BTreeSet<String>, bool)> {
+    if !args.dry_run || !ctx.json {
+        return Ok((BTreeSet::new(), false));
+    }
+    ctx.stage("expected_hooks_current_repo", true)?;
+    apply::expected_writes(
+        ctx,
+        &Options {
+            dry_run: true,
+            decisions: args.decisions,
+            skip: review_skip(first),
+            system: args.system,
+            yes: args.yes,
+            ..Options::default()
+        },
+        first.post_capture.as_ref(),
+    )
+}
+
+fn review_skip(first: &Applied) -> BTreeSet<String> {
+    first
+        .undecided
+        .iter()
+        .chain(first.captured.iter().filter(|key| {
+            !first
+                .post_capture
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.sources.contains_key(*key))
+        }))
+        .cloned()
+        .collect()
+}
+
+fn blocked_keys(ctx: &Context) -> Result<BTreeSet<String>> {
+    let Some(review) = &ctx.reviewed else {
+        return Ok(BTreeSet::new());
+    };
+    let blocked = review.blocked.borrow();
+    let sources = ctx.sources()?;
+    let state = ctx.state(&ctx.repo_id()?)?;
+    Ok(sources
+        .keys()
+        .filter(|key| {
+            sources
+                .sources_of(key)
+                .any(|source| blocked.contains(Path::new(source)))
+        })
+        .chain(
+            state
+                .files
+                .iter()
+                .filter(|(_, entry)| blocked.contains(Path::new(&entry.source)))
+                .map(|(key, _)| key.as_str()),
+        )
+        .map(str::to_owned)
+        .collect())
 }
 
 /// Pushes `branch` and says how many commits went out, unless a `{tmpl}` source the push would
@@ -178,6 +395,7 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
 /// `false`. `pulled` means the pull left the remote's tip in `FETCH_HEAD`, which a remote-tracking
 /// ref matches only when the remote has a fetch refspec.
 fn push(ctx: &Context, branch: &str, pulled: bool) -> Result<bool> {
+    ctx.stage("push", false)?;
     // A repo with no commit has nothing to push.
     if ctx.git.head()?.is_none() {
         return Ok(true);
@@ -187,7 +405,23 @@ fn push(ctx: &Context, branch: &str, pulled: bool) -> Result<bool> {
         return Ok(false);
     }
     let pushed = ctx.git.count_commits(base, "HEAD")?;
-    ctx.git.push_set_upstream(REMOTE, branch)?;
+    let pushed_result = if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+        let tip = review.expected_head.borrow();
+        let tip = tip
+            .as_deref()
+            .ok_or_else(|| anyhow!("no reviewed commit to push"))?;
+        ctx.git.push_reviewed(REMOTE, branch, tip)
+    } else {
+        ctx.git.push_set_upstream(REMOTE, branch)
+    };
+    if let Err(error) = pushed_result {
+        refusal_event(ctx, "push", None, None)?;
+        return Err(error);
+    }
+    if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+    }
     output::success(&match pushed {
         0 => format!("{REMOTE}/{branch} is up to date"),
         1 => format!("pushed 1 commit to {REMOTE}/{branch}"),
@@ -217,6 +451,7 @@ fn renders(ctx: &Context, base: Option<&str>) -> Result<bool> {
             |text| template::render(source, text, ctx.template_vars()).err(),
         );
         if let Some(err) = failure {
+            refusal_event(ctx, "render", Some(&path), Some(key))?;
             let bin = name::bin();
             output::warning(&format!(
                 "{} does not render after the pull: {err:#}; fix it with `{bin} edit {}` and run `{bin} sync` again",
@@ -233,26 +468,43 @@ fn renders(ctx: &Context, base: Option<&str>) -> Result<bool> {
 /// with what to do printed, before anything reached `$HOME`. A conflict is settled with `answer`
 /// unless the commit held something back.
 fn pull(ctx: &Context, branch: &str, held: bool, answer: Option<Answer>) -> Result<Option<bool>> {
+    ctx.stage("pull", false)?;
     // A remote without the branch is a first push: there is nothing to pull.
     if !ctx.git.remote_has_branch(REMOTE, branch)? {
         return Ok(Some(false));
     }
     refuse_unrelated(ctx, branch)?;
     let before = ctx.git.head()?;
-    match ctx.git.pull_rebase(REMOTE, branch)? {
+    let (outcome, receipt) = if let Some(review) = &ctx.reviewed {
+        ctx.git
+            .pull_reviewed(REMOTE, branch, review.expected_head.borrow().as_deref())?
+    } else {
+        (ctx.git.pull_rebase(REMOTE, branch)?, None)
+    };
+    match outcome {
         PullOutcome::Ok => {
+            if let Some(review) = &ctx.reviewed {
+                review.accept_tip(ctx, receipt.as_ref().ok_or(crate::context::ReviewChanged)?)?;
+            }
             pulled(ctx, before.as_deref(), "FETCH_HEAD", branch)?;
             Ok(Some(true))
         }
         PullOutcome::Conflict { stopped } => {
+            if let Some(review) = &ctx.reviewed {
+                review.check_head(ctx)?;
+            }
             let onto = ctx
                 .git
                 .resolve_commit("FETCH_HEAD")?
                 .ok_or_else(|| anyhow!("the pull left no fetched commit"))?;
-            if holds_back_the_answer(ctx, held)?
-                || !conflict::resolve(ctx, branch, &onto, stopped, answer)?
-            {
+            if holds_back_the_answer(ctx, held)? {
                 return Ok(None);
+            }
+            let Some(receipt) = conflict::resolve(ctx, branch, &onto, stopped, answer)? else {
+                return Ok(None);
+            };
+            if let Some(review) = &ctx.reviewed {
+                review.accept_tip(ctx, &receipt)?;
             }
             pulled(ctx, before.as_deref(), &onto, branch)?;
             Ok(Some(true))
@@ -289,6 +541,12 @@ fn holds_back_the_answer(ctx: &Context, held: bool) -> Result<bool> {
     if !held && changed.is_empty() {
         return Ok(false);
     }
+    if ctx.json {
+        ctx.recovery.borrow_mut().extend([
+            Step::instruction("Resolve the reported uncommitted or held repository changes before retrying. Nothing was pulled or pushed."),
+            Step::command([name::bin(), "sync"]).when("after resolving the uncommitted changes"),
+        ]);
+    }
     output::warning(&format!(
         "the pull conflicts with your changes, and the repo holds changes that are not committed, so sync stopped before it settled the conflict. Nothing was pulled or pushed, and your files and commits are as they were. Resolve what the warnings above hold back, then run `{} sync` again",
         name::bin()
@@ -313,15 +571,17 @@ fn without_remote(
     held: bool,
 ) -> Result<Outcome> {
     let dry_run = args.dry_run;
-    // A dry run captured nothing, so its captured keys are not reported a second time.
-    let mut skip = first.undecided;
-    if dry_run {
-        skip.extend(first.captured);
-    }
-    let mut second = apply::apply(
+    let mut skip = if dry_run {
+        review_skip(&first)
+    } else {
+        first.undecided.clone()
+    };
+    skip.extend(blocked_keys(ctx)?);
+    let mut second = apply::apply_projected(
         ctx,
         &[],
         &Options {
+            incoming: ctx.reviewed.is_some(),
             dry_run,
             decisions: args.decisions,
             skip,
@@ -329,6 +589,7 @@ fn without_remote(
             yes: args.yes,
             ..Options::default()
         },
+        first.post_capture.as_ref(),
     )?;
     second.written.extend(first.written);
     second.failed = second.failed.saturating_add(first.uncaptured);
@@ -336,14 +597,49 @@ fn without_remote(
     let reencrypted = reencrypt(ctx, args, dry_run);
     let outcome = apply::finish(ctx, &second, policy);
     reencrypted?;
-    let attention = held || first.outcome == Outcome::Attention || outcome? == Outcome::Attention;
+    let attention = held
+        || first.outcome == Outcome::Attention
+        || outcome? == Outcome::Attention
+        || ctx
+            .reviewed
+            .as_ref()
+            .is_some_and(|review| review.attention.get());
     Ok(finish(attention, dry_run))
 }
 
 /// Commits a re-encryption with the generated message, whatever `-m` said.
 fn reencrypt(ctx: &Context, args: &SyncArgs, dry_run: bool) -> Result<()> {
+    ctx.stage("reencrypt", dry_run)?;
+    if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+        let Some(produced) = secrets::reencrypt_reviewed(ctx, dry_run)? else {
+            return Ok(());
+        };
+        *review.reencrypted.borrow_mut() = Some(produced);
+        let result = commit(
+            ctx,
+            None,
+            false,
+            false,
+            &BTreeSet::new(),
+            &Delta::new(),
+            None,
+        )
+        .map(drop);
+        review.reencrypted.borrow_mut().take();
+        return result;
+    }
     if secrets::reencrypt(ctx, dry_run)? > 0 {
-        commit(ctx, None, false, args.allow_mass_delete, &BTreeSet::new()).map(drop)?;
+        commit(
+            ctx,
+            None,
+            false,
+            args.allow_mass_delete,
+            &BTreeSet::new(),
+            &Delta::new(),
+            None,
+        )
+        .map(drop)?;
     }
     Ok(())
 }
@@ -366,14 +662,14 @@ struct Committed {
     /// Files that hold an age secret key were left out.
     held: bool,
     /// In a dry run, why the real run would refuse to commit; reported once the preview is done.
-    refusal: Option<String>,
+    refusal: Option<MassDelete>,
     /// A remote that cannot be reached after it leaves this run's changes committed locally, which
     /// the error says.
     new_commit: bool,
 }
 
-fn refused(refusal: Option<String>) -> Result<()> {
-    refusal.map_or(Ok(()), |why| Err(anyhow!(why)))
+fn refused(refusal: Option<MassDelete>) -> Result<()> {
+    refusal.map_or(Ok(()), |why| Err(why.into()))
 }
 
 /// Stages everything and commits it, except files that hold an age secret key. A dry run stages
@@ -384,14 +680,20 @@ fn commit(
     dry_run: bool,
     allow_mass_delete: bool,
     captured: &BTreeSet<String>,
+    delta: &Delta,
+    policy: Option<&StagePolicy>,
 ) -> Result<Committed> {
-    let before = ctx.git.status()?;
-    let refusal = if allow_mass_delete {
+    ctx.stage("commit", dry_run)?;
+    let (mut before, excluded) = projected_status(ctx, policy)?;
+    if dry_run && (ctx.json || ctx.reviewed.is_some()) {
+        project_status(&mut before, delta);
+    }
+    let refusal = if allow_mass_delete || ctx.reviewed.is_some() {
         None
     } else {
-        refuse_mass_delete(ctx, &before, dry_run)?
+        refuse_mass_delete(ctx, &before, dry_run, delta)?
     };
-    let held = held_entries(ctx, &before);
+    let held = held_projected(ctx, &before, delta);
     let held_paths: Vec<PathBuf> = held.iter().map(|(entry, _)| entry.path.clone()).collect();
     // A held rename keeps its old path out of the commit too, which would otherwise delete it as
     // a forget does. The rename is staged again afterwards, so the next sync holds both again.
@@ -401,10 +703,26 @@ fn commit(
         .flatten()
         .collect();
     let left_out: Vec<PathBuf> = held_paths.iter().chain(&renamed).cloned().collect();
+    if ctx.reviewed.is_some() {
+        report_held(ctx, &held, dry_run)?;
+        return commit_reviewed(
+            ctx,
+            message,
+            dry_run,
+            delta,
+            &excluded,
+            &left_out,
+            !held_paths.is_empty(),
+        );
+    }
     let mut changed = BTreeSet::new();
     let mut staged_rename = Vec::new();
     if dry_run {
-        changed.extend(captured.iter().cloned());
+        if ctx.json {
+            changed = review_worktree(ctx, &left_out, delta, &excluded)?;
+        } else {
+            changed.extend(captured.iter().cloned());
+        }
     } else {
         staged_rename = ctx.git.index_entries(&renamed)?;
         ctx.git.stage_all_except(&left_out)?;
@@ -430,6 +748,260 @@ fn commit(
     committed
 }
 
+fn commit_reviewed(
+    ctx: &Context,
+    message: Option<&str>,
+    dry_run: bool,
+    delta: &Delta,
+    excluded: &[PathBuf],
+    left_out: &[PathBuf],
+    held: bool,
+) -> Result<Committed> {
+    let review = ctx
+        .reviewed
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing reviewed policy"))?;
+    review.check_head(ctx)?;
+    let projected = projected_edits(ctx, left_out, delta, excluded)?;
+    if let Some(batch) = review.reencrypted.borrow().as_ref() {
+        secrets::check_reencrypted(ctx, batch)?;
+        let complete = batch.files.iter().all(|(path, expected)| {
+            projected
+                .iter()
+                .any(|edit| edit.path == *path && edit.stored == *expected)
+        });
+        if !complete {
+            return Err(crate::context::ReviewChanged.into());
+        }
+    }
+    let mut selected = reviewed_selection(ctx, review, &projected, dry_run.then_some(delta))?;
+    check_reviewed_remainder(ctx, review, &mut selected, &projected, excluded)?;
+    constrain_reviewed_shapes(ctx, review, &mut selected, &projected)?;
+    if let Some(batch) = review.reencrypted.borrow().as_ref() {
+        secrets::check_reencrypted(ctx, batch)?;
+        ensure!(
+            batch
+                .files
+                .iter()
+                .all(|(path, expected)| { selected.get(path) == Some(expected) }),
+            crate::context::ReviewChanged
+        );
+    }
+    let changed: BTreeSet<_> = selected
+        .keys()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let message = message.map_or_else(
+        || default_message(&ctx.identity().host, &changed),
+        str::to_owned,
+    );
+    let mut done = Committed {
+        held,
+        refusal: None,
+        new_commit: false,
+    };
+    if selected.is_empty() {
+        return Ok(done);
+    }
+    if dry_run {
+        output::info(&format!("would commit: {message}"));
+    } else {
+        if !ctx.git.identity_configured()? {
+            bail!(identity_fix());
+        }
+        let new = ctx.git.commit_reviewed(
+            review.expected_head.borrow().as_deref(),
+            review.branch(),
+            &selected,
+            &message,
+        )?;
+        *review.expected_head.borrow_mut() = Some(new);
+        done.new_commit = true;
+        output::success(&format!("committed: {message}"));
+    }
+    Ok(done)
+}
+
+fn reviewed_selection(
+    ctx: &Context,
+    review: &crate::decisions::Reviewed,
+    projected: &[ProjectedEdit],
+    preview: Option<&Delta>,
+) -> Result<Delta> {
+    let mut selected = BTreeMap::new();
+    for edit in projected {
+        let authorized = review.reencrypted.borrow().as_ref().map_or_else(
+            || {
+                review.outgoing(&edit.path).is_some_and(|expected| {
+                    expected.matches(edit.tuple.as_ref())
+                        && !matches!(edit.stored, Stored::Ciphertext)
+                }) || (review
+                    .outgoing(&edit.path)
+                    .is_some_and(crate::decisions::Observed::hypothetical)
+                    && (review
+                        .captured
+                        .borrow()
+                        .get(&edit.path)
+                        .is_some_and(|captured| captured == &edit.stored)
+                        || (matches!(edit.stored, Stored::Ciphertext)
+                            && preview.is_some_and(|delta| {
+                                matches!(delta.get(&edit.path), Some(Stored::Ciphertext))
+                            }))))
+            },
+            |reencrypted| {
+                reencrypted
+                    .files
+                    .get(&edit.path)
+                    .is_some_and(|stored| stored == &edit.stored)
+            },
+        );
+        if authorized && holds_stored(&edit.path, &edit.stored, &ctx.machine.guard.allow).is_none()
+        {
+            let mut stored = edit.stored.clone();
+            if let (Stored::File { mode, .. }, Some(tuple)) = (&mut stored, &edit.tuple) {
+                *mode = tuple.mode;
+            }
+            selected.insert(edit.path.clone(), stored);
+        } else {
+            review.blocked.borrow_mut().insert(edit.path.clone());
+            review.stale(ctx, edit.path.to_str())?;
+        }
+    }
+    Ok(selected)
+}
+
+fn check_reviewed_remainder(
+    ctx: &Context,
+    review: &crate::decisions::Reviewed,
+    selected: &mut Delta,
+    projected: &[ProjectedEdit],
+    excluded: &[PathBuf],
+) -> Result<()> {
+    let index = ctx.git.staging_review(&[], excluded)?;
+    for path in index
+        .head
+        .keys()
+        .chain(
+            index
+                .index
+                .keys()
+                .filter(|path| !index.head.contains_key(*path)),
+        )
+        .filter(|path| index.head.get(*path) != index.index.get(*path))
+    {
+        if !selected.contains_key(path) {
+            review.blocked.borrow_mut().insert(path.clone());
+            review.stale(ctx, path.to_str())?;
+        }
+    }
+    if review.reencrypted.borrow().is_none()
+        && let Some(sync) = &review.input.sync
+    {
+        for entry in &sync.outgoing {
+            let path = entry.path.path()?;
+            if projected.iter().any(|edit| edit.path == path) {
+                continue;
+            }
+            let stored = Stored::read_staged(
+                &ctx.paths.repo,
+                &path,
+                index.head.contains_key(&path) || index.index.contains_key(&path),
+            )?;
+            if !entry.stored.matches(
+                stored
+                    .staged_tuple(index.filemode, index.index.get(&path))
+                    .as_ref(),
+            ) {
+                review.blocked.borrow_mut().insert(path.clone());
+                review.stale(ctx, path.to_str())?;
+            }
+        }
+    }
+    if projected
+        .iter()
+        .any(|edit| edit.path == Path::new(".dotman.toml"))
+        && !selected.contains_key(Path::new(".dotman.toml"))
+    {
+        let captured = review.captured.borrow();
+        selected.retain(|path, _| {
+            if captured.contains_key(path) {
+                review.blocked.borrow_mut().insert(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !captured.is_empty() {
+            review.stale(ctx, Some(".dotman.toml"))?;
+        }
+    }
+    Ok(())
+}
+
+fn constrain_reviewed_shapes(
+    ctx: &Context,
+    review: &crate::decisions::Reviewed,
+    selected: &mut Delta,
+    projected: &[ProjectedEdit],
+) -> Result<()> {
+    let deleted: BTreeSet<_> = projected
+        .iter()
+        .filter(|edit| matches!(edit.stored, Stored::Missing))
+        .map(|edit| edit.path.clone())
+        .collect();
+    let approved = review
+        .input
+        .approvals
+        .mass_delete
+        .as_ref()
+        .map(|paths| {
+            paths
+                .iter()
+                .map(crate::decisions::InputPath::path)
+                .collect::<Result<BTreeSet<_>>>()
+        })
+        .transpose()?;
+    let mass_delete = deleted.len() >= MASS_DELETE
+        && deleted.len().saturating_mul(2) >= ctx.git.ls_tree("HEAD")?.len();
+    if (approved.is_some() && approved.as_ref() != Some(&deleted))
+        || (mass_delete && approved.is_none())
+    {
+        selected.retain(|path, stored| {
+            if matches!(stored, Stored::Missing) {
+                review.blocked.borrow_mut().insert(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        review.stale(ctx, None)?;
+    }
+    let previous_tree = if ctx.git.head()?.is_some() {
+        ctx.git.tree_entries("HEAD")?
+    } else {
+        BTreeMap::new()
+    };
+    let blocked: Vec<_> = selected
+        .iter()
+        .filter(|(_, stored)| !matches!(stored, Stored::Missing))
+        .filter(|(path, _)| {
+            previous_tree.keys().any(|old| {
+                old != *path
+                    && (old.ancestors().any(|parent| parent == path.as_path())
+                        || path.ancestors().any(|parent| parent == old))
+                    && !matches!(selected.get(old), Some(Stored::Missing))
+            })
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    for path in blocked {
+        selected.remove(&path);
+        review.blocked.borrow_mut().insert(path.clone());
+        review.stale(ctx, path.to_str())?;
+    }
+    Ok(())
+}
+
 /// Reports the held files and commits what [`commit`] staged; `changed` names what a dry run
 /// would capture.
 fn commit_staged(
@@ -441,15 +1013,17 @@ fn commit_staged(
     mut changed: BTreeSet<String>,
     done: Committed,
 ) -> Result<Committed> {
-    report_held(ctx, held, dry_run);
-    changed.extend(
-        ctx.git
-            .status()?
-            .iter()
-            .filter(|entry| !left_out.contains(&entry.path))
-            .filter(|entry| !(entry.kind == StatusKind::Untracked && is_temp(&entry.path)))
-            .map(|entry| entry.path.to_string_lossy().into_owned()),
-    );
+    report_held(ctx, held, dry_run)?;
+    if !(dry_run && ctx.json) {
+        changed.extend(
+            ctx.git
+                .status()?
+                .iter()
+                .filter(|entry| !left_out.contains(&entry.path))
+                .filter(|entry| !(entry.kind == StatusKind::Untracked && is_temp(&entry.path)))
+                .map(|entry| entry.path.to_string_lossy().into_owned()),
+        );
+    }
     if changed.is_empty() {
         return Ok(done);
     }
@@ -457,6 +1031,17 @@ fn commit_staged(
         || default_message(&ctx.identity().host, &changed),
         str::to_owned,
     );
+    if dry_run && ctx.json {
+        #[derive(serde::Serialize)]
+        struct Message {
+            record: &'static str,
+            message: Text,
+        }
+        ctx.emit(&Message {
+            record: "message",
+            message: Text::new(&message),
+        })?;
+    }
     // The subject leaves dotman's own files out, and no capture names them.
     let own_files = || {
         for path in &changed {
@@ -480,6 +1065,217 @@ fn commit_staged(
         output::success(&format!("committed: {message}"));
     }
     Ok(Committed { new_commit, ..done })
+}
+
+fn review_head(ctx: &Context) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Review {
+        record: &'static str,
+        head: Option<Text>,
+        tracking_ref: Option<Text>,
+        tracking_commit: Option<Text>,
+        knowledge: &'static str,
+        warnings: [&'static str; 2],
+    }
+    #[derive(serde::Serialize)]
+    struct Commit {
+        record: &'static str,
+        id: Text,
+        subject: Text,
+        paths: Vec<PathValue>,
+    }
+    let head = ctx.git.head()?;
+    let tracking = ctx
+        .git
+        .branch()?
+        .map(|branch| format!("refs/remotes/{REMOTE}/{branch}"));
+    let base = tracking
+        .as_deref()
+        .map(|name| ctx.git.resolve_commit(name))
+        .transpose()?
+        .flatten();
+    ctx.emit(&Review {
+        record: "outgoing",
+        head: head.as_ref().map(Text::new),
+        tracking_ref: tracking.as_ref().map(Text::new),
+        tracking_commit: base.as_ref().map(Text::new),
+        knowledge: "last_fetched",
+        warnings: [
+            "upstream_hook_changes_need_approval",
+            "recipient_changes_may_reencrypt",
+        ],
+    })?;
+    if let Some(head) = head {
+        for (id, subject, paths) in ctx.git.outgoing_commits(base.as_deref(), &head)? {
+            ctx.emit(&Commit {
+                record: "ahead_commit",
+                id: Text::new(id),
+                subject: Text::new(subject),
+                paths: paths.iter().map(|path| PathValue::new(path)).collect(),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn review_worktree(
+    ctx: &Context,
+    left_out: &[PathBuf],
+    delta: &Delta,
+    excluded: &[PathBuf],
+) -> Result<BTreeSet<String>> {
+    #[derive(serde::Serialize)]
+    struct Edit {
+        record: &'static str,
+        path: PathValue,
+        stored: crate::commands::status::Observation,
+        observed: Option<crate::commands::status::Observation>,
+        remove_tracked_temporary: bool,
+        basis: &'static str,
+    }
+    let mut changed = BTreeSet::new();
+    for edit in projected_edits(ctx, left_out, delta, excluded)? {
+        changed.insert(edit.path.to_string_lossy().into_owned());
+        ctx.emit(&Edit {
+            record: if edit.path.to_str().is_some_and(|path| own(path).is_some()) {
+                "own"
+            } else {
+                "repo_edit"
+            },
+            path: PathValue::new(&edit.path),
+            stored: edit.tuple.as_ref().map_or_else(
+                || edit.stored.observation(),
+                crate::commands::status::Observation::tuple,
+            ),
+            observed: edit.observed,
+            remove_tracked_temporary: edit.temporary,
+            basis: edit.basis,
+        })?;
+    }
+    Ok(changed)
+}
+
+struct ProjectedEdit {
+    path: PathBuf,
+    stored: Stored,
+    tuple: Option<crate::engine::Tuple>,
+    observed: Option<crate::commands::status::Observation>,
+    temporary: bool,
+    basis: &'static str,
+}
+
+fn projected_edits(
+    ctx: &Context,
+    left_out: &[PathBuf],
+    delta: &Delta,
+    excluded: &[PathBuf],
+) -> Result<Vec<ProjectedEdit>> {
+    let mut plan = ctx.git.staging_review(left_out, excluded)?;
+    plan.paths.extend(delta.keys().cloned());
+    let mut edits = Vec::new();
+    for path in &plan.paths {
+        let temporary = plan.temporary.contains(path);
+        let owned;
+        let (stored, basis) = if temporary {
+            owned = Stored::Missing;
+            (&owned, "temporary_removal")
+        } else if left_out.contains(path) {
+            owned = plan
+                .head
+                .get(path)
+                .map(|entry| Stored::from_entry(&ctx.git, entry))
+                .transpose()?
+                .unwrap_or(Stored::Missing);
+            (&owned, "held_reset")
+        } else if plan.excluded.iter().any(|root| path.starts_with(root)) {
+            owned = plan
+                .index
+                .get(path)
+                .map(|entry| Stored::from_entry(&ctx.git, entry))
+                .transpose()?
+                .unwrap_or(Stored::Missing);
+            (&owned, "index")
+        } else if let Some(stored) = delta.get(path) {
+            (stored, "projected")
+        } else {
+            owned = Stored::read_staged(
+                &ctx.paths.repo,
+                path,
+                plan.index.contains_key(path) || plan.head.contains_key(path),
+            )?;
+            (&owned, "worktree")
+        };
+        let staged = if matches!(basis, "worktree" | "projected") {
+            stored.staged_tuple(plan.filemode, plan.index.get(path))
+        } else {
+            stored.git_tuple()
+        };
+        let old = plan
+            .head
+            .get(path)
+            .map(|entry| Stored::from_entry(&ctx.git, entry))
+            .transpose()?;
+        if !matches!(stored, Stored::Ciphertext)
+            && staged == old.as_ref().and_then(Stored::git_tuple)
+        {
+            continue;
+        }
+        edits.push(ProjectedEdit {
+            path: path.clone(),
+            stored: stored.clone(),
+            tuple: staged,
+            observed: (basis == "worktree").then(|| stored.observation()),
+            temporary,
+            basis,
+        });
+    }
+    Ok(edits)
+}
+
+fn projected_status(
+    ctx: &Context,
+    policy: Option<&StagePolicy>,
+) -> Result<(Vec<StatusEntry>, Vec<PathBuf>)> {
+    let Some(policy) = policy else {
+        return Ok((ctx.git.status()?, Vec::new()));
+    };
+    let mut status = ctx.git.full_status()?;
+    let untracked: Vec<_> = status
+        .iter()
+        .filter(|entry| entry.kind == StatusKind::Untracked)
+        .map(|entry| entry.path.clone())
+        .collect();
+    let excluded = ctx.projected_exclusions(&untracked, &policy.patterns, &policy.kept)?;
+    status.retain(|entry| {
+        entry.kind != StatusKind::Untracked
+            || !excluded.iter().any(|root| entry.path.starts_with(root))
+    });
+    Ok((status, excluded))
+}
+
+fn project_status(status: &mut Vec<StatusEntry>, delta: &Delta) {
+    for (path, stored) in delta {
+        if let Some(entry) = status.iter_mut().find(|entry| entry.path == *path) {
+            if matches!(stored, Stored::Missing) {
+                ".D"
+            } else {
+                ".M"
+            }
+            .clone_into(&mut entry.xy);
+        } else {
+            status.push(StatusEntry {
+                kind: StatusKind::Ordinary,
+                xy: if matches!(stored, Stored::Missing) {
+                    ".D"
+                } else {
+                    ".M"
+                }
+                .to_owned(),
+                path: path.clone(),
+                orig_path: None,
+            });
+        }
+    }
 }
 
 /// A remote that could not be reached, or a push it refused, as one line saying what that means
@@ -507,11 +1303,25 @@ pub(crate) fn held_entries<'a>(
     ctx: &Context,
     status: &'a [StatusEntry],
 ) -> Vec<(&'a StatusEntry, Finding)> {
+    held_projected(ctx, status, &Delta::new())
+}
+
+fn held_projected<'a>(
+    ctx: &Context,
+    status: &'a [StatusEntry],
+    delta: &Delta,
+) -> Vec<(&'a StatusEntry, Finding)> {
     let allow = &ctx.machine.guard.allow;
     status
         .iter()
         .filter(|entry| entry.kind != StatusKind::Unmerged && !is_temp(&entry.path))
-        .filter_map(|entry| Some((entry, holds_secret_key(ctx, &entry.path, allow)?)))
+        .filter_map(|entry| {
+            let found = delta.get(&entry.path).map_or_else(
+                || holds_secret_key(ctx, &entry.path, allow),
+                |stored| holds_stored(&entry.path, stored, allow),
+            )?;
+            Some((entry, found))
+        })
         .collect()
 }
 
@@ -565,7 +1375,7 @@ fn list_held(ctx: &Context, held: &[(&StatusEntry, Finding)]) {
 /// A held edit stays uncommitted in the worktree, so a pull would stash it and put it back over
 /// what arrives, conflict markers and all. Reports the held files and returns true when there are
 /// any and a remote is set.
-fn holds_back_the_pull(ctx: &Context) -> Result<bool> {
+fn holds_back_the_pull(ctx: &Context, dry_run: bool) -> Result<bool> {
     if ctx.git.remote_url(REMOTE)?.is_none() {
         return Ok(false);
     }
@@ -574,6 +1384,7 @@ fn holds_back_the_pull(ctx: &Context) -> Result<bool> {
     if held.is_empty() {
         return Ok(false);
     }
+    ctx.stage("blocked_by_repo_hold", dry_run)?;
     let one = held.len() == 1;
     let it = if one { "it" } else { "them" };
     output::warning(&format!(
@@ -584,6 +1395,9 @@ fn holds_back_the_pull(ctx: &Context) -> Result<bool> {
         if one { "is" } else { "are" },
     ));
     list_held(ctx, &held);
+    for (entry, _) in &held {
+        ctx.attention("repo_held", entry.path.to_str(), "repo_source", true)?;
+    }
     Ok(true)
 }
 
@@ -596,7 +1410,7 @@ fn holds_secret_key(ctx: &Context, path: &Path, allow: &[Allow]) -> Option<Findi
     let source = path.to_string_lossy();
     if fs::symlink_metadata(&full).ok()?.is_symlink() {
         let target = fs::read_link(&full).ok()?;
-        return secrets::held_link(target.as_os_str().as_bytes(), &source);
+        return holds_stored(path, &Stored::Link(target), allow);
     }
     if let Some(found) = secrets::held_name(&source) {
         return Some(found);
@@ -610,11 +1424,24 @@ fn holds_secret_key(ctx: &Context, path: &Path, allow: &[Allow]) -> Option<Findi
     if !file.metadata().is_ok_and(|meta| meta.is_file()) || file.read_to_end(&mut bytes).is_err() {
         return None;
     }
+    holds_stored(path, &Stored::File { bytes, mode: 0 }, allow)
+}
+
+fn holds_stored(path: &Path, stored: &Stored, allow: &[Allow]) -> Option<Finding> {
+    let source = path.to_string_lossy();
+    let bytes = match stored {
+        Stored::Link(target) => return secrets::held_link(target.as_os_str().as_bytes(), &source),
+        Stored::File { bytes, .. } => bytes,
+        Stored::Missing | Stored::Ciphertext => return None,
+    };
+    if let Some(found) = secrets::held_name(&source) {
+        return Some(found);
+    }
     let key = Sources::group([source.as_ref()])
         .keys()
         .next()
         .map(str::to_owned);
-    secrets::held(&bytes, key.as_deref().unwrap_or(&source), allow)
+    secrets::held(bytes, key.as_deref().unwrap_or(&source), allow)
 }
 
 fn is_temp(path: &Path) -> bool {
@@ -622,9 +1449,9 @@ fn is_temp(path: &Path) -> bool {
         .is_some_and(|name| name.as_bytes().starts_with(TEMP_PREFIX.as_bytes()))
 }
 
-fn report_held(ctx: &Context, held: &[(&StatusEntry, Finding)], dry_run: bool) {
+fn report_held(ctx: &Context, held: &[(&StatusEntry, Finding)], dry_run: bool) -> Result<()> {
     if held.is_empty() {
-        return;
+        return Ok(());
     }
     output::warning(&format!(
         "{} {} in the repo {} an age secret key or a credential, so {} {}committed:",
@@ -635,6 +1462,10 @@ fn report_held(ctx: &Context, held: &[(&StatusEntry, Finding)], dry_run: bool) {
         if dry_run { "would not be " } else { "not " },
     ));
     list_held(ctx, held);
+    for (entry, _) in held {
+        ctx.attention("repo_held", entry.path.to_str(), "repo_source", true)?;
+    }
+    Ok(())
 }
 
 /// Refuses a commit that deletes at least [`MASS_DELETE`] tracked files and at least half of
@@ -644,12 +1475,18 @@ fn refuse_mass_delete(
     ctx: &Context,
     status: &[StatusEntry],
     dry_run: bool,
-) -> Result<Option<String>> {
+    delta: &Delta,
+) -> Result<Option<MassDelete>> {
     // Only files gone from the worktree: a lost index also lists every file as deleted.
     let deleted: Vec<&Path> = status
         .iter()
         .filter(|entry| entry.kind == StatusKind::Ordinary && entry.xy.contains('D'))
-        .filter(|entry| fs::symlink_metadata(ctx.paths.repo.join(&entry.path)).is_err())
+        .filter(|entry| {
+            delta.get(&entry.path).map_or_else(
+                || fs::symlink_metadata(ctx.paths.repo.join(&entry.path)).is_err(),
+                |stored| matches!(stored, Stored::Missing),
+            )
+        })
         .map(|entry| entry.path.as_path())
         .collect();
     if deleted.len() < MASS_DELETE || ctx.git.head()?.is_none() {
@@ -697,7 +1534,7 @@ fn refuse_mass_delete(
         if prompt::confirm("commit the deletions? [y/N]")? {
             return Ok(None);
         }
-        bail!("nothing was committed or pushed");
+        return Err(MassDelete("nothing was committed or pushed".to_owned()).into());
     }
     let fix = if dirs.is_empty() {
         format!(
@@ -709,13 +1546,13 @@ fn refuse_mass_delete(
         )
     };
     if dry_run {
-        return Ok(Some(format!(
+        return Ok(Some(MassDelete(format!(
             "sync would refuse: {what}, as a broken checkout or a forget of many files does, and would commit or push nothing. {fix}"
-        )));
+        ))));
     }
-    bail!(
+    Err(MassDelete(format!(
         "{what}, as a broken checkout or a forget of many files does; nothing was committed or pushed. {fix}"
-    )
+    )).into())
 }
 
 /// Why a sync with a remote refuses a detached `HEAD`, and the command that puts the repo on a
@@ -908,10 +1745,18 @@ fn report_unstashed(ctx: &Context, paths: &[PathBuf]) {
         "the pull finished, but uncommitted edits in the repo did not go back on top of it cleanly. Nothing was applied to $HOME and nothing was pushed; git keeps the edits in its stash. To recover:",
     );
     let mut steps = Vec::new();
+    let mut recovery = Vec::new();
     if !paths.is_empty() {
-        let all: Vec<&PathBuf> = paths.iter().collect();
+        let mut argv = [bin, "git", "checkout", "HEAD", "--"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        argv.extend(paths.iter().map(|path| crate::git::literal_pathspec(path)));
+        recovery.push(Step::command(argv));
         steps.push(vec![
-            format!("{bin} git checkout HEAD -- {}", quoted(&all)),
+            crate::git::recovery_path_command(
+                &["checkout", "HEAD"],
+                &paths.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            ),
             "puts back the pulled version".to_owned(),
         ]);
     }
@@ -924,6 +1769,18 @@ fn report_unstashed(ctx: &Context, paths: &[PathBuf]) {
     ]);
     steps.push(vec![format!("{bin} git stash drop")]);
     steps.push(vec![format!("{bin} sync")]);
+    if ctx.json {
+        recovery.extend([
+            Step::command([bin, "git", "stash", "show", "-p"]),
+            Step::instruction(
+                "Reapply the edits you want under the repository before dropping the saved stash.",
+            ),
+            Step::command([bin, "git", "stash", "drop"])
+                .when("after preserving or reapplying the edits"),
+            Step::command([bin, "sync"]),
+        ]);
+        ctx.recovery.borrow_mut().extend(recovery);
+    }
     print_steps(&steps);
     if !paths.is_empty() {
         output::warning("conflicting paths:");
@@ -934,6 +1791,27 @@ fn report_unstashed(ctx: &Context, paths: &[PathBuf]) {
             ));
         }
     }
+}
+
+fn refusal_event(
+    ctx: &Context,
+    kind: &'static str,
+    source: Option<&Path>,
+    key: Option<&str>,
+) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Refusal {
+        record: &'static str,
+        kind: &'static str,
+        source: Option<PathValue>,
+        key: Option<Text>,
+    }
+    ctx.emit(&Refusal {
+        record: "refusal",
+        kind,
+        source: source.map(PathValue::new),
+        key: key.map(Text::new),
+    })
 }
 
 #[cfg(test)]

@@ -559,7 +559,10 @@ pub(crate) fn capture(
     source: &str,
     repo_config: &mut RepoConfig,
     dry_run: bool,
-) -> Result<Tuple> {
+) -> Result<(Tuple, Vec<u8>)> {
+    if ctx.reviewed.is_some() {
+        return Err(crate::context::ReviewChanged.into());
+    }
     let Node::File {
         bytes,
         mode,
@@ -577,9 +580,9 @@ pub(crate) fn capture(
     if !dry_run {
         ensure_worktree_parents(&ctx.paths.repo, source)?;
         write_atomic(&ctx.paths.repo.join(source), &bytes, stored_mode(mode))?;
-        record(repo_config, key, uid, gid, mode)?;
     }
-    Ok(Tuple::of_file(&bytes, mode))
+    record(repo_config, key, uid, gid, mode)?;
+    Ok((Tuple::of_file(&bytes, mode), bytes))
 }
 
 /// Whether an error is the user lacking permission to read.
