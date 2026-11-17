@@ -1,5 +1,7 @@
 # Experimental status JSON
 
+For comparison payloads and their snapshot semantics, see [diff JSON](diff-json.md).
+
 `dotman status --json` is a read-only, lock-free client interface. It conflicts with
 `--porcelain`; the ordinary human and porcelain formats are unchanged.
 

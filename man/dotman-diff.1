@@ -4,7 +4,7 @@
 .SH NAME
 dotman\-diff \- Show how $HOME differs from the repo, as a diff from repo/ to home/
 .SH SYNOPSIS
-\fBdotman diff\fR [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
+\fBdotman diff\fR [\fB\-\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
 .SH DESCRIPTION
 Show how $HOME differs from the repo, as a diff from repo/ to home/
 .PP
@@ -12,6 +12,9 @@ The diff runs from repo/<key> to home/<key>, so an edit made in $HOME shows
 as added lines. It goes through git\*(Aqs pager unless \-\-no\-pager or NO_PAGER
 is set, or the pager cannot be found. NO_COLOR turns colour off.
 .SH OPTIONS
+.TP
+\fB\-\-json\fR
+Print experimental schema\-versioned NDJSON comparisons
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

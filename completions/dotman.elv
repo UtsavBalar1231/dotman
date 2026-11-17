@@ -155,6 +155,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --help 'Print help'
         }
         &'dotman;diff'= {
+            cand --json 'Print experimental schema-versioned NDJSON comparisons'
             cand -v 'Show verbose output'
             cand --verbose 'Show verbose output'
             cand -q 'Suppress informational messages'

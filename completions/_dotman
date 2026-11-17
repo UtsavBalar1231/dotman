@@ -161,6 +161,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (diff)
 _arguments "${_arguments_options[@]}" : \
+'--json[Print experimental schema-versioned NDJSON comparisons]' \
 '-v[Show verbose output]' \
 '--verbose[Show verbose output]' \
 '-q[Suppress informational messages]' \

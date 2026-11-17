@@ -144,7 +144,7 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__diff)
-            opts="-v -q -h --verbose --quiet --no-pager --allow-root --help"
+            opts="-v -q -h --json --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

@@ -165,6 +165,7 @@ Register-ArgumentCompleter -Native -CommandName 'dotman' -ScriptBlock {
             break
         }
         'dotman;diff' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print experimental schema-versioned NDJSON comparisons')
             [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Show verbose output')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress informational messages')

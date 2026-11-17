@@ -125,6 +125,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand apply" -s q -l quiet -d 'S
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l no-pager -d 'Disable pager output'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -s h -l help -d 'Print help'
+complete -c dotman -n "__fish_dotman_using_subcommand diff" -l json -d 'Print experimental schema-versioned NDJSON comparisons'
 complete -c dotman -n "__fish_dotman_using_subcommand diff" -s v -l verbose -d 'Show verbose output'
 complete -c dotman -n "__fish_dotman_using_subcommand diff" -s q -l quiet -d 'Suppress informational messages'
 complete -c dotman -n "__fish_dotman_using_subcommand diff" -l no-pager -d 'Disable pager output'

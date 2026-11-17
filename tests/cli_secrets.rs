@@ -1002,6 +1002,132 @@ fn diff_compares_the_plaintext_and_removes_its_temp_dir() {
     );
 }
 
+#[test]
+fn json_diff_reports_decrypted_and_locked_sources_and_cleans_up() {
+    if !age_installed() {
+        return;
+    }
+    let a = keyed_device();
+    a.write(HOSTS, b"local content\n", 0o600);
+    let runtime = a.root().join("json-runtime");
+    fs::create_dir(&runtime).unwrap();
+    let out = a.run_with(
+        &[("XDG_RUNTIME_DIR", runtime.to_str().unwrap())],
+        &["diff", "--json", HOSTS],
+    );
+    exits(&out, 0);
+    let values: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let entry = values
+        .iter()
+        .find(|v| v.pointer("/key/raw").and_then(|v| v.as_str()) == Some(HOSTS))
+        .unwrap();
+    let payload = entry
+        .pointer("/payload/raw")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert!(payload.contains("+local content"), "{payload}");
+    assert!(payload.contains("-github.com:"), "{payload}");
+    assert_eq!(
+        entry.pointer("/r/tuple/hash").and_then(|v| v.as_str()),
+        Some(format!("{:032x}", xxhash_rust::xxh3::xxh3_128(PLAIN)).as_str())
+    );
+    assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+    assert!(
+        !fs::read(a.repo().join(HOSTS_AGE))
+            .unwrap()
+            .windows(PLAIN.len())
+            .any(|w| w == PLAIN)
+    );
+
+    let b = a.second_device();
+    exits(&b.run(&["init", &b.remote_url()]), 0);
+    let out = b.run(&["diff", "--json", HOSTS]);
+    exits(&out, 0);
+    let values: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let entry = values
+        .iter()
+        .find(|v| v.pointer("/key/raw").and_then(|v| v.as_str()) == Some(HOSTS))
+        .unwrap();
+    assert_eq!(entry["status"], "locked");
+    assert_eq!(
+        entry.pointer("/r/state").and_then(|v| v.as_str()),
+        Some("unavailable")
+    );
+    assert_eq!(entry["payload"], serde_json::Value::Null);
+
+    a.write_repo(HOSTS_AGE, b"damaged ciphertext");
+    let out = a.run_with(
+        &[("XDG_RUNTIME_DIR", runtime.to_str().unwrap())],
+        &["diff", "--json", HOSTS],
+    );
+    exits(&out, 0);
+    let values: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let entry = values
+        .iter()
+        .find(|v| v.pointer("/key/raw").and_then(|v| v.as_str()) == Some(HOSTS))
+        .unwrap();
+    assert_eq!(entry["status"], "unreadable");
+    assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+}
+
+#[test]
+fn interrupted_json_encrypted_diff_removes_plaintext_snapshots() {
+    use std::os::unix::process::CommandExt;
+    if !age_installed() {
+        return;
+    }
+    let mut env = keyed_device();
+    env.write(HOSTS, b"local change\n", 0o600);
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let bin = env.root().join("interrupt-bin");
+    fs::create_dir(&bin).unwrap();
+    let marker = env.root().join("json-interrupted");
+    common::write_exe(&bin.join("git"), &format!(
+        "#!/bin/sh\nfor arg do\n if [ \"$arg\" = --no-index ]; then\n  trap '' TERM\n  : > '{}'\n  kill -TERM 0\n  exit 42\n fi\ndone\nexec '{}' \"$@\"\n",
+        marker.display(), real_git.display()
+    )).unwrap();
+    env.prepend_path(&bin);
+    let runtime = env.root().join("json-interrupt-runtime");
+    fs::create_dir(&runtime).unwrap();
+    let out = env
+        .dot_process()
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .args(["diff", "--json", HOSTS])
+        .process_group(0)
+        .output()
+        .unwrap();
+    assert!(marker.exists());
+    assert_eq!(out.status.code(), Some(1));
+    let values: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        values
+            .last()
+            .and_then(|v| v.get("record"))
+            .and_then(|v| v.as_str()),
+        Some("result")
+    );
+    assert_eq!(fs::read_dir(runtime).unwrap().count(), 0);
+}
+
 // Without a TTY git starts no pager, even with `-p`, so an external diff stands in for it: a child
 // of git that interrupts the whole process group while dot waits. dot runs in a group of its own,
 // so the interrupt never reaches the test runner.

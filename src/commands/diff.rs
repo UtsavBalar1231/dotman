@@ -7,7 +7,7 @@
 use crate::cli::DiffArgs;
 use crate::context::{Context, TEMP_PREFIX};
 use crate::engine::status::{Content, Source, SourceEntry, Variants, Worktree};
-use crate::engine::{Home, Node, observe_portable, read_node};
+use crate::engine::{Home, Node, Tuple, portable_link_target, read_node};
 use crate::git::Git;
 use crate::output;
 use crate::paths::{create_private_dir, private_temp_dir};
@@ -18,6 +18,7 @@ use crate::system::{self, Verdict};
 use crate::variant::Selection;
 use anyhow::{Context as _, Result, bail};
 use libc::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs::{self, Permissions};
 use std::io::IsTerminal;
@@ -37,8 +38,14 @@ const PAGER_PROBE: Duration = Duration::from_secs(5);
 /// resolved to a key, or a file cannot be rendered for comparison.
 pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     let ctx = Context::resolve("diff")?;
-    ctx.guard()?;
-    ctx.repo_id()?;
+    let repo_id = ctx.guard().and_then(|()| ctx.repo_id());
+    if args.json {
+        crate::commands::status::write_context(&ctx, "diff", repo_id.as_deref().ok())?;
+    }
+    let repo_id = repo_id?;
+    if args.json {
+        return json_diff(&ctx, args, &repo_id);
+    }
     let repo_config = ctx.repo_config()?;
     let (home_paths, system_filters) = system::split_inputs(&ctx.paths, &args.paths)?;
     let sources = ctx.sources()?;
@@ -98,6 +105,365 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
     show_all(&ctx, &refs, &system_refs, no_pager, &DIFF)
 }
 
+#[derive(Serialize)]
+struct DiffRecord {
+    record: &'static str,
+    key: crate::output::json::Text,
+    scope: &'static str,
+    path: crate::output::json::PathValue,
+    status: &'static str,
+    system_off: bool,
+    source: Option<crate::output::json::Text>,
+    r: crate::commands::status::Observation,
+    source_tuple: crate::commands::status::Observation,
+    h: crate::commands::status::Observation,
+    raw_h: crate::commands::status::Observation,
+    payload: Option<crate::output::json::PathValue>,
+}
+
+#[derive(Serialize)]
+struct DiffReport {
+    record: &'static str,
+    count: usize,
+}
+
+impl DiffRecord {
+    fn new(ctx: &Context, key: &str, scope: &'static str, off: bool) -> Self {
+        use crate::commands::status::Observation;
+        let path = if scope == "home" {
+            ctx.paths.home.join(key)
+        } else {
+            ctx.system_scope().disk(key)
+        };
+        Self {
+            record: "diff",
+            key: crate::output::json::Text::new(key),
+            scope,
+            path: crate::output::json::PathValue::new(&path),
+            status: "unavailable",
+            system_off: off,
+            source: None,
+            r: Observation::Unavailable {
+                reason: "not_observed",
+            },
+            source_tuple: Observation::Unavailable {
+                reason: "not_observed",
+            },
+            h: Observation::Unavailable {
+                reason: "not_observed",
+            },
+            raw_h: Observation::Unavailable {
+                reason: "not_observed",
+            },
+            payload: None,
+        }
+    }
+}
+
+fn json_diff(ctx: &Context, args: &DiffArgs, repo_id: &str) -> Result<()> {
+    let config = ctx.repo_config()?;
+    let state = ctx.state(repo_id)?;
+    let sources = ctx.sources()?;
+    let (home_paths, system_filters) = system::split_inputs(&ctx.paths, &args.paths)?;
+    let mut all: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
+    let indexed = ctx.git.index_paths()?;
+    let tracked =
+        crate::variant::Sources::group(indexed.iter().map(String::as_str).filter(|path| {
+            !crate::paths::is_reserved_root_name(path.split('/').next().unwrap_or(path))
+                && ctx.check_key(path, true).is_ok()
+        }));
+    all.extend(tracked.keys().map(str::to_owned));
+    all.extend(state.files.keys().cloned());
+    let keys = if args.paths.is_empty() || !home_paths.is_empty() {
+        ctx.select(&home_paths, all)?
+    } else {
+        BTreeSet::new()
+    };
+    let variants = Variants::new(
+        Worktree::new(&ctx.paths.repo, &config.modes),
+        &sources,
+        ctx.identity(),
+        ctx.template_vars(),
+        ctx.age(),
+    );
+    ctx.git.check_version()?;
+    let tmp = private_temp_dir(&temp_prefix(), &private_base(ctx)?)?;
+    anyhow::ensure!(
+        !fs::canonicalize(tmp.path())?.starts_with(fs::canonicalize(&ctx.paths.repo)?),
+        "the diff temporary directory is inside the repo"
+    );
+    let mut count = 0_usize;
+    for key in keys {
+        let record = home_diff(ctx, tmp.path(), &variants, &sources, &state, &key)?;
+        emit_diff(&record, &mut count)?;
+    }
+    if args.paths.is_empty() || !system_filters.is_empty() {
+        let found = system::evaluate_with_nodes(ctx, &config, &state)?;
+        let indexed_system: Vec<&str> = indexed
+            .iter()
+            .filter_map(|path| path.strip_prefix(".dotman/system/"))
+            .filter(|path| crate::paths::validate_key(path).is_ok())
+            .collect();
+        let grouped = crate::variant::Sources::group(indexed_system);
+        let existing: BTreeSet<String> = found.iter().map(|(f, _)| f.key.clone()).collect();
+        let missing: BTreeSet<String> = grouped
+            .keys()
+            .map(system::key_of)
+            .filter(|key| !existing.contains(key))
+            .collect();
+        let all = existing.union(&missing).cloned().collect();
+        let wanted = system::select_keys(&system_filters, &all)?;
+        for (item, node) in found.into_iter().filter(|(f, _)| wanted.contains(&f.key)) {
+            let record = system_diff(ctx, tmp.path(), item, node)?;
+            emit_diff(&record, &mut count)?;
+        }
+        for key in missing.intersection(&wanted) {
+            let record = missing_system_diff(ctx, tmp.path(), key)?;
+            emit_diff(&record, &mut count)?;
+        }
+    }
+    crate::output::json::write(
+        &mut std::io::stdout().lock(),
+        &DiffReport {
+            record: "report",
+            count,
+        },
+    )
+}
+
+fn missing_system_diff(ctx: &Context, tmp: &Path, key: &str) -> Result<DiffRecord> {
+    use crate::commands::status::Observation;
+    let scope = ctx.system_scope();
+    let standing = scope.standing(key);
+    let mut record = DiffRecord::new(ctx, key, "system", standing == system::Standing::Off);
+    if matches!(standing, system::Standing::Refused(_)) {
+        record.status = "refused";
+        return Ok(record);
+    }
+    record.r = Observation::Missing;
+    record.source_tuple = Observation::Missing;
+    match scope.node(key) {
+        Ok(node) => {
+            record.raw_h = Observation::home(&node.home());
+            let rel = format!("system/{}", key.trim_start_matches('/'));
+            compare_json(tmp, &rel, None, node, &mut record)?;
+        }
+        Err(e) => {
+            record.status = "unreadable";
+            record.h = Observation::Unavailable {
+                reason: "unreadable",
+            };
+            record.raw_h = record.h.clone();
+            output::warning(&format!("{key}: not compared: {e:#}"));
+        }
+    }
+    Ok(record)
+}
+
+fn home_diff(
+    ctx: &Context,
+    tmp: &Path,
+    variants: &Variants<'_>,
+    sources: &crate::variant::Sources,
+    state: &crate::state::State,
+    key: &str,
+) -> Result<DiffRecord> {
+    use crate::commands::status::Observation;
+    let mut record = DiffRecord::new(ctx, key, "home", false);
+    record.source = sources
+        .select(key, ctx.identity())
+        .winner()
+        .map(|source| crate::output::json::Text::new(*source));
+    let mut r = match variants.get(key) {
+        Ok(Selection::Winner(r)) => Some(r),
+        Ok(Selection::None) => None,
+        Ok(Selection::Ambiguous(_)) => {
+            record.status = "ambiguous";
+            return Ok(record);
+        }
+        Ok(Selection::Invalid(_)) => {
+            record.status = "invalid";
+            return Ok(record);
+        }
+        Err(e) => {
+            let reason = if e.is::<Locked>() {
+                "locked"
+            } else if e.is::<crate::engine::status::TemplateError>() {
+                "template_error"
+            } else {
+                "unreadable"
+            };
+            record.status = reason;
+            record.r = Observation::Unavailable { reason };
+            record.source_tuple = Observation::Unavailable { reason };
+            output::warning(&format!("{key}: not compared: {e:#}"));
+            return Ok(record);
+        }
+    };
+    if let Some(entry) = &mut r {
+        record.source = Some(crate::output::json::Text::new(&entry.source));
+        record.source_tuple = Observation::tuple(&entry.tuple);
+        if let Some(saved) = state.files.get(key) {
+            let saved_tuple = Tuple::from_entry(saved)?;
+            let against = saved
+                .repo_mode
+                .as_deref()
+                .map(crate::engine::parse_mode)
+                .transpose()?;
+            if entry.tuple.kind == crate::state::Kind::File
+                && against == Some(entry.tuple.mode)
+                && !variants.mode_is_explicit(&entry.source)
+            {
+                entry.tuple.mode = saved_tuple.mode;
+            }
+        }
+        record.r = Observation::tuple(&entry.tuple);
+    } else {
+        record.r = Observation::Missing;
+        record.source_tuple = Observation::Missing;
+    }
+    match read_node(&ctx.paths.home, key) {
+        Ok(node) => {
+            record.raw_h = Observation::home(&node.home());
+            let node = match node {
+                Node::Symlink(target) => Node::Symlink(portable_link_target(
+                    &target,
+                    key,
+                    &ctx.paths.home,
+                    ctx.paths.home_real.as_deref(),
+                )),
+                node => node,
+            };
+            compare_json(tmp, key, r.as_ref(), node, &mut record)?;
+        }
+        Err(e) => {
+            record.status = "unreadable";
+            record.h = Observation::Unavailable {
+                reason: "unreadable",
+            };
+            record.raw_h = record.h.clone();
+            output::warning(&format!("{key}: not compared: {e:#}"));
+        }
+    }
+    Ok(record)
+}
+
+fn system_diff(
+    ctx: &Context,
+    tmp: &Path,
+    item: system::Evaluated,
+    node: Option<Node>,
+) -> Result<DiffRecord> {
+    use crate::commands::status::Observation;
+    let mut record = DiffRecord::new(ctx, &item.key, "system", item.off);
+    match item.verdict {
+        Verdict::Row { r, .. } => {
+            if let Some(entry) = &r {
+                record.source = Some(crate::output::json::Text::new(&entry.source));
+                record.r = Observation::tuple(&entry.tuple);
+                record.source_tuple = record.r.clone();
+            } else {
+                record.r = Observation::Missing;
+                record.source_tuple = Observation::Missing;
+            }
+            let node = node.context("system comparison snapshot is missing")?;
+            record.raw_h = Observation::home(&node.home());
+            let rel = format!("system/{}", item.key.trim_start_matches('/'));
+            compare_json(tmp, &rel, r.as_ref(), node, &mut record)?;
+        }
+        Verdict::Unreadable(why) => {
+            record.status = "unreadable";
+            output::warning(&format!("{}: not compared: {why}", item.key));
+        }
+        Verdict::Refused(_) => record.status = "refused",
+        Verdict::Invalid(_) => record.status = "invalid",
+        Verdict::Ambiguous(_) => record.status = "ambiguous",
+    }
+    Ok(record)
+}
+
+fn emit_diff(record: &DiffRecord, count: &mut usize) -> Result<()> {
+    crate::output::json::write(&mut std::io::stdout().lock(), record)?;
+    *count = count.saturating_add(1);
+    Ok(())
+}
+
+fn compare_json(
+    tmp: &Path,
+    rel: &str,
+    r: Option<&SourceEntry>,
+    node: Node,
+    record: &mut DiffRecord,
+) -> Result<()> {
+    use crate::commands::status::Observation;
+    use std::os::unix::ffi::OsStrExt;
+    let h = node.home();
+    record.h = Observation::home(&h);
+    if matches!(h, Home::Blocked(_)) {
+        record.status = "blocked";
+        return Ok(());
+    }
+    let equal = match (&h, r) {
+        (Home::Missing, None) => true,
+        (Home::Present(h), Some(r)) => h == &r.tuple,
+        _ => false,
+    };
+    if equal {
+        record.status = "equal";
+        return Ok(());
+    }
+    let tree = private_temp_dir(&temp_prefix(), tmp)?;
+    let home = tree.path().join("home");
+    let repo = tree.path().join("repo");
+    let path = Path::new(rel);
+    if let Some(r) = r {
+        place(&repo.join(path), &r.content, r.tuple.mode)?;
+    }
+    match node {
+        Node::File { bytes, mode, .. } => place(&home.join(path), &Content::Bytes(bytes), mode)?,
+        Node::Symlink(target) => place(&home.join(path), &Content::Link(target), 0)?,
+        Node::Missing => {}
+        Node::BadParent(_) | Node::Dir | Node::Special => bail!("blocked comparison"),
+    }
+    let bytes = capture_diff(tree.path())?;
+    record.payload = Some(crate::output::json::PathValue::new(Path::new(
+        std::ffi::OsStr::from_bytes(&bytes),
+    )));
+    record.status = "different";
+    Ok(())
+}
+
+fn capture_diff(tmp: &Path) -> Result<Vec<u8>> {
+    for side in ["repo", "home"] {
+        create_private_dir(&tmp.join(side), false)?;
+    }
+    let git = Git::new(tmp, "diff");
+    let mut cmd = git.command();
+    cmd.args([
+        "--no-pager",
+        "diff",
+        "--no-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--color=never",
+        "--no-prefix",
+        "--",
+        "repo",
+        "home",
+    ]);
+    cmd.stdout(std::process::Stdio::piped());
+    let child = cmd.spawn().context("failed to run git diff")?;
+    let result = {
+        let _ignored = sys::ignore_signals(&[SIGINT, SIGQUIT, SIGHUP, SIGTERM]);
+        child.wait_with_output()
+    }
+    .context("failed to run git diff")?;
+    match result.status.code() {
+        Some(0 | 1) => Ok(result.stdout),
+        _ => bail!("git diff --no-index failed ({})", result.status),
+    }
+}
+
 /// The names of the two trees `git diff` compares, which label its paths.
 struct Sides {
     home: &'static str,
@@ -151,34 +517,33 @@ fn show_all(
     let (home, home_real) = (&ctx.paths.home, ctx.paths.home_real.as_deref());
     let mut differs = false;
     for (key, r) in entries {
-        let h = match observe_portable(home, home_real, key) {
-            Ok(h) => h,
+        let node = match read_node(home, key) {
+            Ok(node) => node,
             Err(e) => {
                 output::warning(&format!("{key}: not compared: {e:#}"));
                 continue;
             }
         };
-        differs |= stage(
-            &[&home_side, &repo_side],
-            Path::new(key),
-            (key, r),
-            h,
-            || read_node(home, key),
-        )?;
+        let h = match &node {
+            Node::Symlink(target) => Home::Present(Tuple::of_link(&portable_link_target(
+                target, key, home, home_real,
+            ))),
+            _ => node.home(),
+        };
+        differs |= stage(&[&home_side, &repo_side], Path::new(key), (key, r), h, node)?;
     }
     let scope = ctx.system_scope();
     for (key, r) in system_entries {
-        let h = match scope.observe(key) {
-            Ok(h) => h,
+        let node = match scope.node(key) {
+            Ok(node) => node,
             Err(e) => {
                 output::warning(&format!("{key}: not compared: {e:#}"));
                 continue;
             }
         };
         let rel = Path::new("system").join(key.trim_start_matches('/'));
-        differs |= stage(&[&home_side, &repo_side], &rel, (key, r), h, || {
-            scope.node(key)
-        })?;
+        let h = node.home();
+        differs |= stage(&[&home_side, &repo_side], &rel, (key, r), h, node)?;
     }
     if !differs {
         output::info("no differences between the repo and $HOME");
@@ -302,7 +667,7 @@ fn stage(
     rel: &Path,
     (key, r): (&str, &SourceEntry),
     h: Home,
-    read: impl FnOnce() -> Result<Node>,
+    node: Node,
 ) -> Result<bool> {
     let [home_side, repo_side] = sides;
     match h {
@@ -311,7 +676,7 @@ fn stage(
             output::warning(&format!("{key}: blocked, not compared"));
             return Ok(false);
         }
-        Home::Present(_) => match read()? {
+        Home::Present(_) => match node {
             Node::File { bytes, mode, .. } => {
                 place(&home_side.join(rel), &Content::Bytes(bytes), mode)?;
             }
@@ -358,4 +723,125 @@ fn place(path: &Path, content: &Content, mode: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staging_uses_the_observed_node_after_the_file_changes() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path().join("input");
+        fs::create_dir(&root)?;
+        fs::write(root.join("file"), b"before")?;
+        fs::set_permissions(root.join("file"), Permissions::from_mode(0o644))?;
+        let node = read_node(&root, "file")?;
+        let h = node.home();
+        fs::write(root.join("file"), b"after")?;
+
+        let repo = SourceEntry {
+            source: "file".into(),
+            tuple: Tuple::of_file(b"repo", 0o644),
+            content: Content::Bytes(b"repo".to_vec()),
+            template: false,
+            encrypted: false,
+        };
+        let home_side = tmp.path().join("home");
+        let repo_side = tmp.path().join("repo");
+        assert!(stage(
+            &[&home_side, &repo_side],
+            Path::new("file"),
+            ("file", &repo),
+            h,
+            node,
+        )?);
+        assert_eq!(fs::read(home_side.join("file"))?, b"before");
+
+        fs::write(root.join("file"), b"repo")?;
+        let node = read_node(&root, "file")?;
+        let h = node.home();
+        fs::write(root.join("file"), b"after")?;
+        assert!(!stage(
+            &[&home_side, &repo_side],
+            Path::new("file"),
+            ("file", &repo),
+            h,
+            node,
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn json_payload_and_tuple_share_the_owned_node() -> Result<()> {
+        use crate::commands::status::Observation;
+        use crate::output::json::{PathValue, Text};
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path().join("input");
+        fs::create_dir(&root)?;
+        fs::write(root.join("file"), b"before\n")?;
+        let node = read_node(&root, "file")?;
+        let observed = Observation::home(&node.home());
+        fs::write(root.join("file"), b"after\n")?;
+        let repo = SourceEntry {
+            source: "file".into(),
+            tuple: Tuple::of_file(b"repo\n", 0o644),
+            content: Content::Bytes(b"repo\n".to_vec()),
+            template: false,
+            encrypted: false,
+        };
+        let mut record = DiffRecord {
+            record: "diff",
+            key: Text::new("file"),
+            scope: "home",
+            path: PathValue::new(&root.join("file")),
+            status: "unavailable",
+            system_off: false,
+            source: None,
+            r: Observation::tuple(&repo.tuple),
+            source_tuple: Observation::tuple(&repo.tuple),
+            h: observed.clone(),
+            raw_h: observed,
+            payload: None,
+        };
+        compare_json(tmp.path(), "file", Some(&repo), node, &mut record)?;
+        let json = serde_json::to_value(record)?;
+        assert_eq!(
+            json.pointer("/h/tuple/hash").and_then(|v| v.as_str()),
+            Some(crate::engine::hash_hex(b"before\n").as_str())
+        );
+        assert!(
+            json.pointer("/payload/raw")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("+before\n"))
+        );
+        assert!(
+            !json
+                .pointer("/payload/raw")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("+after\n"))
+        );
+        fs::write(root.join("file"), b"repo\n")?;
+        fs::set_permissions(root.join("file"), Permissions::from_mode(0o644))?;
+        let node = read_node(&root, "file")?;
+        fs::write(root.join("file"), b"after\n")?;
+        let mut record = DiffRecord {
+            record: "diff",
+            key: Text::new("file"),
+            scope: "home",
+            path: PathValue::new(&root.join("file")),
+            status: "unavailable",
+            system_off: false,
+            source: None,
+            r: Observation::tuple(&repo.tuple),
+            source_tuple: Observation::tuple(&repo.tuple),
+            h: Observation::home(&node.home()),
+            raw_h: Observation::home(&node.home()),
+            payload: None,
+        };
+        compare_json(tmp.path(), "file", Some(&repo), node, &mut record)?;
+        assert_eq!(record.status, "equal");
+        assert!(record.payload.is_none());
+        Ok(())
+    }
 }

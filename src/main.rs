@@ -34,6 +34,7 @@ fn main() {
         Commands::Apply(args) => args.json,
         Commands::Sync(args) => args.json,
         Commands::Add(args) => args.json,
+        Commands::Diff(args) => args.json,
         _ => false,
     };
     let tracing = tracing_subscriber::fmt()

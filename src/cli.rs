@@ -419,6 +419,9 @@ pub struct SyncArgs {
 /// Arguments of `dotman diff`.
 #[derive(Args)]
 pub struct DiffArgs {
+    /// Print experimental schema-versioned NDJSON comparisons
+    #[arg(long)]
+    pub json: bool,
     /// Compare only these files or directories; every managed path when none are given
     pub paths: Vec<PathBuf>,
 }

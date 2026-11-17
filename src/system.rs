@@ -249,17 +249,6 @@ impl Scope {
         read_node(self.base(), &self.walk_rel(key))
     }
 
-    /// H for a key. Setuid, setgid and sticky bits are masked off, as they are in R.
-    pub(crate) fn observe(&self, key: &str) -> Result<Home> {
-        Ok(match self.node(key)?.home() {
-            Home::Present(mut tuple) if tuple.kind == crate::state::Kind::File => {
-                tuple.mode &= 0o777;
-                Home::Present(tuple)
-            }
-            home => home,
-        })
-    }
-
     /// The package-manager leftovers that exist beside the key.
     #[must_use]
     pub fn siblings(&self, key: &str) -> Vec<&'static str> {
@@ -439,6 +428,26 @@ pub(crate) fn evaluate(
     repo_config: &RepoConfig,
     state: &State,
 ) -> Result<Vec<Evaluated>> {
+    Ok(evaluate_inner(ctx, repo_config, state, false)?
+        .into_iter()
+        .map(|(item, _)| item)
+        .collect())
+}
+
+pub(crate) fn evaluate_with_nodes(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    state: &State,
+) -> Result<Vec<(Evaluated, Option<Node>)>> {
+    evaluate_inner(ctx, repo_config, state, true)
+}
+
+fn evaluate_inner(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    state: &State,
+    keep_nodes: bool,
+) -> Result<Vec<(Evaluated, Option<Node>)>> {
     let scope = ctx.system_scope();
     let sources = ctx.system_sources()?;
     let modes = source_modes(&sources, repo_config);
@@ -454,14 +463,17 @@ pub(crate) fn evaluate(
         let standing = scope.standing(&key);
         let off = standing == Standing::Off;
         let verdict = match standing {
-            Standing::Refused(why) => Some(Verdict::Refused(why)),
+            Standing::Refused(why) => Some((Verdict::Refused(why), None)),
             Standing::Active | Standing::Off => {
                 row_of(ctx, &scope, &sources, &worktree, state, &key)
-                    .unwrap_or_else(|e| Some(Verdict::Unreadable(format!("{e:#}"))))
+                    .unwrap_or_else(|e| Some((Verdict::Unreadable(format!("{e:#}")), None)))
             }
         };
-        if let Some(verdict) = verdict {
-            found.push(Evaluated { key, off, verdict });
+        if let Some((verdict, node)) = verdict {
+            found.push((
+                Evaluated { key, off, verdict },
+                if keep_nodes { node } else { None },
+            ));
         }
     }
     Ok(found)
@@ -475,27 +487,28 @@ fn row_of(
     worktree: &Worktree<'_>,
     state: &State,
     key: &str,
-) -> Result<Option<Verdict>> {
+) -> Result<Option<(Verdict, Option<Node>)>> {
     let rel = rel(key)?;
     let r = match select(ctx, sources, worktree, rel)? {
         Selection::None => None,
         Selection::Winner(entry) => Some(entry),
-        Selection::Ambiguous(tied) => return Ok(Some(Verdict::Ambiguous(tied))),
-        Selection::Invalid(problems) => return Ok(Some(Verdict::Invalid(problems))),
+        Selection::Ambiguous(tied) => return Ok(Some((Verdict::Ambiguous(tied), None))),
+        Selection::Invalid(problems) => return Ok(Some((Verdict::Invalid(problems), None))),
     };
     let recorded = state.system.get(key);
     let s = recorded.map(Tuple::from_entry).transpose()?;
     if r.is_none() && s.is_none() {
         return Ok(None);
     }
-    let h = scope.observe(key)?;
+    let node = scope.node(key)?;
+    let h = node.home();
     let Some(row) = classify(r.as_ref().map(|r| &r.tuple), &h, s.as_ref()) else {
         return Ok(None);
     };
     let winner = r.as_ref().map(|r| r.source.as_str());
     let switched = recorded.is_some_and(|s| Some(s.source.as_str()) != winner);
     let row = if switched { row.switched() } else { row };
-    Ok(Some(Verdict::Row { row, r, h }))
+    Ok(Some((Verdict::Row { row, r, h }, Some(node))))
 }
 
 /// Rows where `apply --system` would write.
@@ -824,13 +837,16 @@ mod tests {
         symlink(&real, real.parent().unwrap().join("link")).unwrap();
         // The test supplies the already canonical prefix, as `Paths::resolve` does.
         let scope = Scope::build(Some(real.clone()), &[PathBuf::from("/etc")], false);
-        assert!(matches!(scope.observe("/etc/x").unwrap(), Home::Present(_)));
+        assert!(matches!(
+            scope.node("/etc/x").unwrap().home(),
+            Home::Present(_)
+        ));
 
         fs::create_dir_all(real.join("elsewhere")).unwrap();
         fs::write(real.join("elsewhere/y"), b"y").unwrap();
         symlink(real.join("elsewhere"), real.join("etc/sub")).unwrap();
         assert!(matches!(
-            scope.observe("/etc/sub/y").unwrap(),
+            scope.node("/etc/sub/y").unwrap().home(),
             Home::Blocked(crate::engine::Obstacle::Parent(_))
         ));
     }
