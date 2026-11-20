@@ -109,6 +109,110 @@ pub(crate) fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd
     owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) })
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn openat_path(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
+    // SAFETY: `open_how` contains only integer fields, and zero leaves `mode` unset.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = u64::from((libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC).cast_unsigned());
+    how.resolve = libc::RESOLVE_NO_XDEV | libc::RESOLVE_NO_SYMLINKS;
+    // SAFETY: the descriptor, name, and open_how are valid for the duration of the syscall.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &how,
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    owned(libc::c_int::try_from(fd).map_err(|_| io::Error::other("invalid descriptor"))?)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn openat_lock(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<File> {
+    let flags = libc::O_RDWR
+        | libc::O_CREAT
+        | libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | libc::O_NONBLOCK
+        | libc::O_NOCTTY;
+    // SAFETY: the descriptor and NUL-terminated name remain valid for the call.
+    owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, 0o600_u32) }).map(File::from)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn mkdirat(dir: BorrowedFd<'_>, name: &CStr, mode: u32) -> io::Result<()> {
+    // SAFETY: the descriptor and NUL-terminated name remain valid for the call.
+    check(unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode) })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn rename_noreplace(
+    from_dir: BorrowedFd<'_>,
+    from: &CStr,
+    to_dir: BorrowedFd<'_>,
+    to: &CStr,
+) -> io::Result<()> {
+    // SAFETY: both descriptors and NUL-terminated names remain valid for the call.
+    check(unsafe {
+        libc::renameat2(
+            from_dir.as_raw_fd(),
+            from.as_ptr(),
+            to_dir.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn has_xattrs(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    // SAFETY: the borrowed descriptor stays open and a null buffer with size zero only queries the size.
+    let size = unsafe { libc::flistxattr(fd.as_raw_fd(), ptr::null_mut(), 0) };
+    if size < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(size != 0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn rename_exchange(
+    from_dir: BorrowedFd<'_>,
+    from: &CStr,
+    to_dir: BorrowedFd<'_>,
+    to: &CStr,
+) -> io::Result<()> {
+    for name in [from, to] {
+        let bytes = name.to_bytes();
+        if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid component",
+            ));
+        }
+    }
+    // SAFETY: both borrowed descriptors and NUL-terminated names remain valid for the call.
+    check(unsafe {
+        libc::renameat2(
+            from_dir.as_raw_fd(),
+            from.as_ptr(),
+            to_dir.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn remove_dir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+    // SAFETY: the descriptor and NUL-terminated name remain valid for the call.
+    check(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) })
+}
+
 /// Creates `name` inside `dir` for writing at `mode`. Fails if anything is there, a symlink
 /// included.
 pub(crate) fn create_excl(dir: BorrowedFd<'_>, name: &CStr, mode: u32) -> io::Result<File> {
@@ -402,6 +506,86 @@ fn grow(len: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detects_extended_attributes() -> io::Result<()> {
+        use std::os::fd::AsFd as _;
+        let file = tempfile::tempfile()?;
+        assert!(!has_xattrs(file.as_fd())?);
+        // SAFETY: the descriptor and name are valid; the empty value has a zero length.
+        let result = unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                c"user.dotman-test".as_ptr(),
+                ptr::null(),
+                0,
+                0,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        assert!(has_xattrs(file.as_fd())?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_noreplace_refuses_an_empty_destination() -> io::Result<()> {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir()?;
+        let stage = temp.path().join("stage");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(stage.join("repo"))?;
+        std::fs::write(stage.join("repo/sample"), b"staged bytes")?;
+        std::fs::create_dir(&target)?;
+        let inode = std::fs::metadata(&target)?.ino();
+        let parent = File::open(temp.path())?;
+        let source = File::open(stage)?;
+        let attempt = || rename_noreplace(source.as_fd(), c"repo", parent.as_fd(), c"target");
+
+        assert_eq!(
+            attempt().err().map(|err| err.kind()),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::metadata(&target)?.ino(), inode);
+        assert_eq!(std::fs::read_dir(&target)?.count(), 0);
+        std::fs::remove_dir(&target)?;
+        attempt()?;
+        assert_eq!(std::fs::read(target.join("sample"))?, b"staged bytes");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_exchange_preserves_both_inodes() -> io::Result<()> {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir()?;
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        std::fs::write(&a, b"first")?;
+        std::fs::write(&b, b"second")?;
+        let first = std::fs::metadata(&a)?.ino();
+        let second = std::fs::metadata(&b)?.ino();
+        let dir = File::open(temp.path())?;
+        rename_exchange(dir.as_fd(), c"a", dir.as_fd(), c"b")?;
+        assert_eq!(std::fs::metadata(&a)?.ino(), second);
+        assert_eq!(std::fs::metadata(&b)?.ino(), first);
+        assert_eq!(std::fs::read(&a)?, b"second");
+        assert_eq!(std::fs::read(&b)?, b"first");
+        assert_eq!(
+            rename_exchange(dir.as_fd(), c"../a", dir.as_fd(), c"b")
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidInput)
+        );
+        Ok(())
+    }
 
     #[test]
     fn current_user_resolves_by_uid_and_name() {

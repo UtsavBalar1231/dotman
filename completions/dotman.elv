@@ -31,6 +31,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand init 'Create the dotman repo or set its remote, or clone a repo and apply it'
             cand add 'Start managing files or directories'
             cand forget 'Stop managing files or directories, keeping them in $HOME'
+            cand remedy 'Review one held file without changing it'
             cand list 'List the managed files'
             cand status 'Compare $HOME, the repo and the last applied state'
             cand apply 'Write the repo''s files into $HOME'
@@ -47,6 +48,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand system-write 'Write the system files a plan names; `apply --system` starts it through sudo, doas or run0'
         }
         &'dotman;init'= {
+            cand --setup-from 'Read a guarded setup request from standard input'
             cand --remote 'Set or replace the `origin` remote'
             cand --git-name 'Git `user.name` to set when git has no identity'
             cand --git-email 'Git `user.email` to set when git has no identity'
@@ -55,6 +57,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --profile 'A profile this machine opts into, written to the machine config; repeatable'
             cand --system-root 'A directory outside $HOME whose files this machine manages, added to `[system] roots`; repeatable'
             cand --age-key-file 'Import the age identity in FILE before applying, so encrypted files decrypt'
+            cand --json 'Print the guarded setup result as NDJSON'
             cand --no-import 'Create a fresh repo without looking for an existing setup to import'
             cand --keep-local 'Keep the local version of files that differ from the repo'
             cand --take-repo 'Take the repo version of files that differ, after backing them up'
@@ -108,6 +111,18 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand -h 'Print help'
             cand --help 'Print help'
         }
+        &'dotman;remedy'= {
+            cand --from 'Read the review request from standard input'
+            cand --json 'Print NDJSON'
+            cand -v 'Show verbose output'
+            cand --verbose 'Show verbose output'
+            cand -q 'Suppress informational messages'
+            cand --quiet 'Suppress informational messages'
+            cand --no-pager 'Disable pager output'
+            cand --allow-root 'Allow running as root'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
         &'dotman;list'= {
             cand --porcelain 'Print `<kind>\t<key>\0` records'
             cand -v 'Show verbose output'
@@ -133,6 +148,8 @@ set edit:completion:arg-completer[dotman] = {|@words|
         }
         &'dotman;apply'= {
             cand --decide-from 'Read experimental versioned, snapshot-bound decisions from stdin only'
+            cand --review-trust 'Review or grant only the named local capture trust'
+            cand --review-hooks 'Approve and run only the reviewed pending hooks'
             cand --json 'Print experimental schema-versioned NDJSON outcomes'
             cand --keep-local 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync''s pull conflicts, keep this machine''s side of each clash: a text file keeps origin''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync''s question about a pull conflict also offers `[h]` for that'
             cand --take-repo 'Take the repo version of conflicting and existing files, after backing them up. When sync''s pull conflicts, take origin''s side of each clash: a text file keeps this machine''s edits elsewhere in it, other files are taken whole, and this machine''s version is saved first'
@@ -155,6 +172,8 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --help 'Print help'
         }
         &'dotman;diff'= {
+            cand --exact-repo 'Compare one exact path only if this repo ID matches'
+            cand --allow-encrypted-source 'Permit the named encrypted winning source in an exact comparison'
             cand --json 'Print experimental schema-versioned NDJSON comparisons'
             cand -v 'Show verbose output'
             cand --verbose 'Show verbose output'
@@ -189,6 +208,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --approve-dirs 'Approve on this machine, printing them first, the `[dirs]` entries it has not approved, and capture the new files under them. An entry that `.dotman.toml` gained from elsewhere captures nothing here until approved; `add <dir>` approves the directory it adds'
             cand --drop-unlisted-ignores 'Stop applying on this machine, printing them first, the `[ignore]` patterns it has seen that `.dotman.toml` no longer lists, and capture what they kept out. A pattern removed from `.dotman.toml`, here or elsewhere, keeps files out of capture on each machine that has seen it until then; `add <file>` adds one file it keeps out'
             cand --no-hooks 'Run no hooks'
+            cand --defer-hooks 'Defer matching hooks from a reviewed whole sync for separate approval'
             cand --dry-run 'Show what would be captured, committed, pulled, applied and pushed; change nothing'
             cand --system 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call'
             cand --yes 'With --system: write the system files without asking'
@@ -274,6 +294,7 @@ set edit:completion:arg-completer[dotman] = {|@words|
             cand --help 'Print help'
             cand init 'Generate an age identity and add its recipient to .dotman.toml'
             cand import 'Copy an existing age identity into place and check that its recipient is listed'
+            cand reviewed 'Execute a reviewed identity request from standard input'
         }
         &'dotman;key;init'= {
             cand -v 'Show verbose output'
@@ -288,6 +309,16 @@ set edit:completion:arg-completer[dotman] = {|@words|
         &'dotman;key;import'= {
             cand --add-recipient 'Add the identity''s recipient to `[age] recipients` in .dotman.toml if it is missing'
             cand --force 'Replace an existing, different identity, after backing it up'
+            cand -v 'Show verbose output'
+            cand --verbose 'Show verbose output'
+            cand -q 'Suppress informational messages'
+            cand --quiet 'Suppress informational messages'
+            cand --no-pager 'Disable pager output'
+            cand --allow-root 'Allow running as root'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'dotman;key;reviewed'= {
             cand -v 'Show verbose output'
             cand --verbose 'Show verbose output'
             cand -q 'Suppress informational messages'

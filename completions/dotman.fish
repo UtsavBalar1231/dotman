@@ -33,6 +33,7 @@ complete -c dotman -n "__fish_dotman_needs_command" -s V -l version -d 'Print ve
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "init" -d 'Create the dotman repo or set its remote, or clone a repo and apply it'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "add" -d 'Start managing files or directories'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "forget" -d 'Stop managing files or directories, keeping them in $HOME'
+complete -c dotman -n "__fish_dotman_needs_command" -f -a "remedy" -d 'Review one held file without changing it'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "list" -d 'List the managed files'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "status" -d 'Compare $HOME, the repo and the last applied state'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "apply" -d 'Write the repo\'s files into $HOME'
@@ -47,6 +48,7 @@ complete -c dotman -n "__fish_dotman_needs_command" -f -a "doctor" -d 'Check the
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "key" -d 'Create or import the age identity that decrypts encrypted files'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "completion" -d 'Generate shell completion scripts'
 complete -c dotman -n "__fish_dotman_needs_command" -f -a "system-write" -d 'Write the system files a plan names; `apply --system` starts it through sudo, doas or run0'
+complete -c dotman -n "__fish_dotman_using_subcommand init" -l setup-from -d 'Read a guarded setup request from standard input' -r -f -a "-\t''"
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l remote -d 'Set or replace the `origin` remote' -r
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l git-name -d 'Git `user.name` to set when git has no identity' -r
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l git-email -d 'Git `user.email` to set when git has no identity' -r
@@ -55,6 +57,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand init" -l host -d 'Host nam
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l profile -d 'A profile this machine opts into, written to the machine config; repeatable' -r
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l system-root -d 'A directory outside $HOME whose files this machine manages, added to `[system] roots`; repeatable' -r -F
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l age-key-file -d 'Import the age identity in FILE before applying, so encrypted files decrypt' -r -F
+complete -c dotman -n "__fish_dotman_using_subcommand init" -l json -d 'Print the guarded setup result as NDJSON'
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l no-import -d 'Create a fresh repo without looking for an existing setup to import'
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l keep-local -d 'Keep the local version of files that differ from the repo'
 complete -c dotman -n "__fish_dotman_using_subcommand init" -l take-repo -d 'Take the repo version of files that differ, after backing them up'
@@ -94,6 +97,13 @@ complete -c dotman -n "__fish_dotman_using_subcommand forget" -s q -l quiet -d '
 complete -c dotman -n "__fish_dotman_using_subcommand forget" -l no-pager -d 'Disable pager output'
 complete -c dotman -n "__fish_dotman_using_subcommand forget" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand forget" -s h -l help -d 'Print help'
+complete -c dotman -n "__fish_dotman_using_subcommand remedy" -l from -d 'Read the review request from standard input' -r -f -a "-\t''"
+complete -c dotman -n "__fish_dotman_using_subcommand remedy" -l json -d 'Print NDJSON'
+complete -c dotman -n "__fish_dotman_using_subcommand remedy" -s v -l verbose -d 'Show verbose output'
+complete -c dotman -n "__fish_dotman_using_subcommand remedy" -s q -l quiet -d 'Suppress informational messages'
+complete -c dotman -n "__fish_dotman_using_subcommand remedy" -l no-pager -d 'Disable pager output'
+complete -c dotman -n "__fish_dotman_using_subcommand remedy" -l allow-root -d 'Allow running as root'
+complete -c dotman -n "__fish_dotman_using_subcommand remedy" -s h -l help -d 'Print help'
 complete -c dotman -n "__fish_dotman_using_subcommand list" -l porcelain -d 'Print `<kind>\\t<key>\\0` records'
 complete -c dotman -n "__fish_dotman_using_subcommand list" -s v -l verbose -d 'Show verbose output'
 complete -c dotman -n "__fish_dotman_using_subcommand list" -s q -l quiet -d 'Suppress informational messages'
@@ -108,6 +118,9 @@ complete -c dotman -n "__fish_dotman_using_subcommand status" -l no-pager -d 'Di
 complete -c dotman -n "__fish_dotman_using_subcommand status" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand status" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l decide-from -d 'Read experimental versioned, snapshot-bound decisions from stdin only' -r -f -a "-\t''"
+complete -c dotman -n "__fish_dotman_using_subcommand apply" -l review-trust -d 'Review or grant only the named local capture trust' -r -f -a "directories\t''
+ignores\t''"
+complete -c dotman -n "__fish_dotman_using_subcommand apply" -l review-hooks -d 'Approve and run only the reviewed pending hooks'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l json -d 'Print experimental schema-versioned NDJSON outcomes'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l keep-local -d 'Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync\'s pull conflicts, keep this machine\'s side of each clash: a text file keeps origin\'s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run `add --for host=<host> <file>` instead, or `add --encrypt --for host=<host> <file>` when any of its sources is encrypted; on a terminal, sync\'s question about a pull conflict also offers `[h]` for that'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l take-repo -d 'Take the repo version of conflicting and existing files, after backing them up. When sync\'s pull conflicts, take origin\'s side of each clash: a text file keeps this machine\'s edits elsewhere in it, other files are taken whole, and this machine\'s version is saved first'
@@ -125,6 +138,8 @@ complete -c dotman -n "__fish_dotman_using_subcommand apply" -s q -l quiet -d 'S
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l no-pager -d 'Disable pager output'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand apply" -s h -l help -d 'Print help'
+complete -c dotman -n "__fish_dotman_using_subcommand diff" -l exact-repo -d 'Compare one exact path only if this repo ID matches' -r
+complete -c dotman -n "__fish_dotman_using_subcommand diff" -l allow-encrypted-source -d 'Permit the named encrypted winning source in an exact comparison' -r
 complete -c dotman -n "__fish_dotman_using_subcommand diff" -l json -d 'Print experimental schema-versioned NDJSON comparisons'
 complete -c dotman -n "__fish_dotman_using_subcommand diff" -s v -l verbose -d 'Show verbose output'
 complete -c dotman -n "__fish_dotman_using_subcommand diff" -s q -l quiet -d 'Suppress informational messages'
@@ -148,6 +163,7 @@ complete -c dotman -n "__fish_dotman_using_subcommand sync" -l approve-hooks -d 
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l approve-dirs -d 'Approve on this machine, printing them first, the `[dirs]` entries it has not approved, and capture the new files under them. An entry that `.dotman.toml` gained from elsewhere captures nothing here until approved; `add <dir>` approves the directory it adds'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l drop-unlisted-ignores -d 'Stop applying on this machine, printing them first, the `[ignore]` patterns it has seen that `.dotman.toml` no longer lists, and capture what they kept out. A pattern removed from `.dotman.toml`, here or elsewhere, keeps files out of capture on each machine that has seen it until then; `add <file>` adds one file it keeps out'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l no-hooks -d 'Run no hooks'
+complete -c dotman -n "__fish_dotman_using_subcommand sync" -l defer-hooks -d 'Defer matching hooks from a reviewed whole sync for separate approval'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l dry-run -d 'Show what would be captured, committed, pulled, applied and pushed; change nothing'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l system -d 'After the pull, also write the system files outside $HOME, through one sudo, doas or run0 call'
 complete -c dotman -n "__fish_dotman_using_subcommand sync" -l yes -d 'With --system: write the system files without asking'
@@ -193,13 +209,14 @@ complete -c dotman -n "__fish_dotman_using_subcommand doctor" -s q -l quiet -d '
 complete -c dotman -n "__fish_dotman_using_subcommand doctor" -l no-pager -d 'Disable pager output'
 complete -c dotman -n "__fish_dotman_using_subcommand doctor" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand doctor" -s h -l help -d 'Print help'
-complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import" -s v -l verbose -d 'Show verbose output'
-complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import" -s q -l quiet -d 'Suppress informational messages'
-complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import" -l no-pager -d 'Disable pager output'
-complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import" -l allow-root -d 'Allow running as root'
-complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import" -s h -l help -d 'Print help'
-complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import" -f -a "init" -d 'Generate an age identity and add its recipient to .dotman.toml'
-complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import" -f -a "import" -d 'Copy an existing age identity into place and check that its recipient is listed'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -s v -l verbose -d 'Show verbose output'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -s q -l quiet -d 'Suppress informational messages'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -l no-pager -d 'Disable pager output'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -l allow-root -d 'Allow running as root'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -s h -l help -d 'Print help'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -f -a "init" -d 'Generate an age identity and add its recipient to .dotman.toml'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -f -a "import" -d 'Copy an existing age identity into place and check that its recipient is listed'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and not __fish_seen_subcommand_from init import reviewed" -f -a "reviewed" -d 'Execute a reviewed identity request from standard input'
 complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from init" -s v -l verbose -d 'Show verbose output'
 complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from init" -s q -l quiet -d 'Suppress informational messages'
 complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from init" -l no-pager -d 'Disable pager output'
@@ -212,6 +229,11 @@ complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subco
 complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from import" -l no-pager -d 'Disable pager output'
 complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from import" -l allow-root -d 'Allow running as root'
 complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from import" -s h -l help -d 'Print help'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from reviewed" -s v -l verbose -d 'Show verbose output'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from reviewed" -s q -l quiet -d 'Suppress informational messages'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from reviewed" -l no-pager -d 'Disable pager output'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from reviewed" -l allow-root -d 'Allow running as root'
+complete -c dotman -n "__fish_dotman_using_subcommand key; and __fish_seen_subcommand_from reviewed" -s h -l help -d 'Print help'
 complete -c dotman -n "__fish_dotman_using_subcommand completion" -s v -l verbose -d 'Show verbose output'
 complete -c dotman -n "__fish_dotman_using_subcommand completion" -s q -l quiet -d 'Suppress informational messages'
 complete -c dotman -n "__fish_dotman_using_subcommand completion" -l no-pager -d 'Disable pager output'

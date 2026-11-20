@@ -16,6 +16,8 @@ use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
+pub(crate) mod reviewed;
+
 /// Runs `dotman forget`.
 ///
 /// # Errors

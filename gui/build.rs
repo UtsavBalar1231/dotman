@@ -1,0 +1,23 @@
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "refresh",
+            "cancel",
+            "open_diff",
+            "open_review",
+            "discard_review",
+            "run_reviewed_sync",
+            "apply_reviewed_files",
+            "accept_reviewed_identity",
+            "approve_pending_hooks",
+            "review_policy",
+            "run_fresh_setup",
+            "run_clone_setup",
+            "run_import_setup",
+            "run_key",
+            "run_held",
+            "run_host_variant",
+        ]),
+    ))?;
+    Ok(())
+}

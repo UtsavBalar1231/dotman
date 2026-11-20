@@ -136,6 +136,8 @@ struct Entry {
     category: Option<&'static str>,
     r: Observation,
     source_tuple: Observation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    physical_plain: Option<Observation>,
     h: Observation,
     raw_h: Observation,
     s: Observation,
@@ -173,6 +175,7 @@ impl Entry {
             source_tuple: Observation::Unavailable {
                 reason: "not_observed",
             },
+            physical_plain: None,
             h: Observation::Unavailable {
                 reason: "not_observed",
             },
@@ -940,6 +943,7 @@ fn home_entry(
             let (h, raw) = item.observations();
             entry.h = Observation::home(h);
             entry.raw_h = Observation::home(raw);
+            entry.physical_plain = item.physical_plain().map(Observation::tuple);
             entry.r = Observation::Missing;
             entry.source_tuple = Observation::Missing;
             if let Some((source, tuple, encrypted, template)) = item.source_metadata() {

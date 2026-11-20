@@ -4,7 +4,7 @@
 .SH NAME
 dotman\-diff \- Show how $HOME differs from the repo, as a diff from repo/ to home/
 .SH SYNOPSIS
-\fBdotman diff\fR [\fB\-\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
+\fBdotman diff\fR [\fB\-\-json\fR] [\fB\-\-exact\-repo\fR] [\fB\-\-allow\-encrypted\-source\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
 .SH DESCRIPTION
 Show how $HOME differs from the repo, as a diff from repo/ to home/
 .PP
@@ -15,6 +15,12 @@ is set, or the pager cannot be found. NO_COLOR turns colour off.
 .TP
 \fB\-\-json\fR
 Print experimental schema\-versioned NDJSON comparisons
+.TP
+\fB\-\-exact\-repo\fR \fI<EXACT_REPO>\fR
+Compare one exact path only if this repo ID matches
+.TP
+\fB\-\-allow\-encrypted\-source\fR \fI<ALLOW_ENCRYPTED_SOURCE>\fR
+Permit the named encrypted winning source in an exact comparison
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

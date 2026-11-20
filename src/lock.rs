@@ -34,6 +34,21 @@ pub struct Lock {
 }
 
 impl Lock {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn acquire_strict(file: File) -> Result<Self> {
+        let mut retries = LOCK_RETRIES;
+        loop {
+            match FileExt::try_lock(&file) {
+                Ok(()) => return Ok(Self { file: Some(file) }),
+                Err(TryLockError::WouldBlock) if retries > 0 => {
+                    retries = retries.saturating_sub(1);
+                    std::thread::sleep(LOCK_RETRY_DELAY);
+                }
+                Err(TryLockError::WouldBlock) => return Err(Held.into()),
+                Err(TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+    }
     /// Takes the lock without waiting.
     ///
     /// A dry run only contends on a lock file that already exists: it creates neither the file
@@ -106,6 +121,53 @@ impl Lock {
     #[must_use]
     pub const fn is_held(&self) -> bool {
         self.file.is_some()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn review_identity(&self, path: &Path) -> Result<(u64, u64)> {
+        use std::os::fd::AsFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::MetadataExt as _;
+        use std::path::Component;
+        let file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review requires an existing lock"))?;
+        let held = file.metadata()?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid review lock path"))?;
+        anyhow::ensure!(parent.is_absolute(), "invalid review lock path");
+        let mut dir = File::open("/")?;
+        for part in parent.components() {
+            match part {
+                Component::RootDir => {}
+                Component::Normal(name) => {
+                    let name = std::ffi::CString::new(name.as_bytes())?;
+                    dir = File::from(crate::sys::openat_dir(dir.as_fd(), &name)?);
+                }
+                _ => anyhow::bail!("invalid review lock path"),
+            }
+        }
+        let directory = dir.metadata()?;
+        anyhow::ensure!(
+            directory.uid() == crate::sys::geteuid() && directory.mode().trailing_zeros() >= 6,
+            "review lock directory is not private"
+        );
+        #[cfg(target_os = "linux")]
+        let current = File::from(crate::sys::openat_path(dir.as_fd(), c"lock")?).metadata()?;
+        #[cfg(not(target_os = "linux"))]
+        let current = std::fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            held.is_file()
+                && current.is_file()
+                && held.uid() == crate::sys::geteuid()
+                && held.nlink() == 1
+                && held.mode() & 0o7777 == 0o600
+                && (held.dev(), held.ino()) == (current.dev(), current.ino()),
+            "review lock is not a private existing lock"
+        );
+        Ok((held.dev(), held.ino()))
     }
 }
 

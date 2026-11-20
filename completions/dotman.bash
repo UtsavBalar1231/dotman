@@ -55,6 +55,9 @@ _dotman() {
             dotman,log)
                 cmd="dotman__subcmd__log"
                 ;;
+            dotman,remedy)
+                cmd="dotman__subcmd__remedy"
+                ;;
             dotman,restore)
                 cmd="dotman__subcmd__restore"
                 ;;
@@ -73,6 +76,9 @@ _dotman() {
             dotman__subcmd__key,init)
                 cmd="dotman__subcmd__key__subcmd__init"
                 ;;
+            dotman__subcmd__key,reviewed)
+                cmd="dotman__subcmd__key__subcmd__reviewed"
+                ;;
             *)
                 ;;
         esac
@@ -80,7 +86,7 @@ _dotman() {
 
     case "${cmd}" in
         dotman)
-            opts="-v -q -h -V --verbose --quiet --no-pager --allow-root --help --version init add forget list status apply diff edit sync log restore import git doctor key completion system-write"
+            opts="-v -q -h -V --verbose --quiet --no-pager --allow-root --help --version init add forget remedy list status apply diff edit sync log restore import git doctor key completion system-write"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -112,7 +118,7 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__apply)
-            opts="-v -q -h --decide-from --json --keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --in-place --no-hooks --dry-run --system --yes --verbose --quiet --no-pager --allow-root --help"
+            opts="-v -q -h --decide-from --review-hooks --review-trust --json --keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --in-place --no-hooks --dry-run --system --yes --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -120,6 +126,10 @@ _dotman() {
             case "${prev}" in
                 --decide-from)
                     COMPREPLY=($(compgen -W "-" -- "${cur}"))
+                    return 0
+                    ;;
+                --review-trust)
+                    COMPREPLY=($(compgen -W "directories ignores" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -144,12 +154,20 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__diff)
-            opts="-v -q -h --json --verbose --quiet --no-pager --allow-root --help"
+            opts="-v -q -h --json --exact-repo --allow-encrypted-source --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --exact-repo)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --allow-encrypted-source)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -232,12 +250,16 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__init)
-            opts="-v -q -h --remote --no-import --keep-local --take-repo --approve-hooks --dry-run --no-bootstrap --refresh-bootstrap --git-name --git-email --git-global --create-github --no-remote --host --profile --system-root --no-system --create-key --no-key --age-key-file --force --verbose --quiet --no-pager --allow-root --help"
+            opts="-v -q -h --setup-from --json --remote --no-import --keep-local --take-repo --approve-hooks --dry-run --no-bootstrap --refresh-bootstrap --git-name --git-email --git-global --create-github --no-remote --host --profile --system-root --no-system --create-key --no-key --age-key-file --force --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --setup-from)
+                    COMPREPLY=($(compgen -W "-" -- "${cur}"))
+                    return 0
+                    ;;
                 --remote)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -278,7 +300,7 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__key)
-            opts="-v -q -h --verbose --quiet --no-pager --allow-root --help init import"
+            opts="-v -q -h --verbose --quiet --no-pager --allow-root --help init import reviewed"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -306,6 +328,20 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__key__subcmd__init)
+            opts="-v -q -h --verbose --quiet --no-pager --allow-root --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        dotman__subcmd__key__subcmd__reviewed)
             opts="-v -q -h --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -355,6 +391,24 @@ _dotman() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        dotman__subcmd__remedy)
+            opts="-v -q -h --from --json --verbose --quiet --no-pager --allow-root --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --from)
+                    COMPREPLY=($(compgen -W "-" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         dotman__subcmd__restore)
             opts="-v -q -h --from --dry-run --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
@@ -388,7 +442,7 @@ _dotman() {
             return 0
             ;;
         dotman__subcmd__sync)
-            opts="-m -v -q -h --decide-from --json --message --keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --approve-dirs --drop-unlisted-ignores --no-hooks --dry-run --system --yes --allow-mass-delete --verbose --quiet --no-pager --allow-root --help"
+            opts="-m -v -q -h --decide-from --json --message --keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --approve-dirs --drop-unlisted-ignores --no-hooks --defer-hooks --dry-run --system --yes --allow-mass-delete --verbose --quiet --no-pager --allow-root --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

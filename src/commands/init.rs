@@ -20,6 +20,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
+#[cfg(target_os = "linux")]
+mod setup;
+
 /// Runs `dotman init`.
 ///
 /// # Errors
@@ -27,6 +30,12 @@ use tempfile::TempDir;
 /// Fails when `--remote` or the source is not a usable URL, the lock is held, git or age fails, a
 /// repo file cannot be written, or `--source` cannot be cloned or applied.
 pub fn run(args: &InitArgs) -> Result<Outcome> {
+    if args.setup_from.is_some() {
+        #[cfg(target_os = "linux")]
+        return setup::run();
+        #[cfg(not(target_os = "linux"))]
+        bail!("guarded setup requires Linux");
+    }
     let ctx = Context::resolve("init")?;
     if let Some(source) = &args.source {
         return clone_and_apply(&ctx, source, args);

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=dotman
+Comment=Manage dotfiles
+Exec=dotman-gui
+Icon=dotman-gui
+Terminal=false
+Categories=Utility;

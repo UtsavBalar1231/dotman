@@ -170,6 +170,8 @@ pub struct SourceEntry {
     pub source: String,
     /// R's tuple, with the mode dotman writes.
     pub tuple: Tuple,
+    /// Physical plain file observation from the source read, before mode policy.
+    pub physical_plain: Option<Box<Tuple>>,
     /// Bytes or link target to write.
     pub content: Content,
     /// The bytes were rendered from `source`, which is a template.
@@ -221,7 +223,7 @@ impl<'a> Worktree<'a> {
     /// `None` when nothing is at `key`. A path under a symlinked directory is not an entry, so
     /// it reads as missing.
     pub fn get(&self, key: &str) -> Result<Option<SourceEntry>> {
-        let (tuple, content) = match read_node(self.root, key)? {
+        let (tuple, content, physical_plain) = match read_node(self.root, key)? {
             Node::File {
                 bytes,
                 mode: on_disk,
@@ -230,14 +232,20 @@ impl<'a> Worktree<'a> {
                 // git keeps only the owner execute bit, so any other mode must come from `[modes]`.
                 let default = if on_disk & 0o100 == 0 { 0o644 } else { 0o755 };
                 let mode = safe_mode(recorded_mode(self.modes, key)?.unwrap_or(default));
-                (Tuple::of_file(&bytes, mode), Content::Bytes(bytes))
+                let tuple = Tuple::of_file(&bytes, mode);
+                let physical = Tuple {
+                    mode: on_disk,
+                    ..tuple.clone()
+                };
+                (tuple, Content::Bytes(bytes), Some(Box::new(physical)))
             }
-            Node::Symlink(target) => (Tuple::of_link(&target), Content::Link(target)),
+            Node::Symlink(target) => (Tuple::of_link(&target), Content::Link(target), None),
             Node::Missing | Node::BadParent(_) | Node::Dir | Node::Special => return Ok(None),
         };
         Ok(Some(SourceEntry {
             source: key.to_owned(),
             tuple,
+            physical_plain,
             content,
             template: false,
             encrypted: false,
@@ -276,14 +284,19 @@ impl<'a> Variants<'a> {
     }
 
     // A failure to decrypt is a `secrets::Locked` error when no key here matches.
-    fn decrypt(&self, mut entry: SourceEntry) -> Result<SourceEntry> {
-        if !matches!(entry.content, Content::Bytes(_)) {
+    fn decrypt(&self, mut entry: SourceEntry, snapshot_dir: Option<&Path>) -> Result<SourceEntry> {
+        entry.physical_plain = None;
+        let Content::Bytes(ciphertext) = &entry.content else {
             bail!(
                 "{}: an encrypted file must be a regular file, not a symlink",
                 entry.source
             );
-        }
-        let plain = self.age.decrypt(&self.worktree.root.join(&entry.source))?;
+        };
+        let plain = if let Some(dir) = snapshot_dir {
+            self.age.decrypt_bytes_in(ciphertext, dir)?
+        } else {
+            self.age.decrypt(&self.worktree.root.join(&entry.source))?
+        };
         let mode = safe_mode(recorded_mode(self.worktree.modes, &entry.source)?.unwrap_or(0o600));
         entry.tuple = Tuple::of_file(&plain, mode);
         entry.content = Content::Bytes(plain);
@@ -292,6 +305,7 @@ impl<'a> Variants<'a> {
     }
 
     fn render(&self, mut entry: SourceEntry) -> Result<SourceEntry> {
+        entry.physical_plain = None;
         let Content::Bytes(bytes) = &entry.content else {
             bail!(
                 "{}: a template must be a regular file, not a symlink",
@@ -321,10 +335,12 @@ impl<'a> Variants<'a> {
     pub fn winner_under(&self, key: &str, identity: &IdentitySnapshot) -> Option<&'a str> {
         self.sources.select(key, identity).winner().copied()
     }
-}
 
-impl Source for Variants<'_> {
-    fn get(&self, key: &str) -> Result<Selection<SourceEntry>> {
+    pub(crate) fn get_snapshot(&self, key: &str, dir: &Path) -> Result<Selection<SourceEntry>> {
+        self.get_inner(key, Some(dir))
+    }
+
+    fn get_inner(&self, key: &str, snapshot_dir: Option<&Path>) -> Result<Selection<SourceEntry>> {
         Ok(match self.sources.select(key, self.identity) {
             Selection::None => Selection::None,
             Selection::Winner(source) => match self.worktree.get(source)? {
@@ -332,7 +348,7 @@ impl Source for Variants<'_> {
                     Selection::Winner(self.render(entry)?)
                 }
                 Some(entry) if self.sources.flag(key, source) == Flag::Age => {
-                    Selection::Winner(self.decrypt(entry)?)
+                    Selection::Winner(self.decrypt(entry, snapshot_dir)?)
                 }
                 Some(entry) => Selection::Winner(entry),
                 None => Selection::None,
@@ -340,6 +356,12 @@ impl Source for Variants<'_> {
             Selection::Ambiguous(sources) => Selection::Ambiguous(sources),
             Selection::Invalid(problems) => Selection::Invalid(problems),
         })
+    }
+}
+
+impl Source for Variants<'_> {
+    fn get(&self, key: &str) -> Result<Selection<SourceEntry>> {
+        self.get_inner(key, None)
     }
 }
 

@@ -63,6 +63,7 @@ https://github.com/user-attachments/assets/8bde50d1-c0ee-4340-8b72-7202184c55ae
 ## Documentation
 
 - [Getting started](docs/getting-started.md): setting up in full, what dotman needs, and using it in Codespaces, Dev Containers and DevPod.
+- [Linux desktop](docs/linux-gui.md): the file workspace, guarded setup, and matching CLI/GUI builds.
 - [Daily use](docs/daily-use.md): the commands and their exit codes, how `status` and `sync` work, what happens when a pull conflicts, backups and file modes, ignoring files, and the flags that answer prompts.
 - [Per-machine files](docs/per-machine.md): variants, templates and hooks.
 - [Secrets](docs/secrets.md): encrypted files, your age key, and how dotman keeps credentials out of the repo.

@@ -428,7 +428,7 @@ pub(crate) fn evaluate(
     repo_config: &RepoConfig,
     state: &State,
 ) -> Result<Vec<Evaluated>> {
-    Ok(evaluate_inner(ctx, repo_config, state, false)?
+    Ok(evaluate_inner(ctx, repo_config, state, false, None)?
         .into_iter()
         .map(|(item, _)| item)
         .collect())
@@ -439,7 +439,19 @@ pub(crate) fn evaluate_with_nodes(
     repo_config: &RepoConfig,
     state: &State,
 ) -> Result<Vec<(Evaluated, Option<Node>)>> {
-    evaluate_inner(ctx, repo_config, state, true)
+    evaluate_inner(ctx, repo_config, state, true, None)
+}
+
+pub(crate) fn evaluate_exact_with_node(
+    ctx: &Context,
+    repo_config: &RepoConfig,
+    state: &State,
+    key: &str,
+) -> Result<Option<(Evaluated, Option<Node>)>> {
+    rel(key)?;
+    Ok(evaluate_inner(ctx, repo_config, state, true, Some(key))?
+        .into_iter()
+        .next())
 }
 
 fn evaluate_inner(
@@ -447,6 +459,7 @@ fn evaluate_inner(
     repo_config: &RepoConfig,
     state: &State,
     keep_nodes: bool,
+    exact: Option<&str>,
 ) -> Result<Vec<(Evaluated, Option<Node>)>> {
     let scope = ctx.system_scope();
     let sources = ctx.system_sources()?;
@@ -459,7 +472,10 @@ fn evaluate_inner(
         .chain(state.system.keys().cloned())
         .collect();
     let mut found = Vec::new();
-    for key in keys {
+    for key in keys
+        .into_iter()
+        .filter(|key| exact.is_none_or(|wanted| key == wanted))
+    {
         let standing = scope.standing(&key);
         let off = standing == Standing::Off;
         let verdict = match standing {

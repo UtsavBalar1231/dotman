@@ -7,14 +7,12 @@ pkgdesc="A dotfiles manager with no learning curve, safe by default"
 arch=('x86_64' 'aarch64')
 url="https://github.com/UtsavBalar1231/dotman"
 license=('MIT')
-depends=('gcc-libs' 'glibc')
+depends=('gcc-libs' 'glibc' 'git')
 makedepends=('cargo')
-# Only the tests run git; the build does not.
-checkdepends=('git')
 # makepkg's lto puts -flto in CFLAGS, so zstd-sys's C objects hold only GCC's IR, and the link
 # rustc runs cannot resolve the ZSTD_ symbols in them. The release profile strips the binary, so
 # a debug package would be empty.
-options=('!lto' '!debug')
+options=('!lto' '!debug' '!strip')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/UtsavBalar1231/dotman/archive/v$pkgver.tar.gz")
 # SKIP while v$pkgver has no release tarball. `just release-prepare` sets pkgver only; once the tag
 # is pushed, run `updpkgsums` here to put the tarball's checksum in.

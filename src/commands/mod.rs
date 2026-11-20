@@ -13,6 +13,8 @@ pub mod init;
 pub mod key;
 pub mod list;
 pub mod log;
+pub(crate) mod partial;
+pub mod remedy;
 pub mod restore;
 pub(crate) mod review;
 pub mod status;

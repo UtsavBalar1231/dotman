@@ -5,6 +5,17 @@ configured system scope. Paths use the same selection rules as terminal `diff`.
 The command is read-only apart from private temporary comparison files and the
 normal diagnostic temporary directory. It does not update state or approvals.
 
+## Exact comparison
+
+`dotman diff --json --exact-repo=REPO_ID [--allow-encrypted-source=SOURCE] -- /absolute/path`
+selects one logical key rather than a prefix. `REPO_ID` must match the context
+repo ID. The absolute operand follows the normal home and system scope rules.
+An encrypted home winner requires its exact source name as `SOURCE`; supplying
+that option for a different, plain, missing, ambiguous or system source is
+refused. The caller must obtain consent before supplying the source. A later
+content change at the approved source is not prevented by this name check;
+compare the returned context, source and tuple before displaying the payload.
+
 ## Framing
 
 Stdout is newline-delimited JSON. Split on LF bytes. A `context` record uses
@@ -23,7 +34,9 @@ record with `count`, then the final `result`. A `diff` record has:
 | `system_off` | The system key lies outside the configured roots |
 | `source` | Winning source path as text, or null |
 | `r`, `source_tuple`, `h`, `raw_h` | Observations described below |
+| `physical_plain` | Optional physical plain-source observation, as in status JSON |
 | `payload` | Git's captured no-index diff as a byte-preserving value, or null when Git did not run |
+| `line_edits` | Optional changed-line occurrences for an exact comparison of a plain, directly managed Home file |
 
 Text and paths use the `raw`/`shown` and `bytes`/`shown` representation in
 [status JSON](status-json.md). The payload uses the same representation as a
@@ -33,6 +46,18 @@ untrusted content, not terminal control sequences or markup. A `different`
 record can have an empty payload when only permission bits Git does not display
 differ. Git displays file executable bits, while tuple modes retain the
 complete effective permission bits.
+
+`line_edits` describes changes from Repository to Home. Each entry has a
+one-based `id`, `old_line` and `before` for the repository side, and `new_line`
+and `after` for the Home side. A missing side has a null line number and null
+text. The strings retain line endings, including a missing final newline. A
+replacement has both sides and is one selectable edit. IDs belong to this
+comparison, not to the path across refreshes.
+
+The field is omitted for unsupported input, including binary content, a
+content-guard match, or a comparison above the size or work limits. Omission
+does not invalidate the ordinary diff. Receiving an edit ID does not grant
+permission to capture a file or write to Home.
 
 ## Snapshots and observations
 

@@ -11,7 +11,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead as _, Read as _, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -157,9 +157,120 @@ pub struct Git {
     dot_command: &'static str,
     env: Vec<(OsString, OsString)>,
     version_checked: OnceLock<()>,
+    prepared_checked: OnceLock<()>,
     leave_out: Option<LeaveOut>,
     /// Where [`Git::recover_pull`] saves an uncommitted edit before it puts the repo back.
     backups: Option<PathBuf>,
+    guarded_setup: Option<PathBuf>,
+}
+
+pub struct SelectedTarget {
+    pub binding: String,
+    url: Option<String>,
+    branch: String,
+}
+
+fn selected_network_url(url: &str) -> bool {
+    let (authority, path, ssh) = if let Some(rest) = url.strip_prefix("https://") {
+        (rest.split_once('/'), rest, false)
+    } else if let Some(rest) = url.strip_prefix("ssh://") {
+        (rest.split_once('/'), rest, true)
+    } else {
+        return false;
+    };
+    let Some((authority, _)) = authority else {
+        return false;
+    };
+    let Some((_, path)) = path.split_once('/') else {
+        return false;
+    };
+    if path.is_empty()
+        || !path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return false;
+    }
+    let host_port = if let Some((user, host)) = authority.split_once('@') {
+        if !ssh
+            || user.is_empty()
+            || user.starts_with('-')
+            || !user
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return false;
+        }
+        host
+    } else {
+        authority
+    };
+    let (host, port) = host_port
+        .split_once(':')
+        .map_or((host_port, None), |(h, p)| (h, Some(p)));
+    if port.is_some_and(|p| {
+        p.is_empty()
+            || !p.bytes().all(|b| b.is_ascii_digit())
+            || p.parse::<u16>().map_or(true, |n| n == 0)
+    }) {
+        return false;
+    }
+    !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+fn selected_cache_socket() -> Result<Option<String>> {
+    let cache = match std::env::var_os("XDG_CACHE_HOME") {
+        Some(path) => PathBuf::from(path),
+        None => {
+            PathBuf::from(std::env::var_os("HOME").context("selected HTTPS push requires HOME")?)
+                .join(".cache")
+        }
+    };
+    ensure!(cache.is_absolute(), "unsupported credential cache location");
+    let parent = cache.join("git/credential");
+    let parent = match fs::canonicalize(parent) {
+        Ok(path) => path,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => bail!("cannot inspect credential cache"),
+    };
+    let metadata = fs::metadata(&parent).map_err(|_| anyhow!("cannot inspect credential cache"))?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == crate::sys::geteuid()
+            && metadata.mode().trailing_zeros() >= 6,
+        "unsupported credential cache permissions"
+    );
+    let socket = parent.join("socket");
+    let metadata = match fs::symlink_metadata(&socket) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => bail!("cannot inspect credential cache"),
+    };
+    ensure!(
+        metadata.file_type().is_socket() && metadata.uid() == crate::sys::geteuid(),
+        "unsupported credential cache socket"
+    );
+    let socket = socket
+        .to_str()
+        .ok_or_else(|| anyhow!("unsupported credential cache location"))?;
+    ensure!(
+        socket
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
+        "unsupported credential cache location"
+    );
+    Ok(Some(socket.to_owned()))
 }
 
 impl fmt::Debug for Git {
@@ -887,8 +998,10 @@ impl Git {
             dot_command,
             env: Vec::new(),
             version_checked: OnceLock::new(),
+            prepared_checked: OnceLock::new(),
             leave_out: None,
             backups: None,
+            guarded_setup: None,
         }
     }
 
@@ -916,6 +1029,14 @@ impl Git {
     {
         self.env
             .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+
+    // reason: dropping the old PathBuf is not const on the MSRV.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::missing_const_for_fn)]
+    pub(crate) fn for_guarded_setup(mut self, stage: PathBuf) -> Self {
+        self.guarded_setup = Some(stage);
         self
     }
 
@@ -961,6 +1082,19 @@ impl Git {
 
     fn base(&self) -> Command {
         let mut cmd = crate::proc::command("git");
+        if let Some(stage) = &self.guarded_setup {
+            cmd.env_clear();
+            if let Some(path) = std::env::var_os("PATH") {
+                cmd.env("PATH", path);
+            }
+            cmd.current_dir(stage)
+                .env("HOME", stage)
+                .env("XDG_CONFIG_HOME", stage)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ALLOW_PROTOCOL", "");
+            cmd.args(["-c", "http.followRedirects=false"]);
+        }
         for var in LOCAL_REPO_ENV {
             cmd.env_remove(var);
         }
@@ -1149,6 +1283,17 @@ impl Git {
         self.write_metadata()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn init_guarded_sha256(&self) -> Result<()> {
+        self.run(&["init", "-q", "--object-format=sha256", NO_TEMPLATE])?;
+        let format = self.run(&["rev-parse", "--show-object-format"])?;
+        ensure!(
+            text(&format).trim() == "sha256",
+            "Git did not create a SHA-256 repository"
+        );
+        Ok(())
+    }
+
     /// Clones `src` into this handle's repo path and populates the working tree.
     ///
     /// Attributes are written before checkout so a tracked `.gitattributes` cannot transform
@@ -1225,6 +1370,51 @@ impl Git {
     /// import takes that history and nothing else.
     pub fn clone_head_from(&self, src: &str) -> Result<()> {
         self.clone_with(src, &["--single-branch", "--no-tags"])
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn guarded_clone(&self, src: &str, protocol: &str) -> Result<()> {
+        if protocol == "file" {
+            let mut cmd = self.base();
+            cmd.arg("--version");
+            let out = self.spawn_bounded(cmd, &["--version"])?;
+            ensure!(out.status.success(), "cannot read git version");
+            let line = String::from_utf8(out.stdout)?;
+            let token = line
+                .trim()
+                .strip_prefix("git version ")
+                .and_then(|s| s.split_whitespace().next())
+                .ok_or_else(|| anyhow!("cannot read git version"))?;
+            let parts: Vec<_> = token.split('.').collect();
+            ensure!(
+                parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                    && parse_version(&line).is_some_and(|v| v >= (2, 45, 1)),
+                "file clone requires git 2.45.1 or newer"
+            );
+        }
+        let args = [
+            OsStr::new("clone"),
+            OsStr::new("-q"),
+            OsStr::new("--no-checkout"),
+            OsStr::new("--no-local"),
+            OsStr::new(NO_TEMPLATE),
+            OsStr::new("--"),
+            OsStr::new(src),
+            self.repo.as_os_str(),
+        ];
+        let mut cmd = self.base();
+        cmd.env("GIT_ALLOW_PROTOCOL", protocol);
+        self.run_with(cmd, &args)?;
+        self.write_metadata()?;
+        if self.head()?.is_some() {
+            self.checkout_head()?;
+        }
+        let status = self.run(&["status", "--porcelain", "-z", "--untracked-files=all"])?;
+        ensure!(status.stdout.is_empty(), "cloned repository is not clean");
+        Ok(())
     }
 
     fn clone_with(&self, src: &str, refs: &[&str]) -> Result<()> {
@@ -1598,6 +1788,7 @@ impl Git {
         edits: &BTreeMap<PathBuf, crate::commands::review::Stored>,
         message: &str,
     ) -> Result<String> {
+        self.check_prepared_transaction()?;
         anyhow::ensure!(
             self.head()?.as_deref() == expected,
             crate::context::ReviewChanged
@@ -1755,6 +1946,33 @@ impl Git {
         result
     }
 
+    pub(crate) fn check_prepared_transaction(&self) -> Result<()> {
+        if self.prepared_checked.get().is_some() {
+            return Ok(());
+        }
+        let mut input = tempfile::tempfile_in(self.repo.join(".git"))?;
+        input.write_all(b"start\nprepare\nabort\n")?;
+        input.rewind()?;
+        self.check_version()?;
+        let args = ["update-ref", "--no-deref", "--stdin"];
+        let mut command = self.command();
+        command.args(args).env("LC_ALL", "C");
+        let probe = self.spawn_with(command, Stdio::from(input))?;
+        if !probe.status.success() {
+            if String::from_utf8_lossy(&probe.stderr).contains("unknown command: start") {
+                return Err(anyhow!(crate::context::ReviewChanged)
+                    .context("prepared Git transaction unavailable"));
+            }
+            return Err(self.failure(&args, &probe));
+        }
+        ensure!(
+            probe.stdout == b"start: ok\nprepare: ok\nabort: ok\n",
+            crate::context::ReviewChanged
+        );
+        let _ = self.prepared_checked.set(());
+        Ok(())
+    }
+
     fn publish_ref(
         &self,
         reference: &str,
@@ -1762,6 +1980,7 @@ impl Git {
         expected: Option<&str>,
         message: &str,
     ) -> Result<()> {
+        self.check_prepared_transaction()?;
         let _ignored = crate::sys::ignore_signals(&[libc::SIGPIPE]);
         let mut command = self.command();
         command
@@ -1871,6 +2090,24 @@ impl Git {
             "--ignored=traditional",
             "--ignore-submodules=all",
         ];
+        parse_status(&self.run_with(cmd, &args)?.stdout)
+    }
+
+    pub(crate) fn status_for(&self, path: &Path) -> Result<Vec<StatusEntry>> {
+        let mut cmd = self.command();
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        let mut args: Vec<OsString> = [
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=traditional",
+            "--ignore-submodules=all",
+            "--",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        args.push(pathspec(":(literal)", path));
         parse_status(&self.run_with(cmd, &args)?.stdout)
     }
 
@@ -2236,7 +2473,7 @@ impl Git {
     }
 
     /// The blob id of `bytes`, with no filter; stored only when `store`.
-    fn hash_object(&self, bytes: &[u8], store: bool) -> Result<String> {
+    pub(crate) fn hash_object(&self, bytes: &[u8], store: bool) -> Result<String> {
         let args: &[&str] = if store {
             &["hash-object", "-w", "--no-filters", "--stdin"]
         } else {
@@ -3416,6 +3653,152 @@ impl Git {
             .map(drop)
     }
 
+    pub(crate) fn selected_target(&self) -> Result<Option<SelectedTarget>> {
+        let Some(branch) = self.branch()? else {
+            return Ok(None);
+        };
+        let remotes = self.run(&["remote"])?;
+        if !text(&remotes).lines().any(|name| name == "origin") {
+            return Ok(Some(SelectedTarget {
+                binding: "local".to_owned(),
+                url: None,
+                branch,
+            }));
+        }
+        let out = self.probe(&["remote", "get-url", "--push", "--all", "origin"])?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let Ok(urls) = std::str::from_utf8(&out.stdout) else {
+            return Ok(None);
+        };
+        let mut lines = urls.lines();
+        let Some(url) = lines.next() else {
+            return Ok(None);
+        };
+        let mut raw = self.probe(&["config", "--get-all", "remote.origin.pushurl"])?;
+        if raw.status.code() == Some(1) {
+            raw = self.probe(&["config", "--get-all", "remote.origin.url"])?;
+        }
+        if !raw.status.success() {
+            return Ok(None);
+        }
+        let Ok(raw) = std::str::from_utf8(&raw.stdout) else {
+            return Ok(None);
+        };
+        let mut raw = raw.lines();
+        if raw.next() != Some(url) || raw.next().is_some() {
+            return Ok(None);
+        }
+        let local = url.strip_prefix("file:///").is_some_and(|path| {
+            !path.is_empty()
+                && path
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+        });
+        if lines.next().is_some() || !(local || selected_network_url(url)) {
+            return Ok(None);
+        }
+        let binding = self.hash_object(
+            format!("selected-target\0{url}\0refs/heads/{branch}").as_bytes(),
+            false,
+        )?;
+        Ok(Some(SelectedTarget {
+            binding: format!("git-{binding}"),
+            url: Some(url.to_owned()),
+            branch,
+        }))
+    }
+
+    pub(crate) fn push_selected(&self, target: &SelectedTarget, tip: &str) -> Result<()> {
+        let Some(url) = &target.url else {
+            return Ok(());
+        };
+        let temp = tempfile::tempdir()?;
+        let objects = fs::canonicalize(self.repo.join(".git/objects"))?;
+        ensure!(
+            !objects.as_os_str().as_encoded_bytes().contains(&b':'),
+            "unsupported object directory"
+        );
+        let isolated = |cmd: &mut Command| {
+            cmd.env_clear();
+            for name in ["PATH", "HOME", "SSH_AUTH_SOCK", "GIT_SSL_CAINFO"] {
+                if let Some(value) = std::env::var_os(name) {
+                    cmd.env(name, value);
+                }
+            }
+            cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ALLOW_PROTOCOL", "file:https:ssh");
+        };
+        let mut init = self.base();
+        isolated(&mut init);
+        init.env_remove("GIT_DEFAULT_HASH")
+            .args(["init", "--bare", "-q", NO_TEMPLATE]);
+        if tip.len() == 64 {
+            init.arg("--object-format=sha256");
+        }
+        init.arg(temp.path());
+        ensure!(
+            self.spawn(init)?.status.success(),
+            "could not prepare selected push"
+        );
+        let mut push = self.base();
+        isolated(&mut push);
+        push.env("HOME", temp.path());
+        if url.starts_with("https://")
+            && let Some(socket) = selected_cache_socket()
+                .context("selected push failed; the local commit is retained")?
+        {
+            push.arg("-c").arg("credential.useHttpPath=true").arg("-c").arg(format!(
+                "credential.helper=!f() {{ if test \"$1\" = get; then git credential-cache --socket={socket} get; fi; }}; f"
+            ));
+        }
+        if url.starts_with("ssh://") {
+            let home = std::env::var("HOME").context("selected SSH push requires HOME")?;
+            ensure!(
+                home.starts_with('/')
+                    && home
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
+                "unsupported HOME for selected SSH push"
+            );
+            push.env("GIT_SSH_COMMAND", format!(
+                "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile={home}/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentityFile=none -o IdentitiesOnly=no -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o ProxyCommand=none -o ProxyJump=none -o ClearAllForwardings=yes -o ForwardAgent=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+            ));
+        }
+        push.stdout(Stdio::null()).stderr(Stdio::null());
+        push.arg("--git-dir")
+            .arg(temp.path())
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &objects)
+            .args([
+                "-c",
+                "push.followTags=false",
+                "-c",
+                "http.sslVerify=true",
+                "-c",
+                "http.followRedirects=false",
+                "-c",
+                "http.proxy=",
+                "-c",
+                "http.lowSpeedLimit=1",
+                "-c",
+                "http.lowSpeedTime=60",
+                "push",
+                "--no-follow-tags",
+                "--",
+                url,
+            ])
+            .arg(format!("{tip}:refs/heads/{}", target.branch));
+        let out = self.spawn(push)?;
+        ensure!(
+            out.status.success(),
+            "selected push failed or was rejected; the local commit is retained and remote status may be uncertain"
+        );
+        Ok(())
+    }
+
     /// Like [`Git::push`], and records `remote` as the upstream of `branch`, so that a bare
     /// `git pull --rebase` works.
     pub fn push_set_upstream(&self, remote: &str, branch: &str) -> Result<()> {
@@ -3997,7 +4380,7 @@ fn parse_version(line: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-fn check_version_text(line: &str) -> Result<()> {
+pub fn check_version_text(line: &str) -> Result<()> {
     let (major, minor, patch) = parse_version(line)
         .ok_or_else(|| anyhow!("could not read the git version from {:?}", line.trim()))?;
     if (major, minor) < MIN_VERSION {

@@ -162,6 +162,8 @@ pub enum Commands {
     Add(AddArgs),
     /// Stop managing files or directories, keeping them in $HOME
     Forget(ForgetArgs),
+    /// Review one held file without changing it
+    Remedy(RemedyArgs),
     /// List the managed files
     #[command(long_about = concat!(
         "List the managed files.\n\n",
@@ -223,6 +225,12 @@ pub struct SystemWriteArgs {
 // reason: independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 pub struct InitArgs {
+    /// Read a guarded setup request from standard input
+    #[arg(long, value_parser = ["-"], requires = "json", conflicts_with_all = ["source", "remote", "no_import", "keep_local", "take_repo", "approve_hooks", "dry_run", "no_bootstrap", "refresh_bootstrap", "git_name", "git_email", "git_global", "create_github", "no_remote", "host", "profile", "system_root", "no_system", "create_key", "no_key", "age_key_file", "force"])]
+    pub setup_from: Option<String>,
+    /// Print the guarded setup result as NDJSON
+    #[arg(long, requires = "setup_from")]
+    pub json: bool,
     /// Git URL or local path of an existing dotman repo to clone and apply
     #[arg(value_name = "URL_OR_PATH", help_heading = "Source")]
     pub source: Option<String>,
@@ -344,6 +352,12 @@ pub struct ApplyArgs {
     /// Read experimental versioned, snapshot-bound decisions from stdin only
     #[arg(long, value_parser = ["-"], conflicts_with_all = ["keep_local", "take_repo", "forget_deleted", "restore_deleted", "accept_identity", "approve_hooks", "system", "yes"])]
     pub decide_from: Option<String>,
+    /// Approve and run only the reviewed pending hooks
+    #[arg(long, requires = "decide_from", conflicts_with_all = ["paths", "in_place", "no_hooks"])]
+    pub review_hooks: bool,
+    /// Review or grant only the named local capture trust
+    #[arg(long, value_parser = ["directories", "ignores"], requires = "json", conflicts_with_all = ["paths", "in_place", "no_hooks", "review_hooks", "keep_local", "take_repo", "forget_deleted", "restore_deleted", "accept_identity", "approve_hooks", "system", "yes"])]
+    pub review_trust: Option<String>,
     /// Print experimental schema-versioned NDJSON outcomes
     #[arg(long)]
     pub json: bool,
@@ -402,6 +416,9 @@ pub struct SyncArgs {
     /// Run no hooks
     #[arg(long, conflicts_with = "approve_hooks")]
     pub no_hooks: bool,
+    /// Defer matching hooks from a reviewed whole sync for separate approval
+    #[arg(long, requires = "decide_from", conflicts_with = "no_hooks")]
+    pub defer_hooks: bool,
     /// Show what would be captured, committed, pulled, applied and pushed; change nothing
     #[arg(long)]
     pub dry_run: bool,
@@ -422,6 +439,12 @@ pub struct DiffArgs {
     /// Print experimental schema-versioned NDJSON comparisons
     #[arg(long)]
     pub json: bool,
+    /// Compare one exact path only if this repo ID matches
+    #[arg(long, requires = "json")]
+    pub exact_repo: Vec<String>,
+    /// Permit the named encrypted winning source in an exact comparison
+    #[arg(long)]
+    pub allow_encrypted_source: Vec<String>,
     /// Compare only these files or directories; every managed path when none are given
     pub paths: Vec<PathBuf>,
 }
@@ -476,6 +499,17 @@ pub struct ForgetArgs {
     /// Show what would be forgotten and change nothing
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments of `dotman remedy`.
+#[derive(Args)]
+pub struct RemedyArgs {
+    /// Read the review request from standard input
+    #[arg(long, value_parser = ["-"], required = true)]
+    pub from: String,
+    /// Print NDJSON
+    #[arg(long, required = true)]
+    pub json: bool,
 }
 
 /// Arguments of `dotman list`.
@@ -582,6 +616,9 @@ pub enum KeyCommand {
     Init,
     /// Copy an existing age identity into place and check that its recipient is listed
     Import(KeyImportArgs),
+    /// Execute a reviewed identity request from standard input
+    #[command(hide = true)]
+    Reviewed,
 }
 
 /// Arguments of `dotman key import`.

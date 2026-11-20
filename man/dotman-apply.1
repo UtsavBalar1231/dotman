@@ -4,7 +4,7 @@
 .SH NAME
 dotman\-apply \- Write the repo\*(Aqs files into $HOME
 .SH SYNOPSIS
-\fBdotman apply\fR [\fB\-\-decide\-from\fR] [\fB\-\-json\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-in\-place\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
+\fBdotman apply\fR [\fB\-\-decide\-from\fR] [\fB\-\-review\-hooks\fR] [\fB\-\-review\-trust\fR] [\fB\-\-json\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-in\-place\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATHS\fR]
 .SH DESCRIPTION
 Write the repo\*(Aqs files into $HOME
 .SH OPTIONS
@@ -18,6 +18,22 @@ Read experimental versioned, snapshot\-bound decisions from stdin only
 .RS 14
 .IP \(bu 2
 \-
+.RE
+.TP
+\fB\-\-review\-hooks\fR
+Approve and run only the reviewed pending hooks
+.TP
+\fB\-\-review\-trust\fR \fI<REVIEW_TRUST>\fR
+Review or grant only the named local capture trust
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+directories
+.IP \(bu 2
+ignores
 .RE
 .TP
 \fB\-\-json\fR

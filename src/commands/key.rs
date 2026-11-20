@@ -21,6 +21,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+#[cfg(target_os = "linux")]
+mod reviewed;
+
 /// Runs `dotman key`.
 ///
 /// # Errors
@@ -33,6 +36,12 @@ pub fn run(args: &KeyArgs) -> Result<Outcome> {
     match &args.command {
         KeyCommand::Init => init(&ctx),
         KeyCommand::Import(import_args) => import(&ctx, import_args),
+        KeyCommand::Reviewed => {
+            #[cfg(target_os = "linux")]
+            return reviewed::run(&ctx);
+            #[cfg(not(target_os = "linux"))]
+            bail!("reviewed identity operations require Linux");
+        }
     }
 }
 

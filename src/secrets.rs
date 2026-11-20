@@ -679,6 +679,15 @@ impl Age {
         self.decrypt(snapshot.path())
     }
 
+    pub(crate) fn decrypt_bytes_in(&self, ciphertext: &[u8], dir: &Path) -> Result<Vec<u8>> {
+        let mut snapshot = tempfile::Builder::new()
+            .prefix(crate::context::TEMP_PREFIX)
+            .tempfile_in(dir)?;
+        snapshot.write_all(ciphertext)?;
+        snapshot.flush()?;
+        self.decrypt(snapshot.path())
+    }
+
     /// Armored ciphertext of `plaintext` for every recipient.
     pub fn encrypt(&self, plaintext: &[u8], recipients: &[String]) -> Result<Vec<u8>> {
         let recipients = recipient_set(recipients);

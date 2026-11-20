@@ -35,6 +35,13 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+pub(crate) mod held_encrypt;
+
+pub(crate) mod host_variant;
+
+#[cfg(target_os = "linux")]
+pub(crate) mod trust_scan;
+
 // A new file over this size is probably a download, a cache or a database, not a config.
 const HOLD_BYTES: u64 = 1_048_576;
 const LARGEST_SHOWN: usize = 5;

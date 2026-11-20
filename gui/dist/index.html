@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dotman</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="file-tree.css">
+  <link rel="stylesheet" href="diff-reader.css">
+  <link rel="stylesheet" href="line-selection.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" class="workspace-symbols" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="pair-mark" viewBox="0 0 64 64">
+        <path class="mark-back" d="m45 13 15-7-7 40c-.8 4.4-.4 7 1.5 9L43 60c-2-1.5-3-4-3-7-4.2 4.6-9 6.8-14 6-9.2-1.3-12.6-9.6-10-20.4C19.2 25.7 29 18.4 42.8 21ZM4.4 49.4c1-3.4 4.5-5.6 8.3-5.8l2.2 5.8c-1.4 4-5.1 6.2-9.7 6.3Z"/>
+        <path class="mark-front" fill-rule="evenodd" d="m43 10 15-7-7 40c-.8 4.4-.4 7 1.5 9L41 57c-2-1.5-3-4-3-7-4.2 4.6-9 6.8-14 6-9.2-1.3-12.6-9.6-10-20.4C17.2 22.7 27 15.4 40.8 18Zm-19 32c3.5-4.7 6-6.2 9.8-4.2 3.8 2 6.7-.3 8.6-4.3l1-7c-3.2 4.5-5.9 5.7-9.8 3.8-4-1.9-7.2.9-8.6 5.7Z"/>
+        <path class="mark-dot" d="M2.4 46.4c1-3.4 4.5-5.6 8.3-5.8l2.2 5.8c-1.4 4-5.1 6.2-9.7 6.3Z"/>
+      </symbol>
+      <symbol id="compare-mark" viewBox="0 0 24 24">
+        <path d="M10 4H3v16h7m4-16h7v16h-7M6 9h4m4 0h4M6 15h3m5 0h4"/>
+        <path d="M12 5v14" stroke-dasharray="1 3"/>
+      </symbol>
+      <symbol id="capture-mark" viewBox="0 0 24 24">
+        <path d="M12 5H4v15h13v-4M9 12h6l5-6m-5 0h5v5"/>
+        <circle cx="8" cy="12" r="1" fill="currentColor"/>
+      </symbol>
+      <symbol id="stop-mark" viewBox="0 0 24 24">
+        <path d="M15 5H3v14h12M6 9l3 3-3 3m5 0h2m5-10v14m3-14v14"/>
+      </symbol>
+    </defs>
+  </svg>
+  <main>
+    <header class="topbar">
+      <div class="brand"><svg class="workspace-mark" aria-hidden="true" focusable="false"><use href="#pair-mark"/></svg><h1>dotman</h1><p class="subtitle">File workspace</p></div>
+      <div class="actions"><details class="appearance"><summary>Appearance</summary><div>
+        <label>Theme <select id="theme-mode"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+        <label>Accent <select id="accent-mode"><option value="petrol">Petrol</option><option value="marine">Marine</option><option value="mulberry">Mulberry</option></select></label>
+      </div></details><button id="refresh">Refresh status</button><button id="cancel" hidden disabled>Cancel read</button></div>
+    </header>
+    <p id="notice" class="notice" hidden>DOTMAN_AGE_KEY was removed before launch. Encrypted files may be locked; use a key file or import an identity with dotman.</p>
+    <p id="message" role="status" aria-live="polite" tabindex="-1">Loading status…</p>
+    <section id="recovery" hidden aria-labelledby="recovery-title">
+      <h2 id="recovery-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#stop-mark"/></svg>Terminal recovery required</h2>
+      <p id="recovery-message"></p>
+      <p>Resolve this in a terminal using the same dotman configuration, then refresh status here. Sync will not resume automatically.</p>
+      <div id="recovery-steps"></div>
+    </section>
+    <details id="context" hidden>
+      <summary>
+        <span class="repository-label">Repository</span><span id="repository-path"></span>
+        <span class="paths-label">Resolved paths</span>
+      </summary>
+      <dl id="paths"></dl>
+    </details>
+    <section id="setup" hidden aria-labelledby="setup-title">
+      <h2 id="setup-title">Repository unavailable</h2>
+      <p>The repository could not be opened. Check the resolved paths above, or run <code>dotman status</code> in a terminal for details. Repair an existing repository in the terminal, then refresh status here.</p>
+      <button id="start-fresh" type="button" hidden>Create repository…</button>
+      <button id="start-import" type="button" hidden>Import dotfiles directory…</button>
+      <div id="clone-controls" hidden>
+        <label for="clone-source">Clone source</label>
+        <p id="clone-help">Use a public HTTPS URL without credentials, or an absolute file URL (Git 2.45.1 or newer). Clone puts files in the repository for separate review.</p>
+        <input id="clone-source" type="text" maxlength="8192" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="clone-help">
+        <button id="start-clone" type="button">Clone repository…</button>
+      </div>
+    </section>
+    <section id="setup-result" hidden aria-labelledby="setup-result-title">
+      <h2 id="setup-result-title">Repository setup result</h2>
+      <p id="setup-message" role="status" aria-live="polite" tabindex="-1"></p>
+    </section>
+    <section id="decisions" hidden aria-labelledby="decisions-title">
+      <h2 id="decisions-title">File decisions</h2>
+      <p id="decision-message" role="status" aria-live="polite" tabindex="-1"></p>
+      <ul id="decision-items"></ul>
+      <div class="actions"><button id="clear-decisions">Clear all</button><button id="apply-decisions">Apply file decisions</button></div>
+      <div id="decision-results"></div>
+    </section>
+    <section id="identity-result" hidden aria-labelledby="identity-result-title">
+      <h2 id="identity-result-title">Identity review result</h2>
+      <p id="identity-message" role="status" aria-live="polite" tabindex="-1"></p>
+    </section>
+    <section id="variant-result" hidden aria-labelledby="variant-result-title">
+      <h2 id="variant-result-title">Host variant result</h2>
+      <p id="variant-message" role="status" aria-live="polite" tabindex="-1"></p>
+    </section>
+    <p id="policy-message" role="status" aria-live="polite"></p>
+    <section id="age-controls" hidden aria-labelledby="age-title">
+      <h2 id="age-title">Age identity</h2>
+      <p>Create a new identity or import one from a local file. Recipient changes require separate confirmation.</p>
+      <div class="actions">
+        <button id="create-age" type="button">Create identity…</button>
+        <button id="import-age" type="button">Import identity…</button>
+      </div>
+      <p id="age-message" role="status" aria-live="polite"></p>
+    </section>
+    <section id="hooks-result" hidden aria-labelledby="hooks-result-title">
+      <h2 id="hooks-result-title">Hook review result</h2>
+      <p id="hooks-message" role="status" aria-live="polite" tabindex="-1"></p>
+    </section>
+    <div class="desk">
+    <section id="entries" hidden aria-labelledby="files-title">
+      <div class="section-head"><h2 id="files-title">Files</h2><button id="open-review" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#capture-mark"/></svg>Review sync</button></div>
+      <p class="queue-meta"><span id="remote"></span><span id="clean"></span></p>
+      <button id="review-hooks" type="button" hidden>Review pending hooks</button>
+      <label for="search">Search files</label>
+      <input id="search" type="search" placeholder="Name, path or status" autocomplete="off">
+      <div class="nav-modes" role="group" aria-label="Group files"><button id="group-folders" aria-pressed="true">Folders</button><button id="group-status" aria-pressed="false">Status</button></div>
+      <p id="held-counts" hidden></p>
+      <details id="policy-controls">
+        <summary>Local capture policy</summary>
+        <p>Review directory or retained-ignore trust for future sync. Nothing is captured now.</p>
+        <button id="policy-directories" type="button">Review directories…</button>
+        <button id="policy-ignores" type="button">Review retained ignore rules…</button>
+      </details>
+      <div id="rows" tabindex="0" aria-label="File change queue"></div>
+      <details id="machine-files" hidden>
+        <summary>Machine files</summary>
+        <div id="machine-file-details"></div>
+        <button id="review-identity" type="button" hidden>Review identity change</button>
+      </details>
+     </section>
+     <section class="desk-guide" aria-labelledby="guide-title">
+        <h2 id="guide-title">Files to inspect</h2>
+        <p id="guide-description"></p>
+        <ul id="attention-list" class="attention-list"></ul>
+     </section>
+    <section id="review" hidden aria-labelledby="review-title">
+      <div class="section-head"><h2 id="review-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#capture-mark"/></svg>Review outgoing sync</h2><button id="close-review">Close review</button></div>
+      <p>This read-only preview does not fetch or predict upstream changes. A changed hook table may require fresh approval. Sync without hooks writes only after native confirmation.</p>
+      <p id="review-remote"></p>
+      <p id="review-message" role="status" aria-live="polite" tabindex="-1"></p>
+      <div id="review-items"></div>
+      <div id="line-summary" hidden><p id="selected-effect"></p><ul id="selected-lines"></ul><button id="leave-lines" type="button">Leave selected-only mode</button></div>
+      <div id="commit-editor" hidden>
+        <label for="commit-message">Commit message (optional)</label>
+        <p id="commit-hint">Used for a new commit if one is made. Edits require native confirmation. Up to 1024 UTF-8 bytes and six lines; no control or invisible formatting characters.</p>
+        <textarea id="commit-message" rows="4" aria-describedby="commit-hint commit-error"></textarea>
+        <p id="commit-error" role="status" aria-live="polite"></p>
+      </div>
+      <button id="sync-reviewed" hidden>Sync without hooks</button>
+      <button id="sync-mass-delete" type="button" hidden>Review and approve mass deletion</button>
+      <button id="sync-lines" type="button" hidden>Commit selected lines</button>
+    </section>
+    <section id="diff" hidden aria-labelledby="diff-title">
+      <div class="section-head"><h2 id="diff-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#compare-mark"/></svg>Compare copies</h2><button id="close-diff">Close diff</button></div>
+      <p id="diff-key"></p><p id="diff-context"></p><p id="diff-message" role="status" aria-live="polite"></p>
+      <div id="reader-tools" hidden></div>
+      <pre id="diff-text" tabindex="0" aria-label="Diff text"></pre>
+      <fieldset id="line-edits" hidden><legend>Choose changes to commit</legend><p>Checking a change enters selected-only mode. Replacements include both sides.</p><div id="line-edit-list"></div></fieldset>
+      <p id="diff-selection" role="status" aria-live="polite"></p>
+      <div id="diff-actions" class="actions"></div>
+      <button id="next-undecided" hidden>Next undecided</button>
+    </section>
+    </div>
+  </main>
+</body>
+</html>

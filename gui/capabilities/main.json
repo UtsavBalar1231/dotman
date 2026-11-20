@@ -1,0 +1,7 @@
+{
+  "identifier": "main",
+  "description": "Status, reviewed sync and cancellation for the local main window.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": ["allow-refresh", "allow-cancel", "allow-open-diff", "allow-open-review", "allow-discard-review", "allow-run-reviewed-sync", "allow-apply-reviewed-files", "allow-accept-reviewed-identity", "allow-approve-pending-hooks", "allow-review-policy", "allow-run-fresh-setup", "allow-run-clone-setup", "allow-run-import-setup", "allow-run-key", "allow-run-held", "allow-run-host-variant"]
+}

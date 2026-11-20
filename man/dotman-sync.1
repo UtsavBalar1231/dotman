@@ -4,7 +4,7 @@
 .SH NAME
 dotman\-sync \- Capture local changes, commit, pull, apply what arrived and push
 .SH SYNOPSIS
-\fBdotman sync\fR [\fB\-\-decide\-from\fR] [\fB\-\-json\fR] [\fB\-m\fR|\fB\-\-message\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-approve\-dirs\fR] [\fB\-\-drop\-unlisted\-ignores\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-\-allow\-mass\-delete\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBdotman sync\fR [\fB\-\-decide\-from\fR] [\fB\-\-json\fR] [\fB\-m\fR|\fB\-\-message\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-forget\-deleted\fR] [\fB\-\-restore\-deleted\fR] [\fB\-\-accept\-identity\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-approve\-dirs\fR] [\fB\-\-drop\-unlisted\-ignores\fR] [\fB\-\-no\-hooks\fR] [\fB\-\-defer\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-system\fR] [\fB\-\-yes\fR] [\fB\-\-allow\-mass\-delete\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Capture local changes, commit, pull, apply what arrived and push
 .SH OPTIONS
@@ -28,6 +28,9 @@ Commit message, replacing the generated `sync(<host>): ...` line
 .TP
 \fB\-\-no\-hooks\fR
 Run no hooks
+.TP
+\fB\-\-defer\-hooks\fR
+Defer matching hooks from a reviewed whole sync for separate approval
 .TP
 \fB\-\-dry\-run\fR
 Show what would be captured, committed, pulled, applied and pushed; change nothing

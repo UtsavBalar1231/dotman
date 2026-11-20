@@ -2,14 +2,27 @@ use clap::{CommandFactory, FromArgMatches};
 use clap_complete::generate;
 use dotman::cli::{Cli, Commands};
 use dotman::commands::{
-    Outcome, add, apply, diff, doctor, edit, forget, git, import, init, key, list, log, restore,
-    status, sync,
+    Outcome, add, apply, diff, doctor, edit, forget, git, import, init, key, list, log, remedy,
+    restore, status, sync,
 };
 use dotman::context::InProgress;
 use dotman::output::{self, Verbosity};
 use dotman::{name, paths, sys, system};
 use std::io;
 use tracing_subscriber::EnvFilter;
+
+const fn wants_json(command: &Commands) -> bool {
+    match command {
+        Commands::Status(args) => args.json,
+        Commands::Apply(args) => args.json,
+        Commands::Sync(args) => args.json,
+        Commands::Add(args) => args.json,
+        Commands::Remedy(args) => args.json,
+        Commands::Diff(args) => args.json,
+        Commands::Init(args) => args.json,
+        _ => false,
+    }
+}
 
 fn main() {
     #[cfg(unix)]
@@ -29,14 +42,7 @@ fn main() {
 
     // The helper is the one command meant to run as root, under sudo, doas or run0.
     let helper = matches!(cli.command, Commands::SystemWrite(_));
-    let json = match &cli.command {
-        Commands::Status(args) => args.json,
-        Commands::Apply(args) => args.json,
-        Commands::Sync(args) => args.json,
-        Commands::Add(args) => args.json,
-        Commands::Diff(args) => args.json,
-        _ => false,
-    };
+    let json = wants_json(&cli.command);
     let tracing = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -70,6 +76,7 @@ fn main() {
         Commands::Init(args) => init::run(&args),
         Commands::Add(args) => add::run(&args),
         Commands::Forget(args) => done(forget::run(&args)),
+        Commands::Remedy(args) => done(remedy::run(&args)),
         Commands::List(args) => done(list::run(&args)),
         Commands::Status(args) => done(status::run(&args)),
         Commands::Apply(args) => apply::run(&args),

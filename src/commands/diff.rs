@@ -43,6 +43,25 @@ pub fn run(args: &DiffArgs, no_pager: bool) -> Result<()> {
         crate::commands::status::write_context(&ctx, "diff", repo_id.as_deref().ok())?;
     }
     let repo_id = repo_id?;
+    anyhow::ensure!(
+        args.allow_encrypted_source.is_empty() || !args.exact_repo.is_empty(),
+        "encrypted source approval requires an exact repo ID"
+    );
+    if !args.exact_repo.is_empty() {
+        anyhow::ensure!(
+            args.exact_repo.len() == 1 && args.allow_encrypted_source.len() <= 1,
+            "exact diff options cannot be repeated"
+        );
+        let expected = args.exact_repo.first().context("missing repo ID")?;
+        anyhow::ensure!(
+            !expected.is_empty() && expected == &repo_id,
+            "repo ID mismatch"
+        );
+        anyhow::ensure!(
+            matches!(args.paths.as_slice(), [path] if path.is_absolute()),
+            "exact diff requires one absolute path"
+        );
+    }
     if args.json {
         return json_diff(&ctx, args, &repo_id);
     }
@@ -116,9 +135,13 @@ struct DiffRecord {
     source: Option<crate::output::json::Text>,
     r: crate::commands::status::Observation,
     source_tuple: crate::commands::status::Observation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    physical_plain: Option<crate::commands::status::Observation>,
     h: crate::commands::status::Observation,
     raw_h: crate::commands::status::Observation,
     payload: Option<crate::output::json::PathValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_edits: Option<Vec<crate::commands::partial::LineEdit>>,
 }
 
 #[derive(Serialize)]
@@ -149,6 +172,7 @@ impl DiffRecord {
             source_tuple: Observation::Unavailable {
                 reason: "not_observed",
             },
+            physical_plain: None,
             h: Observation::Unavailable {
                 reason: "not_observed",
             },
@@ -156,22 +180,22 @@ impl DiffRecord {
                 reason: "not_observed",
             },
             payload: None,
+            line_edits: None,
         }
     }
 }
 
 fn json_diff(ctx: &Context, args: &DiffArgs, repo_id: &str) -> Result<()> {
+    if !args.exact_repo.is_empty() {
+        return exact_json_diff(ctx, args, repo_id);
+    }
     let config = ctx.repo_config()?;
     let state = ctx.state(repo_id)?;
     let sources = ctx.sources()?;
     let (home_paths, system_filters) = system::split_inputs(&ctx.paths, &args.paths)?;
     let mut all: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     let indexed = ctx.git.index_paths()?;
-    let tracked =
-        crate::variant::Sources::group(indexed.iter().map(String::as_str).filter(|path| {
-            !crate::paths::is_reserved_root_name(path.split('/').next().unwrap_or(path))
-                && ctx.check_key(path, true).is_ok()
-        }));
+    let tracked = tracked_home_sources(ctx, &indexed);
     all.extend(tracked.keys().map(str::to_owned));
     all.extend(state.files.keys().cloned());
     let keys = if args.paths.is_empty() || !home_paths.is_empty() {
@@ -187,24 +211,15 @@ fn json_diff(ctx: &Context, args: &DiffArgs, repo_id: &str) -> Result<()> {
         ctx.age(),
     );
     ctx.git.check_version()?;
-    let tmp = private_temp_dir(&temp_prefix(), &private_base(ctx)?)?;
-    anyhow::ensure!(
-        !fs::canonicalize(tmp.path())?.starts_with(fs::canonicalize(&ctx.paths.repo)?),
-        "the diff temporary directory is inside the repo"
-    );
+    let tmp = json_temp(ctx)?;
     let mut count = 0_usize;
     for key in keys {
-        let record = home_diff(ctx, tmp.path(), &variants, &sources, &state, &key)?;
+        let record = home_diff(ctx, tmp.path(), &variants, &sources, &state, &key, None)?;
         emit_diff(&record, &mut count)?;
     }
     if args.paths.is_empty() || !system_filters.is_empty() {
         let found = system::evaluate_with_nodes(ctx, &config, &state)?;
-        let indexed_system: Vec<&str> = indexed
-            .iter()
-            .filter_map(|path| path.strip_prefix(".dotman/system/"))
-            .filter(|path| crate::paths::validate_key(path).is_ok())
-            .collect();
-        let grouped = crate::variant::Sources::group(indexed_system);
+        let grouped = tracked_system_sources(&indexed);
         let existing: BTreeSet<String> = found.iter().map(|(f, _)| f.key.clone()).collect();
         let missing: BTreeSet<String> = grouped
             .keys()
@@ -222,6 +237,35 @@ fn json_diff(ctx: &Context, args: &DiffArgs, repo_id: &str) -> Result<()> {
             emit_diff(&record, &mut count)?;
         }
     }
+    emit_report(count)
+}
+
+fn tracked_home_sources(ctx: &Context, indexed: &[String]) -> crate::variant::Sources {
+    crate::variant::Sources::group(indexed.iter().map(String::as_str).filter(|path| {
+        !crate::paths::is_reserved_root_name(path.split('/').next().unwrap_or(path))
+            && ctx.check_key(path, true).is_ok()
+    }))
+}
+
+fn tracked_system_sources(indexed: &[String]) -> crate::variant::Sources {
+    crate::variant::Sources::group(
+        indexed
+            .iter()
+            .filter_map(|path| path.strip_prefix(".dotman/system/"))
+            .filter(|path| crate::paths::validate_key(path).is_ok()),
+    )
+}
+
+fn json_temp(ctx: &Context) -> Result<tempfile::TempDir> {
+    let tmp = private_temp_dir(&temp_prefix(), &private_base(ctx)?)?;
+    anyhow::ensure!(
+        !fs::canonicalize(tmp.path())?.starts_with(fs::canonicalize(&ctx.paths.repo)?),
+        "the diff temporary directory is inside the repo"
+    );
+    Ok(tmp)
+}
+
+fn emit_report(count: usize) -> Result<()> {
     crate::output::json::write(
         &mut std::io::stdout().lock(),
         &DiffReport {
@@ -229,6 +273,90 @@ fn json_diff(ctx: &Context, args: &DiffArgs, repo_id: &str) -> Result<()> {
             count,
         },
     )
+}
+
+fn exact_json_diff(ctx: &Context, args: &DiffArgs, repo_id: &str) -> Result<()> {
+    let (home, system) = system::split_inputs(&ctx.paths, &args.paths)?;
+    let config = ctx.repo_config()?;
+    let state = ctx.state(repo_id)?;
+    let sources = ctx.sources()?;
+    let indexed = ctx.git.index_paths()?;
+    let identity = ctx.identity();
+    let variants = Variants::new(
+        Worktree::new(&ctx.paths.repo, &config.modes),
+        &sources,
+        identity,
+        ctx.template_vars(),
+        ctx.age(),
+    );
+    let key = if let [path] = home.as_slice() {
+        let cwd = std::env::current_dir()?;
+        let key = ctx.input_key(path, &cwd)?;
+        let tracked = tracked_home_sources(ctx, &indexed);
+        anyhow::ensure!(
+            sources.keys().any(|candidate| candidate == key)
+                || tracked.keys().any(|candidate| candidate == key)
+                || state.files.contains_key(&key),
+            "exact key is not managed"
+        );
+        match sources.select(&key, identity) {
+            Selection::Winner(source) => {
+                let encrypted = sources.flag(&key, source) == crate::variant::Flag::Age;
+                anyhow::ensure!(
+                    if encrypted {
+                        args.allow_encrypted_source.first().map(String::as_str) == Some(source)
+                    } else {
+                        args.allow_encrypted_source.is_empty()
+                    },
+                    "encrypted source approval does not match selection"
+                );
+            }
+            _ => anyhow::ensure!(
+                args.allow_encrypted_source.is_empty(),
+                "encrypted source approval does not match selection"
+            ),
+        }
+        key
+    } else if let [key] = system.as_slice() {
+        anyhow::ensure!(
+            args.allow_encrypted_source.is_empty(),
+            "system sources cannot be approved as encrypted"
+        );
+        key.clone()
+    } else {
+        bail!("exact diff requires one path");
+    };
+    ctx.git.check_version()?;
+    let tmp = json_temp(ctx)?;
+    let record = if home.is_empty() {
+        let found = system::evaluate_exact_with_node(ctx, &config, &state, &key)?;
+        if let Some((item, node)) = found {
+            system_diff(ctx, tmp.path(), item, node)?
+        } else {
+            let grouped = tracked_system_sources(&indexed);
+            anyhow::ensure!(
+                grouped
+                    .keys()
+                    .map(system::key_of)
+                    .any(|candidate| candidate == key),
+                "exact key is not managed"
+            );
+            missing_system_diff(ctx, tmp.path(), &key)?
+        }
+    } else {
+        home_diff(
+            ctx,
+            tmp.path(),
+            &variants,
+            &sources,
+            &state,
+            &key,
+            Some(!args.allow_encrypted_source.is_empty()),
+        )?
+    };
+    let mut count = 0;
+    emit_diff(&record, &mut count)?;
+    emit_report(count)
 }
 
 fn missing_system_diff(ctx: &Context, tmp: &Path, key: &str) -> Result<DiffRecord> {
@@ -267,6 +395,7 @@ fn home_diff(
     sources: &crate::variant::Sources,
     state: &crate::state::State,
     key: &str,
+    exact: Option<bool>,
 ) -> Result<DiffRecord> {
     use crate::commands::status::Observation;
     let mut record = DiffRecord::new(ctx, key, "home", false);
@@ -274,8 +403,14 @@ fn home_diff(
         .select(key, ctx.identity())
         .winner()
         .map(|source| crate::output::json::Text::new(*source));
-    let mut r = match variants.get(key) {
+    let selection = if exact.is_some() {
+        variants.get_snapshot(key, tmp)
+    } else {
+        variants.get(key)
+    };
+    let mut r = match selection {
         Ok(Selection::Winner(r)) => Some(r),
+        Ok(Selection::None) if exact == Some(true) => bail!("approved source is missing"),
         Ok(Selection::None) => None,
         Ok(Selection::Ambiguous(_)) => {
             record.status = "ambiguous";
@@ -303,6 +438,7 @@ fn home_diff(
     if let Some(entry) = &mut r {
         record.source = Some(crate::output::json::Text::new(&entry.source));
         record.source_tuple = Observation::tuple(&entry.tuple);
+        record.physical_plain = entry.physical_plain.as_deref().map(Observation::tuple);
         if let Some(saved) = state.files.get(key) {
             let saved_tuple = Tuple::from_entry(saved)?;
             let against = saved
@@ -334,6 +470,9 @@ fn home_diff(
                 )),
                 node => node,
             };
+            if exact.is_some() && ctx.paths.home.to_str().is_some() {
+                record.line_edits = line_edits(key, r.as_ref(), &node);
+            }
             compare_json(tmp, key, r.as_ref(), node, &mut record)?;
         }
         Err(e) => {
@@ -346,6 +485,35 @@ fn home_diff(
         }
     }
     Ok(record)
+}
+
+fn line_edits(
+    key: &str,
+    r: Option<&SourceEntry>,
+    node: &Node,
+) -> Option<Vec<crate::commands::partial::LineEdit>> {
+    let r = r?;
+    let (
+        Content::Bytes(repo),
+        Node::File {
+            bytes: home, mode, ..
+        },
+    ) = (&r.content, node)
+    else {
+        return None;
+    };
+    if r.source != key
+        || r.template
+        || r.encrypted
+        || r.tuple.mode != *mode
+        || repo == home
+        || crate::secrets::held(repo, key, &[]).is_some()
+        || crate::secrets::held(home, key, &[]).is_some()
+        || crate::secrets::held_name(&r.source).is_some()
+    {
+        return None;
+    }
+    Some(crate::commands::partial::TextChanges::between(repo, home)?.into_edits())
 }
 
 fn system_diff(
@@ -743,6 +911,7 @@ mod tests {
         let repo = SourceEntry {
             source: "file".into(),
             tuple: Tuple::of_file(b"repo", 0o644),
+            physical_plain: None,
             content: Content::Bytes(b"repo".to_vec()),
             template: false,
             encrypted: false,
@@ -786,6 +955,7 @@ mod tests {
         let repo = SourceEntry {
             source: "file".into(),
             tuple: Tuple::of_file(b"repo\n", 0o644),
+            physical_plain: None,
             content: Content::Bytes(b"repo\n".to_vec()),
             template: false,
             encrypted: false,
@@ -800,9 +970,11 @@ mod tests {
             source: None,
             r: Observation::tuple(&repo.tuple),
             source_tuple: Observation::tuple(&repo.tuple),
+            physical_plain: None,
             h: observed.clone(),
             raw_h: observed,
             payload: None,
+            line_edits: None,
         };
         compare_json(tmp.path(), "file", Some(&repo), node, &mut record)?;
         let json = serde_json::to_value(record)?;
@@ -835,9 +1007,11 @@ mod tests {
             source: None,
             r: Observation::tuple(&repo.tuple),
             source_tuple: Observation::tuple(&repo.tuple),
+            physical_plain: None,
             h: Observation::home(&node.home()),
             raw_h: Observation::home(&node.home()),
             payload: None,
+            line_edits: None,
         };
         compare_json(tmp.path(), "file", Some(&repo), node, &mut record)?;
         assert_eq!(record.status, "equal");

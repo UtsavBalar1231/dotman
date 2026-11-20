@@ -1,0 +1,37 @@
+# Maintainer: Utsav Balar <utsavbalar1231@gmail.com>
+
+pkgname=dotman-gui
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Desktop interface for the dotman dotfiles manager"
+arch=('x86_64' 'aarch64')
+url="https://github.com/UtsavBalar1231/dotman"
+license=('MIT' 'OFL-1.1')
+depends=("dotman-cli=$pkgver-$pkgrel" 'gtk3' 'webkit2gtk-4.1')
+makedepends=('cargo' 'pkgconf')
+# Cargo strips the verified release binary; a second strip changes its digest.
+options=('!lto' '!debug' '!strip')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/UtsavBalar1231/dotman/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "dotman-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --manifest-path gui/Cargo.toml --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "dotman-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=gui/target
+    cargo build --manifest-path gui/Cargo.toml --release --locked --offline
+}
+
+package() {
+    cd "dotman-$pkgver"
+    install -Dm755 gui/target/release/dotman-gui "$pkgdir/usr/bin/dotman-gui"
+    install -Dm644 packaging/dotman-gui.desktop "$pkgdir/usr/share/applications/dotman-gui.desktop"
+    install -Dm644 gui/icons/dotman-gui.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/dotman-gui.svg"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 gui/dist/LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/OFL.txt"
+}

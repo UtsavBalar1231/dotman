@@ -369,7 +369,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
         "Backups are never pruned",
         &[
             "backups_are_never_pruned_by_later_syncs_and_applies",
-            "nothing_in_src_deletes_from_the_backups_dir",
+            "nothing_in_src_prunes_backup_copies",
         ],
     ),
     (
@@ -613,7 +613,7 @@ const CLAIMS: &[(&str, &[&str])] = &[
             "an_attributes_line_an_older_dotman_wrote_is_rewritten_before_the_next_write",
             "an_attributes_file_without_the_pinned_line_last_warns_with_a_step_that_works",
             "the_attributes_refresh_keeps_user_lines_and_never_stops_a_command",
-            "only_context_lock_takes_the_lock_to_write",
+            "only_context_setup_and_reviewed_identity_take_the_lock_to_write",
         ],
     ),
     (
@@ -768,6 +768,12 @@ const CLAIMS: &[(&str, &[&str])] = &[
 
 /// Claims that no test proves yet. Each one is a test to write, not a sentence to soften.
 const GAPS: &[&str] = &[
+    // Binary refusal and changed credentials are tested, but a machine grant is not.
+    "It refuses binary content and every name or content finding",
+    // GUI tests are outside the test inventory, and do not exercise the native dialog end to end.
+    "The native confirmation lists every file and directory with its mode",
+    // The desktop confirmation and hook suppression need an end-to-end test together.
+    "A whole desktop sync requires native confirmation and never executes hooks itself",
     // Each prompt in the table has a test for its flag; none checks that the table lists them all.
     "Every prompt has a flag, so unattended runs never guess",
     // Only the git layer's missing-git error is tested, not each command without git.
@@ -933,7 +939,7 @@ fn every_claim_in_the_docs_names_the_tests_that_prove_it() -> R {
 /// A file under `src/` by its path from the crate root, with its lines.
 type Source = (String, Vec<String>);
 
-/// Each `.rs` file under `src/` with the lines before its `#[cfg(test)]` module, comments left out.
+/// Each `.rs` file under `src/`, excluding test modules and comments.
 fn source_lines() -> Result<Vec<Source>, Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
@@ -947,26 +953,51 @@ fn source_lines() -> Result<Vec<Source>, Box<dyn Error>> {
             .strip_prefix(root)?
             .to_string_lossy()
             .into_owned();
-        let lines = fs::read_to_string(entry.path())?
-            .lines()
-            .map(str::trim)
-            .take_while(|line| *line != "#[cfg(test)]")
-            .filter(|line| !line.starts_with("//"))
-            .map(str::to_owned)
-            .collect();
+        let text = fs::read_to_string(entry.path())?;
+        let mut input = text.lines().peekable();
+        let mut lines = Vec::new();
+        while let Some(line) = input.next() {
+            if matches!(
+                line,
+                "#[cfg(test)]" | "#[cfg(all(test, target_os = \"linux\"))]"
+            ) && input
+                .peek()
+                .is_some_and(|line| line.starts_with("mod ") && line.ends_with(" {"))
+            {
+                input.next();
+                if !input.by_ref().any(|line| line == "}") {
+                    return Err(format!("cannot locate test module end in {name}").into());
+                }
+                continue;
+            }
+            let line = line.trim();
+            if !line.starts_with("//") {
+                lines.push(line.to_owned());
+            }
+        }
         files.push((name, lines));
     }
     Ok(files)
 }
 
 /// Every call under `src/` that deletes a file or a directory, by file, with what it deletes;
-/// tempfile's own cleanup removes only what it created. None reaches the backups directory, so
-/// nothing prunes it. A new deletion needs a row that says what it deletes.
+/// tempfile's own cleanup removes only what it created. Recovery cleanup removes only empty runs
+/// after restoring their source, not backup copies. A new deletion needs a row.
 const DELETIONS: &[(&str, usize, &str)] = &[
+    (
+        "src/commands/add/held_encrypt.rs",
+        1,
+        "the empty recovery run after the source was restored without replacement",
+    ),
     (
         "src/commands/add.rs",
         2,
         "the plain repo source that `add --encrypt` replaces, and add's own temp link in the repo",
+    ),
+    (
+        "src/commands/forget/reviewed.rs",
+        6,
+        "reviewed quarantine sources after private backups and tuple checks, their empty directories, and empty recovery or quarantine runs after failed moves or restoration",
     ),
     (
         "src/commands/forget.rs",
@@ -974,9 +1005,19 @@ const DELETIONS: &[(&str, usize, &str)] = &[
         "a forgotten source in the repo, and the repo directories that leaves empty",
     ),
     (
+        "src/commands/init/setup.rs",
+        1,
+        "only `repo` inside guarded setup's private stage, reached through the pinned stage fd",
+    ),
+    (
         "src/commands/init.rs",
         1,
         "the staging directories a killed init left beside the repo",
+    ),
+    (
+        "src/commands/remedy.rs",
+        1,
+        "the exclusive temporary capture file on failure, if it was not already published",
     ),
     (
         "src/context.rs",
@@ -1000,8 +1041,8 @@ const DELETIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/sys.rs",
-        2,
-        "the `unlinkat` wrapper that the helper calls",
+        3,
+        "the `unlinkat` wrapper that the helper calls, and `remove_dir_at`, which nonrecursively removes guarded setup's empty outer stage after the caller checks its device and inode",
     ),
     (
         "src/system/escalate.rs",
@@ -1016,7 +1057,7 @@ const DELETIONS: &[(&str, usize, &str)] = &[
 ];
 
 #[test]
-fn nothing_in_src_deletes_from_the_backups_dir() -> R {
+fn nothing_in_src_prunes_backup_copies() -> R {
     let mut found: Vec<(String, usize)> = Vec::new();
     for (name, lines) in source_lines()? {
         let deletions = lines
@@ -1047,21 +1088,27 @@ fn nothing_in_src_deletes_from_the_backups_dir() -> R {
     Ok(())
 }
 
-/// The lock is taken to write only by `Context::lock`, which rewrites a stale
-/// `.git/info/attributes`; every other `Lock::acquire` is a dry-run probe, which writes nothing.
+/// `Context::lock` rewrites stale `.git/info/attributes`; other `Lock::acquire` calls are
+/// dry-run probes. Guarded setup and reviewed identity writes use validated strict locks.
 #[test]
-fn only_context_lock_takes_the_lock_to_write() -> R {
+fn only_context_setup_and_reviewed_identity_take_the_lock_to_write() -> R {
     let mut writing = Vec::new();
     for (name, lines) in source_lines()? {
-        for line in lines.iter().filter(|line| line.contains("Lock::acquire(")) {
-            if !line.contains(", true)") {
+        for line in lines {
+            if line.contains("Lock::acquire_strict(")
+                || (line.contains("Lock::acquire(") && !line.contains(", true)"))
+            {
                 writing.push(format!("{name}: {line}"));
             }
         }
     }
     assert_eq!(
         writing,
-        ["src/context.rs: let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;"]
+        [
+            "src/commands/init/setup.rs: Ok((Lock::acquire_strict(file)?, id))",
+            "src/commands/key/reviewed.rs: Ok((Lock::acquire_strict(file)?, id))",
+            "src/context.rs: let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;",
+        ]
     );
     Ok(())
 }

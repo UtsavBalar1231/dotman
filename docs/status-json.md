@@ -67,6 +67,9 @@ of template source text or ciphertext. `h` is the portable comparison observatio
 `raw_h` is the separately retained observation the write-time binding uses.
 An absolute symlink into this home can give these two H observations different
 hashes. `s` is the recorded tuple, with `recorded_source` identifying its source.
+For an observed plain regular source, optional `physical_plain` holds the hash and
+actual mode from the same source read. It is omitted for other source classes or
+when unavailable; it is not the logical source tuple.
 
 Observations come from classification, without rereading home to fill the report.
 Locked, unreadable, ambiguous and invalid entries are not represented as missing.
@@ -105,7 +108,8 @@ per-entry warnings and scan notes are text metadata.
 
 [Command outcomes, outgoing review and terminal recovery](outcomes-json.md)
 have a separate record set. [Reviewed decisions](decisions-json.md) consume these
-snapshots; diff JSON remains separate work.
+snapshots. [Guarded setup](setup-json.md) uses the resolved paths without treating
+a null identity as proof that the destination is absent.
 Status does not authorize a later write.
 
 ## Timing check

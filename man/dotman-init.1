@@ -4,10 +4,24 @@
 .SH NAME
 dotman\-init \- Create the dotman repo or set its remote, or clone a repo and apply it
 .SH SYNOPSIS
-\fBdotman init\fR [\fB\-\-remote\fR] [\fB\-\-no\-import\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-no\-bootstrap\fR] [\fB\-\-refresh\-bootstrap\fR] [\fB\-\-git\-name\fR] [\fB\-\-git\-email\fR] [\fB\-\-git\-global\fR] [\fB\-\-create\-github\fR] [\fB\-\-no\-remote\fR] [\fB\-\-host\fR] [\fB\-\-profile\fR] [\fB\-\-system\-root\fR] [\fB\-\-no\-system\fR] [\fB\-\-create\-key\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-key\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-age\-key\-file\fR] [\fB\-\-no\-pager\fR] [\fB\-\-allow\-root\fR] [\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIURL_OR_PATH\fR]
+\fBdotman init\fR [\fB\-\-setup\-from\fR] [\fB\-\-json\fR] [\fB\-\-remote\fR] [\fB\-\-no\-import\fR] [\fB\-\-keep\-local\fR] [\fB\-\-take\-repo\fR] [\fB\-\-approve\-hooks\fR] [\fB\-\-dry\-run\fR] [\fB\-\-no\-bootstrap\fR] [\fB\-\-refresh\-bootstrap\fR] [\fB\-\-git\-name\fR] [\fB\-\-git\-email\fR] [\fB\-\-git\-global\fR] [\fB\-\-create\-github\fR] [\fB\-\-no\-remote\fR] [\fB\-\-host\fR] [\fB\-\-profile\fR] [\fB\-\-system\-root\fR] [\fB\-\-no\-system\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-create\-key\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-key\fR] [\fB\-\-no\-pager\fR] [\fB\-\-age\-key\-file\fR] [\fB\-\-allow\-root\fR] [\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIURL_OR_PATH\fR]
 .SH DESCRIPTION
 Create the dotman repo or set its remote, or clone a repo and apply it
 .SH OPTIONS
+.TP
+\fB\-\-setup\-from\fR \fI<SETUP_FROM>\fR
+Read a guarded setup request from standard input
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+\-
+.RE
+.TP
+\fB\-\-json\fR
+Print the guarded setup result as NDJSON
 .TP
 \fB\-\-dry\-run\fR
 Show what would be created and change nothing

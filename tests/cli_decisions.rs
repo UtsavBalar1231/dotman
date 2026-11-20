@@ -550,6 +550,350 @@ fn hook_approval(env: &TestEnv) -> R<Value> {
     }))
 }
 
+fn defer_rejects_other_policies(b: &TestEnv, review: &Value) -> R {
+    let before = b.four_trees();
+    let dry = decided(b, review, "sync", &["--defer-hooks", "--dry-run"]);
+    assert_eq!(
+        dry.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    assert_eq!(b.four_trees(), before);
+    let mut selected = review.clone();
+    put(&mut selected, "/sync/selected_lines", json!({".a": [1]}))?;
+    assert_ne!(
+        decided(b, &selected, "sync", &["--defer-hooks"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_ne!(
+        decided(b, review, "sync", &["--defer-hooks", "--no-hooks"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let mut grant = review.clone();
+    put(
+        &mut grant,
+        "/approvals/hooks",
+        json!({"canonical": "{}", "commands": [], "pending_keys": []}),
+    )?;
+    assert_ne!(
+        decided(b, &grant, "sync", &["--defer-hooks"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(b.four_trees(), before);
+    Ok(())
+}
+
+fn review_deferred_hook(env: &TestEnv, marker: &std::path::Path) -> R {
+    let status = reports(&env.run(&["status", "--json"]))?;
+    let hooks = at(record(&status, "review_context")?, "/hooks");
+    let mut reviewed = input(env)?;
+    put(
+        &mut reviewed,
+        "/approvals/hooks",
+        json!({
+            "canonical": at(hooks, "/canonical/raw"),
+            "pending_keys": at(hooks, "/pending_keys").as_array().ok_or("pending")?.iter().map(|v| at(v, "/raw")).collect::<Vec<_>>(),
+            "commands": at(hooks, "/pending_commands").as_array().ok_or("commands")?.iter().map(|v| at(v, "/raw")).collect::<Vec<_>>()
+        }),
+    )?;
+    let mut stale = reviewed.clone();
+    put(&mut stale, "/approvals/hooks/pending_keys", json!([]))?;
+    let out = decided(env, &stale, "apply", &["--review-hooks"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(!marker.exists());
+    let out = decided(env, &reviewed, "apply", &["--review-hooks"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(marker)?, "ran\n");
+    Ok(())
+}
+
+#[test]
+fn reviewed_sync_defers_only_incoming_writes_even_when_already_approved() -> R {
+    for approved in [false, true] {
+        let a = TestEnv::new();
+        a.ok(&["init", "--remote", &a.remote_url()]);
+        a.write(".a", b"old", 0o600);
+        a.write(".b", b"old b", 0o600);
+        a.ok(&["add", ".a", ".b"]);
+        let mut config = a.repo_config();
+        config
+            .hooks
+            .insert(".?".into(), "echo ran >> marker".into());
+        config.save(&a.repo().join(".dotman.toml"), false)?;
+        a.ok(&["sync", "--no-hooks"]);
+        a.git(&[
+            "--git-dir",
+            a.remote_path().to_str().ok_or("remote")?,
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+        let b = a.second_device();
+        b.ok(&["init", &b.remote_url(), "--take-repo", "--host", "beta"]);
+        let state_path = b.state_dir().join("state.toml");
+        let mut state: dotman::state::State = toml::from_str(&fs::read_to_string(&state_path)?)?;
+        state.hooks.pending.clear();
+        state.hooks.pending_table = None;
+        state.hooks.approved = if approved {
+            Some(serde_json::to_string(&config.hooks)?)
+        } else {
+            None
+        };
+        state.save(&state_path, false)?;
+        let approval_before = state.hooks.approved.clone();
+        let marker = b.home().join("marker");
+        if marker.exists() {
+            fs::remove_file(&marker)?;
+        }
+        a.write(".a", b"new", 0o600);
+        a.ok(&["sync", "--no-hooks"]);
+        let review = sync_input(&b)?;
+        defer_rejects_other_policies(&b, &review)?;
+        let out = decided(&b, &review, "sync", &["--defer-hooks"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(b.read(".a"), b"new");
+        assert!(!marker.exists());
+        let state: dotman::state::State = toml::from_str(&fs::read_to_string(&state_path)?)?;
+        assert_eq!(state.hooks.approved, approval_before);
+        assert_eq!(state.hooks.pending.into_iter().collect::<Vec<_>>(), [".a"]);
+        assert_eq!(
+            reports(&out)?
+                .iter()
+                .filter(|r| r["record"] == "hook" && r["outcome"] == "deferred")
+                .count(),
+            1
+        );
+        b.write(".b", b"captured only", 0o600);
+        let review = sync_input(&b)?;
+        let out = decided(&b, &review, "sync", &["--defer-hooks"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let state: dotman::state::State = toml::from_str(&fs::read_to_string(&state_path)?)?;
+        assert_eq!(state.hooks.pending.into_iter().collect::<Vec<_>>(), [".a"]);
+        assert!(!marker.exists());
+        review_deferred_hook(&b, &marker)?;
+        a.write(".a", b"newer", 0o600);
+        a.ok(&["sync", "--no-hooks"]);
+        let review = sync_input(&b)?;
+        let out = decided(&b, &review, "sync", &["--no-hooks"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(b.read(".a"), b"newer");
+        let state: dotman::state::State = toml::from_str(&fs::read_to_string(&state_path)?)?;
+        assert!(state.hooks.pending.is_empty());
+        assert_eq!(fs::read_to_string(&marker)?, "ran\n");
+    }
+    Ok(())
+}
+
+#[test]
+fn standalone_hook_review_runs_only_pending_commands_and_rejects_stale_tokens() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_repo(".a", b"base");
+    env.write_repo(".b", b"base");
+    env.ok(&["sync"]);
+    let mut config = env.repo_config();
+    config
+        .hooks
+        .insert(".a".to_owned(), "echo ran >> marker".to_owned());
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    env.write_repo(".a", b"changed");
+    env.ok(&["apply", ".a"]);
+    env.write_repo(".b", b"unrelated");
+    let status = reports(&env.run(&["status", "--json"]))?;
+    let hooks = &record(&status, "review_context")?["hooks"];
+    let mut reviewed = input(&env)?;
+    put(
+        &mut reviewed,
+        "/approvals/hooks",
+        json!({
+            "canonical": at(hooks, "/canonical/raw"),
+            "pending_keys": hooks["pending_keys"].as_array().ok_or("pending")?.iter().map(|v| v["raw"].clone()).collect::<Vec<_>>(),
+            "commands": hooks["pending_commands"].as_array().ok_or("commands")?.iter().map(|v| v["raw"].clone()).collect::<Vec<_>>()
+        }),
+    )?;
+    let state_path = env.state_dir().join("state.toml");
+    let mut raw = saved_state(&env)?;
+    raw.capture_dirs = None;
+    raw.ignore_seen.clear();
+    raw.hooks.pending.insert(".git/hidden".to_owned());
+    raw.save(&state_path, false)?;
+    let before = env.four_trees();
+    for (field, value) in [
+        ("canonical", json!("{}")),
+        ("commands", json!(["echo different"])),
+        ("pending_keys", json!([".b"])),
+    ] {
+        let mut stale = reviewed.clone();
+        put(&mut stale, &format!("/approvals/hooks/{field}"), value)?;
+        let out = decided(&env, &stale, "apply", &["--review-hooks"]);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{field}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(env.four_trees(), before);
+    }
+    let mut mixed = reviewed.clone();
+    let machine = mixed.get("machine").ok_or("missing machine")?.clone();
+    put(
+        &mut mixed,
+        "/approvals/identity",
+        json!({
+            "recorded": null, "current": machine
+        }),
+    )?;
+    let out = decided(&env, &mixed, "apply", &["--review-hooks"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(env.four_trees(), before);
+    let out = decided(&env, &reviewed, "apply", &["--review-hooks", "--dry-run"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(env.four_trees(), before);
+    let out = decided(&env, &reviewed, "apply", &["--review-hooks"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(env.read("marker"), b"ran\n");
+    assert_eq!(env.read(".b"), b"base");
+    assert_eq!(fs::read(env.repo().join(".b"))?, b"unrelated");
+    let after = saved_state(&env)?;
+    assert_eq!(after.capture_dirs, None);
+    assert!(after.ignore_seen.is_empty());
+    assert!(after.hooks.pending.contains(".git/hidden"));
+    assert_eq!(after.files, raw.files);
+    Ok(())
+}
+
+#[test]
+fn trust_ignore_grant_records_new_current_rules() -> R {
+    use std::os::unix::fs::PermissionsExt as _;
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let mut config = env.repo_config();
+    config.ignore.patterns = vec![".old".to_owned()];
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    env.ok(&["sync"]);
+    let state_path = env.state_dir().join("state.toml");
+    let mut text = fs::read_to_string(&state_path)?;
+    text.push_str("\n[future]\nvalue = 'keep' # preserve\n");
+    fs::write(&state_path, text)?;
+    config.ignore.patterns = vec![".new".to_owned()];
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    let mut reviewed = input(&env)?;
+    put(&mut reviewed, "/trust", trust_review(&env, "ignores")?)?;
+    let out = decided(&env, &reviewed, "apply", &["--review-trust", "ignores"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        saved_state(&env)?
+            .ignore_seen
+            .into_iter()
+            .collect::<Vec<_>>(),
+        [".new"]
+    );
+    assert!(fs::read_to_string(&state_path)?.contains("value = 'keep' # preserve"));
+    assert_eq!(
+        fs::metadata(&state_path)?.permissions().mode() & 0o777,
+        0o600
+    );
+    config.ignore.patterns.clear();
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    assert_eq!(
+        trust_review(&env, "ignores")?.get("retained"),
+        Some(&json!([".new"]))
+    );
+    Ok(())
+}
+
+#[test]
+fn trust_review_refuses_sensitive_policy_and_forbidden_directories() -> R {
+    for sensitive in [true, false] {
+        let env = TestEnv::new();
+        env.ok(&["init"]);
+        let mut config = env.repo_config();
+        if sensitive {
+            config.ignore.patterns =
+                vec![concat!("ghp_", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").to_owned()];
+        } else {
+            config.dirs.paths = vec![".git".to_owned()];
+        }
+        config.save(&env.repo().join(".dotman.toml"), false)?;
+        let before = env.four_trees();
+        let out = env.run(&[
+            "apply",
+            "--review-trust",
+            "directories",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("trust_review"));
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("ghp_"));
+        assert_eq!(env.four_trees(), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn trust_review_refuses_sensitive_empty_directory_without_disclosure() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let secret = concat!("ghp_", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let key = format!(".config/{secret}");
+    fs::create_dir_all(env.home().join(&key))?;
+    let mut config = env.repo_config();
+    config.dirs.paths = vec![key];
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    let out = env.run(&[
+        "apply",
+        "--review-trust",
+        "directories",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains(secret));
+    Ok(())
+}
+
 #[test]
 fn stale_hook_tokens_cannot_fall_through_to_standing_approval() -> R {
     for changed in ["canonical", "commands", "pending"] {
@@ -897,6 +1241,252 @@ fn saved_state(env: &TestEnv) -> R<dotman::state::State> {
     )?)?)
 }
 
+fn trust_review(env: &TestEnv, action: &str) -> R<Value> {
+    let out = env.run(&["apply", "--review-trust", action, "--dry-run", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let records = reports(&out)?;
+    assert_eq!(
+        record(&records, "trust_review")?["display_policy"],
+        "all_values_scanned_v1"
+    );
+    Ok(record(&records, "trust_review")?["review"].clone())
+}
+
+#[test]
+fn local_trust_grants_bind_candidates_without_capturing_them() -> R {
+    use std::os::unix::fs::PermissionsExt as _;
+    for action in ["directories", "ignores"] {
+        let env = TestEnv::new();
+        env.ok(&["init"]);
+        if action == "ignores" {
+            env.write(".config/app/anchor", b"anchor", 0o600);
+            env.ok(&["add", ".config/app"]);
+            let mut config = env.repo_config();
+            config.ignore.patterns = vec![".config/app/ignored*".to_owned()];
+            config.save(&env.repo().join(".dotman.toml"), false)?;
+            env.ok(&["sync"]);
+            config.ignore.patterns.clear();
+            config.save(&env.repo().join(".dotman.toml"), false)?;
+            env.write(".config/app/ignored-one", b"one", 0o600);
+        } else {
+            let mut config = env.repo_config();
+            config.dirs.paths.push(".config/app".to_owned());
+            config.save(&env.repo().join(".dotman.toml"), false)?;
+            env.write(".config/app/one", b"one", 0o600);
+        }
+        let key = if action == "ignores" {
+            ".config/app/ignored-one"
+        } else {
+            ".config/app/one"
+        };
+        let mut reviewed = input(&env)?;
+        put(&mut reviewed, "/trust", trust_review(&env, action)?)?;
+        let before = env.four_trees();
+        let out = decided(
+            &env,
+            &reviewed,
+            "apply",
+            &["--review-trust", action, "--dry-run"],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(env.four_trees(), before);
+        let added = if action == "ignores" {
+            ".config/app/ignored-two"
+        } else {
+            ".config/app/two"
+        };
+        env.write(added, b"two", 0o600);
+        let stale = env.four_trees();
+        let out = decided(&env, &reviewed, "apply", &["--review-trust", action]);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(env.four_trees(), stale);
+        fs::remove_file(env.home().join(added))?;
+        env.write(key, b"changed", 0o600);
+        let stale = env.four_trees();
+        let out = decided(&env, &reviewed, "apply", &["--review-trust", action]);
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(env.four_trees(), stale);
+        env.write(key, b"one", 0o600);
+        fs::set_permissions(env.home().join(key), fs::Permissions::from_mode(0o640))?;
+        let stale = env.four_trees();
+        let out = decided(&env, &reviewed, "apply", &["--review-trust", action]);
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(env.four_trees(), stale);
+        put(&mut reviewed, "/trust", trust_review(&env, action)?)?;
+        let before = env.four_trees();
+        let out = decided(&env, &reviewed, "apply", &["--review-trust", action]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let after = env.four_trees();
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1], before[1]);
+        assert_eq!(after[3], before[3]);
+        assert!(!env.repo().join(key).exists());
+        let status = reports(&env.run(&["status", "--json"]))?;
+        assert!(
+            status
+                .iter()
+                .any(|entry| entry["status"] == "new" && at(entry, "/key/raw") == key)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn local_trust_rejects_state_config_and_mixed_approval_changes() -> R {
+    use std::os::unix::fs::PermissionsExt as _;
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/app/anchor", b"anchor", 0o600);
+    env.ok(&["add", ".config/app"]);
+    let mut config = env.repo_config();
+    config.ignore.patterns = vec![".old".to_owned()];
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    env.ok(&["sync"]);
+    config.ignore.patterns.clear();
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    let mut reviewed = input(&env)?;
+    put(&mut reviewed, "/trust", trust_review(&env, "ignores")?)?;
+    for (field, value) in [
+        ("/trust/lock_ino", json!(0)),
+        ("/trust/lock_dev", json!(0)),
+        (
+            "/trust/paths/state",
+            json!({"raw": "/different/state.toml"}),
+        ),
+    ] {
+        let mut stale = reviewed.clone();
+        put(&mut stale, field, value)?;
+        let before = env.four_trees();
+        let out = decided(&env, &stale, "apply", &["--review-trust", "ignores"]);
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(env.four_trees(), before);
+    }
+    let state_path = env.state_dir().join("state.toml");
+    let state = fs::read(&state_path)?;
+    fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644))?;
+    let out = env.run(&["apply", "--review-trust", "ignores", "--dry-run", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600))?;
+    let mut changed = state.clone();
+    changed.extend_from_slice(b"\n");
+    fs::write(&state_path, changed)?;
+    let before = env.four_trees();
+    let out = decided(&env, &reviewed, "apply", &["--review-trust", "ignores"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(env.four_trees(), before);
+    fs::write(&state_path, state)?;
+    let config_path = env.repo().join(".dotman.toml");
+    let mode = fs::metadata(&config_path)?.permissions().mode();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))?;
+    let before = env.four_trees();
+    let out = decided(&env, &reviewed, "apply", &["--review-trust", "ignores"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(env.four_trees(), before);
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(mode))?;
+    let mut mixed = reviewed.clone();
+    put(
+        &mut mixed,
+        "/approvals/hooks",
+        json!({"canonical": "{}", "commands": [], "pending_keys": []}),
+    )?;
+    let before = env.four_trees();
+    let out = decided(&env, &mixed, "apply", &["--review-trust", "ignores"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(env.four_trees(), before);
+    Ok(())
+}
+
+#[test]
+fn trust_review_rejects_foreign_state_and_oversized_candidates() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["sync", "--no-hooks"]);
+    env.write(".config/app/file", b"small", 0o600);
+    let mut config = env.repo_config();
+    config.dirs.paths.push(".config/app".to_owned());
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    let path = env.home().join(".config/app/file");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)?
+        .set_len(8 * 1024 * 1024 + 1)?;
+    let out = env.run(&[
+        "apply",
+        "--review-trust",
+        "directories",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+    env.write(".config/app/file", b"small", 0o600);
+    let state_path = env.state_dir().join("state.toml");
+    let mut state = saved_state(&env)?;
+    state.repo_id = "foreign-repo".to_owned();
+    state.save(&state_path, false)?;
+    let before = env.four_trees();
+    let out = env.run(&[
+        "apply",
+        "--review-trust",
+        "directories",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+    assert_eq!(env.four_trees(), before);
+    Ok(())
+}
+
+#[test]
+fn trust_review_binds_empty_nested_directory_changes() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/app/file", b"small", 0o600);
+    fs::create_dir_all(env.home().join(".config/app/empty"))?;
+    let mut config = env.repo_config();
+    config.dirs.paths.push(".config/app".to_owned());
+    config.save(&env.repo().join(".dotman.toml"), false)?;
+    let mut reviewed = input(&env)?;
+    let snapshot = trust_review(&env, "directories")?;
+    assert!(
+        snapshot
+            .get("candidates")
+            .and_then(Value::as_array)
+            .ok_or("candidates")?
+            .iter()
+            .any(|candidate| candidate["key"] == ".config/app/empty"
+                && candidate["disposition"] == "directory")
+    );
+    put(&mut reviewed, "/trust", snapshot)?;
+    fs::create_dir(env.home().join(".config/app/empty/new"))?;
+    let before = env.four_trees();
+    let out = decided(&env, &reviewed, "apply", &["--review-trust", "directories"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(env.four_trees(), before);
+    Ok(())
+}
+
 #[test]
 fn directory_and_ignore_approvals_bind_complete_sets() -> R {
     for stale in [false, true] {
@@ -1016,6 +1606,33 @@ fn mass_delete_approval_binds_the_exact_set_and_refusal_keeps_state() -> R {
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn mass_delete_dry_run_reports_exact_projected_set() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    for n in 0..12 {
+        env.write_repo(&format!(".f{n}"), b"base");
+    }
+    env.ok(&["sync"]);
+    for n in 0..10 {
+        fs::remove_file(env.repo().join(format!(".f{n}")))?;
+    }
+    let out = env.run(&["sync", "--dry-run", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let records = reports(&out)?;
+    let review = record(&records, "mass_delete_review")?;
+    let actual: std::collections::BTreeSet<_> = review["paths"]
+        .as_array()
+        .ok_or("missing deletion paths")?
+        .iter()
+        .map(|value| value["raw"].as_str().ok_or("missing raw path"))
+        .collect::<Result<_, _>>()?;
+    let expected: Vec<_> = (0..10).map(|n| format!(".f{n}")).collect();
+    assert_eq!(actual, expected.iter().map(String::as_str).collect());
+    assert_eq!(record(&records, "result")?["error_kind"], "mass_delete");
     Ok(())
 }
 
@@ -1845,7 +2462,7 @@ fn switching_symbolic_head_at_reviewed_publication_cannot_redirect_the_branch_ca
     common::write_exe(
         &wrapper.join("git"),
         &format!(
-            "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\nif [ \"$arg\" = update-ref ]; then\n{git} -C {repo} symbolic-ref HEAD refs/heads/other\nfi\ndone\nexec {git} \"$@\"\n",
+            "#!/bin/sh\nset -eu\ncase \" $* \" in *' update-ref '*' -m '*)\n{git} -C {repo} symbolic-ref HEAD refs/heads/other;; esac\nexec {git} \"$@\"\n",
             git = shell_words::quote(git.to_str().ok_or("git")?),
             repo = shell_words::quote(env.repo().to_str().ok_or("repo")?),
         ),
@@ -2299,7 +2916,7 @@ fn symbolic_branch_refs_cannot_redirect_reviewed_commit_or_replay() -> R {
         common::write_exe(
             &wrapper.join("git"),
             &format!(
-                "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\nif [ \"$arg\" = update-ref ]; then\nif [ -f {repo}/.git/dotman-pull ]; then\nprintf staged-neighbour > {repo}/.unlisted\n{git} -C {repo} add -- .unlisted\nfi\n{git} -C {repo} symbolic-ref refs/heads/main refs/heads/other\nfi\ndone\nexec {git} \"$@\"\n",
+                "#!/bin/sh\nset -eu\ncase \" $* \" in *' update-ref '*' -m '*)\nif [ -f {repo}/.git/dotman-pull ]; then\nprintf staged-neighbour > {repo}/.unlisted\n{git} -C {repo} add -- .unlisted\nfi\n{git} -C {repo} symbolic-ref refs/heads/main refs/heads/other;; esac\nexec {git} \"$@\"\n",
                 git = shell_words::quote(git.to_str().ok_or("git")?),
                 repo = shell_words::quote(b.repo().to_str().ok_or("repo")?)
             ),
@@ -2344,6 +2961,73 @@ fn symbolic_branch_refs_cannot_redirect_reviewed_commit_or_replay() -> R {
         assert!(!b.repo().join(".git/refs/heads/main.lock").exists());
         assert_eq!(fs::read(a.remote_path().join("refs/heads/main"))?, remote);
     }
+    Ok(())
+}
+
+#[test]
+fn eof_buffering_git_refuses_publication_without_hanging() -> R {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut env = TestEnv::new();
+    env.ok(&["init", "--remote", &env.remote_url()]);
+    env.ok(&["sync"]);
+    env.write_repo(".reviewed", b"reviewed");
+    let reviewed = sync_input(&env)?;
+    let repo = env.repo();
+    let head = env.git(&["-C", repo.to_str().ok_or("repo")?, "rev-parse", "HEAD"]);
+    let index = fs::read(repo.join(".git/index"))?;
+    let home = common::tree_checksum(&env.home());
+    let remote = common::tree_checksum(&env.remote_path());
+    let git = std::env::split_paths(&std::env::var_os("PATH").ok_or("PATH")?)
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .ok_or("git")?;
+    let wrapper = env.root().join("eof-wrapper");
+    fs::create_dir(&wrapper)?;
+    common::write_exe(
+        &wrapper.join("git"),
+        &format!(
+            "#!/bin/sh\nfor arg do\nif [ \"$arg\" = update-ref ]; then\ncat >/dev/null\nprintf 'fatal: unknown command: start\\n' >&2\nexit 128\nfi\ndone\nexec {git} \"$@\"\n",
+            git = shell_words::quote(git.to_str().ok_or("git")?)
+        ),
+    )?;
+    env.prepend_path(wrapper);
+    let mut command = env.process_for(std::path::Path::new("timeout"));
+    command
+        .args([
+            "--kill-after=2s",
+            "8s",
+            env!("CARGO_BIN_EXE_dotman"),
+            "sync",
+            "--decide-from",
+            "-",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("stdin")?
+        .write_all(reviewed.to_string().as_bytes())?;
+    let out = child.wait_with_output()?;
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        env.git(&["-C", repo.to_str().ok_or("repo")?, "rev-parse", "HEAD"]),
+        head
+    );
+    assert_eq!(fs::read(repo.join(".git/index"))?, index);
+    assert_eq!(common::tree_checksum(&env.home()), home);
+    assert_eq!(common::tree_checksum(&env.remote_path()), remote);
+    assert!(!repo.join(".git/index.lock").exists());
     Ok(())
 }
 
@@ -2431,7 +3115,7 @@ fn oversized_transaction_errors_are_drained_and_reaped() -> R {
     common::write_exe(
         &wrapper.join("git"),
         &format!(
-            "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\nif [ \"$arg\" = update-ref ]; then\nprintf '%s\\n' \"$$\" > {pid}\nhead -c 1048576 /dev/zero | tr '\\000' x >&2\nexit 128\nfi\ndone\nexec {git} \"$@\"\n",
+            "#!/bin/sh\nset -eu\ncase \" $* \" in *' update-ref '*' -m '*)\nprintf '%s\\n' \"$$\" > {pid}\nhead -c 1048576 /dev/zero | tr '\\000' x >&2\nexit 128;; esac\nexec {git} \"$@\"\n",
             pid = shell_words::quote(pid.to_str().ok_or("pid")?),
             git = shell_words::quote(git.to_str().ok_or("git")?)
         ),

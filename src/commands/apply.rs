@@ -46,9 +46,60 @@ use std::time::SystemTime;
 /// Fails when the repo is not initialised, a rebase or merge is in progress, another process holds
 /// the lock, two keys collide by case or normalization, a path cannot be applied, or a hook fails.
 pub fn run(args: &ApplyArgs) -> Result<Outcome> {
-    let input = crate::decisions::Input::stdin(args.decide_from.as_deref())?;
-    let mut ctx = Context::resolve("apply")?;
+    let input = if args.review_trust.is_some() {
+        crate::decisions::Input::trust_stdin(args.decide_from.as_deref())?
+    } else {
+        crate::decisions::Input::stdin(args.decide_from.as_deref())?
+    };
+    let mut ctx = if args.review_trust.is_some() {
+        crate::decisions::trust_context().map_err(|_| anyhow!("trust review refused"))?
+    } else {
+        Context::resolve("apply")?
+    };
     ctx.reviewed = input.map(|input| input.bind(&ctx, false)).transpose()?;
+    if let Some(action) = &args.review_trust {
+        if let Some(review) = &ctx.reviewed {
+            anyhow::ensure!(
+                review.input.files.is_empty()
+                    && review.input.trust.is_some()
+                    && review.input.approvals.identity.is_none()
+                    && review.input.approvals.hooks.is_none()
+                    && review.input.approvals.directories.is_none()
+                    && review.input.approvals.ignores.is_none()
+                    && review.input.approvals.mass_delete.is_none(),
+                "trust review cannot be mixed with other decisions"
+            );
+        } else {
+            anyhow::ensure!(args.dry_run, "trust preflight requires --dry-run");
+        }
+        let lock = ctx.start_trust(args.json)?;
+        anyhow::ensure!(lock.is_held(), "trust review requires an existing lock");
+        return crate::decisions::trust_action(&ctx, action, args.dry_run, &lock);
+    }
+    anyhow::ensure!(
+        ctx.reviewed
+            .as_ref()
+            .is_none_or(|review| review.input.trust.is_none()),
+        "trust review requires --review-trust"
+    );
+    if args.review_hooks {
+        let review = ctx
+            .reviewed
+            .as_ref()
+            .ok_or_else(|| anyhow!("hook review required"))?;
+        anyhow::ensure!(
+            review.input.files.is_empty()
+                && review.input.approvals.hooks.is_some()
+                && review.input.approvals.identity.is_none()
+                && review.input.approvals.directories.is_none()
+                && review.input.approvals.ignores.is_none()
+                && review.input.approvals.mass_delete.is_none(),
+            "hook review cannot be mixed with other decisions"
+        );
+        let lock = ctx.start(args.json, true)?;
+        anyhow::ensure!(lock.is_held(), "hook review requires an existing lock");
+        return hooks::approve_reviewed_only(&ctx, args.dry_run);
+    }
     let _lock = ctx.start(args.json, args.dry_run)?;
     // Before git is asked about the index, which needs a repo to exist.
     ctx.repo_id()?;
@@ -471,6 +522,10 @@ impl Item {
         self.r
             .as_ref()
             .map(|r| (r.source.as_str(), &r.tuple, r.encrypted, r.template))
+    }
+
+    pub(crate) fn physical_plain(&self) -> Option<&Tuple> {
+        self.r.as_ref().and_then(|r| r.physical_plain.as_deref())
     }
 
     pub(crate) const fn observations(&self) -> (&Home, &Home) {
@@ -2545,6 +2600,7 @@ impl<'a> Run<'a> {
             SourceEntry {
                 source: source.to_owned(),
                 tuple: logical,
+                physical_plain: None,
                 content,
                 template: false,
                 encrypted,

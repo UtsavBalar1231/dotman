@@ -60,6 +60,10 @@ enum Unfinished {
     Operation(Operation),
     /// Left by `git stash pop` and the like, with no operation to continue or abort.
     Conflicts(Vec<PathBuf>),
+    #[cfg(target_os = "linux")]
+    ConflictsRedacted,
+    #[cfg(target_os = "linux")]
+    SequencerRedacted,
     /// A sync was stopped while it replayed a pull; a writing command puts it back.
     OwnPull,
     /// Recovery from [`Unfinished::OwnPull`] could not tell how to put the repo back.
@@ -92,6 +96,16 @@ impl fmt::Display for InProgress {
                     "the repo at {repo} has unresolved conflicts in {quoted}, as `git stash pop` leaves them; resolve them and run `{add}`, or put back the committed version with `{checkout}`"
                 )?;
             }
+            #[cfg(target_os = "linux")]
+            Unfinished::ConflictsRedacted => write!(
+                f,
+                "the repository has unresolved conflicts; resolve them before reviewing trust"
+            )?,
+            #[cfg(target_os = "linux")]
+            Unfinished::SequencerRedacted => write!(
+                f,
+                "a git sequencer operation is in progress; finish or abort it before reviewing trust"
+            )?,
             Unfinished::OwnPull => write!(
                 f,
                 "an earlier `{bin} sync` was stopped while it finished a pull in {repo}; run `{bin} sync`, which puts the repo back as it was before that pull and pulls again"
@@ -249,28 +263,47 @@ impl InProgress {
                     );
                 }
             }
-            Unfinished::Conflicts(paths) => {
+            Unfinished::Conflicts(paths) => conflict_recovery(&mut steps, paths, bin),
+            #[cfg(target_os = "linux")]
+            Unfinished::ConflictsRedacted => {
                 steps.push(Step::instruction(
-                    "Resolve the files and stage them, or restore the committed versions instead.",
+                    "Resolve repository conflicts before reviewing trust.",
                 ));
-                let mut argv = vec![
-                    OsString::from(bin),
-                    OsString::from("git"),
-                    OsString::from("add"),
-                    OsString::from("--"),
-                ];
-                argv.extend(paths.iter().map(|path| crate::git::literal_pathspec(path)));
-                steps.push(Step::command(argv).when("after resolving the files"));
-                let mut argv = [bin, "git", "checkout", "HEAD", "--"]
-                    .map(OsString::from)
-                    .to_vec();
-                argv.extend(paths.iter().map(|path| crate::git::literal_pathspec(path)));
-                steps.push(Step::command(argv).when("to restore committed versions instead"));
+            }
+            #[cfg(target_os = "linux")]
+            Unfinished::SequencerRedacted => {
+                steps.push(Step::instruction(
+                    "Finish or abort the git sequencer operation before reviewing trust.",
+                ));
             }
             Unfinished::Refused(_) => {}
         }
         steps
     }
+}
+
+fn conflict_recovery(
+    steps: &mut Vec<crate::output::json::RecoveryStep>,
+    paths: &[PathBuf],
+    bin: &str,
+) {
+    use crate::output::json::RecoveryStep as Step;
+    steps.push(Step::instruction(
+        "Resolve the files and stage them, or restore the committed versions instead.",
+    ));
+    let mut argv = vec![
+        OsString::from(bin),
+        OsString::from("git"),
+        OsString::from("add"),
+        OsString::from("--"),
+    ];
+    argv.extend(paths.iter().map(|path| crate::git::literal_pathspec(path)));
+    steps.push(Step::command(argv).when("after resolving the files"));
+    let mut argv = [bin, "git", "checkout", "HEAD", "--"]
+        .map(OsString::from)
+        .to_vec();
+    argv.extend(paths.iter().map(|path| crate::git::literal_pathspec(path)));
+    steps.push(Step::command(argv).when("to restore committed versions instead"));
 }
 
 /// Resolved locations, with the machine config applied, and the git handle for one run.
@@ -349,6 +382,77 @@ impl Context {
         let lock = locked?;
         self.report_reviewed()?;
         Ok(lock)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_trust(&mut self, json: bool) -> Result<Lock> {
+        self.json = json;
+        let lock = Lock::acquire(&self.paths.lock_file(), true)?;
+        lock.review_identity(&self.paths.lock_file())?;
+        if let Some(reviewed) = &self.reviewed {
+            reviewed.recheck(self)?;
+        }
+        self.guard_trust()?;
+        let id = crate::decisions::trust_repo_id(self)?;
+        if self.json {
+            crate::commands::status::write_context(self, self.command, Some(&id))?;
+        }
+        self.report_reviewed()?;
+        Ok(lock)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn start_trust(&mut self, _json: bool) -> Result<Lock> {
+        bail!("trust review requires Linux")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn guard_trust(&self) -> Result<()> {
+        self.refuse_incomplete()?;
+        if self.git.own_pull() {
+            return Err(self.in_progress_trust(Unfinished::OwnPull).into());
+        }
+        if !is_real_dir(&self.paths.repo.join(".git")) {
+            bail!("trust review requires a repository");
+        }
+        let (status, version) = crate::decisions::trust_git(self, &["--version"], 1024)?;
+        anyhow::ensure!(status.success(), "cannot inspect git version");
+        crate::git::check_version_text(std::str::from_utf8(&version)?)
+            .map_err(|_| anyhow::anyhow!("unsupported git version"))?;
+        if self.paths.repo.join(".git/sequencer").exists() {
+            return Err(self.in_progress_trust(Unfinished::SequencerRedacted).into());
+        }
+        if let Some(operation) = self.git.operation() {
+            return Err(self
+                .in_progress_trust(Unfinished::Operation(operation))
+                .into());
+        }
+        let (status, _) =
+            crate::decisions::trust_git(self, &["rev-parse", "--verify", "-q", "HEAD"], 1024)?;
+        let head = match status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            _ => bail!("cannot inspect repository head"),
+        };
+        if head {
+            let (status, conflicts) =
+                crate::decisions::trust_git(self, &["ls-files", "-u", "-z"], 1024 * 1024)?;
+            anyhow::ensure!(status.success(), "cannot inspect repository index");
+            if !conflicts.is_empty() {
+                return Err(self.in_progress_trust(Unfinished::ConflictsRedacted).into());
+            }
+        }
+        crate::decisions::trust_lost_config(self, head)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn in_progress_trust(&self, unfinished: Unfinished) -> InProgress {
+        InProgress {
+            unfinished,
+            repo: self.paths.repo.clone(),
+            locks: Vec::new(),
+            branch: Ok(None),
+        }
     }
 
     fn report_reviewed(&self) -> Result<()> {

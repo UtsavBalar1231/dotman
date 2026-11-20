@@ -77,7 +77,59 @@ Canonical bytes are the table itself, not a digest. Approval covers command
 text, not scripts it calls. An approved hook can change and commit repository
 content; that is trusted code execution.
 
-Directory, ignore and mass-delete approvals are accepted only with sync.
+For pending hooks alone, `apply --review-hooks --decide-from -` accepts no file
+decisions or other approvals. Copy `canonical`, `pending_keys`, and
+`pending_commands` from status's `review_context.hooks`, using the latter as
+`commands`. It approves the exact table and runs those pending commands without
+applying files or changing identity. It requires an existing lock file and
+refuses if it cannot acquire that lock. A dry run does not approve or execute.
+
+For directory or retained-ignore trust alone on Linux, first run
+`apply --review-trust directories --dry-run --json` or
+`apply --review-trust ignores --dry-run --json`. Copy the `review` object from
+the `trust_review` record unchanged into the envelope as `trust`, then submit
+it with the same `--review-trust` value and `--decide-from -`. The envelope
+must have no file decisions, sync review or other approvals. A reviewed
+`--dry-run` checks the token without granting it.
+
+The `trust` object includes `paths` with `state`, `machine_config`, and
+`repo_config` members. Each is either `{"raw":"..."}` for a UTF-8 path or
+`{"bytes":[...]}` for a non-UTF-8 path. `lock_dev` and `lock_ino` are the
+device and inode numbers of the held lock. Copy these fields unchanged.
+
+Each control-file observation has `kind`, `hash`, `mode`, `dev`, `ino`, `uid`,
+`gid`, and `nlink`. A successful review record carries
+`"display_policy":"all_values_scanned_v1"` only after its display inputs pass
+the policy checks. Consumers must reject a missing or unknown value.
+
+`inventory_hash` binds the observed repository inventory, parent directories,
+and the directory scan before and after the proposed trust change. It is a
+32-character hexadecimal digest. The scan refuses trees beyond its file count,
+byte, depth and review-size limits; it also refuses repository files whose
+source is not recorded in local state. No partial grant is made on refusal.
+State with extended attributes or ACLs is refused rather than rewritten.
+
+The trust lane limits decision input and the emitted review to 1 MiB each,
+individual state and configuration files to 8 MiB, and the repository ID read
+to 128 bytes (the ID itself must be 32 lowercase hexadecimal bytes). Git stdout
+is capped at 1 KiB for version and HEAD, 1 MiB for unmerged entries, 4 KiB for
+the settings tree entry, and 8 MiB for the committed settings blob. The
+directory scan allows at most 4096 entries, 8 MiB of file content, and 32
+directory levels. These are payload limits, not execution-time limits.
+
+The preflight reports the unapproved directory set, retained and ordered
+current ignore rules, state, repo and machine configuration file tuples, and
+projected candidate and directory tuples. Tuples use the same non-cryptographic
+hashes as other reviewed decisions. A grant changes only the corresponding local
+standing state; it does not capture files.
+
+Both standalone trust and hook review take an existing lock in read-only mode,
+require it to be held, and run the operation guard. They do not recover a
+pending pull or refresh Git attributes; the guard refuses an unfinished
+operation instead. If the lock file is absent or the filesystem cannot lock,
+the operation refuses without writing state.
+
+The `approvals` members for directories, ignores and mass deletion are accepted only with sync.
 Retained ignore patterns remain active without a matching approval to drop them.
 
 ## Sync review
@@ -112,6 +164,48 @@ Their raw H and portable link observations remain distinct.
 Automatic system captures are left undecided in a reviewed run; they do not
 inherit permission from a whole-repository sync review.
 
+### Selected lines
+
+For a selected-only commit, copy the outgoing report's `selected_target`
+binding into `sync.selected_target`. Supply one reviewed capture in `captures`,
+an empty `outgoing` array, and `sync.selected_lines` mapping that capture's
+logical key to the chosen one-based IDs from its [exact diff](diff-json.md).
+Use `--no-hooks`, with no file decisions or approvals. The IDs refer to edits
+in those content observations; they are not line numbers in a later file.
+
+This mode requires a clean repository and index, an existing directly
+tracked regular text file, and local content edits with unchanged mode.
+The CLI checks the observed inputs, reconstructs the selected content,
+checks the result against the guard, and records that content as the new
+baseline. Home is not rewritten, so a subsequent status can still show local
+edits. An insertion after an unterminated line may require selecting the
+newline change as well.
+
+`local` identifies a no-origin operation. A supported `file:///`, `https://`
+or `ssh://` push endpoint and its branch instead produce an opaque `git-…` binding. This
+is a destination change detector, not a credential. Selected push uses the
+new commit and the bound branch without force, pull or rebase. Pushing a
+branch can also publish its existing ancestors. On push failure, inspect local
+and remote state before taking another action: the new local commit remains.
+An absent target binding is not permission to push.
+
+HTTPS endpoints have no userinfo, query or fragment; SSH endpoints may include
+a user. Both accept a DNS-style host, optional numeric port and a restricted
+ASCII path. IPv6 literals, scp syntax, URL rewrites and multiple push URLs are
+not supported. HTTPS verifies TLS and rejects redirects, proxies and configured
+credential helpers. For authentication it reads an existing private Git
+credential-cache socket at `$XDG_CACHE_HOME/git/credential/socket`, or
+`$HOME/.cache/git/credential/socket` when `XDG_CACHE_HOME` is unset. The
+credential must match the HTTPS host, port and path; the cache is not started or
+modified. The socket and its private parent must be owned by the invoking user.
+The resolved socket path must contain only ASCII letters, digits, `/`, `.`,
+`_`, or `-`. `GIT_SSL_CAINFO` can supply an explicit CA bundle. SSH uses only
+`SSH_AUTH_SOCK` for authentication and `$HOME/.ssh/known_hosts` for host
+verification, with SSH configuration and identity files disabled. The SSH
+Home path must be absolute and contain only ASCII letters, digits, `/`, `.`,
+`_`, or `-`. Both are noninteractive. No URL or credential is included in the
+binding or error.
+
 ## HEAD receipts and compatibility
 
 A reviewed commit publishes by expected-old comparison on the full reviewed
@@ -121,7 +215,8 @@ Publication uses a non-dereferencing prepared Git transaction. While Git holds
 the branch lock, the CLI checks that the branch ref is direct, not symbolic.
 Git versions without this transaction protocol, including 2.25, refuse reviewed
 publication with exit 3. The project Git minimum and ordinary terminal sync are
-unchanged; the protocol-unavailable regression is not a runtime Git2.25 test.
+unchanged. A closed-input transaction probe checks support before publication;
+constructing a reviewed commit may already have created unreachable Git objects.
 
 An opaque pull/rebase has an operation-scoped branch-reflog boundary and unique
 action marker, with reflog recording forced on. Its attributed transition must

@@ -161,6 +161,10 @@ impl State {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
+        Self::parse_bytes(path, &bytes).map(Some)
+    }
+
+    pub(crate) fn parse_bytes(path: &Path, bytes: &[u8]) -> Result<Self> {
         // `save` always writes `version`, so an empty file is a truncated one. Read as empty, it
         // would make every applied file look new.
         if bytes.is_empty() {
@@ -171,7 +175,7 @@ impl State {
                 crate::name::bin()
             );
         }
-        let state = std::str::from_utf8(&bytes)
+        let state = std::str::from_utf8(bytes)
             .map_err(|e| anyhow!(e))
             .and_then(|text| toml::from_str::<Self>(text).map_err(|e| anyhow!(e)))
             .map_err(|e| corrupt(path, &format!("{e}")))?;
@@ -197,7 +201,7 @@ impl State {
                 bail!(corrupt(path, &format!("ignore_seen `{shown}`: {e}")));
             }
         }
-        Ok(Some(state))
+        Ok(state)
     }
 
     fn for_repo(state: Self, repo_id: &str) -> Self {

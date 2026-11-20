@@ -94,6 +94,7 @@ change needs approval, and recipient changes can require a later re-encryption c
 | `ahead_commit` | Text `id`, `subject`; `paths` |
 | `capture` | Text `key`, `source` path, `scope`; observations `logical_r`, `raw_h`, `portable_h`, `stored_before`, `stored_after`; nullable octal `kept_mode`, `repo_mode`; `hypothetical`, `encrypted` |
 | `repo_edit`, `own` | `path`, final-index `stored` observation, nullable physical `observed` observation, `basis`, `remove_tracked_temporary` |
+| `mass_delete_review` | `paths`, the complete projected deletion set, emitted for a mass-delete refusal when the set has at most 256 paths |
 | `message` | Text `message`, generated or supplied by the caller |
 
 Without a tracking ref, the review lists the commits on HEAD. An unborn HEAD is
@@ -122,6 +123,9 @@ so its physical mode can differ from the final-index `stored` mode.
 Regular file/directory replacements remove the displaced tracked leaf entries;
 symlinked parents and unreadable or special nodes are not treated as replacements.
 Missing means a deletion; unavailable is not missing.
+The `mass_delete_review` record is a projection, not approval. A client must
+check the final `mass_delete` result and the rest of the report before using
+the paths in a reviewed decision. For larger sets the record is omitted.
 The experimental review supports file and symlink entries. An encountered outgoing
 gitlink fails closed with exit 1 rather than inventing a file tuple.
 A directory displacing a tracked leaf is also refused if it contains `.git`

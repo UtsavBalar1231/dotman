@@ -34,6 +34,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+mod selected;
+
 pub(crate) const REMOTE: &str = "origin";
 
 // Paths named in the generated commit message; the rest are counted.
@@ -84,6 +86,29 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     }
     let mut ctx = Context::resolve("sync")?;
     ctx.reviewed = input.map(|input| input.bind(&ctx, true)).transpose()?;
+    if args.defer_hooks {
+        let review = ctx
+            .reviewed
+            .as_ref()
+            .ok_or_else(|| anyhow!("review required"))?;
+        ensure!(
+            review
+                .input
+                .sync
+                .as_ref()
+                .is_some_and(|sync| sync.selected_lines.is_none())
+                && review.input.approvals.hooks.is_none(),
+            "--defer-hooks requires a whole sync without hook approval"
+        );
+    }
+    if ctx
+        .reviewed
+        .as_ref()
+        .and_then(|review| review.input.sync.as_ref())
+        .is_some_and(|sync| sync.selected_lines.is_some())
+    {
+        return selected::run(&mut ctx, args);
+    }
     let dry_run = args.dry_run;
     let _lock = ctx.start(args.json, dry_run)?;
     // Before git is asked about the index, which needs a repo to exist.
@@ -130,6 +155,13 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
             name::bin()
         ));
         let outcome = without_remote(&ctx, args, first, policy, committed.held);
+        if dry_run && committed.refusal.is_some() {
+            let outcome = outcome?;
+            if outcome != Outcome::Done {
+                return Ok(outcome);
+            }
+            return refused(committed.refusal).map(|()| outcome);
+        }
         return refused(committed.refusal).and(outcome);
     };
     with_remote(&ctx, args, first, policy, committed, &branch)
@@ -158,15 +190,15 @@ fn with_remote(
             "would pull {REMOTE} {branch}, apply what arrived and push"
         ));
         secrets::reencrypt(ctx, true)?;
-        let hooked = if ctx.json {
+        let hooked = if args.defer_hooks {
+            hooks::defer(ctx, &BTreeSet::new(), true)
+        } else if ctx.json {
             hooks::preview(ctx, &written, policy, &first.forgotten)
         } else {
             hooks::run(ctx, &written, policy)
         };
-        let hooked = apply::check_failed(first_failed, uncaptured)
-            .and(hooked)
-            .and_then(|hooked| refused(committed.refusal).map(|()| hooked))?;
-        return Ok(finish(
+        let hooked = apply::check_failed(first_failed, uncaptured).and(hooked)?;
+        let outcome = finish(
             attention
                 || hooked == Outcome::Attention
                 || ctx
@@ -174,7 +206,11 @@ fn with_remote(
                     .as_ref()
                     .is_some_and(|review| review.attention.get()),
             true,
-        ));
+        );
+        if outcome != Outcome::Done && committed.refusal.is_some() && ctx.json {
+            return Ok(outcome);
+        }
+        return refused(committed.refusal).map(|()| outcome);
     }
 
     let reached = |err| remote_error(err, committed.new_commit);
@@ -227,9 +263,8 @@ fn with_remote(
         },
     )?;
     attention |= second.outcome == Outcome::Attention;
-    second.written.extend(written);
     let reencrypted = reencrypt(ctx, args, false);
-    let hooked = hooks::run(ctx, &second.written, policy);
+    let hooked = sync_hooks(ctx, &mut second, written, policy, args.defer_hooks);
     let failed = apply::check_failed(second.failed.saturating_add(uncaptured), uncaptured);
 
     attention |= !push(ctx, branch, pulled).map_err(reached)?;
@@ -243,6 +278,21 @@ fn with_remote(
                 .is_some_and(|review| review.attention.get()),
         false,
     ))
+}
+
+fn sync_hooks(
+    ctx: &Context,
+    second: &mut Applied,
+    written: BTreeSet<String>,
+    policy: Policy,
+    defer: bool,
+) -> Result<Outcome> {
+    if defer {
+        hooks::defer(ctx, &second.written, false)
+    } else {
+        second.written.extend(written);
+        hooks::run(ctx, &second.written, policy)
+    }
 }
 
 fn restore_reviewed_index(
@@ -591,11 +641,29 @@ fn without_remote(
         },
         first.post_capture.as_ref(),
     )?;
-    second.written.extend(first.written);
+    let deferred = if args.defer_hooks {
+        Some(second.written.clone())
+    } else {
+        second.written.extend(first.written);
+        None
+    };
     second.failed = second.failed.saturating_add(first.uncaptured);
     second.uncaptured = second.uncaptured.saturating_add(first.uncaptured);
     let reencrypted = reencrypt(ctx, args, dry_run);
-    let outcome = apply::finish(ctx, &second, policy);
+    let outcome = if let Some(written) = deferred {
+        let hooked = hooks::defer(ctx, &written, dry_run);
+        apply::check_failed(second.failed, second.uncaptured)
+            .and(hooked)
+            .map(|outcome| {
+                if second.outcome == Outcome::Attention {
+                    Outcome::Attention
+                } else {
+                    outcome
+                }
+            })
+    } else {
+        apply::finish(ctx, &second, policy)
+    };
     reencrypted?;
     let attention = held
         || first.outcome == Outcome::Attention
@@ -720,6 +788,24 @@ fn commit(
     if dry_run {
         if ctx.json {
             changed = review_worktree(ctx, &left_out, delta, &excluded)?;
+            if refusal.is_some() {
+                #[derive(serde::Serialize)]
+                struct MassDeleteReview {
+                    record: &'static str,
+                    paths: Vec<PathValue>,
+                }
+                let deleted: Vec<_> = projected_edits(ctx, &left_out, delta, &excluded)?
+                    .into_iter()
+                    .filter(|edit| matches!(edit.stored, Stored::Missing))
+                    .map(|edit| PathValue::new(&edit.path))
+                    .collect();
+                if !deleted.is_empty() && deleted.len() <= 256 {
+                    ctx.emit(&MassDeleteReview {
+                        record: "mass_delete_review",
+                        paths: deleted,
+                    })?;
+                }
+            }
         } else {
             changed.extend(captured.iter().cloned());
         }
@@ -1074,6 +1160,8 @@ fn review_head(ctx: &Context) -> Result<()> {
         head: Option<Text>,
         tracking_ref: Option<Text>,
         tracking_commit: Option<Text>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selected_target: Option<String>,
         knowledge: &'static str,
         warnings: [&'static str; 2],
     }
@@ -1099,6 +1187,12 @@ fn review_head(ctx: &Context) -> Result<()> {
         head: head.as_ref().map(Text::new),
         tracking_ref: tracking.as_ref().map(Text::new),
         tracking_commit: base.as_ref().map(Text::new),
+        selected_target: ctx
+            .git
+            .selected_target()
+            .ok()
+            .flatten()
+            .map(|target| target.binding),
         knowledge: "last_fetched",
         warnings: [
             "upstream_hook_changes_need_approval",
@@ -1427,7 +1521,7 @@ fn holds_secret_key(ctx: &Context, path: &Path, allow: &[Allow]) -> Option<Findi
     holds_stored(path, &Stored::File { bytes, mode: 0 }, allow)
 }
 
-fn holds_stored(path: &Path, stored: &Stored, allow: &[Allow]) -> Option<Finding> {
+pub(super) fn holds_stored(path: &Path, stored: &Stored, allow: &[Allow]) -> Option<Finding> {
     let source = path.to_string_lossy();
     let bytes = match stored {
         Stored::Link(target) => return secrets::held_link(target.as_os_str().as_bytes(), &source),

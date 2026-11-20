@@ -35,6 +35,91 @@ pub fn run(ctx: &Context, changed: &BTreeSet<String>, policy: Policy) -> Result<
     run_inner(ctx, changed, policy, &BTreeSet::new())
 }
 
+/// Holds matching writes for a separate hook confirmation without granting approval.
+pub fn defer(ctx: &Context, changed: &BTreeSet<String>, dry_run: bool) -> Result<Outcome> {
+    if let Some(review) = &ctx.reviewed {
+        review.check_head(ctx)?;
+    }
+    ctx.stage("hooks", dry_run)?;
+    let table = ctx.repo_config()?.hooks;
+    validate(&table)?;
+    let held = matched(&table, changed)?;
+    if !dry_run && !held.is_empty() {
+        let json = canonical(&table)?;
+        let mut state = ctx.state(&ctx.repo_id()?)?;
+        drop_unmanaged(ctx, &mut state.hooks.pending)?;
+        if state.hooks.pending.is_empty() {
+            state.hooks.pending_table = Some(json);
+        }
+        state.hooks.pending.extend(held);
+        state.save(&ctx.paths.state_file(), false)?;
+    }
+    hook_event(ctx, None, "deferred", None)?;
+    Ok(Outcome::Done)
+}
+
+/// Approves the reviewed table and releases only its pending hooks.
+pub fn approve_reviewed_only(ctx: &Context, dry_run: bool) -> Result<Outcome> {
+    let reviewed = ctx
+        .reviewed
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("hook review required"))?;
+    let token = reviewed
+        .input
+        .approvals
+        .hooks
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("hook approval required"))?;
+    let table = ctx.repo_config()?.hooks;
+    validate(&table)?;
+    let repo_id = ctx.repo_id()?;
+    let mut state = State::read(&ctx.paths.state_file())?
+        .ok_or_else(|| anyhow::anyhow!("hook review requires existing state"))?;
+    anyhow::ensure!(
+        state.repo_id == repo_id,
+        "state belongs to another repository"
+    );
+    let projection = review(ctx, &table, &state)?;
+    if projection.standing.is_none()
+        || table.is_empty()
+        || projection.pending.is_empty()
+        || projection.commands.is_empty()
+        || token.canonical != projection.canonical
+        || token.pending_keys.iter().cloned().collect::<BTreeSet<_>>() != projection.pending
+        || token.commands != projection.commands
+    {
+        reviewed.stale(ctx, None)?;
+        return Ok(Outcome::Attention);
+    }
+    let commands = due(&table, &projection.pending)?;
+    if dry_run {
+        return preview_hooks(
+            ctx,
+            &commands,
+            true,
+            false,
+            Policy {
+                dry_run: true,
+                ..Policy::default()
+            },
+        );
+    }
+    state.hooks.approved = Some(projection.canonical);
+    state.save(&ctx.paths.state_file(), false)?;
+    let result = run_all(ctx, &commands);
+    if let Some(review) = &ctx.reviewed {
+        *review.expected_head.borrow_mut() = ctx.git.head()?;
+    }
+    for key in &projection.pending {
+        state.hooks.pending.remove(key);
+    }
+    if state.hooks.pending.is_empty() {
+        state.hooks.pending_table = None;
+    }
+    state.save(&ctx.paths.state_file(), false)?;
+    result.map(|()| Outcome::Done)
+}
+
 /// Projects pending hooks after hypothetical removals without saving approvals or running commands.
 pub fn preview(
     ctx: &Context,

@@ -11,6 +11,7 @@ const MINIMAL_ARGS: &[(&str, &[&str])] = &[
     ("init", &[]),
     ("add", &[".bashrc"]),
     ("forget", &[".bashrc"]),
+    ("remedy", &["--from", "-", "--json"]),
     ("list", &[]),
     ("status", &[]),
     ("apply", &[]),
@@ -74,11 +75,45 @@ fn minimal_args_are_accepted_by_the_parser() {
 }
 
 fn stderr_of(env: &TestEnv, args: &[&str]) -> (Option<i32>, String) {
-    let out = env.run(args);
+    let out = if args.first() == Some(&"remedy") {
+        env.run_stdin(
+            &[],
+            br#"{"schema_version":1,"operation":"review","key":".bashrc"}"#,
+            args,
+        )
+    } else {
+        env.run(args)
+    };
     (
         out.status.code(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+#[test]
+fn remedy_invalid_input_precedes_lock_and_repository_guard() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    fs::create_dir(env.repo().join(".git/rebase-merge")).expect("mark the rebase");
+    let lock = dotman::lock::Lock::acquire(&env.state_dir().join("lock"), false)
+        .expect("hold the test lock");
+    for input in [&b""[..], &b"{"[..]] {
+        let out = env.run_stdin(&[], input, &["remedy", "--from", "-", "--json"]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert!(err.contains("invalid remedy request"), "{err}");
+        assert!(
+            !err.contains("rebase") && !err.contains("another dotman process"),
+            "{err}"
+        );
+    }
+    let (code, err) = stderr_of(&env, &["remedy", "--from", "-", "--json"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("another dotman process"), "{err}");
+    drop(lock);
+    let (code, err) = stderr_of(&env, &["remedy", "--from", "-", "--json"]);
+    assert_eq!(code, Some(4), "{err}");
+    assert!(err.contains("a rebase is in progress"), "{err}");
 }
 
 /// `log` only reads the history, so it runs through an unfinished operation.
@@ -103,6 +138,137 @@ fn every_subcommand_but_log_exits_4_while_a_rebase_is_in_progress() {
         );
         assert!(err.contains("dotman git rebase --abort"), "{name}: {err}");
     }
+}
+
+#[test]
+fn trust_guard_refuses_oversized_controls_without_mutation() {
+    for control in ["identity", "repo_config", "machine_config"] {
+        let env = TestEnv::new();
+        env.ok(&["init"]);
+        let path = match control {
+            "identity" => env.repo().join(".git/dotman-id"),
+            "repo_config" => env.repo().join(".dotman.toml"),
+            _ => env.xdg_config().join("dotman/config.toml"),
+        };
+        fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        let file = fs::File::create(&path).expect("control");
+        let size = if control == "identity" {
+            129
+        } else {
+            8 * 1024 * 1024 + 1
+        };
+        file.set_len(size).expect("size");
+        let before = env.four_trees();
+        let out = env.run(&[
+            "apply",
+            "--review-trust",
+            "directories",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{control}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+        assert_eq!(env.four_trees(), before);
+    }
+}
+
+#[test]
+fn trust_guard_refuses_incomplete_and_stopped_operations() {
+    for marker in [
+        "incomplete",
+        "pull",
+        "rebase",
+        "sequencer",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_LOG",
+    ] {
+        let env = TestEnv::new();
+        env.ok(&["init"]);
+        let git = env.repo().join(".git");
+        match marker {
+            "incomplete" => {
+                fs::remove_file(git.join("dotman-id")).expect("identity");
+                fs::write(git.join("config.lock"), b"").expect("lock");
+            }
+            "pull" => fs::create_dir(git.join("dotman-pull")).expect("pull"),
+            "rebase" => fs::create_dir(git.join("rebase-merge")).expect("rebase"),
+            "sequencer" => fs::create_dir(git.join("sequencer")).expect("sequencer"),
+            _ => fs::write(git.join(marker), b"x").expect("operation"),
+        }
+        let before = env.four_trees();
+        let out = env.run(&[
+            "apply",
+            "--review-trust",
+            "directories",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(
+            out.status.code(),
+            Some(if marker == "incomplete" { 1 } else { 4 }),
+            "{marker}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+        assert_eq!(env.four_trees(), before);
+    }
+}
+
+#[test]
+fn trust_guard_refuses_lost_committed_settings() {
+    let env = committed();
+    fs::remove_file(env.repo().join(".dotman.toml")).expect("settings");
+    let before = env.four_trees();
+    let out = env.run(&[
+        "apply",
+        "--review-trust",
+        "directories",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+    assert_eq!(env.four_trees(), before);
+}
+
+#[test]
+fn trust_guard_refuses_oversized_committed_settings_without_mutation() {
+    let env = committed();
+    let path = env.repo().join(".dotman.toml");
+    let file = fs::File::create(&path).expect("settings");
+    file.set_len(8 * 1024 * 1024 + 1).expect("size");
+    let repo = env.repo().to_string_lossy().into_owned();
+    env.git(&["-C", &repo, "add", ".dotman.toml"]);
+    env.git(&["-C", &repo, "commit", "-q", "-m", "large settings"]);
+    fs::remove_file(path).expect("remove settings");
+    let before = env.four_trees();
+    let out = env.run(&[
+        "apply",
+        "--review-trust",
+        "directories",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+    assert_eq!(env.four_trees(), before);
 }
 
 #[test]
@@ -261,6 +427,22 @@ fn a_stash_pop_conflict_is_refused_and_nothing_reaches_home() {
     let pop = env.git_raw(&["-C", &repo, "stash", "pop"]);
     assert!(!pop.status.success(), "the pop should conflict");
     assert!(!env.repo().join(".git/MERGE_HEAD").exists());
+    let before = env.four_trees();
+    let trust = env.run(&[
+        "apply",
+        "--review-trust",
+        "directories",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        trust.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&trust.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&trust.stdout).contains("\"trust_review\""));
+    assert_eq!(env.four_trees(), before);
 
     for args in [&["status"][..], &["apply"], &["sync"]] {
         let (code, err) = stderr_of(&env, args);

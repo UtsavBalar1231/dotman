@@ -234,6 +234,9 @@ fn template_tuple_and_payload_describe_rendered_content() -> R {
     env.write(".font", b"font 18\n", 0o644);
     let values = records(&env, &[], &["diff", "--json", ".font"])?;
     let item = entry(&values, ".font")?;
+    assert!(item.get("physical_plain").is_none());
+    let status = records(&env, &[], &["status", "--json", ".font"])?;
+    assert!(entry(&status, ".font")?.get("physical_plain").is_none());
     assert_eq!(
         at(item, "/r/tuple/hash").as_str(),
         Some(format!("{:032x}", xxhash_rust::xxh3::xxh3_128(b"font 14\n")).as_str())
@@ -328,6 +331,267 @@ fn invalid_selection_returns_one_error_result() -> R {
             .and_then(Value::as_i64),
         Some(1)
     );
+    Ok(())
+}
+
+#[test]
+fn exact_diff_checks_selection_before_decrypting() -> R {
+    if !common::age_installed() {
+        return Ok(());
+    }
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.ok(&["key", "init"]);
+    env.write("dir/secret", b"descendant secret\n", 0o600);
+    env.ok(&["add", "--encrypt", "dir/secret"]);
+    env.write_repo("dir{tmpl}", b"repo\n");
+    env.write("other", b"approved secret\n", 0o600);
+    env.ok(&["add", "--encrypt", "other"]);
+    env.write_repo("switch", b"plain\n");
+    let status = records(&env, &[], &["status", "--json", "switch"])?;
+    assert_eq!(at(entry(&status, "switch")?, "/source/raw"), "switch");
+    fs::remove_file(env.repo().join("switch"))?;
+    fs::copy(
+        env.repo().join("other{age}"),
+        env.repo().join("switch{age}"),
+    )?;
+    let real_age = std::env::split_paths(&std::env::var_os("PATH").ok_or("PATH missing")?)
+        .map(|dir| dir.join("age"))
+        .find(|path| path.is_file())
+        .ok_or("age missing")?;
+    let wrapper = env.root().join("age-wrapper");
+    let marker = env.root().join("age-invocations");
+    let captured = env.root().join("captured-ciphertext");
+    write_exe(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\ndecrypt=no\nfor arg do\n if [ \"$arg\" = -d ]; then decrypt=yes; fi\n last=$arg\ndone\nif [ \"$decrypt\" = yes ]; then\n mode=$(ls -ld \"$last\")\n printf '%s\\t%s\\n' \"$last\" \"${{mode%% *}}\" >> '{}'\n cp \"$last\" '{}'\nfi\nexec '{}' \"$@\"\n",
+            marker.display(),
+            captured.display(),
+            real_age.display()
+        ),
+    )?;
+    env.write_machine_config(&format!("[age]\ncommand = \"{}\"\n", wrapper.display()));
+    let id = fs::read_to_string(env.repo().join(".git/dotman-id"))?;
+    let expected = format!("--exact-repo={}", id.trim());
+    let path = env.home().join("dir").to_string_lossy().into_owned();
+    let values = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    assert_eq!(values.iter().filter(|v| v["record"] == "diff").count(), 1);
+    assert_eq!(at(entry(&values, "dir")?, "/source/raw"), "dir{tmpl}");
+    assert!(!marker.exists());
+    assert!(!format!("{values:?}").contains("descendant secret"));
+
+    let prefix = records(&env, &[], &["diff", "--json", "--", &path])?;
+    assert!(entry(&prefix, "dir/secret").is_ok());
+    assert!(marker.exists());
+    fs::remove_file(&marker)?;
+    fs::remove_file(&captured)?;
+
+    fs::remove_file(env.repo().join("dir{tmpl}"))?;
+    let out = env.run(&["diff", "--json", &expected, "--", &path]);
+    assert!(!out.status.success());
+    assert!(!marker.exists());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\"record\":\"diff\""));
+
+    let switched = env.home().join("switch").to_string_lossy().into_owned();
+    for extra in [None, Some("--allow-encrypted-source=switch")] {
+        let mut args = vec!["diff", "--json", expected.as_str()];
+        args.extend(extra);
+        args.extend(["--", switched.as_str()]);
+        let out = env.run(&args);
+        assert!(!out.status.success());
+        assert!(!marker.exists());
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("approved secret"));
+    }
+
+    let path = env.home().join("other").to_string_lossy().into_owned();
+    for approval in [None, Some("--allow-encrypted-source=wrong{age}")] {
+        let mut args = vec!["diff", "--json", expected.as_str()];
+        args.extend(approval);
+        args.extend(["--", path.as_str()]);
+        let out = env.run(&args);
+        assert!(!out.status.success());
+        assert!(!marker.exists());
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("approved secret"));
+    }
+    env.write("other", b"local edit\n", 0o600);
+    let values = records(
+        &env,
+        &[],
+        &[
+            "diff",
+            "--json",
+            &expected,
+            "--allow-encrypted-source=other{age}",
+            "--",
+            &path,
+        ],
+    )?;
+    assert_eq!(at(entry(&values, "other")?, "/source/raw"), "other{age}");
+    assert!(entry(&values, "other")?.get("line_edits").is_none());
+    assert_owned_ciphertext(&env, &marker, &captured)?;
+    let payload = at(entry(&values, "other")?, "/payload/raw")
+        .as_str()
+        .ok_or("missing payload")?;
+    assert!(payload.contains("-approved secret\n+local edit\n"));
+    assert!(!format!("{values:?}").contains("descendant secret"));
+    Ok(())
+}
+
+fn assert_owned_ciphertext(
+    env: &TestEnv,
+    marker: &std::path::Path,
+    captured: &std::path::Path,
+) -> R {
+    let calls = fs::read_to_string(marker)?;
+    assert_eq!(calls.lines().count(), 1);
+    let (snapshot, mode) = calls
+        .trim_end()
+        .split_once('\t')
+        .ok_or("missing age arguments")?;
+    let snapshot = std::path::Path::new(snapshot);
+    assert!(snapshot.starts_with(env.xdg_state().join("dotman")));
+    assert!(!snapshot.starts_with(env.repo()));
+    assert_eq!(mode, "-rw-------");
+    assert!(!snapshot.exists());
+    assert_eq!(
+        fs::read(captured)?,
+        fs::read(env.repo().join("other{age}"))?
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_paths_and_repo_id_fail_closed() -> R {
+    let env = common::system_setup(&["/etc"]);
+    env.write_repo("--name with spaces", b"repo\n");
+    env.write("--name with spaces", b"home\n", 0o600);
+    let id = fs::read_to_string(env.repo().join(".git/dotman-id"))?;
+    let expected = format!("--exact-repo={}", id.trim());
+    let path = env
+        .home()
+        .join("--name with spaces")
+        .to_string_lossy()
+        .into_owned();
+    let values = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    assert_eq!(entry(&values, "--name with spaces")?["status"], "different");
+    let key = "/etc/dotman-exact.conf";
+    env.write_system(key, b"system\n", 0o600);
+    env.ok(&["add", "--system", key]);
+    env.write_system(key, b"changed\n", 0o600);
+    let values = records(&env, &[], &["diff", "--json", &expected, "--", key])?;
+    assert_eq!(entry(&values, key)?["status"], "different");
+    assert!(entry(&values, key)?.get("line_edits").is_none());
+    assert_eq!(
+        at(entry(&values, key)?, "/path/raw"),
+        env.system_path(key).to_string_lossy().as_ref()
+    );
+    let invalid = env
+        .home()
+        .join(".git/config")
+        .to_string_lossy()
+        .into_owned();
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["diff", "--json", "--exact-repo=wrong", "--", &path],
+        vec!["diff", "--json", "--exact-repo=", "--", &path],
+        vec!["diff", "--json", &expected],
+        vec!["diff", "--json", &expected, "--", "relative"],
+        vec!["diff", "--json", &expected, "--", &path, &path],
+        vec!["diff", "--json", &expected, &expected, "--", &path],
+        vec!["diff", "--json", "--allow-encrypted-source=x", "--", &path],
+        vec!["diff", "--json", &expected, "--", &invalid],
+        vec![
+            "diff",
+            "--json",
+            &expected,
+            "--allow-encrypted-source=x",
+            "--allow-encrypted-source=x",
+            "--",
+            &path,
+        ],
+        vec![
+            "diff",
+            "--json",
+            &expected,
+            "--allow-encrypted-source=x",
+            "--",
+            &path,
+        ],
+        vec![
+            "diff",
+            "--json",
+            &expected,
+            "--allow-encrypted-source=x",
+            "--",
+            key,
+        ],
+    ];
+    for args in cases {
+        let out = env.run(&args);
+        assert!(!out.status.success(), "{args:?}");
+        let text = String::from_utf8(out.stdout)?;
+        let values: Vec<Value> = text
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        assert!(!values.iter().any(|v| v["record"] == "diff"), "{args:?}");
+        assert_eq!(
+            values.last().map(|v| &v["record"]),
+            Some(&Value::from("result"))
+        );
+    }
+    assert!(!env.run(&["diff", &expected, "--", &path]).status.success());
+    Ok(())
+}
+
+#[test]
+fn exact_line_edits_are_scoped_and_guarded() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let id = fs::read_to_string(env.repo().join(".git/dotman-id"))?;
+    let expected = format!("--exact-repo={}", id.trim());
+    env.write_repo(".edit", b"keep\nold1\nold2\nlast");
+    env.write(".edit", b"keep\nnew1\nnew2\nlast\r\n", 0o644);
+    let path = env.home().join(".edit").to_string_lossy().into_owned();
+    let before = env.four_trees();
+    let values = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    let edits = &entry(&values, ".edit")?["line_edits"];
+    assert_eq!(
+        edits,
+        &serde_json::json!([
+            {"id":1,"old_line":2,"new_line":2,"before":"old1\n","after":"new1\n"},
+            {"id":2,"old_line":3,"new_line":3,"before":"old2\n","after":"new2\n"},
+            {"id":3,"old_line":4,"new_line":4,"before":"last","after":"last\r\n"}
+        ])
+    );
+    assert_eq!(before, env.four_trees());
+    let ordinary = records(&env, &[], &["diff", "--json", ".edit"])?;
+    assert!(entry(&ordinary, ".edit")?.get("line_edits").is_none());
+    env.write(".edit", b"home\n", 0o600);
+    let mismatch = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    assert!(entry(&mismatch, ".edit")?.get("line_edits").is_none());
+    env.write(
+        ".edit",
+        concat!("AKIA", "234567ABCDEFGHJK", "\n").as_bytes(),
+        0o644,
+    );
+    let guarded = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    assert!(entry(&guarded, ".edit")?.get("line_edits").is_none());
+    env.write_repo(".tmpl{tmpl}", b"repo\n");
+    env.write(".tmpl", b"home\n", 0o644);
+    let path = env.home().join(".tmpl").to_string_lossy().into_owned();
+    let template = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    assert!(entry(&template, ".tmpl")?.get("line_edits").is_none());
+    env.write_repo(".binary", b"repo\0");
+    env.write(".binary", b"home\0", 0o644);
+    let path = env.home().join(".binary").to_string_lossy().into_owned();
+    let binary = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    assert!(entry(&binary, ".binary")?.get("line_edits").is_none());
+    env.write_repo(".link", b"repo\n");
+    env.symlink(".link", "target");
+    let path = env.home().join(".link").to_string_lossy().into_owned();
+    let link = records(&env, &[], &["diff", "--json", &expected, "--", &path])?;
+    assert!(entry(&link, ".link")?.get("line_edits").is_none());
     Ok(())
 }
 

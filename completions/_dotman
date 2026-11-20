@@ -36,6 +36,7 @@ _dotman() {
         case $line[1] in
             (init)
 _arguments "${_arguments_options[@]}" : \
+'(--remote --no-import --keep-local --take-repo --approve-hooks --dry-run --no-bootstrap --refresh-bootstrap --git-name --git-email --git-global --create-github --no-remote --host --profile --system-root --no-system --create-key --no-key --age-key-file --force)--setup-from=[Read a guarded setup request from standard input]:SETUP_FROM:(-)' \
 '()--remote=[Set or replace the \`origin\` remote]:URL:_default' \
 '--git-name=[Git \`user.name\` to set when git has no identity]:NAME:_default' \
 '--git-email=[Git \`user.email\` to set when git has no identity]:EMAIL:_default' \
@@ -44,6 +45,7 @@ _arguments "${_arguments_options[@]}" : \
 '*--profile=[A profile this machine opts into, written to the machine config; repeatable]:NAME:_default' \
 '*--system-root=[A directory outside \$HOME whose files this machine manages, added to \`\[system\] roots\`; repeatable]:DIR:_files' \
 '--age-key-file=[Import the age identity in FILE before applying, so encrypted files decrypt]:FILE:_files' \
+'--json[Print the guarded setup result as NDJSON]' \
 '()--no-import[Create a fresh repo without looking for an existing setup to import]' \
 '(--take-repo)--keep-local[Keep the local version of files that differ from the repo]' \
 '--take-repo[Take the repo version of files that differ, after backing them up]' \
@@ -105,6 +107,20 @@ _arguments "${_arguments_options[@]}" : \
 '*::paths -- Files, symlinks or directories to stop managing:_files' \
 && ret=0
 ;;
+(remedy)
+_arguments "${_arguments_options[@]}" : \
+'--from=[Read the review request from standard input]:FROM:(-)' \
+'--json[Print NDJSON]' \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (list)
 _arguments "${_arguments_options[@]}" : \
 '--porcelain[Print \`<kind>\\t<key>\\0\` records]' \
@@ -136,6 +152,8 @@ _arguments "${_arguments_options[@]}" : \
 (apply)
 _arguments "${_arguments_options[@]}" : \
 '(--keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --system --yes)--decide-from=[Read experimental versioned, snapshot-bound decisions from stdin only]:DECIDE_FROM:(-)' \
+'(--in-place --no-hooks --review-hooks --keep-local --take-repo --forget-deleted --restore-deleted --accept-identity --approve-hooks --system --yes)--review-trust=[Review or grant only the named local capture trust]:REVIEW_TRUST:(directories ignores)' \
+'(--in-place --no-hooks)--review-hooks[Approve and run only the reviewed pending hooks]' \
 '--json[Print experimental schema-versioned NDJSON outcomes]' \
 '(--take-repo)--keep-local[Keep the local version of conflicting and existing files; sync captures it into the repo for every machine, or into the variant this machine applies when that names its host. When sync'\''s pull conflicts, keep this machine'\''s side of each clash\: a text file keeps origin'\''s edits elsewhere in it, other files are kept whole. To keep a file to this machine only, run \`add --for host=<host> <file>\` instead, or \`add --encrypt --for host=<host> <file>\` when any of its sources is encrypted; on a terminal, sync'\''s question about a pull conflict also offers \`\[h\]\` for that]' \
 '--take-repo[Take the repo version of conflicting and existing files, after backing them up. When sync'\''s pull conflicts, take origin'\''s side of each clash\: a text file keeps this machine'\''s edits elsewhere in it, other files are taken whole, and this machine'\''s version is saved first]' \
@@ -161,6 +179,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (diff)
 _arguments "${_arguments_options[@]}" : \
+'*--exact-repo=[Compare one exact path only if this repo ID matches]:EXACT_REPO:_default' \
+'*--allow-encrypted-source=[Permit the named encrypted winning source in an exact comparison]:ALLOW_ENCRYPTED_SOURCE:_default' \
 '--json[Print experimental schema-versioned NDJSON comparisons]' \
 '-v[Show verbose output]' \
 '--verbose[Show verbose output]' \
@@ -201,6 +221,7 @@ _arguments "${_arguments_options[@]}" : \
 '--approve-dirs[Approve on this machine, printing them first, the \`\[dirs\]\` entries it has not approved, and capture the new files under them. An entry that \`.dotman.toml\` gained from elsewhere captures nothing here until approved; \`add <dir>\` approves the directory it adds]' \
 '--drop-unlisted-ignores[Stop applying on this machine, printing them first, the \`\[ignore\]\` patterns it has seen that \`.dotman.toml\` no longer lists, and capture what they kept out. A pattern removed from \`.dotman.toml\`, here or elsewhere, keeps files out of capture on each machine that has seen it until then; \`add <file>\` adds one file it keeps out]' \
 '(--approve-hooks)--no-hooks[Run no hooks]' \
+'(--no-hooks)--defer-hooks[Defer matching hooks from a reviewed whole sync for separate approval]' \
 '--dry-run[Show what would be captured, committed, pulled, applied and pushed; change nothing]' \
 '--system[After the pull, also write the system files outside \$HOME, through one sudo, doas or run0 call]' \
 '--yes[With --system\: write the system files without asking]' \
@@ -337,6 +358,18 @@ _arguments "${_arguments_options[@]}" : \
 '::file -- Identity file to import; `-` reads standard input:_files' \
 && ret=0
 ;;
+(reviewed)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show verbose output]' \
+'--verbose[Show verbose output]' \
+'-q[Suppress informational messages]' \
+'--quiet[Suppress informational messages]' \
+'--no-pager[Disable pager output]' \
+'--allow-root[Allow running as root]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -378,6 +411,7 @@ _dotman_commands() {
 'init:Create the dotman repo or set its remote, or clone a repo and apply it' \
 'add:Start managing files or directories' \
 'forget:Stop managing files or directories, keeping them in \$HOME' \
+'remedy:Review one held file without changing it' \
 'list:List the managed files' \
 'status:Compare \$HOME, the repo and the last applied state' \
 'apply:Write the repo'\''s files into \$HOME' \
@@ -450,6 +484,7 @@ _dotman__subcmd__key_commands() {
     local commands; commands=(
 'init:Generate an age identity and add its recipient to .dotman.toml' \
 'import:Copy an existing age identity into place and check that its recipient is listed' \
+'reviewed:Execute a reviewed identity request from standard input' \
     )
     _describe -t commands 'dotman key commands' commands "$@"
 }
@@ -463,6 +498,11 @@ _dotman__subcmd__key__subcmd__init_commands() {
     local commands; commands=()
     _describe -t commands 'dotman key init commands' commands "$@"
 }
+(( $+functions[_dotman__subcmd__key__subcmd__reviewed_commands] )) ||
+_dotman__subcmd__key__subcmd__reviewed_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman key reviewed commands' commands "$@"
+}
 (( $+functions[_dotman__subcmd__list_commands] )) ||
 _dotman__subcmd__list_commands() {
     local commands; commands=()
@@ -472,6 +512,11 @@ _dotman__subcmd__list_commands() {
 _dotman__subcmd__log_commands() {
     local commands; commands=()
     _describe -t commands 'dotman log commands' commands "$@"
+}
+(( $+functions[_dotman__subcmd__remedy_commands] )) ||
+_dotman__subcmd__remedy_commands() {
+    local commands; commands=()
+    _describe -t commands 'dotman remedy commands' commands "$@"
 }
 (( $+functions[_dotman__subcmd__restore_commands] )) ||
 _dotman__subcmd__restore_commands() {

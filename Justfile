@@ -58,6 +58,29 @@ lint-strict:
         -W clippy::pedantic \
         -W clippy::unwrap_used
 
+gui-frontend:
+    "${TSC:-tsc}" -p gui/tsconfig.json
+
+gui-frontend-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    output=$(mktemp -d)
+    trap 'rm -r -- "$output"' EXIT
+    "${TSC:-tsc}" -p gui/tsconfig.json --outDir "$output"
+    for js in "$output"/*.js; do cmp "$js" "gui/dist/${js##*/}"; done
+    for js in gui/dist/*.js; do test -f "$output/${js##*/}"; done
+    node gui/tests/file-tree.js
+    node gui/tests/diff-reader.js
+    node gui/tests/ui.js
+    node gui/tests/theme.js
+
+gui-check: gui-frontend-check
+    cargo fmt --manifest-path gui/Cargo.toml --all -- --check
+    cargo clippy --manifest-path gui/Cargo.toml --locked --all-targets --all-features -- -D warnings -W clippy::arithmetic_side_effects -W clippy::expect_used -W clippy::float_arithmetic -W clippy::indexing_slicing -W clippy::mem_forget -W clippy::nursery -W clippy::panic -W clippy::pedantic -W clippy::unwrap_used
+    cargo test --manifest-path gui/Cargo.toml --locked --workspace
+    cargo metadata --manifest-path gui/Cargo.toml --locked --format-version 1 > /dev/null
+    cargo deny --manifest-path gui/Cargo.toml --locked check
+
 # The e2e scenarios in e2e/, against a release build or the binary DOTMAN_BIN names.
 e2e *args:
     #!/usr/bin/env bash
@@ -148,12 +171,13 @@ uninstall:
     cargo uninstall dotman-cli
 
 # The src/bootstrap/install.sh.in template pins CARGO_PKG_VERSION itself, so it needs no bump.
-# Bumps Cargo.toml, Cargo.lock, the PKGBUILD and install.sh's fallback version, then runs `just ci`.
+# Bumps Cargo.toml, Cargo.lock, the PKGBUILDs and install.sh's fallback version, then runs `just ci`.
 release-prepare version:
     #!/usr/bin/env bash
     set -e
     sed -i 's/^version = ".*"/version = "{{ version }}"/' Cargo.toml
     sed -i 's/^pkgver=.*/pkgver={{ version }}/' packaging/arch/PKGBUILD
+    sed -i 's/^pkgver=.*/pkgver={{ version }}/' packaging/arch/gui/PKGBUILD
     sed -i 's/^FALLBACK_VERSION=.*/FALLBACK_VERSION="{{ version }}"/' install/install.sh
     cargo check --workspace
     just ci

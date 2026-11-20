@@ -1,0 +1,15 @@
+{
+  "productName": "dotman",
+  "version": "0.0.0",
+  "identifier": "dev.dotman.gui",
+  "build": { "frontendDist": "dist" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'",
+      "capabilities": ["main"]
+    }
+  },
+  "bundle": { "active": false }
+}

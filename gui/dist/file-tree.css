@@ -1,0 +1,14 @@
+.file-tree-folder > details > summary {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  padding: .5rem;
+  color: var(--muted);
+  font-size: .85rem;
+}
+.file-tree-folder > details > summary::before { content: "▸"; }
+.file-tree-folder > details[open] > summary::before { content: "▾"; }
+.file-tree-name { font-family: Departure, monospace; overflow-wrap: anywhere; min-width: 0; }
+.file-tree-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.file-tree-folder > details > ul { padding-left: .85rem; }
+.file-tree-folder > details > summary::-webkit-details-marker { display: none; }
