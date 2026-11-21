@@ -9,4 +9,7 @@
 .line-before { background: var(--del-bg); color: var(--removed); }
 .line-after { background: var(--add-bg); color: var(--added); }
 .line-pair code { color: var(--ink); font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; }
+@container comparison (max-width: 28rem) {
+  .line-pair > span { grid-template-columns: minmax(0, 1fr); gap: 0; padding-block: .35rem; }
+}
 #selected-lines li { padding-block: .3rem; overflow-wrap: anywhere; }

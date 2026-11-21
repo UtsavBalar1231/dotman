@@ -466,9 +466,8 @@ impl<'a> ReviewedApply<'a> {
                 return Err("unsupported status");
             }
             let present_home = match (row, action) {
-                ("both-changed" | "existing", ApplyAction::KeepLocal | ApplyAction::TakeRepo) => {
-                    true
-                }
+                ("both-changed" | "existing", ApplyAction::KeepLocal | ApplyAction::TakeRepo)
+                | ("changed-in-repo", ApplyAction::TakeRepo) => true,
                 ("deleted-locally" | "deleted-changed-upstream", ApplyAction::Restore) => false,
                 _ => return Err("unsupported row or action"),
             };
@@ -1202,6 +1201,31 @@ mod tests {
                 ReviewedApply::new(&context, vec![(&bad, ApplyAction::TakeRepo)]).is_err(),
                 "case {change}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn changed_in_repo_requires_take_repo_and_regular_exact_observations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (context, _) = fixtures(CAPTURE, EDIT)?;
+        let mut entry: StatusEntry = serde_json::from_str(FILE)?;
+        entry.status = "changed-in-repo".into();
+        entry.row = Some("changed-in-repo".into());
+        assert!(ReviewedApply::new(&context, vec![(&entry, ApplyAction::TakeRepo)]).is_ok());
+        for action in [ApplyAction::KeepLocal, ApplyAction::Restore] {
+            assert!(ReviewedApply::new(&context, vec![(&entry, action)]).is_err());
+        }
+        for observation in 0..4 {
+            let mut bad = entry.clone();
+            let value = match observation {
+                0 => &mut bad.r,
+                1 => &mut bad.source_tuple,
+                2 => &mut bad.h,
+                _ => &mut bad.raw_h,
+            };
+            *value = StatusObservation::Missing;
+            assert!(ReviewedApply::new(&context, vec![(&bad, ApplyAction::TakeRepo)]).is_err());
         }
         Ok(())
     }

@@ -2,9 +2,8 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const withBrowser = require("./browser");
 
 const css = fs.readFileSync(path.join(__dirname, "../dist/style.css"), "utf8");
 const html = `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
@@ -98,85 +97,89 @@ async function checkThemes(send) {
     assert.deepEqual(failures, []);
     console.log(`system ${preference}: text floor ${floors.text.toFixed(2)}, controls floor ${floors.controls.toFixed(2)}`);
   }
-}
 
-async function run() {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "dt-"));
-  try {
-    const browser = spawn(process.env.CHROMIUM || "chromium", [
-      "--headless", "--disable-gpu", "--disable-background-networking", "--disable-component-update",
-      "--no-first-run", "--no-proxy-server", "--host-resolver-rules=MAP * ~NOTFOUND",
-      `--user-data-dir=${path.join(temp, "profile")}`, "--remote-debugging-pipe", "about:blank"
-    ], {
-      stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH, HOME: temp, TMPDIR: temp, XDG_CONFIG_HOME: path.join(temp, "config"),
-        XDG_CACHE_HOME: path.join(temp, "cache"), XDG_DATA_HOME: path.join(temp, "data"),
-        XDG_STATE_HOME: path.join(temp, "state"), XDG_RUNTIME_DIR: temp,
-        DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(temp, "no-bus")}`,
-        DBUS_SYSTEM_BUS_ADDRESS: `unix:path=${path.join(temp, "no-bus")}` }
-    });
-    const input = browser.stdio[3], output = browser.stdio[4];
-    let pending, failure, closing = false, id = 0, buffer = "", stderr = "";
-    function fail(error) {
-      failure ??= error;
-      pending?.reject(failure);
-      pending = undefined;
+  const appHtml = fs.readFileSync(path.join(__dirname, "../dist/index.html"), "utf8")
+    .replace(/<link rel="stylesheet"[^>]*>/g, "")
+    .replace(/<script type="module"[^>]*><\/script>/, `<style>${css}</style>`);
+  await page("Page.setDocumentContent", { frameId: frameTree.frame.id, html: appHtml });
+  await page("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+  assert.deepEqual(await evaluate(`({
+    theme: document.documentElement.dataset.theme,
+    selection: document.querySelector("#theme-mode").value,
+    scheme: getComputedStyle(document.documentElement).colorScheme
+  })`), { theme: "light", selection: "light", scheme: "light" });
+  assert.equal(await evaluate(`document.documentElement.dataset.theme = "system"; getComputedStyle(document.documentElement).colorScheme`), "light dark");
+  assert.equal(await evaluate(`getComputedStyle(document.body).backgroundColor`),
+    await evaluate(`document.documentElement.dataset.theme = "dark"; getComputedStyle(document.body).backgroundColor`));
+
+  await evaluate(`document.querySelector("#cancel").hidden = false;
+    document.querySelector("#review").hidden = false; document.querySelector("#diff").hidden = false;`);
+  const { root } = await page("DOM.getDocument");
+  for (const [id, name] of [["refresh", "Refresh status"], ["cancel", "Cancel read"],
+    ["close-review", "Close review"], ["close-diff", "Close diff"]]) {
+    const { nodeId } = await page("DOM.querySelector", { nodeId: root.nodeId, selector: `#${id}` });
+    const { nodes } = await page("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
+    assert.equal(nodes[0].role.value, "button");
+    assert.equal(nodes[0].name.value, name);
+    if (id === "cancel") {
+      assert.ok(nodes[0].properties.some(property => property.name === "disabled" && property.value.value));
+      await evaluate(`document.querySelector("#cancel").disabled = false`);
     }
-    browser.once("error", fail);
-    browser.stderr.setEncoding("utf8").on("data", chunk => { stderr = (stderr + chunk).slice(-8192); });
-    const closed = new Promise(resolve => browser.once("close", (code, signal) => {
-      if (!closing || code !== 0) fail(new Error(`Chromium exited (${signal ?? code})\n${stderr}`));
-      resolve();
-    }));
-    const deadline = setTimeout(() => {
-      fail(new Error(`Chromium theme checks timed out after 30 seconds\n${stderr}`));
-      browser.kill("SIGKILL");
-    }, 30000);
-    input.on("error", fail);
-    output.on("error", fail);
-    // DevTools pipe frames are NUL-delimited; only one request is in flight.
-    output.setEncoding("utf8").on("data", chunk => {
-      try {
-        buffer += chunk;
-        let end;
-        while ((end = buffer.indexOf("\0")) !== -1) {
-          const message = JSON.parse(buffer.slice(0, end));
-          buffer = buffer.slice(end + 1);
-          if (!pending || message.id !== id) continue;
-          const { resolve, reject, method } = pending;
-          pending = undefined;
-          if (message.error) reject(new Error(`${method}: ${message.error.message}`));
-          else resolve(message.result);
-        }
-      } catch (error) {
-        fail(error);
-      }
-    });
-    const send = (method, params, sessionId) => new Promise((resolve, reject) => {
-      if (failure) return reject(failure);
-      pending = { resolve, reject, method };
-      input.write(JSON.stringify({ id: ++id, method, params, sessionId }) + "\0");
-    });
-    try {
-      await checkThemes(send);
-    } finally {
-      closing = true;
-      // Browser.close can close the pipe before acknowledging the request.
-      try {
-        if (failure) browser.kill();
-        else await Promise.race([send("Browser.close"), closed]);
-      } finally {
-        await closed;
-        clearTimeout(deadline);
-      }
+    for (const width of [360, 960]) {
+      await page("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      const report = await evaluate(`(() => {
+        const button = document.querySelector("#${id}");
+        button.focus();
+        const rect = button.getBoundingClientRect(), tip = getComputedStyle(button, "::after");
+        return { width: rect.width, height: rect.height, radius: getComputedStyle(button).borderRadius,
+          focused: button.matches(":focus-visible"), tip: tip.visibility, text: tip.content,
+          tipLeft: rect.right - parseFloat(tip.width), tipRight: rect.right };
+      })()`);
+      assert.ok(report.width >= 44 && report.height >= 44, `${id}: target size`);
+      assert.equal(report.radius, "50%");
+      assert.equal(report.focused, true, `${id}: keyboard focus`);
+      assert.equal(report.tip, "visible");
+      assert.equal(report.text, `"${name}"`);
+      assert.ok(report.tipLeft >= 0 && report.tipRight <= width, `${id}: tooltip fits at ${width}px`);
+      const center = await evaluate(`(() => {
+        const rect = document.querySelector("#${id}").getBoundingClientRect();
+        document.activeElement.blur();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      })()`);
+      await page("Input.dispatchMouseEvent", { type: "mouseMoved", ...center });
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector("#${id}"), "::after").visibility`), "visible",
+        `${id}: hover tooltip`);
+      await page("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
     }
-    if (failure) throw failure;
-  } finally {
-    fs.rmSync(temp, { recursive: true, force: true });
+  }
+
+  const readerCss = fs.readFileSync(path.join(__dirname, "../dist/diff-reader.css"), "utf8");
+  await page("Page.setDocumentContent", { frameId: frameTree.frame.id, html: `<!doctype html>
+    <style>${css}\n${readerCss}</style><main><div class="desk">
+    <section id="entries">File browser</section><section id="diff"><div id="reader-tools"><button class="dr-toggle">Unified view</button></div>
+    <pre id="diff-text" class="diff-reader"><span class="dr-row"><span class="dr-cell">old</span><span class="dr-cell">new</span></span></pre>
+    </section></div></main>` });
+  for (const [width, height, navigator, columns] of [
+    [1440, 900, true, 2], [960, 640, true, 1], [360, 640, false, 1],
+    [2560, 1080, true, 2], [3440, 1440, true, 2], [5120, 1440, true, 2], [960, 640, true, 1]
+  ]) {
+    await page("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    const layout = await evaluate(`({
+      navigator: document.querySelector("#entries").getClientRects().length > 0,
+      columns: getComputedStyle(document.querySelector(".dr-row")).gridTemplateColumns.split(" ").length,
+      toggle: document.querySelector(".dr-toggle").getClientRects().length > 0,
+      bodySize: parseFloat(getComputedStyle(document.body).fontSize),
+      fits: document.documentElement.scrollWidth <= innerWidth
+    })`);
+    assert.deepEqual(layout, { navigator, columns, toggle: columns === 2, bodySize: 18, fits: true }, `resized to ${width}px`);
+    if (width >= 2560) {
+      const sizes = await evaluate(`[document.querySelector("#entries").clientWidth, document.querySelector("#diff").clientWidth]`);
+      assert.ok(sizes[0] <= 25 * layout.bodySize && sizes[1] > width * .75, `ultrawide ${width}px: panes ${sizes}`);
+    }
   }
 }
 
-run().catch(error => {
+withBrowser(checkThemes).catch(error => {
   console.error(error);
   process.exitCode = 1;
 });

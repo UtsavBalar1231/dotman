@@ -25,6 +25,23 @@ function node<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, 
   return result;
 }
 
+function icon(path: string): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  shape.setAttribute("d", path);
+  svg.append(shape);
+  return svg;
+}
+
+function heading(label: string, className: string, path: string): HTMLElement {
+  const result = node("span", className, label);
+  result.prepend(icon(path));
+  return result;
+}
+
 function parse(text: string): Patch | null {
   if (text.length > 500000 || !text.endsWith("\n") || /[\x00-\x08\x0b-\x1f\x7f]/.test(text)) return null;
   const lines = text.slice(0, -1).split("\n");
@@ -119,7 +136,12 @@ function render(patch: Patch, sideLabel: Side): HTMLElement {
   header.hidden = true;
   fragment.append(header);
   const headings = node("span", "dr-headings");
-  headings.append(node("span", "", "Repository"), node("span", "", sideLabel));
+  headings.append(
+    heading("Repository", "dr-repository", "M2.5 2.25h11v11h-11z M2.5 5.25h11 M5 8h6 M5 10.75h4"),
+    heading(sideLabel === "Home" ? "This computer" : "System", `dr-${sideLabel.toLowerCase()}`, sideLabel === "Home"
+      ? "M1.75 7.5 8 2l6.25 5.5 M3.5 6.25v7.25h9V6.25 M6.5 13.5v-4h3v4"
+      : "M2.25 3h11.5v8.5H2.25z M5 13.5h6 M8 11.5v2"),
+  );
   fragment.append(headings);
   for (const hunk of patch.hunks) {
     fragment.append(node("span", "dr-hunk", hunk.header));
@@ -151,6 +173,16 @@ function button(label: string, action: () => void): HTMLButtonElement {
   const result = node("button", "", label);
   result.type = "button";
   result.addEventListener("click", action);
+  return result;
+}
+
+function changeButton(label: string, step: -1 | 1): HTMLButtonElement {
+  const result = button("", () => navigate(step));
+  result.className = "icon-button";
+  result.setAttribute("aria-label", label);
+  const glyph = icon(step === -1 ? "m3 10 5-5 5 5" : "m3 6 5 5 5-5");
+  glyph.setAttribute("class", "workspace-glyph");
+  result.append(glyph);
   return result;
 }
 
@@ -228,11 +260,11 @@ export function show(text: string, sideLabel: Side = "Home"): void {
     pre.scrollTop += changes[current].getBoundingClientRect().top - top;
   });
   metadata.setAttribute("aria-expanded", "false");
-  previous = button("Previous change", () => navigate(-1));
-  next = button("Next change", () => navigate(1));
+  previous = changeButton("Previous change", -1);
+  next = changeButton("Next change", 1);
   position = node("span", "dr-position");
   position.setAttribute("aria-live", "polite");
   updateNavigation();
-  tools.append(toggle, metadata, previous, next, position);
+  tools.append(toggle, metadata, position, previous, next);
   tools.hidden = false;
 }

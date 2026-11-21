@@ -32,6 +32,7 @@ class Element {
       else this.children.push(child);
     }
   }
+  prepend(...children) { this.children.unshift(...children); }
   replaceChildren(...children) { this._text = ""; this.children = []; this.append(...children); }
   setAttribute(name, value) { this.attributes[name] = value; }
   addEventListener(name, fn) { this.listeners[name] = fn; }
@@ -44,6 +45,7 @@ const tools = new Element();
 const document = {
   getElementById: id => id === "diff-text" ? pre : tools,
   createElement: () => new Element(),
+  createElementNS: () => new Element(),
   createDocumentFragment: () => Object.assign(new Element(), { fragment: true }),
 };
 global.document = document;
@@ -56,6 +58,9 @@ const { show, clear } = await import(`data:text/javascript;base64,${compiled.toS
 const patch = "diff --git repo/x home/x\nindex 123..456 100644\n--- repo/x\n+++ home/x\n@@ -10,3 +20,4 @@ section\n same\n-old value\n+new value\n+added\n tail\n@@ -30 +41 @@\n-before\n+after\n";
 show(patch);
 assert.equal(tools.hidden, false);
+assert.deepEqual(pre.children.find(child => child.className === "dr-headings").children.map(child => [child.className, child.textContent]),
+   [["dr-repository", "Repository"], ["dr-home", "This computer"]]);
+assert.ok(pre.children.find(child => child.className === "dr-headings").children.every(child => child.children[0].attributes["aria-hidden"] === "true"));
 const rows = pre.children.flatMap(child => child.className === "dr-change" ? child.children : [child])
   .filter(child => child.className.startsWith("dr-row"));
 assert.equal(rows.length, 5);
@@ -69,7 +74,9 @@ assert.ok(rows[1].children[0].children[2].children.some(child => child.className
 const groups = pre.children.filter(child => child.className === "dr-change");
 groups[0].offset = 40;
 groups[1].offset = 200;
-const [toggle, metadata, previous, next, position] = tools.children;
+const [toggle, metadata, position, previous, next] = tools.children;
+assert.deepEqual([previous, next].map(b => [b.attributes["aria-label"], b.className, b.children[0].attributes["aria-hidden"]]),
+  [["Previous change", "icon-button", "true"], ["Next change", "icon-button", "true"]]);
 assert.equal(position.textContent, "Change 1 of 2");
 assert.equal(previous.disabled, true);
 assert.equal(next.disabled, false);
@@ -102,6 +109,7 @@ assert.equal(metadata.attributes["aria-expanded"], "true");
 assert.equal(pre.children.filter(child => child.className === "dr-hunk").length, 2);
 show(patch, "System");
 assert.deepEqual(pre.children.find(child => child.className === "dr-headings").children.map(child => child.textContent), ["Repository", "System"]);
+assert.deepEqual(pre.children.find(child => child.className === "dr-headings").children.map(child => child.className), ["dr-repository", "dr-system"]);
 const insertion = "diff --git home/x home/x\nnew file mode 100644\nindex 000..123\n--- /dev/null\n+++ home/x\n@@ -0,0 +1 @@\n+<img onerror=alert(1)>\n";
 show(insertion);
 const inserted = pre.children.find(child => child.className === "dr-change").children[0];

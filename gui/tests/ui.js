@@ -18,9 +18,11 @@ class Element {
     this.isConnected = true;
   }
   append(...children) { this.children.push(...children); }
+  prepend(...children) { this.children.unshift(...children); }
   replaceChildren(...children) { this.children = children; }
   addEventListener(type, fn) { this.listeners[type] = fn; }
   setAttribute(name, value) { this.attributes[name] = value; }
+  removeAttribute(name) { delete this.attributes[name]; }
   querySelector(selector) {
     const tags = selector.split(",").map(tag => tag.trim());
     const visit = node => {
@@ -52,6 +54,9 @@ const ids = ["refresh", "cancel", "diff", "diff-key", "diff-message", "diff-text
   "guide-title", "guide-description", "attention-list", "next-undecided", "reader-tools"];
 ids.push("policy-controls", "policy-directories", "policy-ignores", "policy-message");
 ids.push("variant-result", "variant-message");
+ids.push("replacement-review", "replacement-title", "replacement-source", "replacement-target", "replacement-back", "replacement-batch", "decisions-title");
+ids.push("nav-files", "nav-review", "nav-settings", "settings", "page-heading", "paths-unavailable", "age-unavailable");
+ids.push("recovery-check", "recovery-paths", "recovery-finding", "recovery-details", "setup-check", "setup-paths", "setup-finding", "setup-guidance");
 const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
 const html = fs.readFileSync(path.join(__dirname, "../dist/index.html"), "utf8");
 assert.match(html, /<section id="variant-result" hidden[^>]*>[\s\S]*?<p id="variant-message" role="status" aria-live="polite" tabindex="-1"><\/p>[\s\S]*?<\/section>/);
@@ -64,8 +69,10 @@ elements["group-status"].setAttribute("aria-pressed", "false");
 const document = {
   activeElement: null,
   documentElement: new Element(),
+  body: new Element(),
   getElementById: id => elements[id],
   createElement: tag => new Element("", tag),
+  createElementNS: (_namespace, tag) => new Element("", tag),
   createDocumentFragment: () => new Element(),
 };
 let resolveDiff;
@@ -80,6 +87,7 @@ let refreshes = 0;
 let statusResponse;
 let delayRefresh = false;
 let resolveRefresh;
+let rejectRefresh;
 const calls = [];
 const copies = [];
 let copyFails = false;
@@ -105,7 +113,7 @@ const invoke = (command, args) => {
   calls.push(command);
   if (command === "refresh") {
     refreshes++;
-    if (delayRefresh) return new Promise(resolve => { resolveRefresh = resolve; });
+    if (delayRefresh) return new Promise((resolve, reject) => { resolveRefresh = resolve; rejectRefresh = reject; });
     return Promise.resolve(statusResponse ?? status);
   }
   if (command === "cancel") {
@@ -185,6 +193,24 @@ async function tick() { await new Promise(resolve => setImmediate(resolve)); }
 async function main() {
   await import("../dist/app.js");
   await tick();
+  assert.equal(elements["guide-title"].textContent, "Changes to inspect");
+  assert.equal(elements["attention-list"].children[0].children[0].children[0].textContent, "x");
+  elements["nav-settings"].click();
+  assert.equal(elements["nav-settings"].attributes["aria-current"], "page");
+  assert.equal(document.activeElement, elements["page-heading"]);
+  assert.equal(elements.settings.hidden, false);
+  elements["nav-files"].click();
+  elements["nav-review"].click();
+  resolveReview({ id: "navigation-review", outcome: "review", message: "Preview", items: [] });
+  await tick();
+  elements["nav-settings"].click();
+  assert.deepEqual(discards, ["navigation-review"]);
+  assert.equal(elements.review.hidden, true);
+  assert.equal(elements["nav-settings"].attributes["aria-current"], "page");
+  assert.equal(document.activeElement, elements["page-heading"]);
+  assert.equal(writes.length, 0);
+  discards.length = 0;
+  elements["nav-files"].click();
   statusResponse = { ...status, hook_review_id: "hooks:7" };
   elements.refresh.click();
   await tick();
@@ -200,8 +226,12 @@ async function main() {
   statusResponse = { ...status, key_review_id: "key:7" };
   elements.refresh.click();
   await tick();
+  elements["nav-settings"].click();
   assert.equal(elements["age-controls"].hidden, false);
   elements["import-age"].click();
+  assert.equal(elements["nav-files"].disabled, true);
+  elements["nav-files"].click();
+  assert.equal(elements["nav-settings"].attributes["aria-current"], "page");
   elements["import-age"].click();
   assert.deepEqual(keyWrites, [{ id: "key:7", action: "import" }]);
   resolveWriter({ outcome: "declined", message: "Identity installation was not approved.", refresh: true });
@@ -216,17 +246,131 @@ async function main() {
   resolveWriter({ outcome: "declined", message: "No changes.", refresh: true });
   await tick();
   assert.equal(elements["policy-message"].textContent, "declined: No changes.");
+  elements["nav-files"].click();
   statusResponse = null;
   elements.refresh.click();
   await tick();
   assert.equal(elements["sync-reviewed"].hidden, true);
   assert.equal(elements.decisions.hidden, true);
+  statusResponse = { ...status, entries: [{ ...status.entries[0], key: "dir/<file>", status: "changed-in-repo", group: "incoming" }] };
+  elements.refresh.click();
+  await tick();
+  elements["attention-list"].children[0].children[0].click();
+  assert.equal(elements["diff-key"].textContent, "dir/<file>");
+  assert.match(elements["diff-context"].textContent, /repository copy has changed/);
+  resolveDiff({ outcome: "ready", message: "different", text: "", file_actions: [] });
+  await tick();
+  assert.match(elements["diff-message"].textContent, /Replacement review is not available/);
+  assert.equal(elements["diff-actions"].children.length, 0);
+  assert.equal(fileWrites.length, 0);
+  elements["close-diff"].click();
+  statusResponse = null;
+  elements.refresh.click();
+  await tick();
+  statusResponse = { ...status, entries: [
+    { id: "conflict", key: "other", status: "both-changed", group: "decision", supported: true, system: false },
+    { id: "incoming", key: "config/<file>", status: "changed-in-repo", group: "incoming", supported: true, system: false,
+      machine_file: { selected: "config/<file>{host=test}", recorded: null, alternatives: [], kind: "plain", identity_changed: false, ambiguous: false } },
+  ] };
+  elements.refresh.click();
+  await tick();
+  const allNodes = node => [node, ...node.children.flatMap(allNodes)];
+  const findRow = key => allNodes(elements.rows).find(node => node.tag === "button" && node.title === key);
+  findRow("other").click();
+  resolveDiff({ success: true, outcome: "ready", message: "different", text: "", file_actions: ["keep_local"] });
+  await tick();
+  elements["diff-actions"].children[0].click();
+  findRow("config/<file>").click();
+  resolveDiff({ success: true, outcome: "ready", message: "different", text: "", file_actions: ["take_repo"] });
+  await tick();
+  const replacement = elements["diff-actions"].children[0];
+  assert.equal(replacement.textContent, "Review replacement");
+  assert.equal(replacement.className, "review-action");
+  assert.equal(replacement.children[0].attributes["aria-hidden"], "true");
+  assert.equal(elements["diff-actions"].children.length, 1);
+  replacement.click();
+  assert.equal(elements["replacement-review"].hidden, false);
+  assert.equal(document.activeElement, elements["replacement-title"]);
+  assert.equal(elements["replacement-source"].textContent, "/r/config/<file>{host=test}");
+  assert.equal(elements["replacement-target"].textContent, "/h/config/<file>");
+  assert.equal(elements["decision-items"].children.length, 1);
+  assert.equal(fileWrites.length, 0);
+  elements["replacement-back"].click();
+  assert.equal(document.activeElement, replacement);
+  assert.equal(elements["replacement-review"].hidden, true);
+  assert.equal(elements["decision-items"].children.length, 1);
+  replacement.click();
+  elements["close-diff"].click();
+  elements["replacement-batch"].click();
+  assert.equal(elements["decision-items"].children.length, 1);
+  assert.equal(fileWrites.length, 0);
+  findRow("config/<file>").click();
+  resolveDiff({ success: true, outcome: "ready", message: "different", text: "", file_actions: ["take_repo"] });
+  await tick();
+  elements["diff-actions"].children[0].click();
+  assert.equal(elements["decision-items"].children.length, 1);
+  elements["replacement-batch"].click();
+  assert.equal(elements["replacement-review"].hidden, true);
+  assert.equal(document.activeElement, elements["decisions-title"]);
+  assert.equal(elements.decisions.scrolled.block, "start");
+  assert.equal(elements["decision-items"].children.length, 2);
+  assert.equal(fileWrites.length, 0);
+  elements["diff-actions"].children[0].click();
+  elements["replacement-back"].click();
+  assert.equal(elements["decision-items"].children.length, 2);
+  elements["apply-decisions"].click();
+  assert.deepEqual(fileWrites.at(-1), { answers: [{ id: "conflict", action: "keep_local" }, { id: "incoming", action: "take_repo" }] });
+  resolveWriter({ outcome: "declined", message: "No changes.", items: [], refresh: false });
+  await tick();
+  assert.equal(elements["decision-message"].textContent, "declined: No changes.");
+  replacement.click();
+  assert.equal(elements["decision-items"].children.length, 0);
+  assert.equal(fileWrites.length, 1);
+  elements["decision-message"].textContent = "";
+  fileWrites.length = 0;
+  for (const scenario of [
+    { entry: { system: true }, response: { success: true, outcome: "ready", file_actions: ["take_repo"] } },
+    { entry: { supported: false }, response: null },
+    { entry: {}, response: { success: false, outcome: "ready", file_actions: ["take_repo"] } },
+    { entry: {}, response: { success: true, outcome: "error", file_actions: ["take_repo"] } },
+    { entry: {}, response: { success: true, outcome: "ready", file_actions: ["keep_local"] } },
+    { entry: { key: "bad\u202ename" }, response: { success: true, outcome: "ready", file_actions: ["take_repo"] } },
+    { entry: { machine_file: { selected: "bad\nsource" } }, response: { success: true, outcome: "ready", file_actions: ["take_repo"] } },
+  ]) {
+    statusResponse = { ...status, entries: [{ ...status.entries[0], id: "negative", status: "changed-in-repo", group: "incoming", ...scenario.entry }] };
+    elements.refresh.click();
+    await tick();
+    findRow(scenario.entry.key ?? "x").click();
+    if (scenario.response) resolveDiff({ message: "", text: "", ...scenario.response });
+    await tick();
+    assert.equal(elements["diff-actions"].children.length, 0);
+    assert.equal(elements["decision-items"].children.length, 0);
+    assert.equal(fileWrites.length, 0);
+    elements["close-diff"].click();
+  }
+  statusResponse = { ...status, entries: [{ ...status.entries[0], id: "cancel-incoming", status: "changed-in-repo", group: "incoming" }] };
+  elements.refresh.click();
+  await tick();
+  findRow("x").click();
+  elements.cancel.click();
+  resolveDiff({ success: true, outcome: "ready", message: "late", text: "", file_actions: ["take_repo"] });
+  await tick();
+  assert.equal(elements["diff-actions"].children.length, 0);
+  assert.equal(elements["decision-items"].children.length, 0);
+  assert.equal(fileWrites.length, 0);
+  statusResponse = null;
+  elements.refresh.click();
+  await tick();
   const edits = [
     { id: "opaque-1", old_line: 1, new_line: 1, before: "old", after: "new" },
     { id: "opaque-2", old_line: null, new_line: 2, before: null, after: "added" },
     { id: "opaque-3", old_line: 3, new_line: null, before: "removed", after: null },
   ];
   elements["open-review"].click();
+  assert.equal(elements["nav-review"].attributes["aria-current"], "page");
+  assert.equal(elements["nav-settings"].disabled, true);
+  elements["nav-settings"].click();
+  assert.equal(elements["nav-review"].attributes["aria-current"], "page");
   resolveReview({ id: "line-review", outcome: "review", message: "loaded", commit_message: "message",
     items: [{ group: "Capture", text: "full/path", diff_id: "capture" }] });
   await tick();
@@ -244,6 +388,9 @@ async function main() {
   assert.equal(elements["selected-lines"].children.length, 2);
   assert.match(elements["selected-lines"].children[0].textContent, /full\/path/);
   elements["close-diff"].click();
+  assert.equal(elements["nav-review"].attributes["aria-current"], "page");
+  assert.equal(elements.review.hidden, false);
+  assert.equal(document.activeElement, capture);
   boxes[2].checked = true; boxes[2].listeners.change();
   assert.equal(elements["selected-lines"].children.length, 2);
   capture.click();
@@ -349,7 +496,10 @@ async function main() {
   assert.equal(folder.open, true);
   folder.children[1].children[0].children[0].click();
   assert.equal(diffRequests.at(-1).id, "1:0");
-  const command = elements["diff-actions"].children[0].children[0];
+  const details = elements["diff-actions"].children[0];
+  assert.equal(details.tag, "details");
+  assert.equal(details.children[0].textContent, "Source editing details");
+  const command = details.children[1].children[0];
   assert.equal(command.tag, "textarea");
   assert.equal(command.readOnly, true);
   assert.equal(command.value, "dotman edit -- '/home/config/x'");
@@ -1111,6 +1261,29 @@ async function main() {
   assert.equal(elements.setup.hidden, false);
   assert.equal(elements.context.hidden, false);
   assert.equal(elements.paths.children[3].textContent, "/r");
+  assert.equal(elements["setup-paths"].children[3].textContent, "/r");
+  assert.equal(elements["start-fresh"].hidden, true);
+  assert.match(elements["setup-guidance"].textContent, /not available/);
+  const checkCalls = calls.length;
+  delayRefresh = true;
+  elements["setup-check"].click();
+  assert.equal(elements["setup-check"].disabled, true);
+  assert.equal(elements["start-fresh"].hidden, true);
+  resolveRefresh({ ...status, success: false, repo_unavailable: true, finding: "unavailable", setup_review_id: "setup-check", entries: [] });
+  delayRefresh = false;
+  await tick();
+  assert.deepEqual(calls.slice(checkCalls), ["refresh"]);
+  assert.equal(elements["start-fresh"].hidden, false);
+  assert.match(elements["setup-guidance"].textContent, /Create, Clone, or Import/);
+  delayRefresh = true;
+  elements["setup-check"].click();
+  rejectRefresh(new Error("private stderr"));
+  delayRefresh = false;
+  await tick();
+  assert.equal(elements.setup.hidden, false);
+  assert.equal(elements["start-fresh"].hidden, true);
+  assert.equal(elements["setup-check"].disabled, false);
+  assert.equal(elements.message.textContent, "Status read failed.");
   for (const response of [
     { ...status, success: false, repo_unavailable: false, message: "guard", entries: [] },
     { ...status, success: false, message: "generic", entries: [] },
@@ -1198,6 +1371,7 @@ async function main() {
   assert.equal(elements["review-identity"].hidden, true);
 
   async function identityStatus(id) {
+    elements["nav-settings"].click();
     statusResponse = { ...status, identity_review_id: id };
     const before = calls.length;
     elements.refresh.click();
@@ -1574,11 +1748,31 @@ async function main() {
   elements.refresh.click();
   await tick();
   assert.equal(elements.recovery.hidden, true);
-  statusResponse = { ...status, success: false, message: "An operation requires terminal recovery.", entries: [] };
+  statusResponse = { ...status, success: false, finding: "in_progress", message: "An operation requires terminal recovery.", entries: [] };
   elements.refresh.click();
   await tick();
   assert.equal(elements.recovery.hidden, false);
   assert.equal(elements["recovery-steps"].children.length, 0);
+  assert.equal(elements["recovery-details"].hidden, true);
+  assert.equal(elements.message.textContent, "Repository status needs attention.");
+  assert.equal(elements["recovery-message"].textContent, "Repository status needs attention.");
+  assert.match(elements["recovery-finding"].textContent, /operation in progress/);
+  assert.equal(elements["recovery-paths"].children[3].textContent, "/r");
+  const recoveryChecks = calls.length;
+  elements["recovery-check"].click();
+  await tick();
+  assert.deepEqual(calls.slice(recoveryChecks), ["refresh"]);
+  assert.equal(elements.recovery.hidden, false);
+  statusResponse = status;
+  elements["recovery-check"].focus();
+  elements["recovery-check"].click();
+  await tick();
+  assert.equal(elements.recovery.hidden, true);
+  assert.equal(document.activeElement, elements.message);
+  statusResponse = { ...status, success: false, finding: "in_progress", message: "An operation requires terminal recovery.", entries: [] };
+  elements.refresh.click();
+  await tick();
+  assert.equal(elements.recovery.hidden, false);
   const beforeColdRecovery = calls.length;
   delayRefresh = true;
   elements.refresh.click();

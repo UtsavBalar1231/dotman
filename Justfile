@@ -73,6 +73,7 @@ gui-frontend-check:
     node gui/tests/diff-reader.js
     node gui/tests/ui.js
     node gui/tests/theme.js
+    node gui/tests/workbench-layout.js
 
 gui-check: gui-frontend-check
     cargo fmt --manifest-path gui/Cargo.toml --all -- --check

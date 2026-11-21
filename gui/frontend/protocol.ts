@@ -47,6 +47,7 @@ interface ContextView {
 interface StatusView {
   success: boolean;
   repo_unavailable: boolean;
+  finding: "available" | "unavailable" | "in_progress" | "pull_conflict" | "stopped" | "unknown";
   message: string;
   context: ContextView | null;
   entries: EntryView[];

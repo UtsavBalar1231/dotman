@@ -1,14 +1,38 @@
 .file-tree-folder > details > summary {
   display: flex;
-  align-items: baseline;
-  gap: .5rem;
-  padding: .5rem;
+  align-items: center;
+  gap: .35rem;
+  min-height: 44px;
+  padding: .35rem .5rem;
   color: var(--muted);
   font-size: .85rem;
+  font-weight: normal;
 }
 .file-tree-folder > details > summary::before { content: "▸"; }
 .file-tree-folder > details[open] > summary::before { content: "▾"; }
-.file-tree-name { font-family: Departure, monospace; overflow-wrap: anywhere; min-width: 0; }
+.file-tree-name { display: flex; align-items: baseline; gap: .4rem; overflow-wrap: anywhere; min-width: 0; }
+.file-tree-name > svg {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  align-self: flex-start;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+.file-tree li { border-top: 0; }
+.file-tree .row { flex-wrap: wrap; gap: .1rem .5rem; min-height: 44px; }
+.file-tree .row-key { display: flex; flex: 1 1 100%; max-inline-size: 100%; gap: .5rem; }
+.file-tree-folder .row-key::before { content: ""; flex: 0 0 .65rem; height: .65rem; border-left: 1px solid var(--muted); border-bottom: 1px solid var(--muted); }
+.file-tree .row-status { flex: 1 1 100%; min-width: 0; text-align: left; }
+.file-tree-folder .row-status { padding-left: 1.15rem; }
+.file-tree .row[aria-current="true"] .repository-change { display: none; }
 .file-tree-count { margin-left: auto; font-variant-numeric: tabular-nums; }
-.file-tree-folder > details > ul { padding-left: .85rem; }
+.file-tree-folder > details > ul { padding-left: .5rem; }
+.file-tree ul ul ul ul .file-tree-folder > details > ul { padding-left: 0; }
 .file-tree-folder > details > summary::-webkit-details-marker { display: none; }
+@media (forced-colors: active) {
+  .file-tree .row[aria-current="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  .file-tree .row[aria-current="true"]:focus-visible { outline: 3px solid CanvasText; outline-offset: 2px; }
+}

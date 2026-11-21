@@ -24,6 +24,17 @@ type Item<T> = Folder<T> | { kind: "leaf"; entry: T; name: string };
 
 const states = new WeakMap<HTMLElement, FolderState>();
 
+function icon(path: string): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  shape.setAttribute("d", path);
+  svg.append(shape);
+  return svg;
+}
+
 export function render<T extends TreeEntry>(
   root: HTMLElement,
   entries: readonly T[],
@@ -99,7 +110,16 @@ export function render<T extends TreeEntry>(
       const summary = document.createElement("summary");
       const name = document.createElement("span");
       name.className = "file-tree-name";
-      name.textContent = item.name || "(empty)";
+      const names = [item.name || "(empty)"];
+      let end = item;
+      while (end.items.length === 1) {
+        const child = end.items[0];
+        if (!child || child.kind !== "folder" || child.state.expansion.closed) break;
+        names.push(child.name || "(empty)");
+        end = child;
+      }
+      name.textContent = names.join("/");
+      name.prepend(icon("M1.75 4.25h4l1.35 1.5h7.15v6.75H1.75z"));
       const total = document.createElement("span");
       total.className = "file-tree-count";
       total.textContent = String(item.count);
@@ -122,7 +142,7 @@ export function render<T extends TreeEntry>(
           event.preventDefault();
         }
       });
-      stack.push({ node: item, list: children, parentSummary: summary });
+      stack.push({ node: end, list: children, parentSummary: summary });
     }
   }
   return count;

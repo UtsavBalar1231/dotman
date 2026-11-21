@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -29,34 +29,59 @@
       <symbol id="stop-mark" viewBox="0 0 24 24">
         <path d="M15 5H3v14h12M6 9l3 3-3 3m5 0h2m5-10v14m3-14v14"/>
       </symbol>
+      <symbol id="folder-mark" viewBox="0 0 24 24">
+        <path d="M3 6h7l2 2h9v10H3z"/>
+      </symbol>
+      <symbol id="group-mark" viewBox="0 0 24 24">
+        <path d="M4 6h2m3 0h11M4 12h2m3 0h11M4 18h2m3 0h11"/>
+      </symbol>
+      <symbol id="refresh-mark" viewBox="0 0 24 24">
+        <path d="M20 7v5h-5M4 17v-5h5M5 9a7 7 0 0 1 12-3l3 3M19 15a7 7 0 0 1-12 3l-3-3"/>
+      </symbol>
+      <symbol id="close-mark" viewBox="0 0 24 24">
+        <path d="M6 6l12 12M18 6 6 18"/>
+      </symbol>
+      <symbol id="cancel-mark" viewBox="0 0 24 24">
+        <rect x="6" y="6" width="12" height="12" rx="1"/>
+      </symbol>
+      <symbol id="theme-mark" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M19 5l-1.5 1.5m-11 11L5 19"/>
+      </symbol>
+      <symbol id="repository-mark" viewBox="0 0 24 24">
+        <path d="M5 4h13v16H5zM8 4v16m3-12h4m-4 4h4"/>
+      </symbol>
     </defs>
   </svg>
   <main>
     <header class="topbar">
-      <div class="brand"><svg class="workspace-mark" aria-hidden="true" focusable="false"><use href="#pair-mark"/></svg><h1>dotman</h1><p class="subtitle">File workspace</p></div>
-      <div class="actions"><details class="appearance"><summary>Appearance</summary><div>
-        <label>Theme <select id="theme-mode"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-        <label>Accent <select id="accent-mode"><option value="petrol">Petrol</option><option value="marine">Marine</option><option value="mulberry">Mulberry</option></select></label>
-      </div></details><button id="refresh">Refresh status</button><button id="cancel" hidden disabled>Cancel read</button></div>
+      <div class="brand"><svg class="workspace-mark" aria-hidden="true" focusable="false"><use href="#pair-mark"/></svg><h1>Dotman</h1></div>
+      <nav class="page-nav" aria-label="Workspace">
+        <button id="nav-files" type="button" class="with-glyph" aria-current="page"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#folder-mark"/></svg>Files</button>
+        <button id="nav-review" type="button" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#capture-mark"/></svg>Review</button>
+        <button id="nav-settings" type="button" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#theme-mark"/></svg>Settings</button>
+      </nav>
+      <div class="actions"><button id="refresh" class="icon-button" aria-label="Refresh status"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#refresh-mark"/></svg></button><button id="cancel" class="icon-button" aria-label="Cancel read" hidden disabled><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#cancel-mark"/></svg></button></div>
     </header>
+    <div class="page-status">
+      <h2 id="page-heading" class="page-heading" tabindex="-1">Files</h2>
+      <p id="message" role="status" aria-live="polite" tabindex="-1">Loading status…</p>
+    </div>
     <p id="notice" class="notice" hidden>DOTMAN_AGE_KEY was removed before launch. Encrypted files may be locked; use a key file or import an identity with dotman.</p>
-    <p id="message" role="status" aria-live="polite" tabindex="-1">Loading status…</p>
     <section id="recovery" hidden aria-labelledby="recovery-title">
-      <h2 id="recovery-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#stop-mark"/></svg>Terminal recovery required</h2>
+      <h2 id="recovery-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#stop-mark"/></svg>Repository troubleshooting</h2>
       <p id="recovery-message"></p>
-      <p>Resolve this in a terminal using the same dotman configuration, then refresh status here. Sync will not resume automatically.</p>
-      <div id="recovery-steps"></div>
+      <p id="recovery-finding"></p>
+      <p>Recovery is not available in this panel. A fresh check only reads status; it does not resolve a conflict or resume sync.</p>
+      <dl id="recovery-paths"></dl>
+      <button id="recovery-check" type="button">Check status again</button>
+      <details id="recovery-details" hidden><summary>Terminal recovery details</summary><div id="recovery-steps"></div></details>
     </section>
-    <details id="context" hidden>
-      <summary>
-        <span class="repository-label">Repository</span><span id="repository-path"></span>
-        <span class="paths-label">Resolved paths</span>
-      </summary>
-      <dl id="paths"></dl>
-    </details>
     <section id="setup" hidden aria-labelledby="setup-title">
-      <h2 id="setup-title">Repository unavailable</h2>
-      <p>The repository could not be opened. Check the resolved paths above, or run <code>dotman status</code> in a terminal for details. Repair an existing repository in the terminal, then refresh status here.</p>
+      <h2 id="setup-title">Repository troubleshooting</h2>
+      <p id="setup-finding"></p>
+      <dl id="setup-paths"></dl>
+      <button id="setup-check" type="button">Check status again</button>
+      <p id="setup-guidance"></p>
       <button id="start-fresh" type="button" hidden>Create repository…</button>
       <button id="start-import" type="button" hidden>Import dotfiles directory…</button>
       <div id="clone-controls" hidden>
@@ -71,7 +96,7 @@
       <p id="setup-message" role="status" aria-live="polite" tabindex="-1"></p>
     </section>
     <section id="decisions" hidden aria-labelledby="decisions-title">
-      <h2 id="decisions-title">File decisions</h2>
+      <h2 id="decisions-title" tabindex="-1">File decisions</h2>
       <p id="decision-message" role="status" aria-live="polite" tabindex="-1"></p>
       <ul id="decision-items"></ul>
       <div class="actions"><button id="clear-decisions">Clear all</button><button id="apply-decisions">Apply file decisions</button></div>
@@ -85,41 +110,21 @@
       <h2 id="variant-result-title">Host variant result</h2>
       <p id="variant-message" role="status" aria-live="polite" tabindex="-1"></p>
     </section>
-    <p id="policy-message" role="status" aria-live="polite"></p>
-    <section id="age-controls" hidden aria-labelledby="age-title">
-      <h2 id="age-title">Age identity</h2>
-      <p>Create a new identity or import one from a local file. Recipient changes require separate confirmation.</p>
-      <div class="actions">
-        <button id="create-age" type="button">Create identity…</button>
-        <button id="import-age" type="button">Import identity…</button>
-      </div>
-      <p id="age-message" role="status" aria-live="polite"></p>
-    </section>
     <section id="hooks-result" hidden aria-labelledby="hooks-result-title">
       <h2 id="hooks-result-title">Hook review result</h2>
       <p id="hooks-message" role="status" aria-live="polite" tabindex="-1"></p>
     </section>
     <div class="desk">
     <section id="entries" hidden aria-labelledby="files-title">
-      <div class="section-head"><h2 id="files-title">Files</h2><button id="open-review" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#capture-mark"/></svg>Review sync</button></div>
+      <h2 id="files-title">File browser</h2>
       <p class="queue-meta"><span id="remote"></span><span id="clean"></span></p>
       <button id="review-hooks" type="button" hidden>Review pending hooks</button>
       <label for="search">Search files</label>
       <input id="search" type="search" placeholder="Name, path or status" autocomplete="off">
-      <div class="nav-modes" role="group" aria-label="Group files"><button id="group-folders" aria-pressed="true">Folders</button><button id="group-status" aria-pressed="false">Status</button></div>
+      <div class="nav-modes" role="group" aria-label="Group files"><button id="group-folders" class="with-glyph" aria-pressed="true"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#folder-mark"/></svg>Folders</button><button id="group-status" class="with-glyph" aria-pressed="false"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#group-mark"/></svg>Status</button></div>
       <p id="held-counts" hidden></p>
-      <details id="policy-controls">
-        <summary>Local capture policy</summary>
-        <p>Review directory or retained-ignore trust for future sync. Nothing is captured now.</p>
-        <button id="policy-directories" type="button">Review directories…</button>
-        <button id="policy-ignores" type="button">Review retained ignore rules…</button>
-      </details>
       <div id="rows" tabindex="0" aria-label="File change queue"></div>
-      <details id="machine-files" hidden>
-        <summary>Machine files</summary>
-        <div id="machine-file-details"></div>
-        <button id="review-identity" type="button" hidden>Review identity change</button>
-      </details>
+      <button id="open-review" type="button">Review outgoing sync</button>
      </section>
      <section class="desk-guide" aria-labelledby="guide-title">
         <h2 id="guide-title">Files to inspect</h2>
@@ -127,7 +132,7 @@
         <ul id="attention-list" class="attention-list"></ul>
      </section>
     <section id="review" hidden aria-labelledby="review-title">
-      <div class="section-head"><h2 id="review-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#capture-mark"/></svg>Review outgoing sync</h2><button id="close-review">Close review</button></div>
+      <div class="section-head"><h2 id="review-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#capture-mark"/></svg>Review outgoing sync</h2><button id="close-review" class="icon-button" aria-label="Close review"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#close-mark"/></svg></button></div>
       <p>This read-only preview does not fetch or predict upstream changes. A changed hook table may require fresh approval. Sync without hooks writes only after native confirmation.</p>
       <p id="review-remote"></p>
       <p id="review-message" role="status" aria-live="polite" tabindex="-1"></p>
@@ -143,17 +148,69 @@
       <button id="sync-mass-delete" type="button" hidden>Review and approve mass deletion</button>
       <button id="sync-lines" type="button" hidden>Commit selected lines</button>
     </section>
-    <section id="diff" hidden aria-labelledby="diff-title">
-      <div class="section-head"><h2 id="diff-title" class="with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#compare-mark"/></svg>Compare copies</h2><button id="close-diff">Close diff</button></div>
-      <p id="diff-key"></p><p id="diff-context"></p><p id="diff-message" role="status" aria-live="polite"></p>
+    <section id="diff" hidden aria-labelledby="diff-key">
+      <div class="section-head"><h2 id="diff-key"></h2><button id="close-diff" class="icon-button" aria-label="Close diff"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#close-mark"/></svg></button></div>
+      <div class="comparison-content">
+      <p id="diff-context"></p><p id="diff-message" role="status" aria-live="polite"></p>
+      <h3>Compare copies</h3>
       <div id="reader-tools" hidden></div>
       <pre id="diff-text" tabindex="0" aria-label="Diff text"></pre>
       <fieldset id="line-edits" hidden><legend>Choose changes to commit</legend><p>Checking a change enters selected-only mode. Replacements include both sides.</p><div id="line-edit-list"></div></fieldset>
       <p id="diff-selection" role="status" aria-live="polite"></p>
       <div id="diff-actions" class="actions"></div>
+      </div>
+      <section id="replacement-review" hidden aria-labelledby="replacement-title">
+        <h3 id="replacement-title" tabindex="-1">Replace the local copy?</h3>
+        <dl class="replacement-paths">
+          <div><dt>Copy from repository</dt><dd id="replacement-source"></dd></div>
+          <div><dt>Replace on this computer</dt><dd id="replacement-target"></dd></div>
+        </dl>
+        <p>Applying this decision backs up the local file and replaces it with the repository copy. The repository stays unchanged.</p>
+        <p>Add this file to your decisions, then confirm the complete list before anything is written.</p>
+        <div class="actions">
+          <button id="replacement-back" type="button">Back to comparison</button>
+          <button id="replacement-batch" type="button" class="review-action">Add to file decisions</button>
+        </div>
+      </section>
       <button id="next-undecided" hidden>Next undecided</button>
     </section>
     </div>
+    <section id="settings" hidden aria-labelledby="page-heading">
+      <div class="settings-section">
+        <h3>Appearance</h3>
+        <label>Theme <select id="theme-mode"><option value="system">System</option><option value="light" selected>Light</option><option value="dark">Dark</option></select></label>
+        <label>Accent <select id="accent-mode"><option value="petrol">Petrol</option><option value="marine">Marine</option><option value="mulberry">Mulberry</option></select></label>
+      </div>
+      <details id="context" hidden>
+        <summary><span class="repository-label with-glyph"><svg class="workspace-glyph" aria-hidden="true" focusable="false"><use href="#repository-mark"/></svg>Repository</span><span id="repository-path"></span><span class="paths-label">Resolved paths</span></summary>
+        <dl id="paths"></dl>
+      </details>
+      <p id="paths-unavailable">Resolved paths are unavailable. Refresh status to try again.</p>
+      <details id="policy-controls">
+        <summary>Local capture policy</summary>
+        <p>Review directory or retained-ignore trust for future sync. Nothing is captured now.</p>
+        <button id="policy-directories" type="button">Review directories…</button>
+        <button id="policy-ignores" type="button">Review retained ignore rules…</button>
+        <p id="policy-message" role="status" aria-live="polite"></p>
+      </details>
+      <details id="machine-files" hidden>
+        <summary>Machine files</summary>
+        <div id="machine-file-details"></div>
+        <button id="review-identity" type="button" hidden>Review identity change</button>
+      </details>
+      <section id="age-controls" hidden aria-labelledby="age-title">
+      <details>
+        <summary id="age-title">Age identity</summary>
+        <p>Create a new identity or import one from a local file. Recipient changes require separate confirmation.</p>
+        <div class="actions">
+          <button id="create-age" type="button">Create identity…</button>
+          <button id="import-age" type="button">Import identity…</button>
+        </div>
+      </details>
+      <p id="age-message" role="status" aria-live="polite"></p>
+      </section>
+      <p id="age-unavailable">Age identity controls are unavailable until status is loaded.</p>
+    </section>
   </main>
 </body>
 </html>

@@ -155,6 +155,7 @@ struct HeldCounts {
 pub struct View {
     success: bool,
     repo_unavailable: bool,
+    finding: &'static str,
     message: &'static str,
     context: Option<ContextView>,
     entries: Vec<EntryView>,
@@ -415,6 +416,27 @@ fn supported(entry: &protocol::StatusEntry) -> bool {
         && (!entry.encrypted || entry.source.is_some())
 }
 
+fn status_finding(reply: &protocol::StatusReply) -> &'static str {
+    let protocol::StatusReply::Error {
+        exit_code,
+        error_kind,
+        context,
+        ..
+    } = reply
+    else {
+        return "available";
+    };
+    match (*exit_code, error_kind.as_deref()) {
+        (4, Some("in_progress")) => "in_progress",
+        (4, Some("pull_conflict")) => "pull_conflict",
+        (4, _) => "stopped",
+        (1, Some("other")) if context.as_ref().is_some_and(|c| c.repo_id.is_none()) => {
+            "unavailable"
+        }
+        _ => "unknown",
+    }
+}
+
 fn project(reply: &protocol::StatusReply, key_stripped: bool, generation: u64) -> View {
     match reply {
         protocol::StatusReply::Report(report) => {
@@ -422,6 +444,7 @@ fn project(reply: &protocol::StatusReply, key_stripped: bool, generation: u64) -
             View {
                 success: true,
                 repo_unavailable: false,
+                finding: "available",
                 message: "Status loaded",
                 context: Some((&report.context).into()),
                 entries: report
@@ -486,17 +509,11 @@ fn project(reply: &protocol::StatusReply, key_stripped: bool, generation: u64) -
             }
         }
         protocol::StatusReply::Error {
-            exit_code,
-            context,
-            error_kind,
-            ..
+            exit_code, context, ..
         } => View {
             success: false,
-            repo_unavailable: *exit_code == 1
-                && error_kind.as_deref() == Some("other")
-                && context
-                    .as_ref()
-                    .is_some_and(|context| context.repo_id.is_none()),
+            repo_unavailable: status_finding(reply) == "unavailable",
+            finding: status_finding(reply),
             message: if *exit_code == 4 {
                 "An operation requires terminal recovery."
             } else {
@@ -521,6 +538,7 @@ const fn failure(message: &'static str, key_stripped: bool) -> View {
     View {
         success: false,
         repo_unavailable: false,
+        finding: "unknown",
         message,
         context: None,
         entries: Vec::new(),
@@ -3401,12 +3419,20 @@ mod tests {
             r#""repo_id":{"raw":"private-repo-id","shown":"id"}"#,
             r#""repo_id":null"#,
         );
-        for (context, code, kind, expected) in [
-            (Some(absent.as_str()), 1, "other", true),
-            (Some(CONTEXT), 1, "other", false),
-            (Some(absent.as_str()), 4, "in_progress", false),
-            (None, 1, "root_refused", false),
-            (None, 1, "other", false),
+        for (context, code, kind, expected, finding) in [
+            (Some(absent.as_str()), 1, "other", true, "unavailable"),
+            (Some(CONTEXT), 1, "other", false, "unknown"),
+            (
+                Some(absent.as_str()),
+                4,
+                "in_progress",
+                false,
+                "in_progress",
+            ),
+            (Some(CONTEXT), 4, "pull_conflict", false, "pull_conflict"),
+            (None, 4, "other", false, "stopped"),
+            (None, 1, "root_refused", false, "unknown"),
+            (None, 1, "other", false, "unknown"),
         ] {
             let result = format!(
                 r#"{{"record":"result","outcome":"error","exit_code":{code},"error_kind":"{kind}","recovery":[{{"kind":"instruction","text":{{"raw":"secret recovery","shown":"recovery shown"}}}}]}}"#
@@ -3419,6 +3445,7 @@ mod tests {
             let reply = protocol::parse_status(input.as_bytes(), Some(code))?;
             let view = project(&reply, false, 1);
             assert_eq!(view.repo_unavailable, expected);
+            assert_eq!(view.finding, finding);
             assert!(!serde_json::to_string(&view)?.contains("recovery shown"));
         }
         Ok(())
@@ -3996,6 +4023,7 @@ mod tests {
         for (row, expected) in [
             ("both-changed", r#"["keep_local","take_repo"]"#),
             ("existing", r#"["keep_local","take_repo"]"#),
+            ("changed-in-repo", r#"["take_repo"]"#),
             ("deleted-locally", r#"["restore"]"#),
             ("deleted-changed-upstream", r#"["restore"]"#),
         ] {
@@ -4182,6 +4210,192 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_in_repo_requires_exact_action_and_current_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut inner = action_fixture("changed-in-repo")?;
+        let cancelled = || Arc::new(AtomicBool::new(false));
+        assert!(
+            reserve_apply(
+                &mut inner,
+                &[answer("7:0", FileAction::TakeRepo)],
+                cancelled()
+            )
+            .is_err()
+        );
+        authorize(&mut inner)?;
+        for action in [FileAction::KeepLocal, FileAction::Restore] {
+            assert!(reserve_apply(&mut inner, &[answer("7:0", action)], cancelled()).is_err());
+        }
+        inner.generation = 8;
+        assert!(
+            reserve_apply(
+                &mut inner,
+                &[answer("7:0", FileAction::TakeRepo)],
+                cancelled()
+            )
+            .is_err()
+        );
+        let state = AppState::new(false);
+        {
+            let mut guard = state.inner.lock().map_err(|_| "lock")?;
+            *guard = action_fixture("changed-in-repo")?;
+            authorize(&mut guard)?;
+            drop(guard);
+        }
+        state.stop()?;
+        let guard = state.inner.lock().map_err(|_| "lock")?;
+        assert!(guard.diff_receipts.is_empty());
+        drop(guard);
+        inner.generation = 7;
+        let reservation = reserve_apply(
+            &mut inner,
+            &[answer("7:0", FileAction::TakeRepo)],
+            cancelled(),
+        )?;
+        assert!(
+            reservation
+                .text
+                .contains("Take repository backs up replaced bytes")
+        );
+        assert!(inner.diff_receipts.is_empty());
+        Ok(())
+    }
+
+    fn run_apply_fixture(
+        root: &std::path::Path,
+        cli: &std::ffi::OsStr,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let home = root.join("home");
+        let mut child = Command::new(cli)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("TMPDIR", root)
+            .env("DOTMAN_NON_INTERACTIVE", "1")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(&home)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(input) = input {
+            child.stdin.take().ok_or("stdin")?.write_all(input)?;
+        }
+        Ok(child.wait_with_output()?)
+    }
+
+    #[test]
+    #[ignore = "requires DOTMAN_TEST_CLI pointing to the built CLI"]
+    fn changed_in_repo_real_cli_write_backup_and_stale() -> Result<(), Box<dyn std::error::Error>> {
+        struct Root(std::path::PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let path = std::env::temp_dir().join(format!("dotman-gui-apply-{}", std::process::id()));
+        std::fs::create_dir(&path)?;
+        let root = Root(path);
+        for dir in ["home", "config", "data", "state", "cache", "runtime"] {
+            std::fs::create_dir(root.0.join(dir))?;
+        }
+        let home = root.0.join("home");
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[user]\nname = Test\nemail = test@example.invalid\n",
+        )?;
+        let cli = std::env::var_os("DOTMAN_TEST_CLI").ok_or("missing DOTMAN_TEST_CLI")?;
+        let run =
+            |args: &[&str], input: Option<&[u8]>| run_apply_fixture(&root.0, &cli, args, input);
+        let init = run(&["init"], None)?;
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        std::fs::write(home.join(".profile"), b"original\n")?;
+        let add = run(&["add", ".profile"], None)?;
+        assert!(
+            add.status.success(),
+            "{}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        std::fs::write(root.0.join("data/dotman/.profile"), b"repository\n")?;
+        let status = run(&["status", "--json"], None)?;
+        let protocol::StatusReply::Report(report) =
+            protocol::parse_status(&status.stdout, status.status.code())?
+        else {
+            return Err("status refused".into());
+        };
+        let index = report
+            .entries
+            .iter()
+            .position(|entry| entry.key.raw == ".profile" && entry.status == "changed-in-repo")
+            .ok_or("missing changed-in-repo")?;
+        let mut inner = action_fixture("changed-in-repo")?;
+        inner.reply = Some(protocol::StatusReply::Report(report));
+        let id = format!("7:{index}");
+        let selection = select(&inner, &id)?;
+        let exact = format!(
+            "--exact-repo={}",
+            selection.context.repo_id.as_ref().ok_or("repo id")?.raw
+        );
+        let operand = home.join(".profile");
+        let operand = operand.to_str().ok_or("operand")?;
+        let diff = run(&["diff", "--json", &exact, "--", operand], None)?;
+        let parsed = protocol::parse_diff(&diff.stdout, diff.status.code(), &selection)?;
+        let view = finish_diff(&mut inner, &id, Ok(parsed));
+        assert_eq!(
+            serde_json::to_string(&view.file_actions)?,
+            r#"["take_repo"]"#
+        );
+        let reservation = reserve_apply(
+            &mut inner,
+            &[answer(&id, FileAction::TakeRepo)],
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        let document = reservation.reviewed()?.encode()?;
+        std::fs::write(home.join(".profile"), b"stale\n")?;
+        let args = [
+            "apply",
+            "--json",
+            "--decide-from",
+            "-",
+            "--no-hooks",
+            "--",
+            operand,
+        ];
+        let stale = run(&args, Some(&document))?;
+        assert!(!stale.status.success());
+        assert_eq!(std::fs::read(home.join(".profile"))?, b"stale\n");
+        std::fs::write(home.join(".profile"), b"original\n")?;
+        let done = run(&args, Some(&document))?;
+        assert!(
+            done.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&done.stdout),
+            String::from_utf8_lossy(&done.stderr)
+        );
+        assert_eq!(std::fs::read(home.join(".profile"))?, b"repository\n");
+        let backups = std::fs::read_dir(root.0.join("state/dotman/backups"))?
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read(entry.path().join(".profile")).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(backups, vec![b"original\n".to_vec()]);
         Ok(())
     }
 

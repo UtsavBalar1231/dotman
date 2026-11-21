@@ -1,16 +1,24 @@
 # dotman on Linux desktop
 
-The file workspace opens with a folder tree. Use **Status** to group files by
-what changed, or search by path or status. A wide window keeps the navigator
-beside the comparison; a narrow window uses a unified diff. Close the comparison
-to return to its file, or to Search if the file is filtered out. Expand
-**Resolved paths** to check the active repository, Home, configuration, state
-and identity paths. **Appearance** follows the system by default. You can
-select light or dark and change the accent for the open window.
+- **Files** is where you inspect changes. The file tree combines folders with
+  a single child folder into one path. Browse folders, switch to **Status**
+  to group files by what changed, or search by path or status. A wide window
+  keeps the navigator beside the comparison. On an ultrawide display, the file
+  browser stops growing and the diff uses the remaining width. When the comparison
+  pane is too narrow for two copies, it shows a unified diff. In a narrow window
+  the diff gets the available width; close it to return to the file list.
+- **Review** previews the outgoing sync. Open a capture diff from the preview
+  to inspect what would be committed. Opening the page does not start a sync.
+- **Settings** contains appearance, repository paths and local capture policy.
+  Expand **Resolved paths** to check which Home, repository and state directory
+  the app is using. The window starts in **Light**. Choose **System** to follow
+  the desktop’s appearance, or choose **Dark**. Theme and accent apply to the open window.
 
 ## Set up a repository
 
-If the resolved destination is absent, you can create an empty repository,
+If the repository cannot be opened, **Repository troubleshooting** shows the
+reported paths and offers **Check status again**. This reads status; it does
+not resolve a stopped operation. If the resolved destination is absent, you can create an empty repository,
 clone into it, or import a selected directory of ordinary static dotfiles.
 Each route shows the destination in a native confirmation.
 Clone also shows the exact source and stops at a checkout for review; it does
@@ -43,7 +51,8 @@ standing grants and pending hook approval have separate native reviews.
 
 ## Create or import an age identity
 
-For an available repository, use **Create identity** or **Import identity**.
+For an available repository, open **Settings → Age identity** and use
+**Create identity** or **Import identity**.
 Import opens a native local-file chooser. The identity destination's private
 parent directory must already exist. The first native confirmation names the
 destination; it does not approve replacing an existing identity or editing
@@ -63,7 +72,14 @@ available action and review the collected choices before applying them. When
 the action replaces a different Home file, it first backs up the old copy.
 Skip a file by leaving it undecided.
 
-**Review sync** previews the outgoing changes from the current report. It
+For an eligible plain file marked **changed-in-repo**, choose **Review
+replacement** to see the repository source and local destination. **Back to
+comparison** leaves your decisions untouched. **Add to file decisions** queues
+the replacement alongside any other choices. **Apply file decisions** asks
+for native confirmation of the full list. If a copy has changed since review,
+refresh and compare it again.
+
+**Review outgoing sync** previews the outgoing changes from the current report. It
 does not fetch or predict what is upstream. A whole desktop sync requires native
 confirmation and never executes hooks itself. Matching writes are held in the
 same pending queue as the terminal for a separate native hook confirmation.

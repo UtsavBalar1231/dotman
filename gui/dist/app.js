@@ -25,6 +25,8 @@ let diffOrigin = null;
 const rowNodes = new Map();
 let folderMode = true;
 let statusLoaded = false;
+let statusLocations = null;
+let page = "files";
 let reviewId = null;
 let massDeleteReview = false;
 let writerActive = false;
@@ -33,6 +35,7 @@ let suggestedMessage = null;
 let writerKind = null;
 const decisions = new Map();
 let diffChoiceId = null;
+let replacementReview = null;
 const diffChoiceButtons = new Map();
 let selectedOnly = false;
 const selectedDefaultMessage = "sync: selected edits";
@@ -208,6 +211,14 @@ function updateCommitValidation() {
     controls();
 }
 function controls() {
+    for (const name of ["files", "review", "settings"]) {
+        el(`nav-${name}`).disabled = busy || cancelPending;
+    }
+    el("paths-unavailable").hidden = !el("context").hidden;
+    el("age-unavailable").hidden = keyReviewId !== null;
+    el("age-unavailable").textContent = statusLoaded
+        ? "Age identity controls are not available for this status."
+        : "Age identity controls are unavailable until status is loaded.";
     el("policy-directories").disabled = busy || cancelPending || !statusLoaded || policyReviewId === null;
     el("policy-ignores").disabled = busy || cancelPending || !statusLoaded || policyReviewId === null;
     el("age-controls").hidden = keyReviewId === null;
@@ -217,6 +228,8 @@ function controls() {
     el("next-undecided").disabled = busy || cancelPending;
     el("decisions").hidden = !decisions.size && !el("decision-message").textContent && !(writerActive && writerKind === "files");
     el("refresh").disabled = busy || cancelPending;
+    el("recovery-check").disabled = busy || cancelPending;
+    el("setup-check").disabled = busy || cancelPending;
     el("cancel").hidden = !busy && !cancelPending;
     el("cancel").disabled = !busy || cancelPending;
     el("cancel").textContent = writerActive ? (writerKind === "files" ? "Cancel apply" : writerKind === "identity" ? "Cancel identity review" : writerKind === "hooks" ? "Cancel hook review" : writerKind === "setup" ? "Cancel setup" : writerKind === "age" ? "Cancel identity operation" : writerKind === "policy" ? "Cancel policy review" : "Cancel sync") : "Cancel read";
@@ -255,10 +268,16 @@ function clearDiff() {
     el("line-edit-list").replaceChildren();
     diffChoiceId = null;
     diffChoiceButtons.clear();
+    replacementReview = null;
+    el("replacement-review").hidden = true;
 }
 function clearVariantResult() {
     el("variant-result").hidden = true;
     el("variant-message").textContent = "";
+}
+function safeDisplayPath(value) {
+    return typeof value === "string" && value.length > 0 &&
+        !/[\p{Cc}\p{Cs}\u00ad\u061c\u180e\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{e0001}\u{e0020}-\u{e007f}]/u.test(value);
 }
 const groups = [
     ["decision", "Needs a decision"], ["outgoing", "Local changes and new files"],
@@ -392,7 +411,13 @@ function fileLeaf(entry, displayName) {
     key.textContent = displayName;
     const status = document.createElement("span");
     status.className = "row-status";
-    status.textContent = `${entry.status}${entry.system ? " · system (read only)" : ""}${entry.supported ? "" : " · diff unavailable"}`;
+    if (entry.status === "changed-in-repo" && !entry.system && entry.supported) {
+        status.className += " repository-change";
+        status.textContent = "Repository changed";
+    }
+    else {
+        status.textContent = `${entry.status}${entry.system ? " · system (read only)" : ""}${entry.supported ? "" : " · diff unavailable"}`;
+    }
     row.setAttribute("aria-label", `${entry.key} — ${status.textContent}`);
     row.title = entry.key;
     row.append(key, status);
@@ -475,13 +500,16 @@ function renderWorklist() {
     const root = el("attention-list");
     root.replaceChildren();
     const inspect = entries.filter(entry => entry.group === "decision" && entry.supported && !entry.system);
-    el("guide-title").textContent = inspect.length ? "Needs a decision" : "File comparison";
-    el("guide-description").textContent = inspect.length ? `${inspect.length} to inspect · Select a file to compare its copies.` :
-        entries.length ? "Select a file in the navigator to inspect its status." : "No files need attention.";
-    for (const entry of inspect.slice(0, 6)) {
+    const changes = entries.filter(entry => entry.supported && !entry.system && ["outgoing", "incoming"].includes(entry.group));
+    const list = inspect.length ? inspect : changes;
+    el("guide-title").textContent = inspect.length ? "Needs a decision" : changes.length ? "Changes to inspect" : "File comparison";
+    el("guide-description").textContent = inspect.length ? `${inspect.length} to inspect · Compare these files before choosing how to resolve them.` :
+        changes.length ? "Select a file to compare its copies." :
+            entries.length || !el("held-counts").hidden ? "No comparable changes are available here. Check held counts and the file list for details." : "No files need attention.";
+    for (const entry of list.slice(0, 6)) {
         const item = document.createElement("li");
         const button = document.createElement("button");
-        for (const text of [entry.key, entry.status]) {
+        for (const text of [entry.key, inspect.length ? entry.status.replaceAll("-", " ") : entry.group === "outgoing" ? "Local change" : "Repository change"]) {
             const span = document.createElement("span");
             span.textContent = text;
             button.append(span);
@@ -563,6 +591,7 @@ function renderMachineFiles() {
 async function refresh(preserveReview = false, preserveVariantResult = false) {
     if (busy || cancelPending)
         return;
+    const setupWasVisible = !el("setup").hidden;
     if (!preserveVariantResult)
         clearVariantResult();
     clearLines();
@@ -580,6 +609,7 @@ async function refresh(preserveReview = false, preserveVariantResult = false) {
     reviewId = null;
     entries = [];
     statusLoaded = false;
+    statusLocations = null;
     clearMachineFiles();
     el("setup").hidden = true;
     el("entries").hidden = true;
@@ -595,12 +625,15 @@ async function refresh(preserveReview = false, preserveVariantResult = false) {
             el("recovery").hidden = true;
             el("recovery-message").textContent = "";
             el("recovery-steps").replaceChildren();
+            el("recovery-details").hidden = true;
         }
-        else if (view.message === "An operation requires terminal recovery.") {
-            showRecovery(view.message);
+        else if (["in_progress", "pull_conflict", "stopped"].includes(view.finding)) {
+            showRecovery("Repository status needs attention.");
         }
         el("notice").hidden = !view.key_stripped;
-        el("message").textContent = view.message;
+        el("message").textContent = !view.success && ["in_progress", "pull_conflict", "stopped"].includes(view.finding)
+            ? "Repository status needs attention."
+            : view.message;
         if (view.context) {
             el("repository-path").textContent = view.context.repo;
             for (const [label, key] of [["Home", "home"], ["Repository", "repo"], ["Configuration", "config"], ["State", "state"], ["Identity", "identity"], ["Machine", "machine"]]) {
@@ -610,18 +643,43 @@ async function refresh(preserveReview = false, preserveVariantResult = false) {
                 value.textContent = view.context[key];
                 el("paths").append(term, value);
             }
-            el("context").hidden = preserveReview;
+            el("context").hidden = false;
         }
+        for (const id of ["recovery-paths", "setup-paths"]) {
+            const root = el(id);
+            root.replaceChildren();
+            if (view.context) {
+                for (const [label, value] of [["Home", view.context.home], ["Repository", view.context.repo], ["Configuration", view.context.config], ["State", view.context.state]]) {
+                    const term = document.createElement("dt");
+                    const description = document.createElement("dd");
+                    term.textContent = label;
+                    description.textContent = value;
+                    root.append(term, description);
+                }
+            }
+        }
+        el("recovery-finding").textContent = view.finding === "in_progress"
+            ? "Dotman reports an operation in progress."
+            : view.finding === "pull_conflict"
+                ? "Dotman reports a pull conflict."
+                : "Dotman reports a stopped operation; its cause is not available here.";
         entries = view.entries;
         statusLoaded = view.success;
+        statusLocations = view.success && view.context ? { home: view.context.home, repo: view.context.repo } : null;
         machineDetails = view.success ? view.context?.machine_details ?? null : null;
         identityReviewId = view.success && typeof view.identity_review_id === "string" && view.identity_review_id.length ? view.identity_review_id : null;
         policyReviewId = view.success && typeof view.policy_review_id === "string" && view.policy_review_id.length ? view.policy_review_id : null;
         keyReviewId = view.success && typeof view.key_review_id === "string" && view.key_review_id.length ? view.key_review_id : null;
         hookReviewId = view.success && typeof view.hook_review_id === "string" && view.hook_review_id.length ? view.hook_review_id : null;
         el("setup").hidden = !(!view.success && view.repo_unavailable === true && view.context && !preserveReview && el("recovery").hidden);
-        setupReviewId = !el("setup").hidden && typeof view.context?.repo === "string" && view.context.repo.length &&
+        setupReviewId = !el("setup").hidden && view.repo_unavailable === true && typeof view.context?.repo === "string" && view.context.repo.length &&
             typeof view.setup_review_id === "string" && view.setup_review_id.length ? view.setup_review_id : null;
+        el("setup-finding").textContent = view.finding === "unavailable"
+            ? "Dotman could not open a repository at the resolved location."
+            : "The repository status could not be verified.";
+        el("setup-guidance").textContent = setupReviewId === null
+            ? "Setup is not available for this status. An existing repository may need attention outside this panel."
+            : "Choose Create, Clone, or Import to review a setup. No files are changed until you confirm.";
         el("machine-files").hidden = !view.success || (identityReviewId === null && !entries.some(entry => entry.machine_file));
         if (!el("machine-files").hidden)
             renderMachineFiles();
@@ -633,8 +691,15 @@ async function refresh(preserveReview = false, preserveVariantResult = false) {
         el("entries").hidden = preserveReview || !view.success;
     }
     catch {
-        if (token === serial)
+        if (token === serial) {
             el("message").textContent = "Status read failed.";
+            if (setupWasVisible && el("recovery").hidden) {
+                el("setup").hidden = false;
+                el("setup-finding").textContent = "The repository status could not be verified.";
+                el("setup-guidance").textContent = "Setup is not available until a successful check permits it.";
+                el("setup-paths").replaceChildren();
+            }
+        }
     }
     finally {
         busy = false;
@@ -668,6 +733,9 @@ async function openDiff(entry, row, review = null) {
         el("diff-actions").append(button);
     }
     if (review === null && typeof entry.edit_command === "string") {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = "Source editing details";
         const label = document.createElement("label");
         label.textContent = entry.status === "template-drift"
             ? "Edit the template in a terminal:"
@@ -678,7 +746,8 @@ async function openDiff(entry, row, review = null) {
         command.setAttribute("aria-label", "Terminal edit command");
         command.value = entry.edit_command;
         label.append(command);
-        el("diff-actions").append(label);
+        details.append(summary, label);
+        el("diff-actions").append(details);
     }
     el("close-diff").focus();
     if (!entry.supported) {
@@ -691,7 +760,11 @@ async function openDiff(entry, row, review = null) {
     }
     if (review === null) {
         const recorded = entry.machine_file?.recorded;
-        el("diff-context").textContent += ` · Repository vs ${entry.system ? "system" : "home"}`;
+        if (entry.status === "changed-in-repo" && !entry.system) {
+            el("diff-context").textContent = "The repository copy has changed. Compare it with the file on this computer.";
+        }
+        else
+            el("diff-context").textContent += ` · Repository vs ${entry.system ? "system" : "home"}`;
         if (typeof recorded === "string" && recorded)
             el("diff-context").textContent += ` · Recorded source: ${recorded}`;
     }
@@ -712,16 +785,25 @@ async function openDiff(entry, row, review = null) {
                 renderLineSummary();
             }
         }
-        el("diff-message").textContent = view.message;
+        el("diff-message").textContent = view.outcome === "ready" && view.message === "different" ? "" : view.message;
+        if (review === null && entry.status === "changed-in-repo" && entry.group === "incoming" &&
+            !entry.system && view.outcome === "ready" && !view.file_actions?.includes("take_repo")) {
+            el("diff-message").textContent = [el("diff-message").textContent, "Replacement review is not available for this file."].filter(Boolean).join(" ");
+        }
         if (view.outcome === "ready" && typeof view.text === "string") {
             show(view.text, entry.system ? "System" : "Home");
         }
         else {
             el("diff-text").textContent = view.text ?? "No diff payload.";
         }
+        const source = entry.machine_file ? entry.machine_file.selected : entry.key;
         const actions = review === null && !entry.system && !["held", "unavailable", "other"].includes(entry.group) &&
+            (entry.status !== "changed-in-repo" || (entry.group === "incoming" && view.success === true &&
+                safeDisplayPath(statusLocations?.repo) && safeDisplayPath(statusLocations?.home) &&
+                safeDisplayPath(entry.key) && safeDisplayPath(source))) &&
             view.outcome === "ready" && Array.isArray(view.file_actions)
-            ? view.file_actions.filter((action) => action === "keep_local" || action === "take_repo" || action === "restore") : [];
+            ? view.file_actions.filter((action) => entry.status === "changed-in-repo" ? action === "take_repo" :
+                action === "keep_local" || action === "take_repo" || action === "restore") : [];
         if (review === null) {
             const choice = decisions.get(entry.id);
             if (choice && !actions.includes(choice.action))
@@ -731,17 +813,43 @@ async function openDiff(entry, row, review = null) {
             diffChoiceId = entry.id;
             for (const action of new Set(actions)) {
                 const button = document.createElement("button");
-                button.textContent = actionLabels.get(action) ?? "";
+                const replacement = entry.status === "changed-in-repo" && entry.group === "incoming" &&
+                    !entry.system && view.success === true && action === "take_repo" && statusLocations !== null;
+                button.textContent = replacement ? "Review replacement" : actionLabels.get(action) ?? "";
+                if (replacement) {
+                    button.className = "review-action";
+                    const arrow = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+                    arrow.setAttribute("viewBox", "0 0 24 24");
+                    arrow.setAttribute("aria-hidden", "true");
+                    arrow.setAttribute("focusable", "false");
+                    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                    path.setAttribute("d", "M4 12h15m-6-6 6 6-6 6");
+                    arrow.append(path);
+                    button.append(arrow);
+                }
                 button.addEventListener("click", () => {
                     if (busy || cancelPending || token !== serial || !statusLoaded || !entries.includes(entry))
                         return;
+                    if (replacement) {
+                        if (replacementReview)
+                            return;
+                        if (!statusLocations || !safeDisplayPath(source))
+                            return;
+                        replacementReview = { entry, token, launcher: button };
+                        el("replacement-source").textContent = `${statusLocations.repo.replace(/\/$/, "")}/${source}`;
+                        el("replacement-target").textContent = `${statusLocations.home.replace(/\/$/, "")}/${entry.key}`;
+                        el("replacement-review").hidden = false;
+                        el("replacement-title").focus();
+                        return;
+                    }
                     decisions.set(entry.id, { action, key: entry.key });
                     renderDecisions();
                 });
-                diffChoiceButtons.set(action, button);
+                if (!replacement)
+                    diffChoiceButtons.set(action, button);
                 el("diff-actions").append(button);
             }
-            if (el("diff-actions").children.length) {
+            if (entry.status !== "changed-in-repo") {
                 const skip = document.createElement("button");
                 skip.textContent = "Skip / clear choice";
                 skip.addEventListener("click", () => {
@@ -815,6 +923,7 @@ async function cancel() {
     el("review-items").replaceChildren();
     clearCommitEditor();
     reviewId = null;
+    setPage("files");
     controls();
     selectedRow = null;
     entries = [];
@@ -891,7 +1000,6 @@ async function openReview() {
         diffOrigin = null;
     }
     el("entries").hidden = true;
-    el("context").hidden = true;
     el("review").hidden = false;
     el("review-items").replaceChildren();
     clearCommitEditor();
@@ -1007,6 +1115,7 @@ function showRecovery(message, steps) {
             }
         }
     }
+    el("recovery-details").hidden = root.children.length === 0;
     el("recovery").hidden = false;
 }
 const syncStages = new Map([
@@ -1201,7 +1310,7 @@ async function approvePendingHooks() {
 }
 async function acceptReviewedIdentity() {
     if (busy || cancelPending || !statusLoaded || identityReviewId === null ||
-        el("entries").hidden || el("machine-files").hidden || !el("machine-files").open)
+        page !== "settings" || el("machine-files").hidden || !el("machine-files").open)
         return;
     const id = identityReviewId;
     clearDecisions();
@@ -1380,6 +1489,7 @@ async function closeReview() {
         el("message").focus();
     }
     selectedRow = null;
+    setPage("files");
     if (id !== null) {
         try {
             await invoke("discard_review", { id });
@@ -1390,9 +1500,96 @@ async function closeReview() {
         }
     }
 }
-el("refresh").addEventListener("click", () => refresh());
+function setPage(next) {
+    page = next;
+    document.body.setAttribute("data-page", next);
+    el("settings").hidden = next !== "settings";
+    for (const name of ["files", "review", "settings"]) {
+        if (name === next)
+            el(`nav-${name}`).setAttribute("aria-current", "page");
+        else
+            el(`nav-${name}`).removeAttribute("aria-current");
+    }
+    el("page-heading").textContent = next === "files" ? "Files" : next === "review" ? "Review" : "Settings";
+}
+function navigate(next) {
+    if (busy || cancelPending || next === page)
+        return;
+    if (page === "review") {
+        if (diffOrigin?.review) {
+            clearDiff();
+            diffOrigin = null;
+        }
+        void closeReview();
+    }
+    else if (diffOrigin) {
+        clearDiff();
+        rowNodes.get(diffOrigin.id)?.setAttribute("aria-current", "false");
+        diffOrigin = null;
+    }
+    setPage(next);
+    el("page-heading").focus();
+    if (next === "review") {
+        if (statusLoaded)
+            void openReview();
+        else {
+            el("review").hidden = false;
+            el("review-message").textContent = "Status is unavailable. Refresh status before opening an outgoing preview.";
+            controls();
+        }
+    }
+    else if (next === "files") {
+        el("entries").hidden = !statusLoaded;
+    }
+}
+for (const name of ["files", "review", "settings"]) {
+    el(`nav-${name}`).addEventListener("click", () => navigate(name));
+}
+el("refresh").addEventListener("click", () => {
+    if (page === "review" && !busy && !cancelPending) {
+        void closeReview();
+        el("message").focus();
+    }
+    void refresh();
+});
+for (const id of ["setup-check", "recovery-check"]) {
+    el(id).addEventListener("click", async () => {
+        if (busy || cancelPending)
+            return;
+        const button = el(id);
+        const hadFocus = document.activeElement === button;
+        if (hadFocus)
+            el("message").focus();
+        await refresh();
+        const panel = id === "setup-check" ? el("setup") : el("recovery");
+        if (hadFocus && !panel.hidden && document.activeElement === el("message")) {
+            button.focus();
+        }
+    });
+}
 el("cancel").addEventListener("click", cancel);
 el("close-diff").addEventListener("click", closeDiff);
+el("replacement-batch").addEventListener("click", () => {
+    if (busy || cancelPending || !replacementReview || !statusLoaded ||
+        replacementReview.token !== serial || !entries.includes(replacementReview.entry) ||
+        diffOrigin?.id !== replacementReview.entry.id || diffOrigin.review || el("diff").hidden)
+        return;
+    const entry = replacementReview.entry;
+    replacementReview = null;
+    el("replacement-review").hidden = true;
+    decisions.set(entry.id, { action: "take_repo", key: entry.key });
+    renderDecisions();
+    el("decisions-title").focus({ preventScroll: true });
+    el("decisions").scrollIntoView({ block: "start" });
+});
+el("replacement-back").addEventListener("click", () => {
+    if (busy || cancelPending || !replacementReview)
+        return;
+    const { launcher } = replacementReview;
+    replacementReview = null;
+    el("replacement-review").hidden = true;
+    launcher.focus();
+});
 el("search").addEventListener("input", renderRows);
 for (const [id, folders] of [["group-folders", true], ["group-status", false]]) {
     el(id).addEventListener("click", () => {
@@ -1415,7 +1612,7 @@ el("theme-mode").addEventListener("change", () => {
 el("accent-mode").addEventListener("change", () => {
     document.documentElement.setAttribute("data-accent", el("accent-mode").value);
 });
-el("open-review").addEventListener("click", openReview);
+el("open-review").addEventListener("click", () => navigate("review"));
 el("close-review").addEventListener("click", closeReview);
 el("sync-reviewed").addEventListener("click", () => syncReviewed());
 el("sync-mass-delete").addEventListener("click", () => syncReviewed(false, true));
@@ -1437,7 +1634,7 @@ el("start-clone").addEventListener("click", () => runSetup("clone"));
 policyControls({
     invoke,
     getId: () => policyReviewId,
-    canStart: () => !busy && !cancelPending && statusLoaded && !el("entries").hidden,
+    canStart: () => !busy && !cancelPending && statusLoaded && page === "settings",
     begin: () => {
         policyReviewId = null;
         statusLoaded = false;
