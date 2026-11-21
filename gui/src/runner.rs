@@ -5,9 +5,11 @@ use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const STDOUT_LIMIT: usize = 32 * 1024 * 1024;
 const STDERR_LIMIT: usize = 1024 * 1024;
+const PIPE_CLOSE_GRACE: Duration = Duration::from_millis(100);
 
 /// A bounded commit message suitable for native confirmation and one CLI argument.
 pub struct CommitMessage(String);
@@ -71,6 +73,7 @@ pub struct StatusRun {
     setup_parent: Option<Arc<std::fs::File>>,
     stdout_limit: usize,
     stderr_limit: usize,
+    exit_observed: Option<Instant>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -458,6 +461,7 @@ fn spawn_pinned(
             setup_parent: parent,
             stdout_limit: STDOUT_LIMIT,
             stderr_limit: STDERR_LIMIT,
+            exit_observed: None,
         }),
         Err(error) => {
             reap_later(child, false, parent);
@@ -638,6 +642,14 @@ impl StatusRun {
             }
         }
         let pipes_open = !self.out_eof || !self.err_eof;
+        // An unrelated concurrent spawn can temporarily hold a close-on-exec pipe.
+        // Keep the leader unreaped while waiting for EOF, so group signalling stays safe.
+        if pipes_open && self.failure.is_none() && !self.cancelled {
+            let observed = self.exit_observed.get_or_insert_with(Instant::now);
+            if observed.elapsed() < PIPE_CLOSE_GRACE {
+                return Ok(None);
+            }
+        }
         let signal_result = if pipes_open && !self.cancelled {
             self.cancel()
         } else {
@@ -898,8 +910,35 @@ mod tests {
         assert_eq!(receipt.stderr, b"refused");
         assert!(refused.input_delivery == InputDelivery::Incomplete);
         let mut premature = input_fixture("exec 0<&-; exit 0", vec![b'x'; 1_000_000]);
-        assert!(finish(&mut premature).is_err());
+        assert_eq!(
+            finish(&mut premature)
+                .err()
+                .expect("incomplete input")
+                .to_string(),
+            "child exited before complete input"
+        );
         assert!(premature.input_delivery == InputDelivery::Incomplete);
+    }
+
+    #[test]
+    fn exited_child_waits_for_pipe_closure_and_keeps_late_output() {
+        let mut run = input_fixture(
+            "/bin/sh -c 'IFS= read -r x; printf late' <&0 & exit 7",
+            Vec::new(),
+        );
+        let mut control = run.input.take().expect("control pipe").pipe;
+        let start = Instant::now();
+        while !crate::sys::exited(run.child.as_ref().expect("child")).expect("exit observation") {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::yield_now();
+        }
+        assert!(run.poll().expect("poll").is_none());
+        assert!(!run.is_reaped());
+        control.write_all(b"go\n").expect("release writer");
+        drop(control);
+        let receipt = finish(&mut run).expect("complete receipt");
+        assert_eq!(receipt.status.code(), Some(7));
+        assert_eq!(receipt.stdout, b"late");
     }
 
     #[test]
@@ -946,7 +985,10 @@ mod tests {
         let mut run = fixture(
             "trap 'exit 0' USR1; /bin/sh -c 'trap \"printf child-term; exit 0\" TERM; printf ready; kill -USR1 \"$1\"; for x in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do /bin/sleep 0.1; done' sh \"$$\" & wait",
         );
-        assert!(finish(&mut run).is_err());
+        assert_eq!(
+            finish(&mut run).err().expect("inherited pipe").to_string(),
+            "child output pipes remain open; descendants may ignore SIGTERM"
+        );
         assert!(run.is_reaped());
         let start = Instant::now();
         while !run.out_eof {
