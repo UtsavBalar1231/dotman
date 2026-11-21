@@ -11,3 +11,16 @@ target/
 # demo video renderer (video/README.md)
 /video/node_modules/
 /video/__pycache__/
+
+# Local agent configuration, installed skills, and run artifacts
+/.agents/
+/.claude/
+/.codex/
+/.omo/
+/.github/agents/
+/.github/hooks/
+/.github/skills/
+/skills-lock.json
+
+# Local design reports and screenshots
+/reports/
