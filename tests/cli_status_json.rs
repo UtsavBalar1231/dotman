@@ -341,24 +341,33 @@ fn status_json_retains_ignore_patterns_and_affected_entries() -> R {
 fn status_json_escapes_hostile_names_and_keeps_case_unicode_collisions() -> R {
     let env = TestEnv::new();
     env.ok(&["init"]);
-    for key in [
-        ".<img src=x onerror=canary>",
-        ".bidi\u{202e}",
-        ".case",
-        ".CASE",
-        ".café",
-        ".cafe\u{301}",
-    ] {
+    for key in [".<img src=x onerror=canary>", ".bidi\u{202e}"] {
         env.write_repo(key, b"hostile name fixture");
     }
     env.write_repo("refused\n\u{1b}", b"refused fixture");
     env.git(&["-C", &env.repo().to_string_lossy(), "add", "-A"]);
+    let twins = [".case", ".CASE", ".café", ".cafe\u{301}"];
+    let entries: Vec<_> = twins
+        .iter()
+        .map(|key| (*key, &b"hostile name fixture"[..]))
+        .collect();
+    env.stage_index_entries(&entries);
+    let index = env.git_raw(&["-C", &env.repo().to_string_lossy(), "ls-files", "-z"]);
+    assert!(index.status.success());
+    let paths: Vec<_> = index.stdout.split(|byte| *byte == 0).collect();
+    for key in twins {
+        assert_eq!(
+            paths.iter().filter(|path| **path == key.as_bytes()).count(),
+            1,
+            "{paths:?}"
+        );
+    }
     let records = records(&env, &[])?;
     parity(&env, &records, &[]);
     for value in &records {
         escaped(value);
     }
-    for key in [".case", ".CASE", ".café", ".cafe\u{301}"] {
+    for key in twins {
         assert_eq!(at(entry(&records, key, "collision")?, "/scope"), "home");
     }
     let review = record(&records, "review_context")?;

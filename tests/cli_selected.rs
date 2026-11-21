@@ -1,3 +1,4 @@
+mod bounded_process;
 mod common;
 #[path = "cli_selected/edges.rs"]
 mod edges;
@@ -159,9 +160,7 @@ fn selected_unsupported_transaction_leaves_interrupted_pull_untouched() -> R {
 
 #[test]
 fn selected_preflight_refuses_before_any_capture_or_backup() -> R {
-    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::process::Stdio;
 
     for (error, expected) in [
         ("fatal: unknown command: start", 3),
@@ -205,28 +204,12 @@ fn selected_preflight_refuses_before_any_capture_or_backup() -> R {
             ),
         )?;
         env.prepend_path(wrapper);
-        let mut command = env.process_for(std::path::Path::new("timeout"));
-        command
-            .args([
-                "--kill-after=2s",
-                "8s",
-                env!("CARGO_BIN_EXE_dotman"),
-                "sync",
-                "--decide-from",
-                "-",
-                "--no-hooks",
-                "--json",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or("stdin")?
-            .write_all(decision.to_string().as_bytes())?;
-        let out = child.wait_with_output()?;
+        let out = bounded_process::decision(
+            &env,
+            decision.to_string().as_bytes(),
+            false,
+            &["sync", "--decide-from", "-", "--no-hooks", "--json"],
+        )?;
         assert_eq!(
             out.status.code(),
             Some(expected),

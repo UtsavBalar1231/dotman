@@ -1,3 +1,4 @@
+mod bounded_process;
 mod common;
 
 use common::{TestEnv, expect_prepared_publication, prepared_transactions_supported};
@@ -1977,9 +1978,6 @@ fn identity_approval_and_selected_source_must_match_the_review() -> R {
 
 #[test]
 fn reviewed_stdin_on_a_terminal_is_not_prompt_input_or_hook_stdin() -> R {
-    use std::io::Write as _;
-    use std::path::Path;
-    use std::process::Stdio;
     let env = TestEnv::new();
     env.ok(&["init"]);
     env.write_repo(".a", b"base");
@@ -1999,26 +1997,18 @@ fn reviewed_stdin_on_a_terminal_is_not_prompt_input_or_hook_stdin() -> R {
         json!([file(&env, ".a", "take_repo")?]),
     )?;
     put(&mut reviewed, "/approvals/hooks", hook_approval(&env)?)?;
-    let executable = env.dot_process();
-    let executable = executable.get_program().to_str().ok_or("binary path")?;
-    let line = format!(
-        "{} apply --json --decide-from -",
-        shell_words::quote(executable)
+    let input = serde_json::to_vec_pretty(&reviewed)?;
+    assert!(
+        input
+            .split(|byte| *byte == b'\n')
+            .all(|line| line.len() < 1024)
     );
-    let mut child = env
-        .process_for(Path::new("timeout"))
-        .env("DOTMAN_NON_INTERACTIVE", "")
-        .args(["-k", "2s", "10s", "script", "-qec", &line, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("terminal stdin")?
-        .write_all(format!("{reviewed}\n\u{4}").as_bytes())?;
-    let out = child.wait_with_output()?;
+    let out = bounded_process::decision(
+        &env,
+        &input,
+        true,
+        &["apply", "--decide-from", "-", "--json"],
+    )?;
     assert!(
         out.status.success(),
         "{}\n{}",
@@ -3245,9 +3235,6 @@ fn symbolic_branch_refs_cannot_redirect_reviewed_commit_or_replay() -> R {
 
 #[test]
 fn eof_buffering_git_refuses_publication_without_hanging() -> R {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
     let mut env = TestEnv::new();
     env.ok(&["init", "--remote", &env.remote_url()]);
     env.ok(&["sync"]);
@@ -3272,27 +3259,12 @@ fn eof_buffering_git_refuses_publication_without_hanging() -> R {
         ),
     )?;
     env.prepend_path(wrapper);
-    let mut command = env.process_for(std::path::Path::new("timeout"));
-    command
-        .args([
-            "--kill-after=2s",
-            "8s",
-            env!("CARGO_BIN_EXE_dotman"),
-            "sync",
-            "--decide-from",
-            "-",
-            "--json",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("stdin")?
-        .write_all(reviewed.to_string().as_bytes())?;
-    let out = child.wait_with_output()?;
+    let out = bounded_process::decision(
+        &env,
+        reviewed.to_string().as_bytes(),
+        false,
+        &["sync", "--decide-from", "-", "--json"],
+    )?;
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -3370,8 +3342,6 @@ fn unavailable_prepared_transactions_refuse_reviewed_publication() -> R {
 
 #[test]
 fn oversized_transaction_errors_are_drained_and_reaped() -> R {
-    use std::io::Write as _;
-    use std::process::Stdio;
     let mut env = TestEnv::new();
     env.ok(&["init", "--remote", &env.remote_url()]);
     env.ok(&["sync"]);
@@ -3404,28 +3374,12 @@ fn oversized_transaction_errors_are_drained_and_reaped() -> R {
         ),
     )?;
     env.prepend_path(wrapper);
-    let mut command = env.process_for(std::path::Path::new("timeout"));
-    command
-        .args([
-            "--signal=TERM",
-            "--kill-after=2s",
-            "8s",
-            env!("CARGO_BIN_EXE_dotman"),
-            "sync",
-            "--decide-from",
-            "-",
-            "--json",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("stdin")?
-        .write_all(reviewed.to_string().as_bytes())?;
-    let out = child.wait_with_output()?;
+    let out = bounded_process::decision(
+        &env,
+        reviewed.to_string().as_bytes(),
+        false,
+        &["sync", "--decide-from", "-", "--json"],
+    )?;
     assert_eq!(
         out.status.code(),
         Some(3),

@@ -13,11 +13,11 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::ops::Deref;
 use std::os::unix::fs::{PermissionsExt, symlink as unix_symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Output};
+use std::process::{Command as StdCommand, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 use xxhash_rust::xxh3::xxh3_128;
@@ -285,6 +285,44 @@ impl TestEnv {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    pub fn stage_index_entries(&self, entries: &[(&str, &[u8])]) {
+        let run = |args: &[&str], input: &[u8]| {
+            let mut child = self
+                .git_command()
+                .arg("-C")
+                .arg(self.repo())
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn git");
+            child
+                .stdin
+                .take()
+                .expect("git stdin")
+                .write_all(input)
+                .expect("write git stdin");
+            let out = child.wait_with_output().expect("wait for git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out.stdout
+        };
+        let mut index = Vec::new();
+        for (key, content) in entries {
+            let blob = run(&["hash-object", "-w", "--stdin"], content);
+            index.extend_from_slice(b"100644 ");
+            index.extend_from_slice(blob.trim_ascii_end());
+            index.push(b'\t');
+            index.extend_from_slice(key.as_bytes());
+            index.push(0);
+        }
+        run(&["update-index", "-z", "--index-info"], &index);
     }
 
     /// Write `bytes` to `path` (relative to HOME, or absolute) with `mode`, creating parents.
