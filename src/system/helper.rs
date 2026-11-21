@@ -8,7 +8,7 @@
 //! A plan is not transactional across files. Entries are written in order, each one atomically,
 //! and the first failure stops the rest, which are reported as not written.
 
-use super::{Scope, Standing, canonical_form, rel};
+use super::{Scope, Standing, rel};
 use crate::config::Config;
 use crate::context::TEMP_PREFIX;
 use crate::engine::{hash_hex, parse_mode};
@@ -104,7 +104,7 @@ pub(crate) fn reported<'a>(stdout: &'a str, target: &str) -> Option<(Reported, &
     })
 }
 
-/// The roots that count, in canonical form.
+/// The roots that count, resolved for the scope.
 pub(crate) fn usable_roots(scope: &Scope) -> Vec<String> {
     scope
         .roots()
@@ -489,14 +489,13 @@ fn check(
         expected == target,
         "{target} is not in canonical form, which is {expected}"
     );
-    let canonical = canonical_form(target, scope.macos());
     match scope.standing(target) {
         Standing::Active => {}
         Standing::Off => bail!("{target} is outside [system] roots"),
         Standing::Refused(why) => bail!("{why}"),
     }
     ensure!(
-        !usable_roots(scope).contains(&canonical),
+        !usable_roots(scope).iter().any(|root| root == target),
         "{target} is a root, not a file inside one"
     );
     ensure!(seen.insert(target.to_owned()), "{target} is listed twice");

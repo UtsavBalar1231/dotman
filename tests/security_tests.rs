@@ -10,12 +10,11 @@
 //!   prefix (`system::helper::tests::a_prefix_never_reaches_root`).
 
 mod common;
-
 use common::{
     LEGACY_REPO, R, Setup, TestEnv, age_installed, archive_name, curl_available, files_containing,
-    git_in, have_chezmoi, legacy_fixture, mode_of, overlay_source, plan_entry, plan_json, release,
-    source_tree, stow, stub_chezmoi, system_setup, system_setup_none, system_write, text,
-    tree_checksum, write_plan, yadm_fixture,
+    git_in, have_chezmoi, legacy_fixture, mode_of, overlay_source, path_capability, plan_entry,
+    plan_json, release, source_tree, stow, stub_chezmoi, system_setup, system_setup_none,
+    system_write, text, tree_checksum, write_plan, yadm_fixture,
 };
 use dotman::paths::{Env, Paths, ensure_not_root};
 use std::ffi::{OsStr, OsString};
@@ -1950,8 +1949,22 @@ fn the_staging_guard_keeps_a_credential_out_of_the_commit() {
 /// file the user added that the `.gitignore` matches is committed all the same.
 #[test]
 fn a_tracked_gitignore_never_lets_a_repo_file_skip_the_checks() {
+    tracked_gitignore_checks(false);
+}
+
+#[test]
+fn a_tracked_gitignore_does_not_hide_a_non_utf8_name() {
+    tracked_gitignore_checks(true);
+}
+
+// reason: shared test fixture; failures must abort the test.
+#[allow(clippy::expect_used)]
+fn tracked_gitignore_checks(raw: bool) {
     let env = TestEnv::new();
     env.ok(&["init", "--remote", &env.remote_url()]);
+    if raw && !path_capability::supports_non_utf8(&env.repo()).expect("probe byte names") {
+        return;
+    }
     env.write(".config/app/a.conf", b"a\n", 0o644);
     env.write(".config/app/.gitignore", b"*.log\ndata\n", 0o644);
     env.ok(&["add", ".config/app"]);
@@ -1973,7 +1986,9 @@ fn a_tracked_gitignore_never_lets_a_repo_file_skip_the_checks() {
         env.write_repo(key, format!("token: {token}\n").as_bytes());
     }
     env.write_repo(".config/app/debug.log", b"junk\n");
-    fs::write(&unnamed, b"junk\n").expect("write the unnamed file");
+    if raw {
+        fs::write(&unnamed, b"junk\n").expect("write the unnamed file");
+    }
     fs::write(&temp, b"junk\n").expect("write the temp file");
 
     let listed: Vec<String> = env
@@ -1984,10 +1999,12 @@ fn a_tracked_gitignore_never_lets_a_repo_file_skip_the_checks() {
         .collect();
     assert_eq!(listed, held, "{listed:?}");
     let err = exits(&env.run(&["status"]), 0);
-    assert!(
-        err.contains("z\u{fffd}.log: in the repo, never committed"),
-        "{err}"
-    );
+    if raw {
+        assert!(
+            err.contains("z\u{fffd}.log: in the repo, never committed"),
+            "{err}"
+        );
+    }
     let err = exits(&env.run(&["sync"]), 3);
     for key in held {
         assert!(
@@ -2013,7 +2030,10 @@ fn a_tracked_gitignore_never_lets_a_repo_file_skip_the_checks() {
         ]
     );
     assert!(!remote_history(&env).contains(&token));
-    assert!(unnamed.exists() && temp.exists());
+    assert!(temp.exists());
+    if raw {
+        assert!(unnamed.exists());
+    }
 }
 
 /// Every importer leaves out a file that holds a credential, reports it as needing action and
@@ -2459,6 +2479,11 @@ fn an_import_commits_no_entry_whose_name_holds_a_credential() {
         for keep in [false, true] {
             let env = TestEnv::new();
             let source = source_tree(&env, "dots", &[(".bashrc", "# rc\n")]);
+            if label == "not UTF-8"
+                && !path_capability::supports_non_utf8(&source).expect("probe byte names")
+            {
+                continue;
+            }
             common::git_in(&env, &source, &["init", "-q"]);
             commit_all(&env, &source, "base");
             tip(&env, &source, &token);
@@ -5142,7 +5167,7 @@ fn a_merged_copy_holding_a_credential_is_refused_and_the_way_out_works() {
     let editor = b.root().join("editor");
     fs::write(
         &editor,
-        "#!/bin/sh\nsed -i 's/^Proc-Type: x$/Proc Type x/' \"$1\"\n",
+        "#!/bin/sh\ntrap 'rm -f \"$1.tmp\"' EXIT\nsed 's/^Proc-Type: x$/Proc Type x/' \"$1\" > \"$1.tmp\" && cat \"$1.tmp\" > \"$1\"\n",
     )
     .unwrap();
     fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();

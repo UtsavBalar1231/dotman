@@ -1,6 +1,5 @@
 mod common;
-
-use common::{TestEnv, write_exe};
+use common::{TestEnv, path_capability, write_exe};
 use serde_json::Value;
 use std::error::Error;
 use std::fs;
@@ -670,16 +669,33 @@ fn deleted_tracked_system_source_without_state_is_selected() -> R {
 }
 
 #[test]
-fn option_keys_and_non_utf8_paths_and_payload_are_preserved() -> R {
+fn option_keys_and_non_utf8_payload_are_preserved() -> R {
+    option_keys_and_payload(false)
+}
+
+#[test]
+fn non_utf8_paths_are_preserved() -> R {
+    option_keys_and_payload(true)
+}
+
+fn option_keys_and_payload(raw: bool) -> R {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     let env = TestEnv::new();
     env.ok(&["init"]);
+    if raw && !path_capability::supports_non_utf8(env.root())? {
+        return Ok(());
+    }
     env.write("--item", b"old \xff\n", 0o644);
     env.ok(&["add", "--", "--item"]);
     env.write("--item", b"new \xfe\n", 0o644);
-    let home = env.root().join(OsString::from_vec(b"home-\xff".to_vec()));
-    fs::rename(env.home(), &home)?;
+    let home = if raw {
+        let home = env.root().join(OsString::from_vec(b"home-\xff".to_vec()));
+        fs::rename(env.home(), &home)?;
+        home
+    } else {
+        env.home()
+    };
     let out = env
         .dot_process()
         .env("HOME", &home)
@@ -696,10 +712,17 @@ fn option_keys_and_non_utf8_paths_and_payload_are_preserved() -> R {
         .map(serde_json::from_str)
         .collect::<Result<_, _>>()?;
     let item = entry(&values, "--item")?;
-    assert_eq!(
-        at(item, "/path/bytes"),
-        &serde_json::json!(home.join("--item").as_os_str().as_bytes())
-    );
+    if raw {
+        assert_eq!(
+            at(item, "/path/bytes"),
+            &serde_json::json!(home.join("--item").as_os_str().as_bytes())
+        );
+    } else {
+        assert_eq!(
+            at(item, "/path/raw"),
+            home.join("--item").to_str().ok_or("home path")?
+        );
+    }
     let payload: Vec<u8> = serde_json::from_value(at(item, "/payload/bytes").clone())?;
     assert!(
         payload
@@ -760,5 +783,20 @@ fn interrupted_git_diff_removes_private_snapshots() -> R {
         Some(&Value::from("result"))
     );
     assert_eq!(fs::read_dir(runtime)?.count(), 0);
+    Ok(())
+}
+
+#[test]
+fn json_diff_drains_large_git_output() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write_repo(".large", b"old\n");
+    let content = "new content\n".repeat(20_000);
+    env.write(".large", content.as_bytes(), 0o600);
+    let values = records(&env, &[], &["diff", "--json", ".large"])?;
+    let payload = at(entry(&values, ".large")?, "/payload/raw")
+        .as_str()
+        .ok_or("missing payload")?;
+    assert_eq!(payload.matches("+new content\n").count(), 20_000);
     Ok(())
 }

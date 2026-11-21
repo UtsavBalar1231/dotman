@@ -1,6 +1,5 @@
 mod common;
-
-use common::TestEnv;
+use common::{TestEnv, path_capability};
 use dotman::output::escape_line;
 use dotman::state::State;
 use serde_json::{Value, json};
@@ -384,6 +383,9 @@ fn status_json_escapes_hostile_names_and_keeps_case_unicode_collisions() -> R {
 fn status_json_paths_keep_non_utf8_bytes() -> R {
     let env = TestEnv::new();
     env.ok(&["init"]);
+    if !path_capability::supports_non_utf8(env.root())? {
+        return Ok(());
+    }
     let repo = env.root().join(std::ffi::OsStr::from_bytes(b"repo-\xff"));
     fs::rename(env.repo(), &repo)?;
     let out = env

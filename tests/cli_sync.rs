@@ -1,6 +1,5 @@
 mod common;
-
-use common::{TestEnv, assert_converged, mode_of, tree_checksum};
+use common::{TestEnv, assert_converged, mode_of, path_capability, tree_checksum};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -2282,6 +2281,9 @@ fn ignored_junk_in_the_repo_worktree_never_reaches_a_commit() {
 fn a_repo_name_that_is_not_utf8_is_never_committed_and_status_names_it() {
     let env = first_device(&[(".a", b"a\n", 0o644)]);
     let repo = env.repo();
+    if !path_capability::supports_non_utf8(&repo).expect("probe byte names") {
+        return;
+    }
     let ignored = repo.join(OsStr::from_bytes(b"\xff\xfe.log"));
     let in_ignored_dir = repo.join(OsStr::from_bytes(b"\xffcache/blob"));
     let loose = repo.join(OsStr::from_bytes(b"notes\xff.txt"));
@@ -2339,6 +2341,9 @@ fn a_repo_name_that_is_not_utf8_is_never_committed_and_status_names_it() {
 #[test]
 fn many_repo_names_that_are_not_utf8_are_counted_in_one_warning() {
     let env = first_device(&[(".a", b"a\n", 0o644)]);
+    if !path_capability::supports_non_utf8(&env.repo()).expect("probe byte names") {
+        return;
+    }
     for n in 0..7_u8 {
         let name = [b'n', b'0'.saturating_add(n), 0xff];
         fs::write(env.repo().join(OsStr::from_bytes(&name)), b"junk\n").expect("write the file");

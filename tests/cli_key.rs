@@ -28,7 +28,12 @@ case "$1" in
     printf '# created: 2026-01-01T00:00:00Z\n# public key: age1stub\nAGE-SECRET-KEY-1STUB\n' > "$2" || exit 1
     dir=$(dirname "$2")
     if [ -e '{identity}' ]; then there=present; else there=absent; fi
-    printf '%s %s %s %s\n' "$(stat -c %a "$2")" "$(stat -c %a "$dir")" "$(basename "$dir")" "$there" >> '{log}'
+    if [ "$(uname -s)" = Darwin ]; then
+      file_mode=$(stat -f %Lp "$2"); dir_mode=$(stat -f %Lp "$dir")
+    else
+      file_mode=$(stat -c %a "$2"); dir_mode=$(stat -c %a "$dir")
+    fi
+    printf '%s %s %s %s\n' "$file_mode" "$dir_mode" "$(basename "$dir")" "$there" >> '{log}'
     ;;
   -y)
     if grep -q '^AGE-SECRET-KEY-1' ; then echo age1stubrecipient; else echo 'bad identity' >&2; exit 1; fi

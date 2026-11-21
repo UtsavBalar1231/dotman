@@ -1097,35 +1097,128 @@ fn interrupted_json_encrypted_diff_removes_plaintext_snapshots() {
     let bin = env.root().join("interrupt-bin");
     fs::create_dir(&bin).unwrap();
     let marker = env.root().join("json-interrupted");
-    common::write_exe(&bin.join("git"), &format!(
-        "#!/bin/sh\nfor arg do\n if [ \"$arg\" = --no-index ]; then\n  trap '' TERM\n  : > '{}'\n  kill -TERM 0\n  exit 42\n fi\ndone\nexec '{}' \"$@\"\n",
-        marker.display(), real_git.display()
-    )).unwrap();
+    let survived = env.root().join("git-survived");
     env.prepend_path(&bin);
     let runtime = env.root().join("json-interrupt-runtime");
     fs::create_dir(&runtime).unwrap();
-    let out = env
+    for target in ["0", "\"$PPID\""] {
+        common::write_exe(&bin.join("git"), &format!(
+            "#!/bin/sh\nfor arg do\n if [ \"$arg\" = --no-index ]; then\n  : > '{}'\n  kill -TERM {target}\n  : > '{}'\n  exit 0\n fi\ndone\nexec '{}' \"$@\"\n",
+            marker.display(), survived.display(), real_git.display()
+        )).unwrap();
+        let out = env
+            .dot_process()
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .args(["diff", "--json", HOSTS])
+            .process_group(0)
+            .output()
+            .unwrap();
+        assert!(marker.exists());
+        fs::remove_file(&marker).unwrap();
+        if target == "0" {
+            assert!(!survived.exists());
+        }
+        if survived.exists() {
+            fs::remove_file(&survived).unwrap();
+        }
+        assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+        assert_eq!(out.status.code(), Some(1), "target {target}: {out:?}");
+        let values: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            values
+                .last()
+                .and_then(|v| v.get("record"))
+                .and_then(|v| v.as_str()),
+            Some("result")
+        );
+    }
+}
+
+#[test]
+fn parent_only_interrupt_stops_stalled_json_diff_and_cleans_plaintext() {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    if !age_installed() {
+        return;
+    }
+    let mut env = keyed_device();
+    env.write(HOSTS, b"local change\n", 0o600);
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let bin = env.root().join("stall-bin");
+    fs::create_dir(&bin).unwrap();
+    let pid = env.root().join("git-pid");
+    let holder = env.root().join("holder-pid");
+    common::write_exe(&bin.join("git"), &format!(
+        "#!/bin/sh\nfor arg do\n if [ \"$arg\" = --no-index ]; then\n  trap '' TERM\n  sleep 30 2>/dev/null &\n  echo $! > '{}'\n  echo $$ > '{}'\n  kill -TERM \"$PPID\"\n  wait\n  exit 0\n fi\ndone\nexec '{}' \"$@\"\n",
+        holder.display(), pid.display(), real_git.display()
+    )).unwrap();
+    env.prepend_path(&bin);
+    let runtime = env.root().join("stall-runtime");
+    fs::create_dir(&runtime).unwrap();
+    let mut child = env
         .dot_process()
         .env("XDG_RUNTIME_DIR", &runtime)
         .args(["diff", "--json", HOSTS])
         .process_group(0)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-    assert!(marker.exists());
-    assert_eq!(out.status.code(), Some(1));
-    let values: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let finished = child.try_wait().unwrap().is_some();
+    let git_reaped = fs::read_to_string(&pid).is_ok_and(|pid| {
+        !Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    });
+    let cleanup = fs::read_to_string(&holder).is_ok_and(|pid| {
+        let pid = pid.trim();
+        let alive = Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        !alive
+            || Command::new("kill")
+                .args(["-KILL", pid])
+                .status()
+                .unwrap()
+                .success()
+    });
+    if !finished {
+        let _ = child.kill();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(cleanup, "failed to stop inherited-output holder");
+    assert!(finished, "interrupted diff did not finish within watchdog");
+    assert!(git_reaped, "direct git child was not reaped");
+    assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let records: Vec<serde_json::Value> = String::from_utf8(out.stdout)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(
-        values
-            .last()
-            .and_then(|v| v.get("record"))
-            .and_then(|v| v.as_str()),
-        Some("result")
-    );
-    assert_eq!(fs::read_dir(runtime).unwrap().count(), 0);
+    let result = records.last().unwrap();
+    assert_eq!(result["record"], "result");
+    assert_eq!(result["outcome"], "error");
+    assert_eq!(result["exit_code"], 1);
 }
 
 // Without a TTY git starts no pager, even with `-p`, so an external diff stands in for it: a child

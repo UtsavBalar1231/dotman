@@ -21,10 +21,11 @@ use libc::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs::{self, Permissions};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 
 /// How long `git config` or `git var` may take to name the pager.
@@ -580,6 +581,8 @@ fn compare_json(
         record.status = "equal";
         return Ok(());
     }
+    let _signals = sys::catch_signals(&[SIGINT, SIGQUIT, SIGHUP, SIGTERM])
+        .context("cannot protect temporary diff from interruption")?;
     let tree = private_temp_dir(&temp_prefix(), tmp)?;
     let home = tree.path().join("home");
     let repo = tree.path().join("repo");
@@ -593,7 +596,16 @@ fn compare_json(
         Node::Missing => {}
         Node::BadParent(_) | Node::Dir | Node::Special => bail!("blocked comparison"),
     }
-    let bytes = capture_diff(tree.path())?;
+    let result = if sys::diff_interrupted() {
+        None
+    } else {
+        Some(capture_diff(tree.path()))
+    };
+    drop(tree);
+    if sys::diff_interrupted() {
+        bail!("diff interrupted");
+    }
+    let bytes = result.context("diff interrupted")??;
     record.payload = Some(crate::output::json::PathValue::new(Path::new(
         std::ffi::OsStr::from_bytes(&bytes),
     )));
@@ -620,15 +632,53 @@ fn capture_diff(tmp: &Path) -> Result<Vec<u8>> {
         "home",
     ]);
     cmd.stdout(std::process::Stdio::piped());
-    let child = cmd.spawn().context("failed to run git diff")?;
-    let result = {
-        let _ignored = sys::ignore_signals(&[SIGINT, SIGQUIT, SIGHUP, SIGTERM]);
-        child.wait_with_output()
-    }
-    .context("failed to run git diff")?;
-    match result.status.code() {
-        Some(0 | 1) => Ok(result.stdout),
-        _ => bail!("git diff --no-index failed ({})", result.status),
+    let mut child = cmd.spawn().context("failed to run git diff")?;
+    let mut stdout = child.stdout.take().context("missing git diff stdout")?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    let mut status = None;
+    let mut output = None;
+    loop {
+        if sys::diff_interrupted() {
+            if status.is_none() {
+                if let Err(error) = child.kill()
+                    && child.try_wait()?.is_none()
+                {
+                    return Err(error).context("failed to stop interrupted git diff");
+                }
+                child
+                    .wait()
+                    .context("failed to reap interrupted git diff")?;
+            }
+            bail!("diff interrupted");
+        }
+        if status.is_none() {
+            status = child.try_wait().context("failed to wait for git diff")?;
+        }
+        if output.is_none() {
+            match receiver.recv_timeout(Duration::from_millis(10)) {
+                Ok(result) => output = Some(result),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    output = Some(Err(std::io::Error::other("reading git diff output failed")));
+                }
+            }
+        } else if status.is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if status.is_some() && output.is_some() {
+            let status = status.context("missing git diff status")?;
+            let output = output.take().context("missing git diff output")?;
+            let bytes = output.context("failed to read git diff output")?;
+            return match status.code() {
+                Some(0 | 1) => Ok(bytes),
+                _ => bail!("git diff --no-index failed ({status})"),
+            };
+        }
     }
 }
 

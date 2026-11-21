@@ -1,6 +1,5 @@
 mod common;
-
-use common::{TestEnv, xxh3 as hash_hex};
+use common::{TestEnv, path_capability, xxh3 as hash_hex};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -1096,6 +1095,9 @@ fn unmodelled_recovery_runs_the_complete_decoded_recipe_after_manual_resolution(
 fn recovery_preserves_non_utf8_path_bytes_in_argv_and_printed_shell_commands() -> R {
     let env = TestEnv::new();
     env.ok(&["init"]);
+    if !path_capability::supports_non_utf8(&env.repo())? {
+        return Ok(());
+    }
     let name = OsString::from_vec(b"raw-\xff[1]*".to_vec());
     let neighbour = "raw-neighbour";
     let path = env.repo().join(&name);
@@ -1206,9 +1208,23 @@ fn outgoing_review_distinguishes_observed_modes_and_fails_closed_on_gitlinks() -
 }
 
 #[test]
-fn outgoing_review_handles_unborn_tracking_templates_links_and_raw_paths() -> R {
+fn outgoing_review_handles_unborn_tracking_templates_and_links() -> R {
+    outgoing_review(false)
+}
+
+#[test]
+fn outgoing_review_handles_raw_paths() -> R {
+    outgoing_review(true)
+}
+
+// reason: the shared fixture keeps the raw-name and ordinary-name assertions identical.
+#[allow(clippy::too_many_lines)]
+fn outgoing_review(raw_path: bool) -> R {
     let env = TestEnv::new();
     env.ok(&["init", "--host", "fixture", "--remote", &env.remote_url()]);
+    if raw_path && !path_capability::supports_non_utf8(&env.repo())? {
+        return Ok(());
+    }
     let before = env.four_trees();
     let unborn = records(&env.run(&["sync", "--json", "--dry-run"]), 0)?;
     assert!(find(&unborn, "outgoing")?["head"].is_null());
@@ -1220,12 +1236,16 @@ fn outgoing_review_handles_unborn_tracking_templates_links_and_raw_paths() -> R 
     env.symlink(".link", "base");
     env.ok(&["add", ".link"]);
     let raw = OsString::from_vec(b"source-\xff".to_vec());
-    fs::write(env.repo().join(&raw), b"raw-base")?;
+    if raw_path {
+        fs::write(env.repo().join(&raw), b"raw-base")?;
+    }
     env.ok(&["git", "add", "-A"]);
     env.ok(&["sync"]);
     env.write_repo(".tpl{tmpl}", b"template-source-edit");
     env.write_repo("install.sh", b"bootstrap-edit");
-    fs::write(env.repo().join(&raw), b"raw-edit")?;
+    if raw_path {
+        fs::write(env.repo().join(&raw), b"raw-edit")?;
+    }
     fs::remove_file(env.home().join(".link"))?;
     std::os::unix::fs::symlink(env.home().join("next"), env.home().join(".link"))?;
     let before = env.four_trees();
@@ -1240,14 +1260,16 @@ fn outgoing_review_handles_unborn_tracking_templates_links_and_raw_paths() -> R 
             .iter()
             .any(|record| record["record"] == "ahead_commit")
     );
-    let raw_record = report
-        .iter()
-        .find(|record| at(record, "/path/bytes") == &json!(b"source-\xff"))
-        .ok_or("raw outgoing path")?;
-    assert_eq!(
-        at(raw_record, "/stored/tuple/hash"),
-        &json!(hash_hex(b"raw-edit"))
-    );
+    if raw_path {
+        let raw_record = report
+            .iter()
+            .find(|record| at(record, "/path/bytes") == &json!(b"source-\xff"))
+            .ok_or("raw outgoing path")?;
+        assert_eq!(
+            at(raw_record, "/stored/tuple/hash"),
+            &json!(hash_hex(b"raw-edit"))
+        );
+    }
     let template = report
         .iter()
         .find(|record| at(record, "/path/raw") == ".tpl{tmpl}")

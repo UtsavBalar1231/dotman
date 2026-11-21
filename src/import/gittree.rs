@@ -2095,12 +2095,18 @@ fn commit_count(git: &Git) -> Result<usize> {
 
 /// Removes `origin` and the refs it leaves. After a `--single-branch` clone, `git remote remove`
 /// deletes only the branch the narrowed refspec names, which leaves `origin/HEAD` pointing at a
-/// deleted ref, and `git fsck` fails on it. `for-each-ref` skips such a ref, so it is named here.
+/// deleted ref, and `git fsck` fails on it. Remove it first too: it can block removal of a
+/// remote branch under `HEAD/`. `for-each-ref` skips a dangling ref, so it is named here.
 fn drop_origin(git: &Git) -> Result<()> {
     // A commit fetched in place of a clone leaves no origin.
     if git.remote_url("origin")?.is_none() {
         return Ok(());
     }
+    git_stdout(
+        git,
+        &["update-ref", "--no-deref", "-d", "refs/remotes/origin/HEAD"],
+        None,
+    )?;
     git.remove_remote("origin")?;
     let listed = git_stdout(
         git,

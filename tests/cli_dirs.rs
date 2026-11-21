@@ -1,6 +1,5 @@
 mod common;
-
-use common::{TestEnv, assert_converged, mode_of};
+use common::{TestEnv, assert_converged, mode_of, path_capability};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -291,17 +290,12 @@ fn an_ignored_directory_that_holds_a_tracked_file_still_drops_new_files() {
 }
 
 /// Ignored junk beside a managed file in the repo copy is left out of the commit path by path.
-/// Those paths reach git on stdin: as arguments, 6500 of these 1 KiB ones come to over 6 MiB,
+/// Those paths reach git on stdin: as arguments, 12000 of these paths come to over 6 MiB,
 /// the kernel's ceiling whatever the stack limit, and staging failed with E2BIG.
 #[test]
 fn thousands_of_left_out_paths_reach_git_without_overflowing_its_arguments() {
     let a = device();
-    let dir = format!(
-        ".config/nvim/{}/{}/{}",
-        "d".repeat(250),
-        "e".repeat(250),
-        "f".repeat(250)
-    );
+    let dir = format!(".config/nvim/{}/{}", "d".repeat(180), "e".repeat(180));
     a.write(format!("{dir}/keep.lua"), b"-- keep\n", 0o644);
     let mut config = a.repo_config();
     config.ignore.patterns.push("**/*.bak".to_owned());
@@ -310,8 +304,8 @@ fn thousands_of_left_out_paths_reach_git_without_overflowing_its_arguments() {
         .expect("save .dotman.toml");
     exits(&a, 0, &["sync"]);
     let junk = a.repo().join(&dir);
-    let tail = "x".repeat(240);
-    for i in 0..6500 {
+    let tail = "x".repeat(180);
+    for i in 0..12000 {
         fs::write(junk.join(format!("{i:05}-{tail}.bak")), b"").expect("write junk");
     }
     a.write(".config/nvim/init.lua", b"-- edited\n", 0o644);
@@ -451,6 +445,11 @@ impl Drop for Readable {
 #[test]
 fn a_name_that_is_not_utf8_is_noted_until_an_ignore_pattern_matches_its_lossy_form() {
     let a = device();
+    if !path_capability::supports_non_utf8(&a.home().join(".config/nvim"))
+        .expect("probe byte names")
+    {
+        return;
+    }
     let name = OsStr::from_bytes(b"bad\xff.lua");
     fs::write(a.home().join(".config/nvim").join(name), b"x\n").expect("write");
     let err = a.ok(&["status"]);
@@ -491,6 +490,11 @@ fn a_name_with_a_control_character_is_noted_escaped_and_never_captured() {
 #[test]
 fn a_new_file_that_differs_only_in_case_from_a_managed_one_is_held() {
     let a = device();
+    if !path_capability::supports_case_twins(&a.home().join(".config/nvim"))
+        .expect("probe case twins")
+    {
+        return;
+    }
     a.write(".config/nvim/Init.lua", b"-- other\n", 0o644);
     assert_eq!(
         a.token_of("status", ".config/nvim/Init.lua").as_deref(),

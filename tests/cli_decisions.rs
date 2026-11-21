@@ -1,7 +1,8 @@
 mod bounded_process;
 mod common;
-
-use common::{TestEnv, expect_prepared_publication, prepared_transactions_supported};
+use common::{
+    TestEnv, expect_prepared_publication, path_capability, prepared_transactions_supported,
+};
 use serde_json::{Value, json};
 use std::fs;
 
@@ -1870,18 +1871,34 @@ fn reviewed_commit_preserves_staged_only_edits_deletions_and_renames() -> R {
 }
 
 #[test]
-fn canceled_outgoing_edit_is_stale_and_non_utf8_outgoing_paths_remain_literal() -> R {
+fn canceled_outgoing_edit_is_stale() -> R {
+    canceled_outgoing_edit(false)
+}
+
+#[test]
+fn non_utf8_outgoing_paths_remain_literal() -> R {
+    canceled_outgoing_edit(true)
+}
+
+fn canceled_outgoing_edit(raw: bool) -> R {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
     let env = TestEnv::new();
     env.ok(&["init"]);
+    if raw && !path_capability::supports_non_utf8(&env.repo())? {
+        return Ok(());
+    }
     env.write_repo(".a", b"base");
     let name = OsString::from_vec(b"source-\xff".to_vec());
-    fs::write(env.repo().join(&name), b"byte-base")?;
+    if raw {
+        fs::write(env.repo().join(&name), b"byte-base")?;
+    }
     env.ok(&["git", "add", "-A"]);
     env.ok(&["sync"]);
     env.write_repo(".a", b"reviewed");
-    fs::write(env.repo().join(&name), b"byte-path")?;
+    if raw {
+        fs::write(env.repo().join(&name), b"byte-path")?;
+    }
     let reviewed = sync_input(&env)?;
     env.write_repo(".a", b"base");
     let out = decided(&env, &reviewed, "sync", &[]);
@@ -1904,13 +1921,15 @@ fn canceled_outgoing_edit_is_stale_and_non_utf8_outgoing_paths_remain_literal() 
         "--name-only",
         "HEAD",
     ]);
-    assert!(
-        listed
-            .stdout
-            .split(|byte| *byte == 0)
-            .any(|path| path == b"source-\xff")
-    );
-    assert_eq!(fs::read(env.repo().join(name))?, b"byte-path");
+    if raw {
+        assert!(
+            listed
+                .stdout
+                .split(|byte| *byte == 0)
+                .any(|path| path == b"source-\xff")
+        );
+        assert_eq!(fs::read(env.repo().join(name))?, b"byte-path");
+    }
     Ok(())
 }
 
@@ -1946,7 +1965,8 @@ fn identity_approval_and_selected_source_must_match_the_review() -> R {
                 json!("wrong"),
             )?;
         } else if change == "selected_source" {
-            env.write_repo(".a{host=after+os=linux}", b"later source");
+            let os = at(&reviewed, "/machine/os").as_str().ok_or("reviewed OS")?;
+            env.write_repo(&format!(".a{{host=after+os={os}}}"), b"later source");
         }
         let out = decided(&env, &reviewed, "apply", &[]);
         assert_eq!(
@@ -2142,7 +2162,10 @@ fn new_capture_bindings_reject_unavailable_or_changed_identity_source_and_home()
             "source" => {
                 std::os::unix::fs::symlink("anchor", env.repo().join(".config/app/new"))?;
             }
-            "variant" => env.write_repo(".config/app/new{os=linux}", b"late-variant"),
+            "variant" => {
+                let os = at(&reviewed, "/machine/os").as_str().ok_or("reviewed OS")?;
+                env.write_repo(&format!(".config/app/new{{os={os}}}"), b"late-variant");
+            }
             _ => env.write_machine_config("[identity]\nhost = \"different\"\n"),
         }
         let before = env.four_trees();
@@ -2195,6 +2218,7 @@ fn a_variant_arriving_during_an_earlier_capture_invalidates_the_selected_source(
         fs::create_dir(&wrapper)?;
         let armed = env.root().join("armed");
         fs::write(&armed, b"")?;
+        let os = at(&reviewed, "/machine/os").as_str().ok_or("reviewed OS")?;
         common::write_exe(
             &wrapper.join("age"),
             &format!(
@@ -2202,7 +2226,7 @@ fn a_variant_arriving_during_an_earlier_capture_invalidates_the_selected_source(
                 armed = shell_words::quote(armed.to_str().ok_or("armed")?),
                 variant = shell_words::quote(
                     env.repo()
-                        .join(".config/app/new{os=linux}")
+                        .join(format!(".config/app/new{{os={os}}}"))
                         .to_str()
                         .ok_or("variant")?
                 ),

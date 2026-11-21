@@ -119,12 +119,12 @@ pub fn source_path(rel: &str) -> String {
     format!("{DIR}/{rel}")
 }
 
-/// One entry of `[system] roots`, as configured and in canonical form.
+/// One entry of `[system] roots`, as configured and resolved for its scope.
 #[derive(Debug, Clone)]
 pub struct Root {
     /// The text in the machine config.
     pub shown: String,
-    /// The canonical form that keys are compared with.
+    /// The resolved form that keys are compared with.
     pub canon: String,
     /// Why this root is not used, if it is not.
     pub problem: Option<&'static str>,
@@ -231,11 +231,12 @@ impl Scope {
         if never_allowed(&canon, self.macos) {
             return Standing::Refused(format!("{key} is on the never-allowed list"));
         }
+        let compared = if self.prefix.is_some() { key } else { &canon };
         let inside = self
             .roots
             .iter()
             .filter(|root| root.problem.is_none())
-            .any(|root| is_under(&canon, &root.canon));
+            .any(|root| is_under(compared, &root.canon));
         if inside {
             Standing::Active
         } else {
@@ -277,7 +278,11 @@ fn resolve_root(raw: &Path, base: &Path, prefixed: bool, macos: bool) -> Root {
             exists: false,
         };
     };
-    let lexical = canonical_form(&clean, macos);
+    let lexical = if prefixed {
+        clean.clone()
+    } else {
+        canonical_form(&clean, macos)
+    };
     let disk = base.join(clean.trim_start_matches('/'));
     let exists = fs::metadata(&disk).is_ok_and(|meta| meta.is_dir());
     let mut problem = None;
@@ -292,7 +297,10 @@ fn resolve_root(raw: &Path, base: &Path, prefixed: bool, macos: bool) -> Root {
         Ok(real) => real.to_str().map_or(lexical, str::to_owned),
         Err(_) => lexical,
     };
-    if problem.is_none() && never_allowed(&canon, macos) {
+    if problem.is_none()
+        && (never_allowed(&canonical_form(&clean, macos), macos)
+            || never_allowed(&canonical_form(&canon, macos), macos))
+    {
         problem = Some("is on the never-allowed list");
     }
     Root {
@@ -836,6 +844,64 @@ mod tests {
         assert!(matches!(scope.standing("/tmp/x"), Standing::Refused(_)));
         assert!(matches!(scope.standing("etc/x"), Standing::Refused(_)));
         assert!(matches!(scope.standing("/etc/../x"), Standing::Refused(_)));
+    }
+
+    #[test]
+    fn macos_prefixed_roots_compare_walked_paths() {
+        let tmp = TempDir::new().unwrap();
+        let prefix = fs::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(prefix.join("etc")).unwrap();
+        fs::create_dir_all(prefix.join("private/etc")).unwrap();
+        fs::write(prefix.join("etc/x"), b"x").unwrap();
+        let scope = Scope::build(Some(prefix.clone()), &[PathBuf::from("/etc")], true);
+        assert_eq!(scope.roots().first().unwrap().canon, "/etc");
+        assert_eq!(scope.standing("/etc/x"), Standing::Active);
+        assert_eq!(scope.standing("/private/etc/x"), Standing::Off);
+        assert_eq!(scope.target("/etc/x"), "/etc/x");
+        assert_eq!(scope.disk("/etc/x"), prefix.join("etc/x"));
+        assert!(matches!(
+            scope.node("/etc/x").unwrap().home(),
+            Home::Present(_)
+        ));
+    }
+
+    #[test]
+    fn macos_scope_keeps_alias_and_symlink_restrictions() {
+        let tmp = TempDir::new().unwrap();
+        let prefix = fs::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(prefix.join("etc")).unwrap();
+        fs::create_dir_all(prefix.join("var")).unwrap();
+        symlink(prefix.join("var"), prefix.join("bad")).unwrap();
+        symlink(prefix.join("etc"), prefix.join("tmp")).unwrap();
+        symlink(prefix.parent().unwrap(), prefix.join("escape")).unwrap();
+        symlink(prefix.join("var"), prefix.join("etc/sub")).unwrap();
+        let scope = Scope::build(
+            Some(prefix),
+            &["/etc", "/bad", "/escape", "/tmp", "/missing"].map(PathBuf::from),
+            true,
+        );
+        assert!(scope.roots().get(1).unwrap().problem.is_some());
+        assert_eq!(
+            scope.roots().get(2).unwrap().problem,
+            Some("resolves outside DOTMAN_SYSTEM_ROOT")
+        );
+        assert!(scope.roots().get(3).unwrap().problem.is_some());
+        assert_eq!(scope.standing("/missing/x"), Standing::Active);
+        assert!(matches!(scope.standing("/var/x"), Standing::Refused(_)));
+        assert!(matches!(scope.standing("/tmp/x"), Standing::Refused(_)));
+        assert!(matches!(
+            scope.standing("/private/var/x"),
+            Standing::Refused(_)
+        ));
+        assert!(matches!(
+            scope.node("/etc/sub/x").unwrap().home(),
+            Home::Blocked(crate::engine::Obstacle::Parent(_))
+        ));
+
+        let normal = Scope::build(None, &[], true);
+        assert_eq!(normal.target("/etc/x"), "/private/etc/x");
+        assert_eq!(normal.disk("/etc/x"), PathBuf::from("/private/etc/x"));
+        assert!(matches!(normal.standing("/var/x"), Standing::Refused(_)));
     }
 
     #[test]

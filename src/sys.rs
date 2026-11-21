@@ -8,6 +8,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Upper bound for the `*_r` lookup buffers, so a misbehaving NSS module cannot make us grow forever.
 const MAX_LOOKUP_BUF: usize = 1 << 20;
@@ -40,6 +41,33 @@ pub fn ignore_signals(signals: &[libc::c_int]) -> SignalsIgnored {
             })
             .collect(),
     )
+}
+
+static DIFF_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn catch_signal(_: libc::c_int) {
+    DIFF_INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+/// Catches signals while a temporary plaintext tree exists; exec resets the child's handlers.
+#[cfg(unix)]
+pub(crate) fn catch_signals(signals: &[libc::c_int]) -> io::Result<SignalsIgnored> {
+    DIFF_INTERRUPTED.store(false, Ordering::SeqCst);
+    let mut guard = SignalsIgnored(Vec::new());
+    for &signal in signals {
+        // SAFETY: the handler has the required C ABI and only stores to a lock-free atomic.
+        let previous =
+            unsafe { libc::signal(signal, catch_signal as *const () as libc::sighandler_t) };
+        if previous == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+        guard.0.push((signal, previous));
+    }
+    Ok(guard)
+}
+
+pub(crate) fn diff_interrupted() -> bool {
+    DIFF_INTERRUPTED.load(Ordering::SeqCst)
 }
 
 /// Ignores SIGPIPE until the value is dropped. Meanwhile a write to a child that has already

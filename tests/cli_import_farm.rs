@@ -521,14 +521,8 @@ fn the_nix_store_given_as_the_source_reports_every_link_and_imports_nothing() {
 #[test]
 fn links_into_system_directories_are_no_farm_and_stay_as_they_are() {
     let env = TestEnv::new();
-    let mut entries: Vec<PathBuf> = fs::read_dir("/usr/share")
-        .map(|dir| dir.flatten().map(|entry| entry.path()).collect())
-        .unwrap_or_default();
-    entries.sort();
-    let [first, second, ..] = entries.as_slice() else {
-        eprintln!("skipping: /usr/share has fewer than two entries");
-        return;
-    };
+    let first = Path::new("/dev/null");
+    let second = Path::new("/dev/zero");
     env.symlink(".local/share/x", first);
     env.symlink(".local/share/y", second);
     let home = tree_checksum(&env.home());
@@ -536,7 +530,7 @@ fn links_into_system_directories_are_no_farm_and_stay_as_they_are() {
     let (out, err) = run_import(&env, &[]);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(err.contains("none found"), "{err}");
-    let (out, err) = run_import(&env, &["/usr/share"]);
+    let (out, err) = run_import(&env, &["/dev"]);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(err.contains("system directory"), "{err}");
     assert_eq!(tree_checksum(&env.home()), home);
@@ -550,8 +544,29 @@ fn links_into_system_directories_are_no_farm_and_stay_as_they_are() {
     assert_eq!(tree_checksum(&env.home()), home);
     let (out, err) = run_import(&env, &["--swap"]);
     assert_eq!(out.status.code(), Some(0), "{err}");
-    assert_eq!(link_text(&env, ".local/share/x"), first.as_path());
-    assert_eq!(link_text(&env, ".local/share/y"), second.as_path());
+    assert_eq!(link_text(&env, ".local/share/x"), first);
+    assert_eq!(link_text(&env, ".local/share/y"), second);
+}
+
+#[test]
+fn a_chezmoi_source_that_is_also_a_farm_refuses_overlay() {
+    let mut env = TestEnv::new();
+    env.ok(&["init"]);
+    fs::create_dir(env.root().join("stubs")).expect("stub dir");
+    env.write_script("stubs/chezmoi", "#!/bin/sh\nexit 99\n");
+    env.prepend_path(env.root().join("stubs"));
+    small_farm(&env, "dots");
+    env.write("dots/pkg/.chezmoiroot", b".\n", 0o644);
+    let source = env.home().join("dots/pkg");
+    let before = untouched(&env);
+
+    let (out, err) = run_import(&env, &["--overlay", &source.to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("--overlay does not take a chezmoi source"),
+        "{err}"
+    );
+    assert_eq!(untouched(&env), before);
 }
 
 #[test]

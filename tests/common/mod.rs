@@ -3,6 +3,8 @@
 // reason: test-only helpers; clippy.toml exempts expect only inside #[test] fns, not shared helpers.
 #![allow(clippy::expect_used)]
 
+pub mod path_capability;
+
 use assert_cmd::Command;
 use dotman::VERSION;
 use dotman::repo_config::RepoConfig;
@@ -54,7 +56,10 @@ pub struct TestEnv {
 
 impl TestEnv {
     pub fn new() -> Self {
-        let root = Arc::new(TempDir::new().expect("create temp root"));
+        let root = Arc::new(
+            TempDir::new_in(fs::canonicalize(std::env::temp_dir()).expect("canonical temp dir"))
+                .expect("create temp root"),
+        );
         let env = Self {
             remote_owner: Arc::clone(&root),
             root,
@@ -76,7 +81,12 @@ impl TestEnv {
 
     pub fn second_device(&self) -> Self {
         let env = Self {
-            root: Arc::new(TempDir::new().expect("create temp root")),
+            root: Arc::new(
+                TempDir::new_in(
+                    fs::canonicalize(std::env::temp_dir()).expect("canonical temp dir"),
+                )
+                .expect("create temp root"),
+            ),
             remote_owner: Arc::clone(&self.remote_owner),
             path_prepend: self.path_prepend.clone(),
             system_root_on: false,
@@ -1419,9 +1429,8 @@ pub const GIT_HOOKS: [&str; 10] = [
     "reference-transaction",
 ];
 
-/// Runs the binary with `args` under `script(1)`, so its stdin and stdout are a terminal, as an
-/// interactive run with the harness environment plus `vars`, feeding it `input`. Returns what the
-/// terminal showed, or `None` where there is no `script` to run.
+/// Runs the binary with a controlling terminal, the harness environment plus `vars`, and `input`.
+/// Returns what the terminal showed, or `None` if python3 is not on PATH.
 pub fn in_a_terminal(
     env: &TestEnv,
     vars: &[(&str, &str)],
@@ -1431,8 +1440,7 @@ pub fn in_a_terminal(
     in_a_terminal_sized(env, vars, args, input, None)
 }
 
-/// [`in_a_terminal`] on a terminal `cols` columns wide: the pty `script(1)` makes is 0 by 0 when
-/// its own stdin is a pipe, so dotman sees no width until `stty` sets one.
+/// [`in_a_terminal`] on a terminal `cols` columns wide.
 pub fn in_a_terminal_cols(
     env: &TestEnv,
     vars: &[(&str, &str)],
@@ -1450,43 +1458,56 @@ fn in_a_terminal_sized(
     input: &[u8],
     cols: Option<u16>,
 ) -> Option<String> {
-    use std::io::Write as _;
+    use std::io::{Read as _, Seek as _};
     use std::process::Stdio;
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    let script = std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join("script"))
+    let path = std::env::var_os("PATH")?;
+    let python = std::env::split_paths(&path)
+        .map(|dir| dir.join("python3"))
         .find(|path| path.is_file())?;
-    let dot = env.dot_process();
-    let mut line = cols.map_or_else(String::new, |cols| format!("stty cols {cols}; "));
-    line.push_str(&shell_words::quote(&dot.get_program().to_string_lossy()));
-    for arg in args {
-        line.push(' ');
-        line.push_str(&shell_words::quote(arg));
-    }
-    let mut cmd = StdCommand::new(script);
-    cmd.env_clear();
-    for (name, value) in dot.get_envs() {
-        if let Some(value) = value {
-            cmd.env(name, value);
-        }
-    }
+    let input_file = tempfile::NamedTempFile::new_in(env.root()).expect("create terminal input");
+    fs::write(input_file.path(), input).expect("write terminal input");
+    let output_file = tempfile::tempfile_in(env.root()).expect("create terminal output");
+    let errors_file = tempfile::tempfile_in(env.root()).expect("create terminal errors");
+    let mut cmd = env.process_for(&python);
     cmd.env("DOTMAN_NON_INTERACTIVE", "");
     for (name, value) in vars {
         cmd.env(name, value);
     }
-    let mut child = cmd
-        .current_dir(env.home())
-        .args(["-qec", &line, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(input).ok()?;
-    let out = child.wait_with_output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    let status = cmd
+        .args(["-c", include_str!("terminal.py")])
+        .arg(input_file.path())
+        .arg(cols.unwrap_or(0).to_string())
+        .arg("60")
+        .arg(env!("CARGO_BIN_EXE_dotman"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            output_file.try_clone().expect("clone terminal output"),
+        ))
+        .stderr(Stdio::from(
+            errors_file.try_clone().expect("clone terminal errors"),
+        ))
+        .status()
+        .expect("run terminal driver");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut output_file = output_file;
+    let mut errors_file = errors_file;
+    output_file.rewind().expect("rewind terminal output");
+    output_file
+        .read_to_end(&mut out)
+        .expect("read terminal output");
+    errors_file.rewind().expect("rewind terminal errors");
+    errors_file
+        .read_to_end(&mut err)
+        .expect("read terminal errors");
+    assert!(
+        status.success(),
+        "terminal driver failed: {}\n{}",
+        String::from_utf8_lossy(&err),
+        String::from_utf8_lossy(&out)
+    );
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// The arguments after `dotman` of the first backticked `dotman <prefix>...` command in `text`,

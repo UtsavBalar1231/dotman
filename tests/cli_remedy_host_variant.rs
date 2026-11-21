@@ -173,7 +173,19 @@ fn unsupported_recipient_is_never_emitted() {
         "occurrence":{"scope":"home","source":source,"reason":"host_variant","finding":null}});
     let out = request(&env, &input);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("terminal_only"));
+    let error = serde_json::Deserializer::from_slice(&out.stdout)
+        .into_iter::<Value>()
+        .map(Result::unwrap)
+        .find(|row| row["record"] == "remedy_error")
+        .expect("remedy_error record");
+    assert_eq!(
+        error.get("code").and_then(Value::as_str),
+        Some(if cfg!(target_os = "linux") {
+            "terminal_only"
+        } else {
+            "refused"
+        })
+    );
     assert!(!String::from_utf8_lossy(&out.stdout).contains(marker));
     assert!(!String::from_utf8_lossy(&out.stderr).contains(marker));
 }
