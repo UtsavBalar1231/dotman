@@ -91,8 +91,13 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: Run tests
+      - name: Run tests (Linux)
+        if: runner.os == 'Linux'
         run: cargo test --workspace --all-targets
+
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test --workspace --all-targets --no-fail-fast
 
   msrv:
     name: MSRV
