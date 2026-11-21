@@ -38,7 +38,7 @@ jobs:
           tool: just
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -89,7 +89,7 @@ jobs:
           toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Run tests
         run: cargo test --workspace --all-targets
@@ -118,7 +118,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Build
         run: cargo +${{ steps.msrv.outputs.version }} build --locked --workspace
@@ -146,7 +146,12 @@ jobs:
             sed -i -e 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|' -e 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|' /etc/apt/sources.list
             apt-get update -qq
           fi
-          apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git
+          apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git python3
+          curl -sSfL -o /tmp/age.tar.gz https://github.com/FiloSottile/age/releases/download/v1.3.1/age-v1.3.1-linux-amd64.tar.gz
+          echo "bdc69c09cbdd6cf8b1f333d372a1f58247b3a33146406333e30c0f26e8f51377  /tmp/age.tar.gz" | sha256sum -c
+          tar -xzf /tmp/age.tar.gz -C /usr/local/bin --strip-components=1 age/age age/age-keygen
+          age --version
+          age-keygen --version
           git --version
           case "$(git --version)" in
             "git version 2.25."*) ;;
@@ -174,6 +179,12 @@ jobs:
         run: |
           docker exec -i -u tester -w /work floor bash -euo pipefail <<'EOF'
           . "$HOME/.cargo/env"
+          # Reviewed operations require a non-group-writable repo and private temp parent.
+          umask 0022
+          export DOTMAN_REQUIRE_AGE=1
+          export TMPDIR="$HOME/tmp"
+          mkdir -p "$TMPDIR"
+          chmod 700 "$TMPDIR"
           cargo test --workspace --all-targets
           EOF
 
@@ -240,7 +251,7 @@ jobs:
       - name: Install tools
         run: |
           docker exec -i alpine sh -eu <<'EOF'
-          apk add --no-cache bash build-base ca-certificates curl git util-linux-misc
+          apk add --no-cache age bash build-base ca-certificates curl git python3 util-linux-misc
           adduser -D tester
           cp -a /src /work
           chown -R tester:tester /work
@@ -275,6 +286,12 @@ jobs:
         run: |
           docker exec -i -u tester -w /work alpine sh -eu <<'EOF'
           . "$HOME/.cargo/env"
+          # Reviewed operations require a non-group-writable repo and private temp parent.
+          umask 0022
+          export DOTMAN_REQUIRE_AGE=1
+          export TMPDIR="$HOME/tmp"
+          mkdir -p "$TMPDIR"
+          chmod 700 "$TMPDIR"
           cargo test --workspace --all-targets
           EOF
 
@@ -425,7 +442,7 @@ jobs:
           toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Run the secrets tests
         run: cargo test --test cli_secrets
@@ -460,7 +477,7 @@ jobs:
           toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Run the chezmoi tests
         run: cargo test --test cli_import_chezmoi --test security_tests
@@ -479,7 +496,7 @@ jobs:
           toolchain: stable
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Regenerate man pages and completions
         run: cargo run -p xtask -- generate
@@ -518,7 +535,7 @@ jobs:
           tool: cross
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: cross-${{ matrix.target }}
 
@@ -557,7 +574,7 @@ jobs:
           tool: just
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check the scripts
         run: shellcheck e2e/*.sh e2e/*/*.sh

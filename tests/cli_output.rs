@@ -299,6 +299,7 @@ fn a_legacy_head_never_starts_a_line_of_an_error() {
 }
 
 /// An import note over 100 characters, with its command at the end.
+#[cfg(target_os = "linux")]
 const LONG_HINT: &str = "the new repo has no remote, as a local path is no use as one; add one with `dotman init --remote <url>`";
 
 #[test]

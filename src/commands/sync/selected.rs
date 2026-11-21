@@ -13,6 +13,14 @@ use std::time::SystemTime;
 
 pub(super) fn run(ctx: &mut Context, args: &SyncArgs) -> Result<Outcome> {
     ensure!(args.no_hooks, "selected capture requires --no-hooks");
+    if !args.dry_run
+        && let Err(error) = ctx.git.check_prepared_transaction()
+    {
+        if !ctx.git.own_pull() {
+            prepare(ctx, args)?;
+        }
+        return Err(error);
+    }
     let _lock = ctx.start(args.json, args.dry_run)?;
     ctx.refuse_git_locks()?;
     ctx.refuse_collisions()?;

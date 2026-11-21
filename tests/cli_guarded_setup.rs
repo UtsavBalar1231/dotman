@@ -78,6 +78,51 @@ fn assert_no_setup_stage(env: &TestEnv) -> R {
     Ok(())
 }
 
+fn preview_with_sha256(
+    env: &TestEnv,
+    value: &Value,
+    source: &std::path::Path,
+) -> R<Option<Output>> {
+    let probe = tempfile::tempdir_in(env.root())?;
+    let support = env.git_raw(&[
+        "init",
+        "-q",
+        "--template=",
+        "--object-format=sha256",
+        probe.path().to_str().ok_or("probe path")?,
+    ]);
+    if support.status.success() {
+        let out = setup(env, value)?;
+        assert!(out.status.success(), "{}", common::text(&out));
+        return Ok(Some(out));
+    }
+    assert!(
+        common::text(&support).contains("unknown option `object-format=sha256'"),
+        "{}",
+        common::text(&support)
+    );
+    let home = tree_checksum(&env.home());
+    let config = tree_checksum(&env.xdg_config());
+    let data = tree_checksum(&env.xdg_data());
+    let source_before = tree_checksum(source);
+    let out = setup(env, value)?;
+    refused(&out)?;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(common::text(&out).contains("requires Git with SHA-256 repository support"));
+    assert!(
+        !records(&out)?
+            .iter()
+            .any(|r| r["record"] == "import_preview")
+    );
+    assert_eq!(tree_checksum(&env.home()), home);
+    assert_eq!(tree_checksum(&env.xdg_config()), config);
+    assert_eq!(tree_checksum(&env.xdg_data()), data);
+    assert_eq!(tree_checksum(source), source_before);
+    assert_only_lock(env);
+    assert_no_setup_stage(env)?;
+    Ok(None)
+}
+
 #[test]
 fn static_import_previews_and_publishes_only_the_selected_working_tree() -> R {
     let env = TestEnv::new();
@@ -102,8 +147,9 @@ fn static_import_previews_and_publishes_only_the_selected_working_tree() -> R {
     let mut value = request(&env)?;
     *value.get_mut("operation").ok_or("operation")? =
         json!({"kind":"import_preview","source":{"raw":source}});
-    let preview = setup(&env, &value)?;
-    assert!(preview.status.success(), "{}", common::text(&preview));
+    let Some(preview) = preview_with_sha256(&env, &value, &source)? else {
+        return Ok(());
+    };
     let rows = records(&preview)?;
     let row = rows
         .iter()
@@ -190,8 +236,9 @@ fn static_import_refuses_changed_source_and_destination() -> R {
         let mut value = request(&env)?;
         *value.get_mut("operation").ok_or("operation")? =
             json!({"kind":"import_preview","source":{"raw":source}});
-        let out = setup(&env, &value)?;
-        assert!(out.status.success(), "{}", common::text(&out));
+        let Some(out) = preview_with_sha256(&env, &value, &source)? else {
+            continue;
+        };
         let rows = records(&out)?;
         let review = rows
             .iter()
@@ -228,8 +275,9 @@ fn static_import_refuses_directory_mode_changed_after_review() -> R {
     let mut value = request(&env)?;
     *value.get_mut("operation").ok_or("operation")? =
         json!({"kind":"import_preview","source":{"raw":source}});
-    let out = setup(&env, &value)?;
-    assert!(out.status.success(), "{}", common::text(&out));
+    let Some(out) = preview_with_sha256(&env, &value, &source)? else {
+        return Ok(());
+    };
     let rows = records(&out)?;
     let review = rows
         .iter()
@@ -255,8 +303,9 @@ fn static_import_refuses_replaced_source_directory() -> R {
     let mut value = request(&env)?;
     *value.get_mut("operation").ok_or("operation")? =
         json!({"kind":"import_preview","source":{"raw":source}});
-    let out = setup(&env, &value)?;
-    assert!(out.status.success(), "{}", common::text(&out));
+    let Some(out) = preview_with_sha256(&env, &value, &source)? else {
+        return Ok(());
+    };
     let rows = records(&out)?;
     let review = rows
         .iter()
@@ -285,8 +334,9 @@ fn static_import_binds_sha256_review_and_preserves_git_format() -> R {
     let mut value = request(&env)?;
     *value.get_mut("operation").ok_or("operation")? =
         json!({"kind":"import_preview","source":{"raw":source}});
-    let preview = setup(&env, &value)?;
-    assert!(preview.status.success(), "{}", common::text(&preview));
+    let Some(preview) = preview_with_sha256(&env, &value, &source)? else {
+        return Ok(());
+    };
     let rows = records(&preview)?;
     let review = rows
         .iter()
@@ -372,8 +422,9 @@ fn static_import_digest_changes_with_content() -> R {
     let mut value = request(&env)?;
     *value.get_mut("operation").ok_or("operation")? =
         json!({"kind":"import_preview","source":{"raw":source}});
-    let first = setup(&env, &value)?;
-    assert!(first.status.success(), "{}", common::text(&first));
+    let Some(first) = preview_with_sha256(&env, &value, &source)? else {
+        return Ok(());
+    };
     let first_rows = records(&first)?;
     let first_digest = first_rows
         .iter()

@@ -251,7 +251,7 @@ fk_kill_at() {
     shift 3
     real=$(command -v git)
     e2e_stub "$m" git "#!/bin/sh
-case \" \$* \" in $pattern) [ $when = before ] && kill -KILL \"\$PPID\" ;; esac
+case \" \$* \" in $pattern) if [ $when = before ]; then kill -KILL \"\$PPID\"; exit 137; fi ;; esac
 '$real' \"\$@\"
 rc=\$?
 case \" \$* \" in $pattern) [ $when = after ] && kill -KILL \"\$PPID\" ;; esac

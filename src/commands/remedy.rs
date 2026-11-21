@@ -92,6 +92,7 @@ enum PlainAction {
 
 struct Candidate {
     snapshot: Snapshot,
+    #[cfg(target_os = "linux")]
     bytes: Vec<u8>,
     executable: bool,
 }
@@ -615,6 +616,7 @@ fn candidate(ctx: &Context, key: &str, action: PlainAction) -> Result<Candidate>
             config_mode,
             context,
         },
+        #[cfg(target_os = "linux")]
         bytes,
         executable,
     })

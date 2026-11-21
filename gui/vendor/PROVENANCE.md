@@ -17,7 +17,8 @@ MIT OR Apache-2.0 and is not vendored here.
 - Both normalized manifests drop `proc-macro-error` only.
 - GTK: `attribute_parser.rs`, `composite_template_derive.rs` and `lib.rs`
   adapt [gtk3-rs commit 45782251fa35ecf8bfe759ffceb3db32659a0c97](https://github.com/gtk-rs/gtk3-rs/commit/45782251fa35ecf8bfe759ffceb3db32659a0c97).
-  Abort paths become spanned `syn::Error` compile errors.
+  Abort paths become spanned `syn::Error` compile errors. The attribute parser
+  also drops unused stored field types and spans; argument validation is retained.
 - GLib: `boxed_derive.rs`, `closure.rs`, `derived_properties_attribute.rs`,
   `enum_derive.rs`, `error_domain_derive.rs`, `flags_attribute.rs`, `lib.rs`,
   `object_interface_attribute.rs`, `object_subclass_attribute.rs`,
@@ -29,7 +30,7 @@ MIT OR Apache-2.0 and is not vendored here.
   the second capture and also report the first, preserving both locations.
 - No upstream feature upgrades or changes to application code are included.
 
-These are local forks of unmaintained GTK 3-era packages. Their owner must
+These are local forks of GTK 3-era package releases. Their owner must
 review security and compatibility changes and retire the patches when a
 compatible maintained stack is adopted. The fixtures do not prove compatibility
 for every macro or every input. GTK 0.18's existing `template(string = ...)`

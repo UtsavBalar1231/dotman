@@ -11,6 +11,7 @@ use crate::variant::{self, Sources};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;

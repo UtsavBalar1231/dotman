@@ -3,8 +3,10 @@ use crate::commands::apply::{self, Classified};
 use crate::commands::forget::reviewed::{self, Source};
 use crate::commands::review::Stored;
 use crate::context::Context;
+#[cfg(target_os = "linux")]
+use crate::engine::safe_mode;
 use crate::engine::status::{Row, Variants, Worktree};
-use crate::engine::{Tuple, parents, read_node, safe_mode};
+use crate::engine::{Tuple, parents, read_node};
 use crate::secrets;
 use crate::state::{Entry, IdentitySnapshot};
 use crate::variant::{self, Flag, Selection, Sources};

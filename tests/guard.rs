@@ -141,6 +141,7 @@ fn every_subcommand_but_log_exits_4_while_a_rebase_is_in_progress() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_guard_refuses_oversized_controls_without_mutation() {
     for control in ["identity", "repo_config", "machine_config"] {
         let env = TestEnv::new();
@@ -178,6 +179,7 @@ fn trust_guard_refuses_oversized_controls_without_mutation() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_guard_refuses_incomplete_and_stopped_operations() {
     for marker in [
         "incomplete",
@@ -222,6 +224,7 @@ fn trust_guard_refuses_incomplete_and_stopped_operations() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_guard_refuses_lost_committed_settings() {
     let env = committed();
     fs::remove_file(env.repo().join(".dotman.toml")).expect("settings");
@@ -244,6 +247,7 @@ fn trust_guard_refuses_lost_committed_settings() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_guard_refuses_oversized_committed_settings_without_mutation() {
     let env = committed();
     let path = env.repo().join(".dotman.toml");
@@ -437,7 +441,7 @@ fn a_stash_pop_conflict_is_refused_and_nothing_reaches_home() {
     ]);
     assert_eq!(
         trust.status.code(),
-        Some(4),
+        Some(if cfg!(target_os = "linux") { 4 } else { 1 }),
         "{}",
         String::from_utf8_lossy(&trust.stderr)
     );

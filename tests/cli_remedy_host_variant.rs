@@ -41,6 +41,7 @@ fn setup(encrypted: bool) -> (TestEnv, String) {
     (env, source)
 }
 
+#[cfg(target_os = "linux")]
 fn review(env: &TestEnv, source: &str) -> anyhow::Result<Value> {
     let occurrence = json!({"scope":"home","source":source,"reason":"host_variant","finding":null});
     let output = request(
@@ -61,6 +62,7 @@ fn review(env: &TestEnv, source: &str) -> anyhow::Result<Value> {
     )?)
 }
 
+#[cfg(target_os = "linux")]
 fn execute(env: &TestEnv, source: &str, snapshot: &Value) -> std::process::Output {
     request(
         env,
@@ -70,6 +72,7 @@ fn execute(env: &TestEnv, source: &str, snapshot: &Value) -> std::process::Outpu
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn plain_review_execute_preserves_base_home_config_and_index() {
     let (env, source) = setup(false);
     let repo = env.repo().to_string_lossy().into_owned();
@@ -118,6 +121,7 @@ fn plain_review_execute_preserves_base_home_config_and_index() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn encrypted_review_execute_preserves_ciphertext() {
     if !common::age_installed() {
         return;
@@ -175,6 +179,7 @@ fn unsupported_recipient_is_never_emitted() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn changed_or_unsupported_mode_is_refused_without_effects() {
     let (env, source) = setup(false);
     let row = review(&env, &source).unwrap();
@@ -211,6 +216,7 @@ fn malformed_execute_is_rejected_before_repository_guard() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn chosen_source_and_snapshot_must_agree() {
     let (env, source) = setup(false);
     let row = review(&env, &source).unwrap();
@@ -220,6 +226,7 @@ fn chosen_source_and_snapshot_must_agree() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn non_utf8_repository_context_round_trips_without_loss() {
     use std::os::unix::ffi::OsStringExt;
     let (env, source) = setup(false);

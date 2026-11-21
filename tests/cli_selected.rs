@@ -4,7 +4,7 @@ mod edges;
 #[path = "cli_selected/transport.rs"]
 mod transport;
 
-use common::TestEnv;
+use common::{TestEnv, expect_prepared_publication};
 use serde_json::{Value, json};
 use std::fs;
 
@@ -100,6 +100,62 @@ fn bound_input_with(env: &TestEnv, vars: &[(&str, &str)]) -> RValue {
 }
 
 type RValue = Result<Value, Box<dyn std::error::Error>>;
+
+#[test]
+fn selected_unsupported_transaction_leaves_interrupted_pull_untouched() -> R {
+    let mut env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"one\ntwo\nthree\n", 0o600);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    env.write(".a", b"ONE\ntwo\nTHREE\n", 0o600);
+    let decision = input(&env, &[1])?;
+    let head = env.git(&[
+        "-C",
+        env.repo().to_str().ok_or("repo")?,
+        "rev-parse",
+        "HEAD",
+    ]);
+    let head = head.trim();
+    fs::write(
+        env.repo().join(".git/dotman-pull"),
+        format!("dotman-pull 1\0main\0{head}\0{head}\0"),
+    )?;
+    let run = |env: &TestEnv| {
+        env.run_stdin(
+            &[],
+            decision.to_string().as_bytes(),
+            &["sync", "--decide-from", "-", "--no-hooks", "--json"],
+        )
+    };
+    if !common::prepared_transactions_supported()? {
+        common::assert_prepared_refusal(&env, || run(&env));
+    }
+    let git = std::env::split_paths(&std::env::var_os("PATH").ok_or("PATH")?)
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .ok_or("git")?;
+    let wrapper = env.root().join("no-prepared");
+    fs::create_dir(&wrapper)?;
+    common::write_exe(
+        &wrapper.join("git"),
+        &format!(
+            "#!/bin/sh\nfor arg do\nif [ \"$arg\" = update-ref ]; then\ncat >/dev/null\nprintf '%s\\n' 'fatal: unknown command: start' >&2\nexit 128\nfi\ndone\nexec {} \"$@\"\n",
+            shell_words::quote(git.to_str().ok_or("git")?)
+        ),
+    )?;
+    env.prepend_path(wrapper);
+    let before = env.four_trees();
+    let out = run(&env);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(env.four_trees(), before);
+    Ok(())
+}
 
 #[test]
 fn selected_preflight_refuses_before_any_capture_or_backup() -> R {
@@ -206,6 +262,39 @@ fn selected_preflight_refuses_before_any_capture_or_backup() -> R {
     Ok(())
 }
 
+fn assert_stale_push_target(env: &TestEnv, review: &Value, other_url: &str) -> R {
+    let refused = env.run_stdin(
+        &[],
+        review.to_string().as_bytes(),
+        &["sync", "--decide-from", "-", "--no-hooks", "--json"],
+    );
+    assert!(!refused.status.success());
+    assert!(!String::from_utf8_lossy(&refused.stderr).contains(other_url));
+    assert_eq!(fs::read(env.repo().join(".a"))?, b"one\ntwo\nthree\n");
+    let before = env.four_trees();
+    let stale_preview = env.run_stdin(
+        &[],
+        review.to_string().as_bytes(),
+        &[
+            "sync",
+            "--decide-from",
+            "-",
+            "--no-hooks",
+            "--json",
+            "--dry-run",
+        ],
+    );
+    assert!(
+        !stale_preview.status.success()
+            && common::text(&stale_preview)
+                .contains("selected push target changed or was not reviewed"),
+        "{}",
+        common::text(&stale_preview)
+    );
+    assert_eq!(env.four_trees(), before);
+    Ok(())
+}
+
 #[test]
 fn selected_push_is_bound_and_pushes_only_the_reviewed_branch() -> R {
     let env = TestEnv::new();
@@ -243,14 +332,7 @@ fn selected_push_is_bound_and_pushes_only_the_reviewed_branch() -> R {
     env.git(&[
         "-C", repo, "remote", "set-url", "--push", "origin", &other_url,
     ]);
-    let refused = env.run_stdin(
-        &[],
-        review.to_string().as_bytes(),
-        &["sync", "--decide-from", "-", "--no-hooks", "--json"],
-    );
-    assert!(!refused.status.success());
-    assert!(!String::from_utf8_lossy(&refused.stderr).contains(&other_url));
-    assert_eq!(fs::read(env.repo().join(".a"))?, b"one\ntwo\nthree\n");
+    assert_stale_push_target(&env, &review, &other_url)?;
     env.git(&[
         "-C",
         repo,
@@ -260,11 +342,16 @@ fn selected_push_is_bound_and_pushes_only_the_reviewed_branch() -> R {
         "origin",
         &env.remote_url(),
     ]);
-    let out = env.run_stdin(
-        &[],
-        review.to_string().as_bytes(),
-        &["sync", "--decide-from", "-", "--no-hooks", "--json"],
-    );
+    let Some(out) = expect_prepared_publication(&env, || {
+        env.run_stdin(
+            &[],
+            review.to_string().as_bytes(),
+            &["sync", "--decide-from", "-", "--no-hooks", "--json"],
+        )
+    })?
+    else {
+        return Ok(());
+    };
     assert!(
         out.status.success(),
         "{}",
@@ -315,11 +402,16 @@ fn selected_push_rejects_diverged_remote_and_retains_commit() -> R {
     let remote = env.remote_path();
     let remote = remote.to_str().ok_or("remote")?;
     let before = env.git(&["--git-dir", remote, "rev-parse", "refs/heads/main"]);
-    let out = env.run_stdin(
-        &[],
-        review.to_string().as_bytes(),
-        &["sync", "--decide-from", "-", "--no-hooks", "--json"],
-    );
+    let Some(out) = expect_prepared_publication(&env, || {
+        env.run_stdin(
+            &[],
+            review.to_string().as_bytes(),
+            &["sync", "--decide-from", "-", "--no-hooks", "--json"],
+        )
+    })?
+    else {
+        return Ok(());
+    };
     assert!(!out.status.success());
     assert_eq!(
         env.git(&["--git-dir", remote, "rev-parse", "refs/heads/main"]),
@@ -340,11 +432,16 @@ fn selected_capture_commits_only_selected_edits() -> R {
     env.ok(&["sync"]);
     env.write(".a", b"ONE\ntwo\nTHREE\n", 0o600);
     let review = input(&env, &[1])?;
-    let out = env.run_stdin(
-        &[],
-        review.to_string().as_bytes(),
-        &["sync", "--decide-from", "-", "--no-hooks"],
-    );
+    let Some(out) = expect_prepared_publication(&env, || {
+        env.run_stdin(
+            &[],
+            review.to_string().as_bytes(),
+            &["sync", "--decide-from", "-", "--no-hooks"],
+        )
+    })?
+    else {
+        return Ok(());
+    };
     assert!(
         out.status.success(),
         "{}",
@@ -373,21 +470,27 @@ fn selected_capture_rejects_stale_or_unrelated_repo_edits() -> R {
     env.write(".a", b"ONE\ntwo\n", 0o600);
     let review = input(&env, &[1])?;
     env.write(".a", b"later\ntwo\n", 0o600);
+    let before = env.four_trees();
     let out = env.run_stdin(
         &[],
         review.to_string().as_bytes(),
         &["sync", "--decide-from", "-", "--no-hooks"],
     );
     assert!(!out.status.success());
+    assert!(common::text(&out).contains("selected capture changed since review"));
+    assert_eq!(env.four_trees(), before);
     assert_eq!(fs::read(env.repo().join(".a"))?, b"one\ntwo\n");
     env.write(".a", b"ONE\ntwo\n", 0o600);
     env.write_repo(".unrelated", b"keep");
+    let before = env.four_trees();
     let out = env.run_stdin(
         &[],
         review.to_string().as_bytes(),
         &["sync", "--decide-from", "-", "--no-hooks"],
     );
     assert!(!out.status.success());
+    assert!(common::text(&out).contains("selected capture requires a clean repository and index"));
+    assert_eq!(env.four_trees(), before);
     assert_eq!(fs::read(env.repo().join(".unrelated"))?, b"keep");
     assert_eq!(fs::read(env.repo().join(".a"))?, b"one\ntwo\n");
     Ok(())

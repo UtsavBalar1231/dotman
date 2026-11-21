@@ -6,7 +6,7 @@ use syn::{
     parse::{Error, Parse, ParseStream},
     punctuated::Punctuated,
 };
-use syn::{Attribute, DeriveInput, Field, Fields, Ident, LitStr, Meta, Token, Type};
+use syn::{Attribute, DeriveInput, Field, Fields, Ident, LitStr, Meta, Token};
 
 mod kw {
     syn::custom_keyword!(file);
@@ -118,13 +118,10 @@ pub enum FieldAttributeType {
 pub struct FieldAttribute {
     pub ty: FieldAttributeType,
     pub args: Vec<FieldAttributeArg>,
-    pub path_span: Span,
-    pub span: Span,
 }
 
 pub struct AttributedField {
     pub ident: Ident,
-    pub ty: Type,
     pub attr: FieldAttribute,
 }
 
@@ -167,12 +164,10 @@ fn parse_field(field: &Field) -> Result<Option<AttributedField>, Error> {
         None => return Err(Error::new(field.span(), "expected identifier")),
     };
 
-    let ty = &field.ty;
     let mut attr = None;
 
     for field_attr in field_attrs {
         let span = field_attr.span();
-        let path_span = field_attr.path().span();
         let ty = if field_attr.path().is_ident("template_child") {
             Some(FieldAttributeType::TemplateChild)
         } else {
@@ -183,12 +178,7 @@ fn parse_field(field: &Field) -> Result<Option<AttributedField>, Error> {
             let args = parse_field_attr_args(field_attr)?;
 
             if attr.is_none() {
-                attr = Some(FieldAttribute {
-                    ty,
-                    args,
-                    path_span,
-                    span,
-                })
+                attr = Some(FieldAttribute { ty, args })
             } else {
                 return Err(Error::new(
                     span,
@@ -201,11 +191,39 @@ fn parse_field(field: &Field) -> Result<Option<AttributedField>, Error> {
     if let Some(attr) = attr {
         Ok(Some(AttributedField {
             ident: ident.clone(),
-            ty: ty.clone(),
             attr,
         }))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn template_child_arguments_are_preserved_and_validated() {
+        let field: Field = parse_quote!(#[template_child(id = "button")] button: Widget);
+        let parsed = parse_field(&field).unwrap().unwrap();
+        assert_eq!(parsed.ident, "button");
+        assert!(matches!(&parsed.attr.args[..], [FieldAttributeArg::Id(id)] if id == "button"));
+
+        let duplicate: Field = parse_quote!(#[template_child(id = "a", id = "b")] button: Widget);
+        assert!(parse_field(&duplicate)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("two instances"));
+        let invalid: Field = parse_quote!(#[template_child(id = 42)] button: Widget);
+        assert!(parse_field(&invalid).is_err());
+        let repeated: Field = parse_quote!(#[template_child] #[template_child] button: Widget);
+        assert!(parse_field(&repeated)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("multiple attributes"));
     }
 }
 

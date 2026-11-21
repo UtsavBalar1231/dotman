@@ -2567,6 +2567,7 @@ impl Git {
         decisions: &BTreeMap<PathBuf, Decision>,
         host: &str,
     ) -> Result<Replayed> {
+        self.check_prepared_transaction()?;
         self.replay_inner(remote, branch, onto, decisions, host, true)
     }
 
@@ -5566,6 +5567,52 @@ mod tests {
         git.show_blob(rev, path).expect("blob")
     }
 
+    fn assert_reviewed_replay_unavailable(d: &Diverged, decisions: &BTreeMap<PathBuf, Decision>) {
+        let index_path = d.b.repo().join(".git/index");
+        let index = fs::read(&index_path).expect("index");
+        let refs = d.sb.raw_ok(d.b.repo(), &["show-ref"]);
+        let error =
+            d.b.replay_reviewed("origin", "main", &d.onto, decisions, "beta")
+                .expect_err("unsupported transaction");
+        assert!(error.is::<crate::context::ReviewChanged>(), "{error:#}");
+        assert!(format!("{error:#}").contains("prepared Git transaction unavailable"));
+        assert_eq!(fs::read(&index_path).expect("index"), index);
+        assert_eq!(d.sb.raw_ok(d.b.repo(), &["show-ref"]), refs);
+        assert_restored(d);
+    }
+
+    #[test]
+    fn reviewed_replay_without_prepared_transactions_refuses_before_mutation() {
+        let d = diverged(
+            "'rebase.backend=merge'",
+            &[("a.txt", Some(b"base\n"))],
+            &[("a.txt", Some(b"origin\n"))],
+            &[&[("a.txt", Some(b"local\n"))]],
+        );
+        if d.b.check_prepared_transaction().is_ok() {
+            return;
+        }
+        let head = d.b.head().expect("head");
+        let status = d.sb.raw_ok(d.b.repo(), &["status", "--porcelain", "-uall"]);
+        let decisions = decide(vec![("a.txt", set(&d.b, b"settled\n"))]);
+        let index = fs::read(d.b.repo().join(".git/index")).expect("index");
+        let error =
+            d.b.replay_reviewed("origin", "main", &d.onto, &decisions, "beta")
+                .expect_err("unsupported transaction");
+        assert!(error.is::<crate::context::ReviewChanged>(), "{error:#}");
+        assert!(format!("{error:#}").contains("prepared Git transaction unavailable"));
+        assert_eq!(d.b.head().expect("head"), head);
+        assert_eq!(
+            fs::read(d.b.repo().join(".git/index")).expect("index"),
+            index
+        );
+        assert_eq!(
+            d.sb.raw_ok(d.b.repo(), &["status", "--porcelain", "-uall"]),
+            status
+        );
+        assert!(!d.b.own_pull());
+    }
+
     #[test]
     fn a_replay_sets_each_settled_path_and_corrects_once() {
         for reviewed in [false, true] {
@@ -5603,10 +5650,15 @@ mod tests {
                     if correct {
                         decisions.push(("conf", set(&d.b, conf_theirs)));
                     }
+                    let decisions = decide(decisions);
+                    if reviewed && d.b.check_prepared_transaction().is_err() {
+                        assert_reviewed_replay_unavailable(&d, &decisions);
+                        continue;
+                    }
                     let replayed = if reviewed {
-                        d.b.replay_reviewed("origin", "main", &d.onto, &decide(decisions), "beta")
+                        d.b.replay_reviewed("origin", "main", &d.onto, &decisions, "beta")
                     } else {
-                        d.b.replay("origin", "main", &d.onto, &decide(decisions), "beta")
+                        d.b.replay("origin", "main", &d.onto, &decisions, "beta")
                     }
                     .expect("replay");
                     assert!(matches!(replayed, Replayed::Done(_)), "{backend}");
@@ -5652,6 +5704,10 @@ mod tests {
             ("a.txt", set(&d.b, b"settled\n")),
             ("conf", set(&d.b, b"c1 origin\nc2\nc3\nc4\nc5\n")),
         ]);
+        if d.b.check_prepared_transaction().is_err() {
+            assert_reviewed_replay_unavailable(&d, &decisions);
+            return;
+        }
         let (marker, fork) =
             d.b.start_replay("origin", "main", &d.onto, &decisions)
                 .expect("start");

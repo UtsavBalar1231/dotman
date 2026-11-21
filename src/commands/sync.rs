@@ -109,6 +109,22 @@ pub fn run(args: &SyncArgs) -> Result<Outcome> {
     {
         return selected::run(&mut ctx, args);
     }
+    if !args.dry_run
+        && let Some(review) = &ctx.reviewed
+    {
+        let remote = ctx.git.remote_url(REMOTE)?.is_some();
+        let outgoing = review
+            .input
+            .sync
+            .as_ref()
+            .is_some_and(|sync| !sync.captures.is_empty() || !sync.outgoing.is_empty());
+        if (remote || outgoing)
+            && let Err(error) = ctx.git.check_prepared_transaction()
+            && (ctx.git.own_pull() || !remote || held_entries(&ctx, &ctx.git.status()?).is_empty())
+        {
+            return Err(error);
+        }
+    }
     let dry_run = args.dry_run;
     let _lock = ctx.start(args.json, dry_run)?;
     // Before git is asked about the index, which needs a repo to exist.

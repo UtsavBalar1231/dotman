@@ -1,4 +1,4 @@
-use super::{R, TestEnv, input, records};
+use super::{R, TestEnv, expect_prepared_publication, input, records};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -34,7 +34,14 @@ fn dry_run_matches_then_real_sync_leaves_unselected_home_lines() -> R {
         String::from_utf8_lossy(&dry.stderr)
     );
     assert_eq!(env.four_trees(), before);
-    let real = run(&["sync", "--decide-from", "-", "--no-hooks", "--json"]);
+    let Some(real) = expect_prepared_publication(&env, || {
+        run(&["sync", "--decide-from", "-", "--no-hooks", "--json"])
+    })?
+    else {
+        env.ok(&["sync", "--no-hooks"]);
+        assert_eq!(fs::read(env.repo().join(".a"))?, home);
+        return Ok(());
+    };
     assert!(
         real.status.success(),
         "{}",
@@ -109,11 +116,16 @@ fn private_capture_binds_physical_source_and_preserves_modes() -> R {
     assert!(!stale.status.success());
     assert_eq!(env.four_trees(), before);
     fs::set_permissions(env.repo().join(".a"), fs::Permissions::from_mode(0o644))?;
-    let real = env.run_stdin(
-        &[],
-        review.as_bytes(),
-        &["sync", "--decide-from", "-", "--no-hooks", "--json"],
-    );
+    let Some(real) = expect_prepared_publication(&env, || {
+        env.run_stdin(
+            &[],
+            review.as_bytes(),
+            &["sync", "--decide-from", "-", "--no-hooks", "--json"],
+        )
+    })?
+    else {
+        return Ok(());
+    };
     assert!(
         real.status.success(),
         "{}",

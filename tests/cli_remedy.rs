@@ -3,10 +3,12 @@ mod common;
 use common::TestEnv;
 use serde_json::{Value, json};
 
+#[cfg(target_os = "linux")]
 fn new_name_occurrence() -> Value {
     json!({"scope":"new","source":null,"reason":"secret_name","finding":null})
 }
 
+#[cfg(target_os = "linux")]
 fn content_occurrence(scope: &str, source: Option<&str>) -> Value {
     json!({"scope":scope,"source":source,"reason":"content",
         "finding":{"rule":"github-token","place":"content","line":1}})
@@ -108,6 +110,7 @@ fn invalid_requests_are_rejected_before_the_repository_guard() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("request is too large"));
 }
 
+#[cfg(target_os = "linux")]
 fn snapshot(env: &TestEnv, key: &str) -> anyhow::Result<Value> {
     let out = review(env, key);
     assert!(
@@ -124,6 +127,7 @@ fn snapshot(env: &TestEnv, key: &str) -> anyhow::Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("missing snapshot"))
 }
 
+#[cfg(target_os = "linux")]
 fn execute(env: &TestEnv, key: &str, snapshot: &Value) -> std::process::Output {
     let request =
         json!({"schema_version": 1, "operation": "execute", "key": key, "snapshot": snapshot});
@@ -144,6 +148,26 @@ fn fixture() -> TestEnv {
 }
 
 #[test]
+#[cfg(not(target_os = "linux"))]
+fn reviewed_capture_is_not_executable_off_linux() {
+    let env = fixture();
+    let before = env.four_trees();
+    let out = review(&env, ".config/app/data");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let record: Value =
+        serde_json::from_slice(out.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    assert_eq!(record.get("executable"), Some(&json!(false)));
+    assert!(record.get("snapshot").is_none_or(Value::is_null));
+    assert_eq!(env.four_trees(), before);
+    assert!(!env.repo().join(".config/app/data").exists());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn captures_reviewed_leaf_without_touching_siblings() {
     let env = fixture();
     let key = ".config/app/data";
@@ -174,6 +198,7 @@ fn captures_reviewed_leaf_without_touching_siblings() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn refuses_stale_content_and_occupied_destination() {
     for occupied in [false, true] {
         let env = fixture();
@@ -205,6 +230,7 @@ fn refuses_stale_content_and_occupied_destination() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn captures_preconfigured_private_mode() {
     use std::os::unix::fs::PermissionsExt;
     let env = fixture();
@@ -237,6 +263,7 @@ fn captures_preconfigured_private_mode() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn refuses_changed_mode_directory_or_new_variant() {
     for change in ["mode", "directory", "variant"] {
         let env = fixture();
@@ -264,6 +291,7 @@ fn refuses_changed_mode_directory_or_new_variant() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn leaves_an_unrelated_staged_edit_alone() {
     let env = fixture();
     let key = ".config/app/data";
@@ -284,6 +312,7 @@ fn leaves_an_unrelated_staged_edit_alone() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn encrypts_one_held_leaf_without_a_private_identity() {
     if !common::age_installed() {
         return;
@@ -339,6 +368,7 @@ fn encrypts_one_held_leaf_without_a_private_identity() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn encrypted_review_refuses_changed_home() {
     if !common::age_installed() {
         return;
@@ -380,6 +410,7 @@ fn encrypted_review_refuses_changed_home() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn first_held_secret_is_encrypted_with_a_new_recipient_record() {
     if !common::age_installed() {
         return;
@@ -456,6 +487,7 @@ fn first_held_secret_is_encrypted_with_a_new_recipient_record() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn rejects_a_snapshot_with_unknown_fields() {
     let env = fixture();
     let key = ".config/app/data";
@@ -484,6 +516,7 @@ fn action_request(
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn allows_only_name_held_text_without_creating_a_grant() {
     for mode in [0o644, 0o600] {
         let env = fixture();
@@ -542,6 +575,7 @@ fn allows_only_name_held_text_without_creating_a_grant() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn plain_review_rejects_new_credentials_and_cross_action_snapshots() {
     let env = fixture();
     let key = ".config/app/.env";
@@ -605,6 +639,7 @@ fn plain_review_refuses_binary_secret_names() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn held_managed() -> (TestEnv, String) {
     let env = TestEnv::new();
     env.ok(&["init"]);
@@ -619,6 +654,7 @@ fn held_managed() -> (TestEnv, String) {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn forgets_one_held_managed_key_with_private_backup() {
     use std::os::unix::fs::PermissionsExt;
     let (env, secret) = held_managed();
@@ -676,6 +712,7 @@ fn forgets_one_held_managed_key_with_private_backup() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn forget_refuses_nonheld_and_a_new_variant() {
     let env = TestEnv::new();
     env.ok(&["init"]);
@@ -733,6 +770,7 @@ fn forget_refuses_nonheld_and_a_new_variant() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn forget_saves_a_repo_only_held_edit() {
     let env = TestEnv::new();
     env.ok(&["init"]);
@@ -787,6 +825,7 @@ fn forget_saves_a_repo_only_held_edit() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn forget_review_requires_the_exact_home_occurrence() {
     let (env, _) = held_managed();
     let occurrence = json!({"scope":"home","source":".profile","reason":"content",
@@ -861,6 +900,7 @@ fn forget_review_requires_the_exact_home_occurrence() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn plain_review_requires_the_exact_new_occurrence() {
     let env = fixture();
     let key = ".config/app/.env";
@@ -900,6 +940,7 @@ fn plain_review_requires_the_exact_new_occurrence() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn encrypt_review_requires_the_exact_new_occurrence() {
     if !common::age_installed() {
         return;
@@ -946,6 +987,7 @@ fn encrypt_review_requires_the_exact_new_occurrence() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn forget_review_checks_the_exact_tracked_repo_occurrence() {
     let env = TestEnv::new();
     env.ok(&["init"]);

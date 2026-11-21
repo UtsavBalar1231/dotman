@@ -10,7 +10,6 @@ rust-version = "1.88"
 authors = ["Utsav Balar <utsavbalar1231@gmail.com>"]
 description = "A dotfiles manager with no learning curve, safe by default"
 # documentation = "https://docs.rs/dotman"
-homepage = "https://github.com/UtsavBalar1231/dotman"
 repository = "https://github.com/UtsavBalar1231/dotman"
 license = "MIT"
 readme = "README.md"
@@ -59,7 +58,6 @@ serde_json = "1.0"
 regex = { version = "1.13", default-features = false, features = ["std", "perf"] }
 
 shell-words = "1.1"
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]

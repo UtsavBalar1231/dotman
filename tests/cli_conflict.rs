@@ -147,6 +147,7 @@ fn kill_once(env: &TestEnv, pattern: &str, before: bool) -> (String, String) {
 /// The lines of a terminal capture that are wider than `cols`, judged with the harness's long
 /// temp root shortened. A line that is one word, such as a backup path on a line of its own, cannot
 /// be broken and is left out.
+#[cfg(target_os = "linux")]
 fn wide_lines(env: &TestEnv, seen: &str, cols: usize) -> Vec<String> {
     let root = env.root().to_string_lossy().into_owned();
     seen.replace("\r\n", "\n")

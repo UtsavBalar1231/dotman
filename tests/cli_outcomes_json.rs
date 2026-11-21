@@ -815,6 +815,48 @@ fn directory_conflict(name: &str) -> R<(TestEnv, Vec<Value>, String)> {
     Ok((b, report, String::from_utf8(out.stderr)?))
 }
 
+fn parked_copy(env: &TestEnv, name: &str) -> R<(String, Value)> {
+    let prefix = format!("{name}~");
+    let copies = fs::read_dir(env.repo())?
+        .map(|entry| Ok(entry?.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let copies: Vec<_> = copies
+        .iter()
+        .filter_map(|path| path.to_str().filter(|path| path.starts_with(&prefix)))
+        .collect();
+    let &[copy] = copies.as_slice() else {
+        return Err(format!("expected one parked copy: {copies:?}").into());
+    };
+    let path = env.repo().join(copy);
+    assert_eq!(fs::read(&path)?, b"this-machine-file");
+    let literal = format!(":(literal){copy}");
+    let tracked = common::git_in(env, &env.repo(), &["ls-files", "-z", "--", &literal]);
+    let argv = if tracked.is_empty() {
+        json!(["rm", "-f", "--", path.to_str().ok_or("copy path")?])
+    } else {
+        assert!(tracked.split_terminator('\0').all(|entry| entry == copy));
+        json!(["dotman", "git", "rm", "-q", "-f", "--", literal])
+    };
+    Ok((copy.to_owned(), argv))
+}
+
+fn is_copy_removal(step: &Value) -> bool {
+    at(step, "/argv/0") == "rm" || at(step, "/argv/2") == "rm"
+}
+
+fn run_copy_removal(env: &TestEnv, step: &Value, expected: &Value) -> R<Output> {
+    assert_eq!(&step["argv"], expected);
+    if at(step, "/argv/0") == "rm" {
+        let path = at(step, "/argv/3").as_str().ok_or("copy path")?;
+        Ok(env
+            .process_for(std::path::Path::new("rm"))
+            .args(["-f", "--", path])
+            .output()?)
+    } else {
+        run_argv(env, step)
+    }
+}
+
 #[test]
 fn structured_and_printed_destructive_recovery_keep_literal_copy_neighbours() -> R {
     for name in ["x[1]", "star*", ":(glob)colon*"] {
@@ -827,17 +869,11 @@ fn structured_and_printed_destructive_recovery_keep_literal_copy_neighbours() ->
             .find(|step| at(step, "/argv/2") == "pull")
             .ok_or("pull")?;
         assert_eq!(run_argv(&env, pull)?.status.code(), Some(1));
+        let (copy, expected) = parked_copy(&env, name)?;
         let remove = recovery
             .iter()
-            .find(|step| at(step, "/argv/2") == "rm")
-            .ok_or("tracked copy removal")?;
-        let literal = remove["argv"]
-            .as_array()
-            .ok_or("argv")?
-            .last()
-            .and_then(Value::as_str)
-            .ok_or("copy")?;
-        let copy = literal.strip_prefix(":(literal)").ok_or("literal prefix")?;
+            .find(|step| is_copy_removal(step))
+            .ok_or("copy removal")?;
         let neighbour = copy
             .replace("[1]", "1")
             .replace('*', "neighbour")
@@ -858,23 +894,28 @@ fn structured_and_printed_destructive_recovery_keep_literal_copy_neighbours() ->
                 &format!(":{neighbour}"),
             ])
             .stdout;
-        assert!(run_argv(&env, remove)?.status.success());
-        assert!(!env.repo().join(copy).exists());
+        assert!(run_copy_removal(&env, remove, &expected)?.status.success());
+        assert!(!env.repo().join(&copy).exists());
         assert_eq!(
             fs::read(env.repo().join(&neighbour))?,
             b"neighbour-hand-edit"
         );
-        env.write_repo(copy, b"this-machine-file");
-        env.dot()
-            .args(["git", "add", "--"])
-            .arg(literal)
-            .assert()
-            .success();
+        env.write_repo(&copy, b"this-machine-file");
+        if at(remove, "/argv/0") == "dotman" {
+            env.dot()
+                .args(["git", "add", "--"])
+                .arg(format!(":(literal){copy}"))
+                .assert()
+                .success();
+        }
         let printed = stderr
             .lines()
             .map(str::trim_start)
-            .find(|line| line.starts_with("dotman git rm -q -f --"))
+            .find(|line| {
+                line.starts_with("dotman git rm -q -f -- ") || line.starts_with("rm -f -- ")
+            })
             .ok_or("printed removal")?;
+        assert_eq!(json!(shell_words::split(printed)?), expected);
         let out = common::paste(&env, printed);
         assert!(
             out.status.success(),
@@ -1013,19 +1054,29 @@ fn unmodelled_recovery_runs_the_complete_decoded_recipe_after_manual_resolution(
         .as_array()
         .ok_or("recipe")?;
     assert!(recipe.iter().any(|step| step["kind"] == "instruction"));
-    for (n, step) in recipe
-        .iter()
-        .filter(|step| step["kind"] == "command")
-        .enumerate()
-    {
-        let out = run_argv(&env, step)?;
+    let mut commands = recipe.iter().filter(|step| step["kind"] == "command");
+    let pull = commands.next().ok_or("pull command")?;
+    assert_eq!(at(pull, "/argv/2"), "pull");
+    assert_eq!(run_argv(&env, pull)?.status.code(), Some(1));
+    let (copy, expected) = parked_copy(&env, "shape[1]")?;
+    let mut removed = false;
+    for step in commands {
+        let out = if is_copy_removal(step) {
+            assert!(!removed, "duplicate copy removal");
+            removed = true;
+            run_copy_removal(&env, step, &expected)?
+        } else {
+            run_argv(&env, step)?
+        };
         assert_eq!(
             out.status.code(),
-            Some(i32::from(n == 0)),
+            Some(0),
             "{step}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    assert!(removed, "missing copy removal");
+    assert!(!env.repo().join(copy).exists());
     assert_eq!(env.read("shape[1]"), b"this-machine-file");
     assert!(!env.repo().join(".git/rebase-merge").exists());
     assert!(!env.repo().join(".git/dotman-pull").exists());

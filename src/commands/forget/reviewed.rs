@@ -218,6 +218,11 @@ mod tests {
             "# preserved comment\n[dirs]\npaths = [\"dir\"] # tracked directory\n[modes]\n\"dir/a\" = \"0600\"\n\"dir/other\" = \"0640\" # unrelated mode\n",
         )
         .unwrap();
+        std::fs::set_permissions(
+            ctx.repo_config_file(),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let mut state = crate::state::State::load(&ctx.paths.state_file(), "test").unwrap();
         state.files.insert(
             "dir/a".into(),
@@ -579,12 +584,14 @@ impl std::fmt::Display for ForgetPartial {
 
 impl std::error::Error for ForgetPartial {}
 
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct QuarantineConflict {
     directory: String,
     path: std::path::PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 impl std::fmt::Display for QuarantineConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -595,6 +602,7 @@ impl std::fmt::Display for QuarantineConflict {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl std::error::Error for QuarantineConflict {}
 
 fn digest<T: Serialize>(value: &T) -> Result<String> {
@@ -670,6 +678,7 @@ fn control_file(_path: &Path) -> Result<ControlFile> {
     anyhow::bail!("reviewed forget requires protected metadata reads on Linux")
 }
 
+#[cfg(target_os = "linux")]
 fn file_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(control_file(path)?.map(|(bytes, _)| bytes))
 }
@@ -704,11 +713,7 @@ fn file_metadata(path: &Path) -> Result<Option<(u32, bool, bool)>> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn file_metadata(_path: &Path) -> Result<Option<(u32, bool, bool)>> {
-    anyhow::bail!("reviewed forget requires protected metadata reads on Linux")
-}
-
+#[cfg(target_os = "linux")]
 fn edit_config(
     bytes: Option<&[u8]>,
     before: &crate::repo_config::RepoConfig,
@@ -768,11 +773,17 @@ fn edit_config(
 type ControlFile = Option<(Vec<u8>, (u32, bool, bool))>;
 
 struct Controls {
+    #[cfg(target_os = "linux")]
     config: crate::repo_config::RepoConfig,
+    #[cfg(target_os = "linux")]
     state: crate::state::State,
+    #[cfg(target_os = "linux")]
     config_file: ControlFile,
+    #[cfg(target_os = "linux")]
     state_file: ControlFile,
+    #[cfg(target_os = "linux")]
     index_file: ControlFile,
+    #[cfg(target_os = "linux")]
     head: String,
 }
 
@@ -894,17 +905,18 @@ fn review_pinned(ctx: &Context, key: &str) -> Result<(ForgetReview, Controls)> {
         holds,
         context,
     };
-    Ok((
-        review,
-        Controls {
-            config,
-            state,
-            config_file,
-            state_file,
-            index_file,
-            head,
-        },
-    ))
+    #[cfg(target_os = "linux")]
+    let controls = Controls {
+        config,
+        state,
+        config_file,
+        state_file,
+        index_file,
+        head,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let controls = Controls {};
+    Ok((review, controls))
 }
 
 fn source_holds(ctx: &Context, key: &str, sources: &[Source]) -> Result<Vec<(String, String)>> {

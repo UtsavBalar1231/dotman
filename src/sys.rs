@@ -156,16 +156,7 @@ pub(crate) fn rename_noreplace(
     to_dir: BorrowedFd<'_>,
     to: &CStr,
 ) -> io::Result<()> {
-    // SAFETY: both descriptors and NUL-terminated names remain valid for the call.
-    check(unsafe {
-        libc::renameat2(
-            from_dir.as_raw_fd(),
-            from.as_ptr(),
-            to_dir.as_raw_fd(),
-            to.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    })
+    renameat2(from_dir, from, to_dir, to, libc::RENAME_NOREPLACE)
 }
 
 #[cfg(target_os = "linux")]
@@ -195,16 +186,34 @@ pub(crate) fn rename_exchange(
             ));
         }
     }
-    // SAFETY: both borrowed descriptors and NUL-terminated names remain valid for the call.
-    check(unsafe {
-        libc::renameat2(
-            from_dir.as_raw_fd(),
+    renameat2(from_dir, from, to_dir, to, libc::RENAME_EXCHANGE)
+}
+
+#[cfg(target_os = "linux")]
+fn renameat2(
+    from_dir: BorrowedFd<'_>,
+    from: &CStr,
+    to_dir: BorrowedFd<'_>,
+    to: &CStr,
+    flags: libc::c_uint,
+) -> io::Result<()> {
+    // Older libcs may not export renameat2 even when the kernel supports it.
+    // SAFETY: both descriptors and NUL-terminated names remain valid for the call.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::c_long::from(from_dir.as_raw_fd()),
             from.as_ptr(),
-            to_dir.as_raw_fd(),
+            libc::c_long::from(to_dir.as_raw_fd()),
             to.as_ptr(),
-            libc::RENAME_EXCHANGE,
+            libc::c_ulong::from(flags),
         )
-    })
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -548,8 +557,8 @@ mod tests {
         let attempt = || rename_noreplace(source.as_fd(), c"repo", parent.as_fd(), c"target");
 
         assert_eq!(
-            attempt().err().map(|err| err.kind()),
-            Some(io::ErrorKind::AlreadyExists)
+            attempt().err().and_then(|err| err.raw_os_error()),
+            Some(libc::EEXIST)
         );
         assert_eq!(std::fs::metadata(&target)?.ino(), inode);
         assert_eq!(std::fs::read_dir(&target)?.count(), 0);
@@ -578,6 +587,12 @@ mod tests {
         assert_eq!(std::fs::metadata(&b)?.ino(), first);
         assert_eq!(std::fs::read(&a)?, b"second");
         assert_eq!(std::fs::read(&b)?, b"first");
+        assert_eq!(
+            rename_exchange(dir.as_fd(), c"a", dir.as_fd(), c"missing")
+                .err()
+                .and_then(|error| error.raw_os_error()),
+            Some(libc::ENOENT)
+        );
         assert_eq!(
             rename_exchange(dir.as_fd(), c"../a", dir.as_fd(), c"b")
                 .err()

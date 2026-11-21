@@ -100,8 +100,10 @@ fn absolute_symlink_targets_become_relative_and_a_dangling_link_is_refused() {
     let env = TestEnv::new();
     env.ok(&["init"]);
     env.write(".bashrc", b"x", 0o644);
+    let outside = env.root().join("outside");
+    fs::write(&outside, b"outside").unwrap();
     env.symlink(".config/inside", env.home().join(".bashrc").as_path());
-    env.symlink(".config/outside", "/etc/hostname");
+    env.symlink(".config/outside", &outside);
     env.symlink(".config/relative", "../.bashrc");
     env.symlink("dangling", "/nonexistent/target");
 
@@ -116,7 +118,7 @@ fn absolute_symlink_targets_become_relative_and_a_dangling_link_is_refused() {
 
     let target = |key: &str| fs::read_link(env.repo().join(key)).expect("read_link");
     assert_eq!(target(".config/inside"), Path::new("../.bashrc"));
-    assert_eq!(target(".config/outside"), Path::new("/etc/hostname"));
+    assert_eq!(target(".config/outside"), outside);
     assert_eq!(target(".config/relative"), Path::new("../.bashrc"));
     assert!(fs::symlink_metadata(env.repo().join("dangling")).is_err());
     assert_eq!(

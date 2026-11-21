@@ -93,11 +93,13 @@ impl TestEnv {
         );
         for dir in [
             self.home(),
+            self.root().join("xdg"),
             self.xdg_config(),
             self.xdg_state(),
             self.xdg_data(),
         ] {
-            fs::create_dir_all(dir).expect("create dir");
+            fs::create_dir_all(&dir).expect("create dir");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod dir");
         }
         fs::write(
             self.home().join(".gitconfig"),
@@ -679,6 +681,76 @@ pub fn git_in(env: &TestEnv, dir: &Path, args: &[&str]) -> String {
     let mut full = vec!["-C", &*dir];
     full.extend_from_slice(args);
     env.git(&full)
+}
+
+pub fn prepared_transactions_supported() -> R<bool> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    use std::sync::OnceLock;
+
+    fn probe() -> R<bool> {
+        let env = TestEnv::new();
+        let mut child = env
+            .process_for(Path::new("git"))
+            .arg("-C")
+            .arg(env.remote_path())
+            .args(["update-ref", "--no-deref", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("stdin")?
+            .write_all(b"start\nprepare\nabort\n")?;
+        let out = child.wait_with_output()?;
+        if out.status.success() {
+            assert_eq!(out.stdout, b"start: ok\nprepare: ok\nabort: ok\n");
+        } else {
+            assert_eq!(out.status.code(), Some(128), "{}", text(&out));
+            assert!(
+                text(&out).contains("unknown command: start"),
+                "{}",
+                text(&out)
+            );
+        }
+        Ok(out.status.success())
+    }
+
+    static SUPPORT: OnceLock<Result<bool, String>> = OnceLock::new();
+    SUPPORT
+        .get_or_init(|| probe().map_err(|error| error.to_string()))
+        .as_ref()
+        .copied()
+        .map_err(|error| error.clone().into())
+}
+
+/// Runs a reviewed operation that needs Git's prepared transaction to reach the assertion under
+/// test. On a toolchain without it, verifies the actual refusal and unchanged fixture state.
+pub fn expect_prepared_publication(
+    env: &TestEnv,
+    run: impl FnOnce() -> Output,
+) -> R<Option<Output>> {
+    if prepared_transactions_supported()? {
+        return Ok(Some(run()));
+    }
+    assert_prepared_refusal(env, run);
+    Ok(None)
+}
+
+pub fn assert_prepared_refusal(env: &TestEnv, run: impl FnOnce() -> Output) {
+    let before = tree_checksum(env.root());
+    let remote = tree_checksum(&env.remote_path());
+    let out = run();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert!(
+        text(&out).contains("prepared Git transaction unavailable"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(tree_checksum(env.root()), before);
+    assert_eq!(tree_checksum(&env.remote_path()), remote);
 }
 
 /// A source tree outside the repo. Dropping it fails the test if an import changed it since the

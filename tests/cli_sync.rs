@@ -3407,6 +3407,23 @@ fn printed_copy(err: &str, whose: &str, path: &str) -> String {
         .to_owned()
 }
 
+// reason: the printed copy must decode to one path present in the stopped worktree.
+#[allow(clippy::expect_used)]
+fn parked_copy_removal(env: &TestEnv, copy: &str) -> String {
+    let words = shell_words::split(copy).expect("quoted copy");
+    let [copy]: [String; 1] = words.try_into().expect("one path");
+    let path = env.repo().join(&copy);
+    assert!(fs::symlink_metadata(&path).is_ok(), "missing {copy}");
+    let literal = format!(":(literal){copy}");
+    let tracked = common::git_in(env, &env.repo(), &["ls-files", "-z", "--", &literal]);
+    if tracked.is_empty() {
+        format!("rm -f -- {}", shell_words::quote(&path.to_string_lossy()))
+    } else {
+        assert!(tracked.split_terminator('\0').all(|entry| entry == copy));
+        format!("dotman git rm -q -f -- {}", shell_words::quote(&literal))
+    }
+}
+
 /// A file or a symlink pointing outside the repo here, against a directory in origin, is a shape
 /// dotman does not settle, even with a flag and beside a conflict it does settle: sync exits 4
 /// with git's steps, which name each path as it stands after the abort and git's copy of this
@@ -3445,30 +3462,19 @@ fn a_file_against_a_directory_exits_4_with_git_steps_that_work_as_printed() {
         );
         let copy = printed_copy(&err, "this machine's", name);
         assert!(copy.starts_with(&format!("'{name}~")), "{err}");
-        // git with `ort` tracks the copy; git 2.25's `recursive` leaves it untracked.
-        let bare = shell_words::split(&copy).expect("the copy as one word");
-        let [bare]: [String; 1] = bare.try_into().expect("one word");
-        let remove = if common::pull_strategy(&b) == "ort" {
-            format!(
-                "dotman git rm -q -f -- {}",
-                shell_words::quote(&format!(":(literal){bare}"))
-            )
-        } else {
-            let path = b.repo().join(bare).to_string_lossy().into_owned();
-            format!("rm -f -- {}", shell_words::quote(&path))
-        };
         let keep = steps(&err).get(2).cloned().unwrap_or_default();
-        assert_eq!(
-            keep,
-            format!(
-                "dotman git checkout --no-overlay REBASE_HEAD -- ':(literal){name}'\n{remove}\ndotman git add -- ':(literal).a' ':(literal){name}'\ndotman git add -u"
-            )
-        );
         no_replay_left(&b);
         assert_eq!(b.read(".a"), b"from b\n");
 
         let repo = b.repo();
         run_git_steps(&b, &err, || {
+            let remove = parked_copy_removal(&b, &copy);
+            assert_eq!(
+                keep,
+                format!(
+                    "dotman git checkout --no-overlay REBASE_HEAD -- ':(literal){name}'\n{remove}\ndotman git add -- ':(literal).a' ':(literal){name}'\ndotman git add -u"
+                )
+            );
             fs::write(repo.join(".a"), b"resolved\n").expect("resolve .a");
         });
         no_replay_left(&b);
@@ -3521,20 +3527,51 @@ fn a_symlink_or_a_submodule_in_origin_exits_4_with_git_steps_that_work_as_printe
         let err = exits(&b, 4, &["sync", "--keep-local"]);
         assert_eq!(err.matches(reason).count(), 1, "{err}");
         assert!(!err.contains("git matched"), "{err}");
-        // git 2.25's `recursive` sets no copy of a file aside from a submodule: it leaves the path
-        // empty, and step 3 checks this machine's version out.
-        if shape == "submodule" && common::pull_strategy(&b) == "recursive" {
-            let edit = steps(&err).get(1).cloned().unwrap_or_default();
-            assert!(
-                edit.ends_with("\n.a is left empty: step 3 checks out this machine's version"),
-                "{err}"
-            );
-            assert!(!err.contains("aside as a copy"), "{err}");
-        } else {
-            printed_copy(&err, copy_of, path);
-        }
+        let recipe = steps(&err);
+        let edit = recipe.get(1).expect("step 2");
+        let commands = recipe.get(2).expect("step 3");
         no_replay_left(&b);
-        run_git_steps(&b, &err, || {});
+        run_git_steps(&b, &err, || {
+            if shape == "submodule"
+                && common::pull_strategy(&b) == "recursive"
+                && edit.ends_with("\n.a is left empty: step 3 checks out this machine's version")
+            {
+                assert!(!err.contains("aside as a copy"), "{err}");
+                let repo = b.repo();
+                let path = repo.join(path);
+                assert!(
+                    !path.exists()
+                        || (path.is_dir()
+                            && fs::read_dir(path)
+                                .expect("read empty directory")
+                                .next()
+                                .is_none())
+                );
+                assert!(!fs::read_dir(repo).expect("repo").any(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".a~")
+                }));
+                assert!(
+                    !common::git_in(&b, &b.repo(), &["ls-files", "-z"])
+                        .split('\0')
+                        .any(|path| path.starts_with(".a~"))
+                );
+            } else {
+                let copy = printed_copy(&err, copy_of, path);
+                let remove = parked_copy_removal(&b, &copy);
+                assert!(commands.lines().any(|line| line == remove), "{err}");
+            }
+            if shape == "submodule" {
+                assert_eq!(
+                    commands.lines().next(),
+                    Some("dotman git checkout --no-overlay REBASE_HEAD -- ':(literal).a'"),
+                    "{err}"
+                );
+            }
+        });
         no_replay_left(&b);
         assert_eq!(remote_file(&b, edited), "from b\n", "{shape}");
         exits(&b, 0, &["sync"]);

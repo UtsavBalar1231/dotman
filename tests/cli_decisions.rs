@@ -1,6 +1,6 @@
 mod common;
 
-use common::TestEnv;
+use common::{TestEnv, expect_prepared_publication, prepared_transactions_supported};
 use serde_json::{Value, json};
 use std::fs;
 
@@ -97,6 +97,14 @@ fn decided(env: &TestEnv, input: &Value, command: &str, extra: &[&str]) -> std::
     env.run_stdin(&[], input.to_string().as_bytes(), &args)
 }
 
+fn decided_publication(
+    env: &TestEnv,
+    review: &Value,
+    extra: &[&str],
+) -> R<Option<std::process::Output>> {
+    expect_prepared_publication(env, || decided(env, review, "sync", extra))
+}
+
 fn sync_input(env: &TestEnv) -> R<Value> {
     sync_input_with(env, &[])
 }
@@ -130,6 +138,124 @@ fn sync_input_with(env: &TestEnv, flags: &[&str]) -> R<Value> {
 }
 
 #[test]
+fn reviewed_sync_matches_actual_prepared_transaction_capability() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"original", 0o600);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    env.write(".a", b"changed", 0o600);
+    let review = sync_input(&env)?;
+    let supported = prepared_transactions_supported()?;
+    let before = env.four_trees();
+    let out = decided(&env, &review, "sync", &[]);
+    if supported {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    } else {
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(env.four_trees(), before);
+        assert!(common::text(&out).contains("prepared Git transaction unavailable"));
+        env.ok(&["sync"]);
+    }
+    assert_eq!(fs::read(env.repo().join(".a"))?, b"changed");
+    Ok(())
+}
+
+#[test]
+fn reviewed_local_noop_does_not_need_prepared_transactions() -> R {
+    let mut env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".a", b"original", 0o600);
+    env.ok(&["add", ".a"]);
+    env.ok(&["sync"]);
+    let review = sync_input(&env)?;
+    let actual = decided(&env, &review, "sync", &[]);
+    assert_eq!(actual.status.code(), Some(0), "{}", common::text(&actual));
+    let git = std::env::split_paths(&std::env::var_os("PATH").ok_or("PATH")?)
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .ok_or("git")?;
+    let wrapper = env.root().join("no-prepared");
+    fs::create_dir(&wrapper)?;
+    common::write_exe(
+        &wrapper.join("git"),
+        &format!(
+            "#!/bin/sh\nfor arg do\nif [ \"$arg\" = update-ref ]; then\nexit 99\nfi\ndone\nexec {} \"$@\"\n",
+            shell_words::quote(git.to_str().ok_or("git")?)
+        ),
+    )?;
+    env.prepend_path(wrapper);
+    let out = decided(&env, &review, "sync", &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(env.repo().join(".a"))?, b"original");
+    Ok(())
+}
+
+#[test]
+fn reviewed_sync_without_prepared_transactions_refuses_before_capture() -> R {
+    for remote in [false, true] {
+        let mut env = TestEnv::new();
+        if remote {
+            env.ok(&["init", "--remote", &env.remote_url()]);
+        } else {
+            env.ok(&["init"]);
+        }
+        env.write(".a", b"original", 0o600);
+        env.ok(&["add", ".a"]);
+        env.ok(&["sync"]);
+        env.write(".a", b"changed", 0o600);
+        let review = sync_input(&env)?;
+        let git = std::env::split_paths(&std::env::var_os("PATH").ok_or("PATH")?)
+            .map(|dir| dir.join("git"))
+            .find(|path| path.is_file())
+            .ok_or("git")?;
+        let wrapper = env.root().join("no-prepared");
+        fs::create_dir(&wrapper)?;
+        common::write_exe(
+            &wrapper.join("git"),
+            &format!(
+                "#!/bin/sh\nfor arg do\nif [ \"$arg\" = update-ref ]; then\ncat >/dev/null\nprintf '%s\\n' 'fatal: unknown command: start' >&2\nexit 128\nfi\ndone\nexec {} \"$@\"\n",
+                shell_words::quote(git.to_str().ok_or("git")?)
+            ),
+        )?;
+        env.prepend_path(wrapper);
+        let before = env.four_trees();
+        let out = decided(&env, &review, "sync", &[]);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(env.four_trees(), before);
+        let dry = decided(&env, &review, "sync", &["--dry-run"]);
+        assert!(
+            dry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&dry.stderr)
+        );
+        assert_eq!(env.four_trees(), before);
+        env.ok(&["sync"]);
+        assert_eq!(fs::read(env.repo().join(".a"))?, b"changed");
+    }
+    Ok(())
+}
+
+#[test]
 fn decided_sync_preserves_unreviewed_index_and_only_publishes_matching_captures() -> R {
     let env = TestEnv::new();
     env.ok(&["init", "--remote", &env.remote_url()]);
@@ -160,7 +286,9 @@ fn decided_sync_preserves_unreviewed_index_and_only_publishes_matching_captures(
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(env.four_trees(), dry);
-    let out = decided(&env, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -659,7 +787,9 @@ fn reviewed_sync_defers_only_incoming_writes_even_when_already_approved() -> R {
         a.ok(&["sync", "--no-hooks"]);
         let review = sync_input(&b)?;
         defer_rejects_other_policies(&b, &review)?;
-        let out = decided(&b, &review, "sync", &["--defer-hooks"]);
+        let Some(out) = decided_publication(&b, &review, &["--defer-hooks"])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -798,6 +928,7 @@ fn standalone_hook_review_runs_only_pending_commands_and_rejects_stale_tokens() 
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_ignore_grant_records_new_current_rules() -> R {
     use std::os::unix::fs::PermissionsExt as _;
     let env = TestEnv::new();
@@ -843,6 +974,7 @@ fn trust_ignore_grant_records_new_current_rules() -> R {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_review_refuses_sensitive_policy_and_forbidden_directories() -> R {
     for sensitive in [true, false] {
         let env = TestEnv::new();
@@ -872,6 +1004,7 @@ fn trust_review_refuses_sensitive_policy_and_forbidden_directories() -> R {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_review_refuses_sensitive_empty_directory_without_disclosure() -> R {
     let env = TestEnv::new();
     env.ok(&["init"]);
@@ -988,7 +1121,9 @@ fn decided_reencryption_stages_only_rewritten_sources_and_record() -> R {
         let repo = a.repo();
         let repo_path = repo.to_str().ok_or("repo")?;
         let index = a.git(&["-C", repo_path, "ls-files", "-s", "--", ".unlisted"]);
-        let out = decided(&a, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&a, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(3),
@@ -1140,7 +1275,9 @@ fn decided_first_commit_can_review_an_unborn_head_and_own_files() -> R {
     env.ok(&["init"]);
     let reviewed = sync_input(&env)?;
     assert!(at(&reviewed, "/sync/head").is_null());
-    let out = decided(&env, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -1203,7 +1340,9 @@ fn push_publishes_the_pinned_reviewed_tip_not_a_raced_branch_head() -> R {
         ),
     )?;
     env.prepend_path(wrapper);
-    let out = decided(&env, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -1241,6 +1380,7 @@ fn saved_state(env: &TestEnv) -> R<dotman::state::State> {
     )?)?)
 }
 
+#[cfg(target_os = "linux")]
 fn trust_review(env: &TestEnv, action: &str) -> R<Value> {
     let out = env.run(&["apply", "--review-trust", action, "--dry-run", "--json"]);
     assert_eq!(
@@ -1258,6 +1398,26 @@ fn trust_review(env: &TestEnv, action: &str) -> R<Value> {
 }
 
 #[test]
+#[cfg(not(target_os = "linux"))]
+fn trust_review_refuses_without_mutating_off_linux() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let before = env.four_trees();
+    let out = env.run(&[
+        "apply",
+        "--review-trust",
+        "directories",
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("trust review refused"));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\"trust_review\""));
+    assert_eq!(env.four_trees(), before);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn local_trust_grants_bind_candidates_without_capturing_them() -> R {
     use std::os::unix::fs::PermissionsExt as _;
     for action in ["directories", "ignores"] {
@@ -1352,6 +1512,7 @@ fn local_trust_grants_bind_candidates_without_capturing_them() -> R {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn local_trust_rejects_state_config_and_mixed_approval_changes() -> R {
     use std::os::unix::fs::PermissionsExt as _;
     let env = TestEnv::new();
@@ -1417,6 +1578,7 @@ fn local_trust_rejects_state_config_and_mixed_approval_changes() -> R {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_review_rejects_foreign_state_and_oversized_candidates() -> R {
     let env = TestEnv::new();
     env.ok(&["init"]);
@@ -1459,6 +1621,7 @@ fn trust_review_rejects_foreign_state_and_oversized_candidates() -> R {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn trust_review_binds_empty_nested_directory_changes() -> R {
     let env = TestEnv::new();
     env.ok(&["init"]);
@@ -1529,7 +1692,9 @@ fn directory_and_ignore_approvals_bind_complete_sets() -> R {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(env.four_trees(), before);
-        let out = decided(&env, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(if stale { 3 } else { 0 }),
@@ -1575,7 +1740,19 @@ fn mass_delete_approval_binds_the_exact_set_and_refusal_keeps_state() -> R {
             )?;
         }
         let before = saved_state(&env)?;
-        let out = decided(&env, &reviewed, "sync", &[]);
+        let before_preview = env.four_trees();
+        let preview = decided(&env, &reviewed, "sync", &["--dry-run"]);
+        let expected = Some(if token == "exact" { 0 } else { 3 });
+        assert_eq!(
+            preview.status.code(),
+            expected,
+            "{}",
+            common::text(&preview)
+        );
+        assert_eq!(env.four_trees(), before_preview);
+        let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(if token == "exact" { 0 } else { 3 }),
@@ -1664,7 +1841,9 @@ fn reviewed_commit_preserves_staged_only_edits_deletions_and_renames() -> R {
         let before = env
             .git_raw(&["-C", repo, "ls-files", "-s", "-z", "--", ".b", ".renamed"])
             .stdout;
-        let out = decided(&env, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(3),
@@ -1904,7 +2083,9 @@ fn new_directory_captures_round_trip_missing_logical_sources_and_raw_links() -> 
         if approved {
             env.write(".config/app/unlisted", b"unlisted-sibling", 0o600);
         }
-        let out = decided(&env, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(if approved { 3 } else { 0 }),
@@ -2039,7 +2220,9 @@ fn a_variant_arriving_during_an_earlier_capture_invalidates_the_selected_source(
             ),
         )?;
         env.prepend_path(wrapper);
-        let out = decided(&env, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(3),
@@ -2125,7 +2308,9 @@ fn reviewed_encrypted_capture_projects_without_writes_then_commits_its_ciphertex
     );
     assert_eq!(common::tree_checksum(env.root()), before);
     env.write_repo(".unlisted", b"unreviewed-capture-neighbor");
-    let out = decided(&env, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -2274,6 +2459,82 @@ fn pull_pair(kind: &str) -> (TestEnv, TestEnv) {
     (a, b)
 }
 
+#[test]
+fn reviewed_pull_matches_actual_prepared_transaction_capability() -> R {
+    for kind in ["fast_forward", "diverge"] {
+        let (a, b) = pull_pair(kind);
+        let review = sync_input(&b)?;
+        let supported = prepared_transactions_supported()?;
+        let before = b.four_trees();
+        let remote = common::tree_checksum(&a.remote_path());
+        let out = decided(&b, &review, "sync", &[]);
+        if supported {
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{kind}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(b.read(".arrived"), b"from-remote");
+            if kind == "diverge" {
+                assert_eq!(b.read(".local"), b"same-patch");
+            }
+        } else {
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{kind}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(common::text(&out).contains("prepared Git transaction unavailable"));
+            assert_eq!(b.four_trees(), before);
+            assert_eq!(common::tree_checksum(&a.remote_path()), remote);
+            assert!(!b.repo().join(".git/dotman-pull").exists());
+            b.ok(&["sync"]);
+            assert_eq!(b.read(".arrived"), b"from-remote");
+            if kind == "diverge" {
+                assert_eq!(b.read(".local"), b"same-patch");
+            }
+            assert!(!b.repo().join(".git/dotman-pull").exists());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn reviewed_remote_sync_reports_repo_hold_without_touching_the_pull() -> R {
+    let (a, b) = pull_pair("fast_forward");
+    let review = sync_input(&b)?;
+    b.write_repo(
+        ".base",
+        concat!(
+            "AGE-SECRET-KEY-1",
+            "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+        )
+        .as_bytes(),
+    );
+    let before = b.four_trees();
+    let remote = common::tree_checksum(&a.remote_path());
+    let out = decided(&b, &review, "sync", &[]);
+    assert_eq!(out.status.code(), Some(3), "{}", common::text(&out));
+    let report = reports(&out)?;
+    assert!(
+        report
+            .iter()
+            .any(|row| row["stage"] == "blocked_by_repo_hold"),
+        "{}",
+        common::text(&out)
+    );
+    assert!(
+        common::text(&out).contains("sync stopped before the pull"),
+        "{}",
+        common::text(&out)
+    );
+    assert_eq!(b.four_trees(), before);
+    assert_eq!(common::tree_checksum(&a.remote_path()), remote);
+    no_downstream(&out)
+}
+
 fn no_downstream(out: &std::process::Output) -> R {
     for entry in reports(out)? {
         assert!(!matches!(
@@ -2309,7 +2570,9 @@ printf external-race > "$repo/.race"
 "$git" -C "$repo" -c core.hooksPath=/dev/null commit --only -qm external -- .race
 "#,
         )?;
-        let out = decided(&b, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&b, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(3),
@@ -2355,7 +2618,9 @@ fn legitimate_pull_receipts_work_when_reflogs_were_disabled_or_absent() -> R {
         b.ok(&["git", "config", "core.logAllRefUpdates", "false"]);
         fs::remove_file(b.repo().join(".git/logs/refs/heads/main"))?;
         let reviewed = sync_input(&b)?;
-        let out = decided(&b, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&b, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -2400,7 +2665,9 @@ rm -- "$repo/.git/receipt-log"
 "#
         };
         after_git(&mut b, "pull", body)?;
-        let out = decided(&b, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&b, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(3),
@@ -2468,7 +2735,9 @@ fn switching_symbolic_head_at_reviewed_publication_cannot_redirect_the_branch_ca
         ),
     )?;
     env.prepend_path(wrapper);
-    let out = decided(&env, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -2539,7 +2808,9 @@ new=$(printf external-replay-race | "$git" -C "$repo" commit-tree "$tree" -p "$t
 "#,
             )?;
         }
-        let out = decided(&b, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&b, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(if raced { 3 } else { 0 }),
@@ -2654,7 +2925,9 @@ fn encrypted_capture_rechecks_its_source_after_the_encrypting_child() -> R {
         ),
     )?;
     env.prepend_path(wrapper);
-    let out = decided(&env, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -2732,7 +3005,9 @@ fn reviewed_ignore_release_captures_only_after_the_exact_approval() -> R {
             String::from_utf8_lossy(&preview.stderr)
         );
         assert_eq!(common::tree_checksum(env.root()), before);
-        let out = decided(&env, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(expected),
@@ -2825,7 +3100,9 @@ new=$(printf external-detached-edit | "$git" -C "$repo" commit-tree "$tree" -p "
 "$git" -C "$repo" update-ref --no-deref HEAD "$new" "$tip"
 "#,
     )?;
-    let out = decided(&b, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&b, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -2923,7 +3200,9 @@ fn symbolic_branch_refs_cannot_redirect_reviewed_commit_or_replay() -> R {
         )?;
         b.prepend_path(wrapper);
         let remote = fs::read(a.remote_path().join("refs/heads/main"))?;
-        let out = decided(&b, &reviewed, "sync", &[]);
+        let Some(out) = decided_publication(&b, &reviewed, &[])? else {
+            continue;
+        };
         assert_eq!(
             out.status.code(),
             Some(3),
@@ -3098,6 +3377,10 @@ fn oversized_transaction_errors_are_drained_and_reaped() -> R {
     env.ok(&["sync"]);
     env.write_repo(".reviewed", b"reviewed");
     let reviewed = sync_input(&env)?;
+    if !prepared_transactions_supported()? {
+        common::assert_prepared_refusal(&env, || decided(&env, &reviewed, "sync", &[]));
+        return Ok(());
+    }
     let head = env.git(&[
         "-C",
         env.repo().to_str().ok_or("repo")?,
@@ -3206,7 +3489,9 @@ fn reencryption_decrypts_the_frozen_ciphertext_not_a_restored_source() -> R {
         ),
     )?;
     a.prepend_path(wrapper);
-    let out = decided(&a, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&a, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -3253,7 +3538,9 @@ fn missing_detached_replay_attribution_stops_before_publication() -> R {
         ),
     )?;
     b.prepend_path(wrapper);
-    let out = decided(&b, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&b, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -3299,7 +3586,9 @@ fn reviewed_sync_does_not_automatically_capture_system_edits() -> R {
     let system = saved_state(&env)?.system;
     let settings = fs::read(env.repo().join(".dotman.toml"))?;
     env.write_system("/etc/keyd/default.conf", b"late-system", 0o600);
-    let out = decided(&env, &reviewed, "sync", &[]);
+    let Some(out) = decided_publication(&env, &reviewed, &[])? else {
+        return Ok(());
+    };
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -3416,7 +3705,9 @@ fn late_age_inventory_and_index_entries_refuse_the_whole_reencryption() -> R {
                 ".unlisted",
             ]);
             reencrypt_status_race(&mut a, path, produced)?;
-            let out = decided(&a, &reviewed, "sync", &[]);
+            let Some(out) = decided_publication(&a, &reviewed, &[])? else {
+                continue;
+            };
             assert_eq!(
                 out.status.code(),
                 Some(3),
@@ -3503,7 +3794,9 @@ fn reencrypt_freezes_inputs_and_couples_the_produced_commit() -> R {
                 ".unlisted",
             ]);
             reencrypt_status_race(&mut a, path, produced)?;
-            let out = decided(&a, &reviewed, "sync", &[]);
+            let Some(out) = decided_publication(&a, &reviewed, &[])? else {
+                continue;
+            };
             assert_eq!(
                 out.status.code(),
                 Some(3),
