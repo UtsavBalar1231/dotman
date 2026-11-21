@@ -1360,14 +1360,34 @@ fn an_import_of_a_repo_without_commits_is_refused() {
     assert!(!env.repo().exists(), "nothing is left behind");
 }
 
+fn can_clone_head(env: &TestEnv, work: &Path, oid: &str) -> bool {
+    let probe = env.root().join("clone-probe");
+    let out = env.git_raw(&[
+        "clone",
+        "-q",
+        "--no-checkout",
+        "--no-local",
+        "--template=",
+        "--single-branch",
+        "--no-tags",
+        "--",
+        &work.to_string_lossy(),
+        &probe.to_string_lossy(),
+    ]);
+    if out.status.success() {
+        assert_eq!(git_in(env, &probe, &["rev-parse", "HEAD"]).trim(), oid);
+    }
+    out.status.success()
+}
+
 /// A source whose HEAD names a branch git refuses, which a clone skips, or one under `HEAD/`,
-/// which a clone cannot make, is imported all the same: its commit, read from the source's loose
+/// when a clone cannot make it, is imported all the same: its commit, read from the source's loose
 /// or packed ref and fetched, goes on a new `main`, with a note that names the branch, whether
 /// `main` is left beside it at the same commit, at another, or not at all. The source is left as
 /// it was, and no git command is printed.
 #[test]
 fn a_head_branch_git_refuses_or_cannot_clone_is_imported_onto_main() {
-    let cases = ["a/.b", "a.lock/b", "a.", "a@{x}", "HEAD/x"]
+    let cases = ["a/.b", "a.lock/b", "a.", "a@{x}", "HEAD/x", "normal/x"]
         .into_iter()
         .flat_map(|branch| {
             [
@@ -1403,17 +1423,26 @@ fn a_head_branch_git_refuses_or_cannot_clone_is_imported_onto_main() {
             None => fs::remove_file(git_dir.join("refs/heads/main")).expect("drop main"),
         }
         let source = Source::new(work.clone());
+        let clone_succeeds =
+            branch == "normal/x" || (branch == "HEAD/x" && can_clone_head(&env, &work, oid.trim()));
 
         let err = env.ok(&["import", "--yes", &work.to_string_lossy()]);
         let label = format!("{branch} {same_main:?} {packed}");
-        assert!(
-            err.contains(&format!("the source's HEAD names the branch `{branch}`")),
-            "{label}: {err}"
-        );
-        assert!(
-            err.contains("so the import puts its commit on a new branch, main"),
-            "{label}: {err}"
-        );
+        if clone_succeeds {
+            assert!(
+                !err.contains("so the import puts its commit on a new branch, main"),
+                "{label}: {err}"
+            );
+        } else {
+            assert!(
+                err.contains(&format!("the source's HEAD names the branch `{branch}`")),
+                "{label}: {err}"
+            );
+            assert!(
+                err.contains("so the import puts its commit on a new branch, main"),
+                "{label}: {err}"
+            );
+        }
         assert!(err.contains("imported 2 commits"), "{label}: {err}");
         assert!(!err.contains("git -C"), "{label}: {err}");
         let repo = env.repo();
@@ -1422,9 +1451,14 @@ fn a_head_branch_git_refuses_or_cannot_clone_is_imported_onto_main() {
             &repo,
             &["merge-base", "--is-ancestor", oid.trim(), "HEAD"],
         );
+        let expected_branch = if clone_succeeds {
+            format!("refs/heads/{branch}")
+        } else {
+            "refs/heads/main".to_owned()
+        };
         assert_eq!(
             git_in(&env, &repo, &["symbolic-ref", "HEAD"]).trim(),
-            "refs/heads/main"
+            expected_branch
         );
         assert_eq!(git_in(&env, &repo, &["remote"]).trim(), "", "{label}");
         assert_eq!(fs::read(repo.join(".bashrc")).expect("read"), b"x\n");

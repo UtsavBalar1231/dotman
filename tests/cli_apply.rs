@@ -563,18 +563,17 @@ fn the_conflicts_are_listed_before_the_question_even_with_quiet() {
     env.write(".bashrc", b"mine\n", 0o644);
     let plain = [("NO_COLOR", "1"), ("TERM", "dumb")];
     let Some(seen) = common::in_a_terminal(&env, &plain, &["-q", "apply"], b"s\n") else {
-        eprintln!("skipped: no script(1) to give dotman a terminal");
+        eprintln!("skipped: no python3 to give dotman a terminal");
         return;
     };
-    assert!(seen.contains("\n1 conflict:"), "{seen}");
-    assert!(
-        seen.contains("  both-changed              .bashrc"),
-        "{seen}"
-    );
-    assert!(
-        seen.contains("[k] keep all local  [t] take all from repo  [d] show diffs"),
-        "{seen}"
-    );
+    let heading = seen.find("1 conflict:").expect("conflict heading");
+    let row = seen
+        .find("  both-changed              .bashrc")
+        .expect("conflict row");
+    let question = seen
+        .find("[k] keep all local  [t] take all from repo  [d] show diffs")
+        .expect("conflict question");
+    assert!(heading < row && row < question, "{seen}");
     assert_eq!(env.read(".bashrc"), b"mine\n");
 }
 

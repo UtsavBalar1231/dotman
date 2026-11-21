@@ -5392,7 +5392,7 @@ fn an_encrypted_edit_is_encrypted_to_every_merged_recipient_and_leaves_no_plaint
     let editor = editor(
         &b,
         &format!(
-            "printf '%s\\n%s\\n' \"$1\" \"$(stat -c %a \"$(dirname \"$1\")\")\" > '{}'\ncp \"$1\" '{}'\nprintf 'plain_marker_edited\\n' > \"$1\"",
+            "if [ \"$(uname -s)\" = Darwin ]; then mode=$(stat -f %Lp \"$(dirname \"$1\")\"); else mode=$(stat -c %a \"$(dirname \"$1\")\"); fi\nprintf '%s\\n%s\\n' \"$1\" \"$mode\" > '{}'\ncp \"$1\" '{}'\nprintf 'plain_marker_edited\\n' > \"$1\"",
             log.display(),
             opened.display()
         ),

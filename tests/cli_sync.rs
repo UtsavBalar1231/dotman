@@ -4242,7 +4242,7 @@ fn on_a_terminal_edit_takes_the_merged_copy_the_editor_saves() {
     let editor = editor(
         &b,
         &format!(
-            "printf '%s\\n%s\\n' \"$1\" \"$(stat -c %a \"$(dirname \"$1\")\")\" > '{}'\ncp \"$1\" '{}'\nprintf '1 from a\\n2\\nboth\\n4\\n5 from b\\n' > \"$1\"",
+            "if [ \"$(uname -s)\" = Darwin ]; then mode=$(stat -f %Lp \"$(dirname \"$1\")\"); else mode=$(stat -c %a \"$(dirname \"$1\")\"); fi\nprintf '%s\\n%s\\n' \"$1\" \"$mode\" > '{}'\ncp \"$1\" '{}'\nprintf '1 from a\\n2\\nboth\\n4\\n5 from b\\n' > \"$1\"",
             log.display(),
             opened.display()
         ),
@@ -4291,7 +4291,7 @@ fn on_a_terminal_an_edit_that_is_refused_is_asked_again() {
     let count = b.root().join("count");
     let token = github_token();
     let body = format!(
-        "n=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > '{count}'\ncase $n in\n2) sed -i '/^<<<<<<< /d' \"$1\" ;;\n3) printf 'x={token}\\n' > \"$1\" ;;\n4) grep -q '^x=' \"$1\" && printf 'merged\\n' > \"$1\" ;;\nesac",
+        "n=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > '{count}'\ncase $n in\n2) sed '/^<<<<<<< /d' \"$1\" > \"$1.edited\" && cat \"$1.edited\" > \"$1\" && rm \"$1.edited\" ;;\n3) printf 'x={token}\\n' > \"$1\" ;;\n4) grep -q '^x=' \"$1\" && printf 'merged\\n' > \"$1\" ;;\nesac",
         count = count.display()
     );
     let editor = editor(&b, &body);
