@@ -1,84 +1,69 @@
 # Project knowledge base
 
+**Source snapshot** `796225f` on `main`, mapped 2026-11-21.
+
 ## Overview
-dotman is a dotfiles manager in Rust (edition 2024, MSRV 1.88). The repo is an ordinary git repo whose root maps to `$HOME`; dotman copies files in and out and compares three sides (repo R, home H, recorded state S). The package is `dotman-cli`, the library crate is `dotman`, and the binary is `dotman` (`dot` is an optional alias). When this file and the code disagree, trust the code.
+
+Dotman is a dotfiles manager that maps an ordinary Git repo onto `$HOME`. It compares the repo (R), home (H), and recorded state (S) before applying or capturing files. The root workspace contains `dotman-cli` (library and binary `dotman`, optional alias `dot`) and `xtask`. The CLI uses Rust edition 2024 with MSRV 1.88. The Linux desktop app has a separate Tauri workspace in `gui/` with MSRV 1.90. When guidance and code disagree, trust the code.
 
 ## Structure
+
 ```
 src/cli.rs              clap definitions and long help; xtask imports it
 src/main.rs             dispatch, root refusal, exit codes
-src/commands/           one module per subcommand
-src/engine/             status model (status.rs) and the safe write path (write.rs)
-src/import/             importers: legacy, gittree (yadm, bare, vcsh), chezmoi, farm
-src/context.rs          per-run paths, configs and git handle; the in-progress guard and temp sweep
-src/paths.rs            dotman's own file locations, key validation, write_atomic
-src/config.rs           the machine config, with the per-machine [guard] allow
-src/repo_config.rs      .dotman.toml and its defaults
-src/state.rs            state.toml, including the hook and [dirs] approvals and held-back hooks
-src/identity.rs         the machine identity that variants match
-src/remote.rs           whether the remote is public
-src/lock.rs             the per-user process lock
-src/prompt.rs           questions, and when a run is interactive
-src/system.rs           system scope: roots, verdicts, never-allowed paths
-src/system/             helper.rs (root `system-write`) and escalate.rs (sudo, doas, run0)
-src/variant.rs          brace-block variant grammar and ranking
-src/template.rs         minijinja rendering
-src/secrets.rs          age and rage handling, and the content guard rules
-src/hooks.rs            hook approval and the one spawn site
-src/git.rs              the git layer, its isolation flags and stripped variables
-src/proc.rs             every child process starts here
-src/name.rs             the invoked name (`dot` or `dotman`) for hints
-src/sys.rs              the only module with `unsafe`
-src/output/             stderr status output and its escaping
-src/output/json.rs      experimental NDJSON text/path transport and final status result
-src/bootstrap.rs        writes and refreshes the install.sh at the repo root
-src/bootstrap/          the install.sh template written by `init`
-tests/                  integration tests; tests/common is the harness
-e2e/                    multi-machine scenario suites in bash: lib.sh is the harness, run.sh the runner
-docs/                   user guide pages that README.md links to
-video/                  demo films: scenes recorded from the real binary in containers, rendered by build.py
-xtask/                  man page and completion generator
+src/commands/           command policy, reviewed actions, sync, and conflict resolution
+src/engine/             three-way status, source selection, observation, and confined writes
+src/import/             legacy, chezmoi, farm, and Git-tree conversion
+src/system/             escalation and the privileged system-write helper
+src/output/             terminal output, escaping, and NDJSON transport
+gui/                    separate Linux workspace with native IPC and bundled WebView assets
+docs/                   user guides and experimental CLI/desktop protocol contracts
+tests/                  Rust integration tests with an isolated CLI harness
+e2e/                    Bash journeys, failure injection, and importer scenarios
+xtask/                  clap-based man page and completion generator
 man/                    generated man pages
 completions/            generated shell completions
-packaging/arch/         PKGBUILD
-install/                install.sh for users
-scripts/                release helper scripts
+video/                  demo films recorded from the real CLI in containers
+install/                release installer, separate from the bootstrap written by init
+packaging/arch/         CLI and desktop package recipes
+scripts/                release and local desktop packaging helpers
 ```
 
 ## Finding your way
-| To change | Look in | Why it is not obvious |
+
+Read the closest scoped guide before editing in that area.
+
+| Area | Guide | Coverage |
 |---|---|---|
-| A flag or subcommand | `src/cli.rs` | `main.rs` only dispatches |
-| What a row or category means | `src/engine/status.rs` | Eleven rows are evaluated in order; categories drive prompts |
-| How a file reaches `$HOME` | `src/engine/write.rs` | `safe_write` is the only path for managed files; SECURITY.md lists the other writes under `$HOME` |
-| When a write backs up | `src/commands/apply.rs` (`write`) | Whenever H's content differs from R, whatever S says; a mode-only change goes to `modes.txt` |
-| A mode written over a file | `src/engine/mod.rs` (`never_widen`), `apply.rs` (`kept_mode`) | `[modes]` and a repo mode changed since S bypass the narrowing |
-| Variant selection | `src/variant.rs` | Pure; the status model calls it |
-| Template variables | `src/template.rs` | `env` holds only `[template] env` names |
-| Encryption, keys, recipients | `src/secrets.rs`, `src/commands/key.rs` | The key goes to age's stdin only |
-| The content guard | `src/secrets.rs` (`RULES`, `held`, `held_link`) | One combined regex; the age rule also runs alone, and binary files are skipped. `held` scans the key's name first and `held_link` a symlink's target; no allow entry covers either |
-| What sync holds or refuses | `src/commands/sync.rs` | `held_entries` is the staging guard; the mass-delete and unrelated-history refusals live here too |
-| How a pull conflict is settled | `src/commands/conflict.rs` | `resolve` classifies each stopped path, takes the flag's answer or asks, runs `accept` on new text and saves the losing versions; `Git::replay` in `git.rs` does the index writes, the marker and the branch move |
-| Key rules | `src/paths.rs` (`validate_key`) | Control characters, `.git` in NTFS spellings and reserved root names |
-| Checks every command runs first | `src/context.rs` (`guard`, `lock`) | All but `doctor`, `git` and `completion`; `log` runs only the first. A command that writes calls `lock`, which takes the lock, runs `guard` and refreshes `.git/info/attributes` |
-| An importer | `src/import/` | `import::run` routes by detection order |
-| System files, the helper | `src/system.rs`, `src/system/helper.rs`, `src/system/escalate.rs` | The helper runs as root and trusts nothing from the caller |
-| Hook approval | `src/hooks.rs` | The state stores the approved `[hooks]` table as canonical JSON |
-| Exit codes and environment in the help | `src/cli.rs` (`EXIT_AND_ENVIRONMENT`) | `xtask` turns its blocks into the man page's EXIT STATUS and ENVIRONMENT sections, so keep the indentation |
-| A never, always or every claim in the docs | `tests/docs.rs` (`CLAIMS`, `GAPS`) | Each one names the tests that prove it, or is a gap |
-| Invoked name in hints | `src/name.rs` | Never hard-code `dot` or `dotman` in a hint |
-| Running a child process | `src/proc.rs` | It strips `DOTMAN_AGE_KEY` |
-| Man pages and completions | `cargo run -p xtask -- generate`, or `just generate` | Output is tracked; CI checks freshness |
-| Security regressions | `tests/security_tests.rs` | Hostile-repo and hostile-plan cases |
-| Subcommand coverage | `tests/guard.rs` | Every subcommand needs a row |
+| Shared CLI services | [src/AGENTS.md](src/AGENTS.md) | Git isolation, context and state, settings, guards, and system scope |
+| CLI behavior and JSON | [src/commands/AGENTS.md](src/commands/AGENTS.md) | Adding a command, reviewed inputs, outcomes, apply, and sync |
+| Status and managed writes | [src/engine/AGENTS.md](src/engine/AGENTS.md) | Classification, source selection, and write mechanics |
+| Import | [src/import/AGENTS.md](src/import/AGENTS.md) | Format detection, input accounting, and import-specific safety |
+| Rust integration tests | [tests/AGENTS.md](tests/AGENTS.md) | Harness, optional tools, security and docs contracts |
+| Shell scenarios | [e2e/AGENTS.md](e2e/AGENTS.md) | Fixtures, machine isolation, and interrupted operations |
+| Desktop | [gui/AGENTS.md](gui/AGENTS.md) | Build, assets, IPC, and the paired CLI |
+
+## Code map
+
+References are Rust language server usages at the snapshot above, excluding declarations and including tests.
+
+| Symbol | Location | Refs | Role |
+|---|---|---:|---|
+| `Context` | `src/context.rs` | 499 | Resolved paths, Git handle, local policy, operation checks |
+| `Git` | `src/git.rs` | 86 | CLI Git subprocess and repository operations |
+| `proc::command` | `src/proc.rs` | 36 | CLI child process creation and environment scrubbing |
+| `classify` | `src/engine/status.rs` | 27 | Converts repo, home, and state observations to a status row |
+| `safe_write` | `src/engine/write.rs` | 15 | Confined write for regular files |
+| `decisions::Input` | `src/decisions.rs` | 11 | Reviewed CLI decision input |
 
 ## House rules
+
 - New code passes `just lint-strict`, the clippy set that the pre-commit hook and CI both run.
 - No `.unwrap()`, `.expect()` or `panic!` in `src/`. `clippy.toml` allows `unwrap` and `expect` in tests only.
 - Comments and docs only where they carry what the code cannot: a constraint, invariant, unit, safety reason, or why. No doc that restates an item's name, no narrating comments. `missing_docs` covers public items only, so a public item carries a one-line `///` and a private one needs none.
 - Status output goes through `crate::output` to stderr. stdout is for command output.
 - Destructive commands take `--dry-run`, and a dry run changes nothing.
-- Every child process starts from `proc::command`.
+- Start every CLI child process through `proc::command`.
 - Hints print `name::bin()`, never a hard-coded `dotman` or `dot`; `tests/names.rs` guards it.
 - Every prompt has a flag that answers it. There is no hidden test switch.
 - A fake credential in a test is split with `concat!`, a const or a format argument, so no secret scanner sees it whole. `just secrets` runs gitleaks over the commits a push would publish.
@@ -89,51 +74,37 @@ scripts/                release helper scripts
 - Every never, always or every claim in README.md, `docs/*.md` and SECURITY.md has an entry in `tests/docs.rs`: `CLAIMS` names the tests that prove it, and `GAPS` holds the ones no test proves yet.
 - Commits follow Conventional Commits with a scope, such as `feat(sync): ...`. Use `!` for breaking changes.
 - Commit through the pre-commit hook, with your own git identity, never with `git -c user.name=... -c user.email=...`.
-- Adding a command:
-  1. Add a `Commands` variant in `src/cli.rs`.
-  2. Add a match arm in `src/main.rs`.
-  3. Add a module in `src/commands/mod.rs`.
-  4. Add a row to `tests/guard.rs`, which checks the in-progress-operation guard.
-  5. Run `cargo run -p xtask -- generate`.
+- The CLI permits `unsafe` only in `src/sys.rs`, with a `// SAFETY:` comment per block. The desktop crate has its own `gui/src/sys.rs`.
+- Strict lint denies `arithmetic_side_effects`, `float_arithmetic`, and `indexing_slicing`, including in tests. Use checked or saturating integer operations and `.get()`. A local `#[allow]` goes on one item with a `// reason:` comment that proves the bound.
 
-## Invariants
-- **Isolation flags.** Every git call carries `-c core.excludesFile= -c core.hooksPath=/dev/null`, `-c core.symlinks=true` and the other flags in `ISOLATION` in `src/git.rs`, starts without the `GIT_*` variables in `LOCAL_REPO_ENV`, and parsed output uses `-z`. `git init` and `git clone` also get `--template=`, and clones `--no-local`, so a local source goes through git's transport. Staging pathspecs go to `git add --pathspec-from-file=-` on stdin, never as arguments. A user's global excludes, hooks, `core.symlinks` or template directory never affect the repo.
-- **Attributes file.** `init` and every clone write `.git/info/attributes` (`* merge -text -filter -ident -working-tree-encoding`), and `Context::lock`, which every writing command takes, keeps the user's lines and rewrites the file outside a dry run when the pinned line is missing or not last; a failed write warns and the command goes on. A tracked `.gitattributes` cannot transform content, not even through an `[attr]merge` macro, which is why `merge` comes first: git reads the line from its end and keeps the first value set. The bare `merge` always uses git's built-in text merge, whatever `merge.*.driver` or `merge.default` the user configures; never write `merge=text`, which git looks up in the user's config as a driver name.
-- **Rebase backend.** Every rebase dotman runs or prints uses git's merge backend: `pull --rebase` names git's default strategy from `Git::pull_backend` (`-s ort`, or `-s recursive` before git 2.34), and the replay runs `rebase --merge` with that strategy; a pull or merge dotman prints names it too, so neither the user's `rebase.backend` nor `pull.twohead` picks one. `ISOLATION` pins `merge.renames` and `merge.directoryRenames` to git's defaults. The apply backend, git 2.25's default and a `rebase.backend` choice, merges against the patch's paths alone, so an edit to a file removed upstream can land in another file with the same content, with no conflict.
-- **Import scope.** A git-tree import clones with `--single-branch --no-tags`: HEAD's branch only, no tags or other branches. The content guard scans that history's blobs and commit messages, and a finding squashes the import unless `--keep-history`.
-- **State and repo ID.** `$XDG_STATE_HOME/dotman/state.toml` is never synced and is written through temp, fsync and rename. `.git/dotman-id` identifies the repo; a state whose `repo_id` differs is treated as empty. A state file that fails to parse is never treated as empty.
-- **Repo root names.** `.git`, `.dotman.toml`, `.dotman/`, `README*`, `LICENSE*` and `install.sh` are never applied. `.git` is refused as a key component at any depth.
-- **Home writes.** Managed files reach `$HOME` only through `safe_write` and `safe_symlink`: no symlinked parent, no write through a symlink, temp file at 0600, setuid, setgid and sticky stripped, a backup first when the content differs. The `--swap` replacement and rollback, `write_atomic` for dotman's own files and `git config --global` are the other writes, listed in SECURITY.md; a new one goes there too.
-- **Pull conflicts.** New text from a pull conflict becomes a blob only after `accept` in `conflict.rs`, this machine's losing version is saved before the replay, and resolved content reaches the repo worktree through git's index, never written by dotman; a replay killed under `.git/dotman-pull` is put back by `Context::lock`.
-- **System scope.** `system-write` is the only path that runs as root. It rereads `[system] roots` from the invoking user's config, refuses `DOTMAN_SYSTEM_ROOT` and a plan prefix when euid is 0, and walks every target with `openat(O_NOFOLLOW)`.
-- **`unsafe`.** Only in `src/sys.rs`, each block with a `// SAFETY:` comment. The crate root denies it.
-- **Arithmetic.** `arithmetic_side_effects`, `float_arithmetic` and `indexing_slicing` are errors under lint-strict, in `tests/` too. Use checked or saturating integer arithmetic and `.get()`. A local `#[allow]` goes on one item with a `// reason:` comment that proves the bound.
-- **Plaintext.** Decrypted content is never written into the repo. `DOTMAN_AGE_KEY` is removed from every child except age, and refused in `[template] env`.
-- **Threat model.** A hostile repo, import source or plan must never cause a write outside `$HOME` or the roots, a write through a symlink, a setuid bit, an unapproved hook, a template command, or a silent loss of a file.
+## Safety boundaries
+
+- A hostile repo, import source, or plan must never cause a write outside `$HOME` or the opted-in roots, a write through a symlink, a setuid, setgid, or sticky bit, an unapproved hook, a template command, or silent file loss.
+- Keep managed writes in the engine and system writes in the privileged helper. [SECURITY.md](SECURITY.md) documents the complete write surface, including importer swaps, dotman's own atomic writes, and explicitly requested global Git config. Update it when that surface changes.
+- Never write decrypted contents to the repo. `DOTMAN_AGE_KEY` is stripped from CLI children except age and rejected as a template environment variable.
+- Use `tests/common` or a temp root with HOME and every XDG directory inside it. Do not point development commands at the real `~/.dotman`, `~/.config/dotman`, `~/.local/share/dotman`, `~/.local/state/dotman`, `$HOME`, or `/etc`.
+- Put regressions involving hostile repos or plans in `tests/security_tests.rs`.
 
 ## Commands
+
 ```bash
 cargo test --workspace --all-targets          # the full suite; run before every commit
-just ci                                       # CI's lint, test, freshness, deny and e2e checks and a gitleaks scan; run before a push
+just ci                                       # local CLI checks, including e2e and gitleaks; run before a push
 cargo test --test cli_sync                    # one test file
 just lint-strict                              # pre-commit clippy set
 cargo fmt --check
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+just docs-check                               # rustdoc with warnings denied
 cargo run -p xtask -- generate                # man pages and completions
-just e2e                                      # e2e scenarios against a release build
-just video setup                              # render a demo film into target/video; video/README.md lists what it needs
-just e2e-keep 02-conflict                     # one scenario, keeping its temp root
-just release-prepare 0.2.0                    # bumps Cargo.toml, Cargo.lock, the PKGBUILD and install/install.sh
+just e2e                                      # scenarios against a release build
+just gui-check                                # separate desktop workspace and frontend checks
+just video setup                              # demo output in target/video; see video/README.md
+just release-prepare 0.2.0                    # updates release versions and runs just ci
 ```
-- `DOTMAN_REQUIRE_AGE=1` and `DOTMAN_REQUIRE_CHEZMOI=1` turn a skipped age or chezmoi test into a failure. CI sets them.
-- The real-sudo test in `tests/system_scope.rs` runs only with `DOTMAN_REAL_SUDO_TEST=1` and a container marker (`/.dockerenv` or `/run/.containerenv`). Only CI's `system-scope` job sets both; elsewhere it returns early.
-- Tests shell out to `git`, which needs `user.name` and `user.email` set. The harness in `tests/common` gives each test its own HOME and XDG dirs.
-- `just e2e` builds the release binary unless `DOTMAN_BIN` names one. Each scenario runs dotman under `env -i` with HOME and the XDG dirs in a fresh temp root, against a `file://` remote, and needs git, age and age-keygen on PATH. The helpers in `e2e/lib.sh` each carry a one-line comment.
-- `just e2e` runs `e2e/journeys`, `e2e/faults` (SIGKILL campaign; `E2E_KILL_ITERS` and `E2E_KILL_SEED` for soak runs) and `e2e/import` (its chezmoi case skips without chezmoi unless `E2E_REQUIRE_CHEZMOI=1`); `just e2e-distros` runs the journeys in Docker per distro and is not in CI.
+
+The specialized CLI jobs are defined in `.github/workflows/ci.yml`. The root Cargo workspace and `just ci` do not cover the desktop workspace.
 
 ## Do not
-- Do not run `dotman` or tests against the real `~/.dotman`, `~/.config/dotman`, `~/.local/share/dotman`, `~/.local/state/dotman`, `/etc` or `$HOME`. Use `tests/common`, or a temp root with a HOME and every `XDG_*` pointing inside it.
-- Do not weaken the defaults: paths stay confined to `$HOME` and the opted-in roots, and setuid, setgid and sticky bits stay stripped. Regression tests go in `tests/security_tests.rs`.
+
 - Do not hand-edit `man/*.1` or `completions/` (except `completions/README.md`). Regenerate them.
 - Do not commit proptest regression files. They are gitignored.
 - Do not add a dependency that is not already in `Cargo.toml` without raising it first.
