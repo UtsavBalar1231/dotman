@@ -14,11 +14,7 @@ async function check({ page, evaluate, waitFor, resize, key }) {
   const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
   const renderedDiff = () => waitFor(visible("#diff-actions .review-action"));
   const fits = () => evaluate("document.documentElement.scrollWidth <= innerWidth");
-  const selectTheme = theme => evaluate(`(() => {
-    const select = document.querySelector("#theme-mode");
-    select.value = ${JSON.stringify(theme)};
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  })()`);
+  const selectTheme = theme => click(`input[name=theme][value="${theme}"]`);
   const capture = async name => {
     if (!evidence) return;
     fs.mkdirSync(evidence, { recursive: true });
@@ -27,6 +23,24 @@ async function check({ page, evaluate, waitFor, resize, key }) {
     fs.writeFileSync(path.join(evidence, name + ".png"), Buffer.from(data, "base64"));
   };
 
+  await waitFor(visible("#rows [role=tree]"));
+  await resize(1440, 900);
+  await waitFor("document.querySelector('.tree-divider').ariaValueMax === '1060'");
+  const point = await evaluate(`(() => {
+    const box = document.querySelector(".tree-divider").getBoundingClientRect();
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  })()`);
+  await page("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "left", clickCount: 1 });
+  await page("Input.dispatchMouseEvent", { type: "mouseMoved", x: 418, y: point.y, buttons: 1 });
+  await page("Input.dispatchMouseEvent", { type: "mouseReleased", x: 418, y: point.y, button: "left", clickCount: 1 });
+  await waitFor("document.querySelector('#entries').offsetWidth === 418");
+  await key("ArrowRight");
+  assert.equal(await evaluate("document.querySelector('.tree-divider').ariaValueNow"), "434");
+  await page("Page.reload");
+  await waitFor("document.querySelector('#entries')?.offsetWidth === 434");
+  await evaluate("document.querySelector('.tree-divider').focus()");
+  await key("ArrowLeft");
+  await click("#group-status");
   await waitFor(visible(incoming));
   assert.equal(await evaluate(`document.fonts.ready.then(() => {
     const family = getComputedStyle(document.querySelector("#search")).fontFamily;
@@ -213,7 +227,13 @@ async function check({ page, evaluate, waitFor, resize, key }) {
 
   await click("#nav-review");
   await waitFor(visible("#commit-message"));
-  assert.equal(await evaluate("document.querySelector('#review-items h3').textContent.startsWith('Hypothetical effects')"), true);
+  await resize(1440, 900);
+  assert.equal(await evaluate(`(() => {
+    const drawer = document.querySelector("#review");
+    const box = drawer.getBoundingClientRect();
+    return drawer.matches(":modal") && box.right === innerWidth && box.width < innerWidth * .6;
+  })()`), true, "Review is docked to the right of the workspace");
+  assert.equal(await evaluate("document.querySelector('#review-items summary').textContent.startsWith('Hypothetical effects')"), true);
   await evaluate(`(() => {
     const draft = document.querySelector("#commit-message");
     draft.value = "Edited draft";
@@ -283,7 +303,99 @@ async function check({ page, evaluate, waitFor, resize, key }) {
   console.log("Workbench layout, keyboard, decision queue, recovery, and CSP passed");
 }
 
-withDesktop(statusFixture, check).catch(error => {
+async function checkSourceEditor({ page, evaluate, waitFor, key, resize }) {
+  const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const shadow = "document.querySelector('#source-buffer').shadowRoot";
+  const code = `Array.from(${shadow}.querySelectorAll('.cm-line'), line => line.textContent).join('\\n')`;
+  const insert = text => page("Input.insertText", { text });
+  await waitFor("document.querySelector('[role=treeitem][title=plain]')");
+  await click("[role=treeitem][title=plain]");
+  await waitFor("document.querySelector('#source-edit-details button:enabled')");
+  await click("#source-edit-details button");
+  await waitFor(`${shadow}?.activeElement?.matches('.cm-content')`);
+  assert.equal(await evaluate(code), "initial\n");
+  await key("a", 2);
+  await insert("changed\n");
+  await click(".source-undo");
+  assert.equal(await evaluate(code), "initial\n");
+  await click(".source-redo");
+  assert.equal(await evaluate(code), "changed\n");
+  await click(".source-find");
+  await evaluate(`${shadow}.querySelector('[aria-label=Find]').focus()`);
+  await insert("changed");
+  assert.equal(await evaluate(`${shadow}.querySelector('output').textContent`), "1 match");
+  await evaluate(`${shadow}.querySelector('button[aria-label="Whole word"]').click()`);
+  assert.equal(await evaluate(`${shadow}.querySelector('button[aria-label="Whole word"]').getAttribute("aria-pressed")`), "true");
+  await evaluate(`${shadow}.querySelector('button[aria-label=Replace]').click()`);
+  await insert("replaced");
+  await evaluate(`const replaceAll = ${shadow}.querySelector('button[aria-label="Replace all"]'); replaceAll.focus(); replaceAll.click()`);
+  assert.equal(await evaluate(code), "replaced\n");
+  await key("Escape");
+  assert.equal(await evaluate("document.querySelector('#source-editor').open"), true);
+  assert.equal(await evaluate(`Boolean(${shadow}.querySelector('.source-search'))`), false);
+  await click(".source-position");
+  await evaluate(`${shadow}.querySelector('input[name=line]').select()`);
+  await insert("2");
+  await key("Enter");
+  await waitFor("document.querySelector('.source-position').textContent === 'Ln 2, Col 1'");
+  await click(".source-wrap");
+  assert.equal(await evaluate(`Boolean(${shadow}.querySelector('.cm-lineWrapping'))`), true);
+  await resize(360, 430);
+  assert.equal(await evaluate("document.querySelector('#source-editor').scrollWidth <= innerWidth"), true);
+  await key("Escape");
+  await waitFor("document.querySelector('.source-discard').hidden === false");
+  assert.equal(await evaluate("document.querySelector('#source-editor').matches(':modal')"), true);
+  await click(".source-save");
+  await waitFor("document.querySelector('#source-editor [role=status]').textContent.includes('File changed')");
+  assert.equal(await evaluate(code), "replaced\n");
+  await evaluate("window.failSave = false");
+  await key("s", 2);
+  await waitFor("!document.querySelector('#source-editor').open && document.querySelector('#source-edit-details button:enabled')");
+  assert.equal(await evaluate("window.sourceText"), "replaced\r\n");
+  await click("#source-edit-details button");
+  await waitFor(`${shadow}.activeElement?.matches('.cm-content')`);
+  assert.equal(await evaluate(code), "replaced\n");
+  assert.equal(await evaluate("document.querySelector('.source-undo').disabled"), true);
+  await key("Escape");
+  await evaluate(`window.fixtureStatus.entries[2].key = "settings.ts";
+    window.sourceText = "const width: number = 80;";`);
+  await click("#refresh");
+  const script = '[role=treeitem][title="settings.ts"]';
+  await waitFor(`document.querySelector(${JSON.stringify(script)})`);
+  await click(script);
+  await waitFor("document.querySelector('#source-edit-details button:enabled')");
+  await click("#source-edit-details button");
+  await waitFor("document.querySelector('.source-language').textContent === 'TypeScript'");
+  assert.equal(await evaluate(code), "const width: number = 80;");
+  await key("a", 2);
+  await insert("discard me");
+  await click(".source-cancel");
+  await click(".source-discard");
+  assert.equal(await evaluate("window.sourceText"), "const width: number = 80;");
+  assert.equal(await evaluate(`${shadow}.childElementCount`), 0);
+  assert.deepEqual(await evaluate("window.violations"), []);
+}
+
+async function main() {
+  await withDesktop(statusFixture, check);
+  await withDesktop(statusFixture + `
+    window.fixtureStatus.entries[2].editable = true;
+    window.sourceText = "initial\\r\\n";
+    window.failSave = true;
+    const originalInvoke = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = async (command, args) => {
+      if (command === "open_source") return window.sourceText;
+      if (command === "save_source") {
+        if (window.failSave) throw Error("File changed");
+        window.sourceText = args.text;
+        return;
+      }
+      return originalInvoke(command, args);
+    };
+  `, checkSourceEditor);
+}
+
+main().catch(error => {
   console.error(error);
   process.exitCode = 1;
 });

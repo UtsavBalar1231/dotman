@@ -1,0 +1,40 @@
+dialog#source-editor {
+  width: min(68rem, 94vw);
+  padding: 0;
+}
+#source-editor[open] {
+  display: grid;
+  grid-template-rows: auto auto minmax(0,1fr) auto auto;
+}
+.source-heading, .source-tools, .source-status, .source-notice {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+  padding-inline: clamp(.85rem, 2.5vw, 1.8rem);
+}
+.source-heading { padding-block: 1rem; }
+.source-location { flex: 1; min-width: 0; }
+.source-location p { display:flex; align-items:center; gap:.45rem; color:var(--muted); font-size:.82rem; margin:0 0 .25rem; }
+.source-location span, .source-location h2 { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.source-location h2 { font-size:clamp(1.12rem,2.2vw,1.55rem); }
+.source-heading button { flex:none; }
+.source-heading .source-save { min-height:40px; padding-inline:1rem; }
+.source-tools { margin:0; min-width:0; flex-wrap:wrap; gap:.2rem; padding-block:.4rem; border:0; border-block:1px solid var(--divider); background:var(--navigation-surface); }
+.source-tools button,.source-status button,.source-status select { color:var(--muted); font-size:.82rem; background:transparent; border:1px solid transparent; border-radius:.45rem; }
+.source-tools button { display:inline-flex; align-items:center; gap:.45rem; }
+.source-tools .source-wrap { margin-inline-start:auto; }
+.source-tools button[aria-pressed=true] { color:var(--accent); background:var(--selected); }
+#source-buffer { min-height:0; overflow:hidden; }
+.source-notice { min-height:2.1rem; flex-wrap:wrap; font-size:.82rem; color:var(--muted); }
+.source-notice p { flex:1; margin:.4rem 0; }
+.source-notice:has(.source-discard:not([hidden])) { color:var(--amber); }
+.source-status { min-height:2.6rem; flex-wrap:wrap; gap:.25rem .9rem; border-block-start:1px solid var(--divider); background:var(--navigation-surface); color:var(--muted); font-size:.76rem; }
+.source-status .source-language { color:var(--ink); }
+.source-position { margin-inline-start:auto; }
+@media(max-width:48rem) { dialog#source-editor { width:100vw; } }
+@media(max-width:30rem) {
+  .source-heading,.source-tools,.source-status,.source-notice { padding-inline:.65rem; }
+  .source-heading { gap:.35rem; }
+  .source-status { gap:.1rem .45rem; }
+  .source-tools button,.source-status button,.source-status select { padding-inline:.35rem; }
+}

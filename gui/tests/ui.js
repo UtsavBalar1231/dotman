@@ -41,7 +41,7 @@ class Element {
 
 const ids = ["refresh", "cancel", "diff", "diff-key", "diff-message", "diff-text",
   "rows", "search", "entries", "context", "paths", "message", "notice",
-  "remote", "clean", "held-counts", "close-diff", "review", "review-items", "review-message",
+  "cancel-review", "remote", "clean", "held-counts", "close-diff", "review", "review-items", "review-message",
   "review-remote", "close-review", "sync-reviewed", "sync-mass-delete", "sync-lines", "leave-lines", "line-summary", "selected-effect", "selected-lines", "line-edits", "line-edit-list",
   "commit-editor", "commit-message", "commit-error",
   "recovery", "recovery-message", "recovery-steps", "decisions", "decision-message",
@@ -193,6 +193,7 @@ async function main() {
   const { getWorkspaceView } = await import("../.controller-tests/workspace-view.js");
   await import("../.controller-tests/app.js");
   await tick();
+  elements["group-status"].click();
   assert.equal(elements["guide-title"].textContent, "File comparison");
   assert.equal(elements["attention-list"].children.length, 0);
   elements["nav-settings"].click();
@@ -377,7 +378,7 @@ async function main() {
   resolveReview({ id: "line-review", outcome: "review", message: "loaded", commit_message: "message",
     items: [{ group: "Capture", text: "full/path", diff_id: "capture" }] });
   await tick();
-  const capture = elements["review-items"].children[1].children[0].children[0];
+  const capture = elements["review-items"].children[0].children[1].children[0].children[0];
   capture.click();
   resolveDiff({ success: true, outcome: "ready", message: "", text: "", selected_push: false, line_edits: edits });
   await tick();
@@ -458,7 +459,7 @@ async function main() {
     resolveReview({ id: `review-${outcome}`, outcome: "review", message: "", commit_message: "message",
       items: [{ group: "Capture", text: "full/path", diff_id: "capture" }] });
     await tick();
-    elements["review-items"].children[1].children[0].children[0].click();
+    elements["review-items"].children[0].children[1].children[0].children[0].click();
     resolveDiff({ success: true, outcome: "ready", message: "", text: "", line_edits: edits });
     await tick();
     const box = elements["line-edit-list"].children[0].children[0];
@@ -477,7 +478,7 @@ async function main() {
   resolveReview({ id: "malformed", outcome: "review", message: "", commit_message: "message",
     items: [{ group: "Capture", text: "full/path", diff_id: "capture" }] });
   await tick();
-  elements["review-items"].children[1].children[0].children[0].click();
+  elements["review-items"].children[0].children[1].children[0].children[0].click();
   resolveDiff({ success: true, outcome: "ready", message: "", text: "", line_edits: [edits[0], edits[0]] });
   await tick();
   assert.equal(elements["line-edits"].hidden, true);
@@ -487,7 +488,7 @@ async function main() {
   assert.equal(elements["group-folders"].attributes["aria-pressed"], "false");
   assert.equal(elements["group-status"].attributes["aria-pressed"], "true");
   elements["group-folders"].click();
-  statusResponse = { ...status, entries: [{ ...status.entries[0], key: "config/x", status: "template-drift", edit_command: "dotman edit -- '/home/config/x'" }] };
+  statusResponse = { ...status, entries: [{ ...status.entries[0], key: "config/x", status: "template-drift", editable: true }] };
   elements.refresh.click();
   await tick();
   const folder = elements.rows.children[0].children[0];
@@ -501,13 +502,8 @@ async function main() {
   folder.children[1].children[0].click();
   assert.equal(diffRequests.at(-1).id, "1:0");
   const details = elements["source-edit-details"].children[0];
-  assert.equal(details.tag, "details");
-  assert.equal(details.children[0].textContent, "Source editing details");
-  const command = details.children[1].children[0];
-  assert.equal(command.tag, "textarea");
-  assert.equal(command.readOnly, true);
-  assert.equal(command.value, "dotman edit -- '/home/config/x'");
-  assert.equal(command.attributes["aria-label"], "Terminal edit command");
+  assert.equal(details.tag, "button");
+  assert.equal(details.textContent, "Edit source");
   resolveDiff({ outcome: "ready", message: "folder", text: "" });
   await tick();
   elements["close-diff"].click();
@@ -553,11 +549,11 @@ async function main() {
   elements.search.value = "";
   elements.search.listeners.input();
   elements["nav-review"].click();
-  assert.equal(elements.entries.hidden, true);
+  assert.equal(elements.entries.hidden, false);
   assert.equal(document.activeElement, elements["close-review"]);
   resolveReview({ id: "7:1", outcome: "review", message: "loaded", items: [{ group: "Hooks due", text: "<script>alert(1)</script>" }] });
   await tick();
-  assert.equal(elements["review-items"].children[1].children[0].textContent, "<script>alert(1)</script>");
+  assert.equal(elements["review-items"].children[0].children[1].children[0].textContent, "<script>alert(1)</script>");
   assert.equal(elements["sync-reviewed"].hidden, false);
   elements["close-review"].click();
   assert.equal(document.activeElement, elements["nav-review"]);
@@ -722,7 +718,7 @@ async function main() {
   assert.equal(elements["review-message"].textContent, "cancelled: reaped");
   firstProgress.onmessage("push");
   assert.equal(elements["review-message"].textContent, "cancelled: reaped");
-  assert.equal(elements["review-items"].children[1].children[0].textContent, "<cancelled>");
+  assert.equal(elements["review-items"].children[0].children[1].children[0].textContent, "<cancelled>");
   assert.equal(refreshes, beforeCancel);
   assert.equal(elements.entries.hidden, true);
 
@@ -756,9 +752,9 @@ async function main() {
     assert.match(elements["review-message"].textContent, new RegExp(`^${outcome}: actual result`));
     assert.equal(elements.review.hidden, false);
     assert.equal(elements.entries.hidden, true);
-    assert.equal(elements["review-items"].children[0].textContent, "<group> (1)");
-    assert.equal(elements["review-items"].children[1].children[0].textContent, "<item>");
-    assert.equal(elements["review-items"].children[1].children[0].children.length, 0);
+    assert.equal(elements["review-items"].children[0].children[0].textContent, "<group> (1)");
+    assert.equal(elements["review-items"].children[0].children[1].children[0].textContent, "<item>");
+    assert.equal(elements["review-items"].children[0].children[1].children[0].children.length, 0);
     if (outcome === "terminal_recovery" || outcome === "cleanup_unresolved") {
       assert.match(elements["review-message"].textContent, /terminal/);
     }
@@ -846,7 +842,7 @@ async function main() {
       { group: "Capture", text: "unavailable", diff_id: null },
     ] });
     await tick();
-    return elements["review-items"].children[1].children;
+    return elements["review-items"].children[0].children[1].children;
   }
   let captureRows = await captureReview("partial");
   assert.equal(captureRows[0].children.length, 0);
@@ -1038,12 +1034,12 @@ async function main() {
     { group: "Capture", text: "capture", diff_id: "opaque-a" },
   ] });
   await tick();
-  elements["review-items"].children[1].children[0].children[0].click();
+  elements["review-items"].children[0].children[1].children[0].children[0].click();
   rejectDiff(new Error("capture failed"));
   await tick();
   assert.equal(elements["decision-items"].children.length, 2);
   elements["close-diff"].click();
-  elements["review-items"].children[1].children[0].children[0].click();
+  elements["review-items"].children[0].children[1].children[0].children[0].click();
   resolveDiff({ outcome: "ready", message: "capture", text: "", file_actions: ["keep_local"] });
   await tick();
   assert.equal(elements["decision-items"].children.length, 2);
@@ -1727,9 +1723,9 @@ async function main() {
   resolveDiff({ outcome: "ready", message: "ready", text: "old", file_actions: ["keep_local"] });
   await tick();
   elements["nav-review"].click();
-  assert.equal(elements.diff.hidden, true);
-  assert.equal(elements["diff-text"].textContent, "");
-  assert.equal(elements["diff-actions"].children.length, 0);
+  assert.equal(elements.diff.hidden, false);
+  assert.equal(elements["diff-text"].textContent, "old");
+  assert.ok(elements["diff-actions"].children.length);
   resolveReview({ id: "read-review", outcome: "terminal_recovery", message: "<review warning>", items: [] });
   await tick();
   assert.equal(elements.recovery.hidden, false);

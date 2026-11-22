@@ -9,7 +9,7 @@ export interface EntryView {
   system: boolean;
   held_actions?: ("add" | "plain" | "encrypt" | "forget")[];
   host_variant?: boolean;
-  edit_command?: string;
+  editable?: boolean;
   hold?: {
     origin: string;
     reason: string;
@@ -111,6 +111,8 @@ export interface Channel {
 }
 
 export interface Commands {
+  open_source: { args: { id: string }; result: string };
+  save_source: { args: { id: string; text: string }; result: void };
   refresh: { args: undefined; result: StatusView };
   cancel: { args: undefined; result: void };
   discard_review: { args: { id: string }; result: void };

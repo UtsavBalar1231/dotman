@@ -1,21 +1,18 @@
 # dotman on Linux desktop
 
-- **Files** opens on **Changed**, which groups files by what changed. Switch
-  to **All files** to browse the repository by folder. The tree combines
-  folders with a single child into one path. Press **Ctrl+F** to search.
-  A wide window
-  keeps the navigator beside the comparison. On an ultrawide display, the file
-  browser stops growing and the diff uses the remaining width. When the comparison
-  pane is too narrow for two copies, it shows a unified diff. In a narrow window
-  the diff gets the available width. Choose **Back to files** to return to
-  the navigator.
-- **Review** previews the outgoing sync. Open a capture diff from the preview
-  to inspect what would be committed. Opening the page does not start a sync.
+- **Files** opens on **All files**, a folder tree that folds single-child
+  directories into one path. Choose **Changed** to group files by status.
+  Press **Ctrl+F** to search. In a wide window, drag the divider or focus it
+  and use the arrow keys to adjust the tree width. Dotman remembers the width
+  when you reopen the app. A narrow comparison switches to a unified diff.
+  In a narrow window, **Back to files** returns to the tree.
+- **Review changes** opens the outgoing sync preview in a drawer. Expand a
+  group to inspect its files, or open a capture diff to see the proposed
+  changes. Close the drawer to return to Files.
 - **Settings** contains appearance, repository paths and local capture policy.
   Expand **Resolved paths** to check which Home, repository and state directory
-  the app is using. **System** follows the desktop’s appearance. Choose
-  **Light** or **Dark** to override it. Dotman remembers the choice on this
-  computer.
+  the app is using. The default theme is **AMOLED**. Choose **Light** for a
+  light workspace or **System** to follow the desktop appearance.
 
 ## Set up a repository
 
@@ -47,10 +44,30 @@ Use the terminal to adopt or repair a repository or import other formats. The
 desktop can show reported sources, review a changed machine identity, and
 create an exact per-host variant of an eligible managed plain or age-encrypted
 file. Variants requiring unsupported settings or mode edits need terminal
-review. Templates cannot be captured as host variants; eligible managed files
-show a selectable `dotman edit` command for use in a terminal, and the desktop
-does not launch an editor. System files are read-only. Directory and ignore
-standing grants and pending hook approval have separate native reviews.
+review. Templates cannot be captured as host variants. System files are read-only.
+Directory and ignore standing grants and pending hook approval have separate native reviews.
+
+## Edit a repository source
+
+In **Files**, select a managed text file and choose **Edit source**. The editor
+recognizes common dotfiles, including shell startup scripts, Git configuration,
+TOML, YAML, JSON and Lua. Other files open as plain text. The status bar shows
+the language, line ending and cursor position. Use its indentation selector to
+choose tabs or spaces for new edits.
+
+- **Find** or **Ctrl+F** opens search and replace, including whole-word,
+  case-sensitive and regular-expression matching.
+- Click the line and column in the status bar or press **Ctrl+Alt+G** to jump.
+  **Ctrl+Z** undoes an edit, and **Ctrl+Shift+Z** redoes it.
+- **Wrap lines** fits long lines to the pane. **Ctrl+Space** opens completions.
+  **Tab** indents. **Ctrl+M** toggles using Tab to move focus between controls.
+- **Save source** or **Ctrl+S** asks for native confirmation and reloads the
+  comparison after saving. Applying changes to Home is a separate decision.
+  Closing a modified file offers to discard the draft. A stale save keeps the
+  draft available to copy.
+
+The editor accepts eligible regular UTF-8 files and template sources up to
+1 MiB with LF or CRLF line endings.
 
 ## Create or import an age identity
 

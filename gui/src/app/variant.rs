@@ -48,7 +48,7 @@ fn select(
     Ok((report.context.clone(), entry.clone()))
 }
 
-fn same_context(a: &protocol::StatusContext, b: &protocol::StatusContext) -> bool {
+pub(super) fn same_context(a: &protocol::StatusContext, b: &protocol::StatusContext) -> bool {
     a.home.path == b.home.path
         && a.repo.path == b.repo.path
         && a.config.path == b.config.path

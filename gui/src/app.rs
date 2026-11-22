@@ -18,6 +18,7 @@ pub mod held;
 pub mod import_setup;
 pub mod keys;
 pub mod policy_trust;
+pub mod source;
 pub mod variant;
 
 #[derive(Serialize)]
@@ -81,16 +82,12 @@ struct EntryView {
     held_actions: Vec<&'static str>,
     host_variant: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    edit_command: Option<String>,
+    editable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     machine_file: Option<MachineFile>,
 }
 
-fn edit_command(
-    entry: &protocol::StatusEntry,
-    paths: &HeldPaths<'_>,
-    home: &Path,
-) -> Option<String> {
+fn editable(entry: &protocol::StatusEntry, paths: &HeldPaths<'_>, home: &Path) -> Option<bool> {
     if entry.scope != "home"
         || entry.encrypted
         || paths.matches(entry, false)
@@ -122,7 +119,7 @@ fn edit_command(
     if path.chars().any(runner::unsafe_display_char) {
         return None;
     }
-    Some(format!("dotman edit -- '{}'", path.replace('\'', "'\\''")))
+    Some(true)
 }
 
 #[derive(Serialize)]
@@ -470,7 +467,7 @@ fn project(reply: &protocol::StatusReply, key_stripped: bool, generation: u64) -
                         hold: hold_view(entry),
                         held_actions: held::actions(entry, &paths, generation, report),
                         host_variant: generation != u64::MAX && variant::eligible(entry, &paths),
-                        edit_command: edit_command(entry, &paths, &report.context.home.path),
+                        editable: editable(entry, &paths, &report.context.home.path),
                         machine_file: machine_file(entry, &paths),
                     })
                     .collect(),
@@ -561,6 +558,7 @@ const fn failure(message: &'static str, key_stripped: bool) -> View {
 #[derive(Default)]
 struct Inner {
     active: Option<Arc<AtomicBool>>,
+    source_doc: Option<(String, Arc<source::Document>)>,
     reply: Option<protocol::StatusReply>,
     review: Option<RetainedReview>,
     generation: u64,
@@ -603,6 +601,7 @@ impl AppState {
             cancelled.store(true, Ordering::Release);
         }
         inner.reply = None;
+        inner.source_doc = None;
         inner.review = None;
         inner.diff_receipts.clear();
         inner.setup = None;
@@ -649,6 +648,7 @@ pub async fn refresh(state: tauri::State<'_, AppState>) -> Result<View, String> 
             ));
         }
         inner.reply = None;
+        inner.source_doc = None;
         inner.review = None;
         inner.diff_receipts.clear();
         inner.setup = None;
@@ -2918,6 +2918,7 @@ pub async fn apply_reviewed_files(
     let mut inner = state.inner.lock().map_err(|_| "Status state unavailable")?;
     let Ok(result) = worker else {
         inner.reply = None;
+        inner.source_doc = None;
         inner.review = None;
         inner.diff_receipts.clear();
         return Err("Apply worker failed; check the terminal before continuing".into());
@@ -3062,6 +3063,7 @@ pub async fn run_reviewed_sync(
     let mut inner = state.inner.lock().map_err(|_| "Status state unavailable")?;
     let Ok(result) = worker else {
         inner.reply = None;
+        inner.source_doc = None;
         inner.review = None;
         inner.diff_receipts.clear();
         drop(inner);
@@ -3132,34 +3134,31 @@ mod tests {
         entry.status = "template-drift".into();
         let paths = HeldPaths::new(&report);
         let entry = report.entries.first().ok_or("missing entry")?;
-        assert_eq!(
-            edit_command(entry, &paths, Path::new("/home")),
-            Some("dotman edit -- '/home/-a b'\\''c'".into())
-        );
+        assert_eq!(editable(entry, &paths, Path::new("/home")), Some(true));
         let mut unavailable = entry.clone();
         unavailable.status = "clean".into();
-        assert!(edit_command(&unavailable, &paths, Path::new("/home")).is_some());
+        assert!(editable(&unavailable, &paths, Path::new("/home")).is_some());
         unavailable.key.raw = "bad\nname".into();
-        assert!(edit_command(&unavailable, &paths, Path::new("/home")).is_none());
+        assert!(editable(&unavailable, &paths, Path::new("/home")).is_none());
         unavailable.key.raw = entry.key.raw.clone();
         unavailable.status = "locked".into();
-        assert!(edit_command(&unavailable, &paths, Path::new("/home")).is_none());
+        assert!(editable(&unavailable, &paths, Path::new("/home")).is_none());
         unavailable.status = "clean".into();
         unavailable.encrypted = true;
-        assert!(edit_command(&unavailable, &paths, Path::new("/home")).is_none());
+        assert!(editable(&unavailable, &paths, Path::new("/home")).is_none());
         unavailable.encrypted = false;
         unavailable.source_tuple = protocol::StatusObservation::Missing;
-        assert!(edit_command(&unavailable, &paths, Path::new("/home")).is_none());
+        assert!(editable(&unavailable, &paths, Path::new("/home")).is_none());
         unavailable.source_tuple = entry.source_tuple.clone();
         unavailable.scope = "system".into();
-        assert!(edit_command(&unavailable, &paths, Path::new("/home")).is_none());
+        assert!(editable(&unavailable, &paths, Path::new("/home")).is_none());
         let mut held = entry.clone();
         held.status = "held".into();
         held.hold = Some(protocol::Hold::SecretName);
         report.entries.push(held);
         let paths = HeldPaths::new(&report);
         assert!(
-            edit_command(
+            editable(
                 report.entries.first().ok_or("missing entry")?,
                 &paths,
                 Path::new("/home")
@@ -3738,6 +3737,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut inner = Inner {
+            source_doc: None,
             active: Some(cancelled.clone()),
             reply: Some(report()?),
             review: None,
@@ -3779,6 +3779,7 @@ mod tests {
     fn selection_ids_are_generation_bound_and_denial_never_starts()
     -> Result<(), Box<dyn std::error::Error>> {
         let inner = Inner {
+            source_doc: None,
             active: None,
             reply: Some(report()?),
             review: None,
@@ -3834,6 +3835,7 @@ mod tests {
         let result = r#"{"record":"result","outcome":"error","exit_code":4,"error_kind":"other","recovery":[{"kind":"command","argv":["private-recovery-arg"],"shown":["shown-recovery"],"when":null}]}"#;
         let diff_context = CONTEXT.replace(r#""command":"status""#, r#""command":"diff""#);
         let mut inner = Inner {
+            source_doc: None,
             active: None,
             reply: Some(report()?),
             review: None,

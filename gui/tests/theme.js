@@ -104,19 +104,19 @@ async function checkThemes(send) {
 
 async function checkPreferences({ page, evaluate, waitFor, resize }) {
   const scheme = value => page("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value }] });
-  const theme = () => evaluate("document.querySelector('#theme-mode').value");
+  const theme = () => evaluate("document.querySelector('input[name=theme]:checked').value");
   const background = () => evaluate("getComputedStyle(document.body).backgroundColor");
   const ready = () => waitFor("Boolean(document.querySelector('#rows .row'))");
   await ready();
-  assert.equal(await theme(), "system");
+  assert.equal(await theme(), "dark");
+  await evaluate("document.querySelector('input[name=theme][value=system]').click()");
+  await waitFor("document.documentElement.dataset.theme === 'system'");
   await scheme("dark");
   const dark = await background();
   await scheme("light");
   assert.notEqual(await background(), dark, "System theme follows the platform");
   await evaluate(`document.querySelector("#nav-settings").click();
-    const control = document.querySelector("#theme-mode");
-    control.value = "dark";
-    control.dispatchEvent(new Event("change", { bubbles: true }));`);
+    document.querySelector('input[name=theme][value=dark]').click();`);
   await waitFor("document.documentElement.dataset.theme === 'dark'");
   assert.equal(await background(), dark);
   await page("Page.reload");

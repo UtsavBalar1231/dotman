@@ -1,3 +1,4 @@
+import { editSource } from "./source-editor.js";
 import { render, reveal } from "./file-tree.js";
 import { clear, show } from "./diff-reader.js";
 import { runKey } from "./keys.js";
@@ -15,12 +16,11 @@ declare global {
 
 const invoke = window.__TAURI__.core.invoke;
 type InputId = "search" | "clone-source";
-type ButtonId = "refresh" | "cancel" | "start-fresh" | "start-clone" | "start-import" | "setup-check" | "setup-retry" | "recovery-check" | "create-age" | "import-age" | "review-identity" | "review-hooks" | "sync-reviewed" | "sync-mass-delete" | "sync-lines" | "leave-lines" | "close-review" | "apply-decisions" | "clear-decisions" | "review-decisions" | "close-decisions" | "retry-decisions" | "next-undecided" | "close-diff" | "group-folders" | "group-status";
+type ButtonId = "cancel-review" | "refresh" | "cancel" | "start-fresh" | "start-clone" | "start-import" | "setup-check" | "setup-retry" | "recovery-check" | "create-age" | "import-age" | "review-identity" | "review-hooks" | "sync-reviewed" | "sync-mass-delete" | "sync-lines" | "leave-lines" | "close-review" | "apply-decisions" | "clear-decisions" | "review-decisions" | "close-decisions" | "retry-decisions" | "next-undecided" | "close-diff" | "group-folders" | "group-status";
 type ElementFor<T extends string> = T extends InputId ? HTMLInputElement
   : T extends ButtonId ? HTMLButtonElement
   : T extends "commit-message" ? HTMLTextAreaElement
   : T extends "machine-files" ? HTMLDetailsElement
-  : T extends "theme-mode" ? HTMLSelectElement
   : HTMLElement;
 function el<T extends string>(id: T): ElementFor<T> {
   const element = document.getElementById(id);
@@ -47,7 +47,7 @@ let diffOrigin: {
   reviewScroll: number;
 } | null = null;
 const rowNodes = new Map<string, HTMLElement>();
-let folderMode = false;
+let folderMode = true;
 let statusLoaded = false;
 let statusLocations: { home: string; repo: string } | null = null;
 let reviewId: string | null = null;
@@ -266,6 +266,8 @@ function controls() {
     ? queueLabel : null;
   const cancelLabel = writerActive && writerKind !== null ? cancelLabels[writerKind] : "Cancel read";
   updateWorkspace({ busy: busy || cancelPending, cancelling: cancelPending, queued, cancel: busy || cancelPending ? cancelLabel : null });
+  const edit = el("source-edit-details").querySelector("button");
+  if (edit) edit.disabled = busy || cancelPending;
   el("close-decisions").disabled = busy || cancelPending;
   el("retry-decisions").hidden = !retryDecisions;
   el("retry-decisions").disabled = busy || cancelPending;
@@ -291,6 +293,8 @@ function controls() {
   el("sync-lines").disabled = busy || cancelPending || !!commitError() || !Array.from(lineReceipts.values()).some(receipt => receipt.selected.size);
   el("leave-lines").disabled = busy || cancelPending;
   el("close-review").disabled = writerActive;
+  el("cancel-review").hidden = !writerActive || writerKind !== "sync";
+  el("cancel-review").disabled = cancelPending;
   el("apply-decisions").disabled = busy || cancelPending || !statusLoaded || !decisions.size;
   el("clear-decisions").disabled = busy || cancelPending || !decisions.size;
 }
@@ -495,6 +499,7 @@ function fileLeaf(entry: EntryView, displayName: string) {
   }
   row.setAttribute("aria-label", `${entry.key} — ${status.textContent}`);
   row.title = entry.key;
+  status.title = status.textContent;
   row.append(rowKey(displayName), status);
   row.addEventListener("click", () => openDiff(entry, row));
   return item;
@@ -700,7 +705,7 @@ async function refresh(preserveReview = false, preserveVariantResult = false) {
   clearDiff();
   diffOrigin = null;
   if (!preserveReview) {
-    el("review").hidden = true;
+    displayReview(false);
     el("review-items").replaceChildren();
   }
   reviewId = null;
@@ -728,6 +733,7 @@ async function refresh(preserveReview = false, preserveVariantResult = false) {
     el("notice").hidden = !view.key_stripped;
     updateWorkspace({ status: !view.success && ["in_progress", "pull_conflict", "stopped"].includes(view.finding)
       ? "Repository status needs attention." : view.message });
+    updateWorkspace({ repository: view.context?.repo ?? "" });
     if (view.context) {
       el("repository-path").textContent = view.context.repo;
       for (const [label, key] of [["Home", "home"], ["Repository", "repo"], ["Configuration", "config"], ["State", "state"], ["Identity", "identity"], ["Machine", "machine"]] as const) {
@@ -813,7 +819,7 @@ async function openDiff(entry: EntryView, row: HTMLElement | undefined, review: 
   };
   clearDiff();
   if (review === null) rowNodes.get(entry.id)?.setAttribute("aria-current", "true");
-  if (diffOrigin.review) el("review").hidden = true;
+  if (diffOrigin.review) displayReview(false);
   if (window.matchMedia?.("(max-width: 56rem)").matches && document.activeElement instanceof HTMLElement) {
     document.activeElement.blur();
   }
@@ -833,23 +839,17 @@ async function openDiff(entry: EntryView, row: HTMLElement | undefined, review: 
     button.addEventListener("click", () => runHostVariant(entry.id));
     el("diff-actions").append(button);
   }
-  if (review === null && typeof entry.edit_command === "string") {
-    const details = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = "Source editing details";
-    summary.prepend(icon("chevron-right", "disclosure-glyph"));
-    const label = document.createElement("label");
-    label.textContent = entry.status === "template-drift"
-      ? "Edit the template in a terminal:"
-      : "Edit the managed source in a terminal:";
-    const command = document.createElement("textarea");
-    command.readOnly = true;
-    command.rows = 2;
-    command.setAttribute("aria-label", "Terminal edit command");
-    command.value = entry.edit_command;
-    label.append(command);
-    details.append(summary, label);
-    el("source-edit-details").append(details);
+  if (review === null && entry.editable) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Edit source";
+    button.title = "Edit this file in the repository";
+    button.addEventListener("click", () => { if (!busy) void editSource(entry, invoke, async () => {
+      await refresh();
+      const updated = entries.find(item => item.key === entry.key && item.editable);
+      if (updated) await openDiff(updated, rowNodes.get(updated.id));
+    }); });
+    el("source-edit-details").append(button);
   }
   el("close-diff").focus();
   if (!entry.supported) {
@@ -1005,7 +1005,7 @@ async function cancel() {
   cancelPending = true;
   clearDiff();
   diffOrigin = null;
-  el("review").hidden = true;
+  displayReview(false);
   el("review-items").replaceChildren();
   clearCommitEditor();
   reviewId = null;
@@ -1038,7 +1038,7 @@ function closeDiff() {
   ++serial;
   clearDiff();
   if (diffOrigin?.review && reviewId !== null) {
-    el("review").hidden = false;
+    displayReview(true);
     el("review-body").scrollTop = diffOrigin.reviewScroll;
     if (diffOrigin.row?.isConnected) diffOrigin.row.focus({ preventScroll: true });
     window.scrollTo(...diffOrigin.scroll);
@@ -1067,17 +1067,19 @@ function closeDiff() {
   diffOrigin = null;
 }
 
+function displayReview(open: boolean) {
+  const panel = el("review") as HTMLDialogElement;
+  if (!open) panel.close?.();
+  panel.hidden = !open;
+  if (open && !panel.open) panel.showModal?.();
+}
+el("review").addEventListener("cancel", event => { event.preventDefault(); void closeReview(); });
+
 async function openReview() {
   if (busy || cancelPending || !statusLoaded) return;
   clearLines();
   previousScroll = [window.scrollX, window.scrollY];
-  if (diffOrigin && !diffOrigin.review) {
-    rowNodes.get(diffOrigin.id)?.setAttribute("aria-current", "false");
-    clearDiff();
-    diffOrigin = null;
-  }
-  el("entries").hidden = true;
-  el("review").hidden = false;
+  displayReview(true);
   el("review-items").replaceChildren();
   clearCommitEditor();
   reviewId = null;
@@ -1090,7 +1092,10 @@ async function openReview() {
   controls();
   try {
     const view = await invoke("open_review");
-    if (token !== serial) return;
+    if (token !== serial) {
+      if (view.id) await invoke("discard_review", { id: view.id });
+      return;
+    }
     reviewId = view.id ?? null;
     massDeleteReview = view.outcome === "mass_delete";
     if (view.outcome === "review" && typeof reviewId === "string" && reviewId.length && typeof view.commit_message === "string" && view.commit_message.length) {
@@ -1128,9 +1133,13 @@ function renderReviewItems(items: ReviewItem[], captureDiffs = false) {
   for (const label of labels) {
     const items = groups.get(label);
     if (!items) continue;
-    const heading = document.createElement("h3");
-    const list = document.createElement("ul");
+    if (label === "Suggested message" && !el("commit-editor").hidden) continue;
+    const section = document.createElement("details");
+    section.open = ["Captures", "Held or undecided"].includes(label) || labels.length === 1;
+    const heading = document.createElement("summary");
     heading.textContent = `${label} (${items.length})`;
+    heading.prepend(icon("chevron-right", "disclosure-glyph"));
+    const list = document.createElement("ul");
     for (const item of items) {
       const row = document.createElement("li");
       row.textContent = item.text;
@@ -1146,7 +1155,8 @@ function renderReviewItems(items: ReviewItem[], captureDiffs = false) {
       }
       list.append(row);
     }
-    el("review-items").append(heading, list);
+    section.append(heading, list);
+    el("review-items").append(section);
   }
 }
 
@@ -1290,7 +1300,7 @@ async function applyDecisions() {
   clearCommitEditor();
   clearDiff();
   el("entries").hidden = true;
-  el("review").hidden = true;
+  displayReview(false);
   el("decision-results").replaceChildren();
   el("decision-message").textContent = "Waiting for native confirmation…";
   el("decision-message").focus();
@@ -1507,19 +1517,18 @@ async function runSetup(kind: "fresh" | "clone" | "import") {
 
 async function closeReview() {
   if (writerActive) return;
-  if (busy) { void cancel(); return; }
   clearLines();
   const token = ++serial;
   const id = reviewId;
   reviewId = null;
   controls();
-  el("review").hidden = true;
+  displayReview(false);
   el("review-items").replaceChildren();
   clearCommitEditor();
   el("context").hidden = !el("paths").children.length;
   if (statusLoaded) {
     el("entries").hidden = false;
-    el("nav-review").focus({ preventScroll: true });
+    el(busy ? "page-heading" : "nav-review").focus({ preventScroll: true });
     window.scrollTo(...previousScroll);
   } else {
     el("message").focus();
@@ -1551,7 +1560,7 @@ function navigate(next: Page) {
       diffOrigin = null;
     }
     void closeReview();
-  } else if (diffOrigin) {
+  } else if (diffOrigin && next !== "review") {
     clearDiff();
     rowNodes.get(diffOrigin.id)?.setAttribute("aria-current", "false");
     diffOrigin = null;
@@ -1561,7 +1570,7 @@ function navigate(next: Page) {
   if (next === "review") {
     if (statusLoaded) void openReview();
     else {
-      el("review").hidden = false;
+      displayReview(true);
       el("review-message").textContent = "Status is unavailable. Refresh status before opening an outgoing preview.";
       controls();
     }
@@ -1597,6 +1606,7 @@ for (const id of ["setup-check", "setup-retry", "recovery-check"] as const) {
   });
 }
 el("cancel").addEventListener("click", cancel);
+el("cancel-review").addEventListener("click", cancel);
 el("close-diff").addEventListener("click", closeDiff);
 el("replacement-batch").addEventListener("click", () => {
   if (busy || cancelPending || !replacementReview || !statusLoaded ||
@@ -1676,7 +1686,8 @@ window.addEventListener("keydown", event => {
     el("search").focus();
     el("search").select();
   } else if (!event.ctrlKey && event.key === "Escape" && !busy && !cancelPending) {
-    if (decisionsOpen && !el("decisions").hidden) closeDecisions();
+    if (!el("review").hidden) void closeReview();
+    else if (decisionsOpen && !el("decisions").hidden) closeDecisions();
     else if (replacementReview) el("replacement-back").click();
     else if (!el("diff").hidden) closeDiff();
     else if (page === "review") void closeReview();

@@ -29,3 +29,6 @@ pub mod setup;
 
 #[allow(unsafe_code)]
 mod sys;
+
+/// Exchanges the existing source and its prepared replacement atomically.
+pub use sys::exchange_files;

@@ -4,6 +4,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "refresh",
             "cancel",
             "open_diff",
+            "open_source",
+            "save_source",
             "open_review",
             "discard_review",
             "run_reviewed_sync",

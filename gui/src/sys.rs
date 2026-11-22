@@ -130,6 +130,28 @@ pub fn terminate_group(child: &Child) -> io::Result<()> {
     Ok(())
 }
 
+/// Atomically swaps two existing directory entries on Linux.
+///
+/// # Errors
+/// Returns the filesystem error if the exchange is unsupported or either path is inaccessible.
+pub fn exchange_files(a: &std::ffi::CStr, b: &std::ffi::CStr) -> io::Result<()> {
+    // SAFETY: both paths are live NUL-terminated strings throughout the syscall.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::wait_readable;

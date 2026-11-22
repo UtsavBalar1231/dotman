@@ -32,6 +32,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app::refresh,
             app::cancel,
             app::open_diff,
+            app::source::open_source,
+            app::source::save_source,
             app::open_review,
             app::discard_review,
             app::run_reviewed_sync,
