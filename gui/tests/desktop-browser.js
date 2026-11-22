@@ -99,7 +99,7 @@ window.fixtureStatus = {
   context: { home: "/home/test", repo: "/repo/" + longPath, config: "/config", state: "/state", identity: "/identity", machine: "test" },
   entries: [
     { id: "1:0", key: ".config/niri/" + longPath, status: "changed-locally", group: "outgoing", supported: true, system: false },
-    { id: "1:1", key: ".config/helix/config.toml", status: "changed-in-repo", group: "incoming", supported: true, system: false },
+    { id: "1:1", key: ".config/helix/config.toml", status: "changed-in-repo", group: "incoming", supported: true, system: false, editable: true },
     { id: "1:2", key: "plain", status: "clean", group: "clean", supported: true, system: false },
   ],
 };

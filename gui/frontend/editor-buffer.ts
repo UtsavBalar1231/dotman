@@ -57,6 +57,7 @@ const theme = EditorView.theme({
   ".cm-searchMatch,.cm-selectionMatch": { background: "var(--selected)", outline: "1px solid var(--rule)" },
   ".cm-searchMatch.cm-searchMatch-selected,.cm-matchingBracket": { outline: "1px solid var(--accent)" },
   ".cm-panels,.cm-tooltip": { color: "var(--ink)", background: "var(--paper)", borderColor: "var(--partition)" },
+  ".cm-panels": { flexShrink: 0, maxHeight: "50%", overflowY: "auto" },
   ".source-search": { padding: ".6rem clamp(.65rem, 2vw, 1.35rem)", fontFamily: "var(--font-workbench)" },
   ".source-search > div:not([hidden])": { display: "flex", alignItems: "center", flexWrap: "wrap", gap: ".25rem" },
   ".source-search > div + div": { marginTop: ".3rem" },

@@ -59,21 +59,23 @@ return <>
       </div>
     </dialog>
     <section id="diff" hidden aria-labelledby="diff-key">
-      <div className="section-head">
-        <div className="comparison-title" role="group" aria-label="File and status" tabIndex={0}>
-          <h2 id="diff-key"></h2>
-          <p id="diff-context"></p>
+      <div id="comparison-body">
+        <div className="section-head">
+          <div className="comparison-title" role="group" aria-label="File and status" tabIndex={0}>
+            <h2 id="diff-key"></h2>
+            <p id="diff-context"></p>
+          </div>
+          <div id="source-edit-details"></div>
+          <button id="close-diff" className="with-glyph" type="button">Back to files</button>
         </div>
-        <div id="source-edit-details"></div>
-        <button id="close-diff" className="with-glyph" type="button">Back to files</button>
-      </div>
-      <div className="comparison-content">
-        <p id="diff-message" role="status" aria-live="polite"></p>
-        <div className="comparison-reader">
-          <div id="reader-tools" hidden></div>
-          <pre id="diff-text" tabIndex={0} aria-label="Diff text"></pre>
+        <div className="comparison-content">
+          <p id="diff-message" role="status" aria-live="polite"></p>
+          <div className="comparison-reader">
+            <div id="reader-tools" hidden></div>
+            <pre id="diff-text" tabIndex={0} aria-label="Diff text"></pre>
+          </div>
+          <fieldset id="line-edits" hidden><legend>Choose changes to commit</legend><p>Checking a change enters selected-only mode. Replacements include both sides.</p><div id="line-edit-list"></div></fieldset>
         </div>
-        <fieldset id="line-edits" hidden><legend>Choose changes to commit</legend><p>Checking a change enters selected-only mode. Replacements include both sides.</p><div id="line-edit-list"></div></fieldset>
       </div>
       <section id="replacement-review" hidden aria-labelledby="replacement-title">
         <div className="replacement-content" role="group" tabIndex={0} aria-label="Replacement details">

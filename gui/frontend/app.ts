@@ -258,7 +258,8 @@ function controls() {
   el("next-undecided").hidden = !statusLoaded || el("diff").hidden || !diffOrigin || diffOrigin.review || !nextUndecided();
   el("next-undecided").disabled = busy || cancelPending;
   const hasDecisionResult = Boolean(el("decision-message").textContent);
-  el("decisions").hidden = !decisionsOpen || (!decisions.size && !hasDecisionResult);
+  if (!decisions.size && !hasDecisionResult) decisionsOpen = false;
+  el("decisions").hidden = !decisionsOpen;
   const queueLabel = decisions.size
     ? `Review ${decisions.size} ${decisions.size === 1 ? "decision" : "decisions"}`
     : "View file decision result";
@@ -853,6 +854,7 @@ async function openDiff(entry: EntryView, row: HTMLElement | undefined, review: 
     el("source-edit-details").append(button);
   }
   el("close-diff").focus();
+  el("comparison-body").scrollTop = 0;
   if (!entry.supported) {
     if (review === null) {
       decisions.delete(entry.id);
@@ -1340,6 +1342,7 @@ async function applyDecisions() {
   const answers = Array.from(decisions, ([id, choice]) => ({ id, action: choice.action }));
   retryDecisions = false;
   decisionsOpen = true;
+  el("decision-message").textContent = "Waiting for native confirmation…";
   clearDecisions();
   writerActive = true;
   writerKind = "files";
@@ -1354,7 +1357,6 @@ async function applyDecisions() {
   el("entries").hidden = true;
   displayReview(false);
   el("decision-results").replaceChildren();
-  el("decision-message").textContent = "Waiting for native confirmation…";
   el("decision-message").focus();
   controls();
   let shouldRefresh = false;
@@ -1672,6 +1674,10 @@ el("replacement-batch").addEventListener("click", () => {
   decisions.set(entry.id, { action: "take_repo", key: entry.key });
   renderDecisions();
   launcher.focus({ preventScroll: true });
+  const body = el("comparison-body");
+  if (body.clientHeight > 0) {
+    body.scrollTop += el("diff-text").getBoundingClientRect().top - body.getBoundingClientRect().top;
+  }
 });
 el("replacement-back").addEventListener("click", () => {
   if (busy || cancelPending || !replacementReview) return;

@@ -91,6 +91,68 @@ async function check({ page, evaluate, waitFor, resize, key }) {
   })()`), true, "Replacement action fits in a short window");
   await click("#close-diff");
 
+  const reachable = selector => evaluate(`(() => {
+    const button = document.querySelector(${JSON.stringify(selector)});
+    const box = button.getBoundingClientRect();
+    return box.top >= 0 && box.bottom <= innerHeight &&
+      button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+  })()`);
+  for (const [width, remove] of [[320, "#clear-decisions"], [360, "#decision-items button"], [320, "#clear-decisions"]]) {
+    await resize(width, 320);
+    await click(incoming);
+    await renderedDiff();
+    await click("#diff-actions .review-action");
+    assert.equal(await reachable("#replacement-batch"), true, `Replacement fits at ${width} × 320`);
+    await click("#replacement-batch");
+    await waitFor(visible("#review-decisions"));
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => resolve(true)))");
+    assert.equal(await reachable("#diff-actions .review-action"), true, "Queued comparison action fits");
+    assert.equal(await evaluate(`(() => {
+      const body = document.querySelector("#comparison-body").getBoundingClientRect();
+      const text = document.querySelector("#diff-text").getBoundingClientRect();
+      return Math.min(body.bottom, text.bottom) - Math.max(body.top, text.top) >= 80;
+    })()`), true, "Queueing a replacement returns to the diff text");
+    await click("#review-decisions");
+    assert.equal(await evaluate(visible("#diff")), false, "The open queue owns the short workspace");
+    await evaluate('document.querySelector("#apply-decisions").focus()');
+    assert.equal(await reachable("#apply-decisions"), true, "The queue scrolls its action into view");
+    await key("Escape");
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => resolve(true)))");
+    assert.equal(await evaluate("document.activeElement.id"), "review-decisions");
+    await click("#close-diff");
+    await click('button[title^=".config/niri/"]');
+    assert.equal(await evaluate("document.activeElement.id"), "close-diff");
+    assert.equal(await evaluate("document.querySelector('#comparison-body').scrollTop"), 0, "A different file opens at its heading");
+    await click("#review-decisions");
+    await click(remove);
+    await key("Escape");
+    assert.equal(await evaluate(visible(incoming)), true, "Escape returns to Files after removing the last decision");
+  }
+
+  await click("#nav-settings");
+  await evaluate("document.querySelector('#context summary').focus()");
+  await key(" ");
+  for (const [width, height, scale] of [[1715, 1373, 100], [3440, 1440, 100], [609, 450, 200], [320, 420, 200]]) {
+    await resize(width, height);
+    await evaluate(`document.documentElement.style.fontSize = "${scale}%"`);
+    assert.deepEqual(await evaluate(`(() => {
+      const settings = document.querySelector("#settings");
+      const path = document.querySelector("#repository-path");
+      const labels = [...document.querySelectorAll(".theme-picker label")];
+      return {
+        readablePath: path.clientWidth >= Math.min(300, settings.clientWidth * .65),
+        fits: settings.scrollWidth <= settings.clientWidth,
+        expanded: document.querySelector("#context").open,
+        focused: document.activeElement.matches("#context summary"),
+        themesFit: innerWidth < 1000 || labels.every(label => label.offsetTop === labels[0].offsetTop),
+      };
+    })()`), { readablePath: true, fits: true, expanded: true, focused: true, themesFit: true },
+    `Expanded Settings at ${width}×${height}, ${scale}% text`);
+  }
+  await key(" ");
+  await evaluate("document.documentElement.style.removeProperty('font-size')");
+  await click("#nav-files");
+
   for (const theme of ["light", "dark"]) {
     await click("#nav-settings");
     await selectTheme(theme);
@@ -111,12 +173,15 @@ async function check({ page, evaluate, waitFor, resize, key }) {
         assert.deepEqual(await evaluate(`(() => {
           const back = document.querySelector("#close-diff");
           const title = document.querySelector("#diff-key");
+          const group = document.querySelector(".comparison-title");
           return {
             backLabel: back.getAttribute("aria-label"),
             compact: back.getBoundingClientRect().width === 44,
             oneLine: title.getBoundingClientRect().height <= parseFloat(getComputedStyle(title).lineHeight) + 1,
+            statusFits: group.scrollHeight === group.clientHeight,
+            editVisible: document.querySelector("#source-edit-details button").getBoundingClientRect().height >= 44,
           };
-        })()`), { backLabel: "Back to files", compact: true, oneLine: true });
+        })()`), { backLabel: "Back to files", compact: true, oneLine: true, statusFits: true, editVisible: true });
       }
       const geometry = await evaluate(`(() => {
         const diff = document.querySelector("#diff-text");
@@ -328,6 +393,24 @@ async function checkSourceEditor({ page, evaluate, waitFor, key, resize }) {
   assert.equal(await evaluate(`${shadow}.querySelector('button[aria-label="Whole word"]').getAttribute("aria-pressed")`), "true");
   await evaluate(`${shadow}.querySelector('button[aria-label=Replace]').click()`);
   await insert("replaced");
+  await resize(360, 320);
+  assert.deepEqual(await evaluate(`(() => {
+    const root = ${shadow};
+    const panel = root.querySelector(".cm-panels-top");
+    const code = root.querySelector(".cm-scroller");
+    const reachable = (selector, scrollTop) => {
+      panel.scrollTop = scrollTop;
+      const control = root.querySelector(selector);
+      const bounds = control.getBoundingClientRect();
+      return root.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2) === control;
+    };
+    return {
+      scrollable: panel.scrollHeight > panel.clientHeight && getComputedStyle(panel).overflowY === "auto",
+      codeVisible: code.clientHeight >= parseFloat(getComputedStyle(code).lineHeight),
+      find: reachable("input[aria-label=Find]", 0),
+      replaceAll: reachable("button[aria-label='Replace all']", panel.scrollHeight),
+    };
+  })()`), { scrollable: true, codeVisible: true, find: true, replaceAll: true }, "Expanded find and replace preserves the editor and both ends of the controls in a short window");
   await evaluate(`const replaceAll = ${shadow}.querySelector('button[aria-label="Replace all"]'); replaceAll.focus(); replaceAll.click()`);
   assert.equal(await evaluate(code), "replaced\n");
   await key("Escape");

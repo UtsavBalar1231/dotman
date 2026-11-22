@@ -31,6 +31,10 @@ dialog#source-editor {
 .source-status { min-height:2.6rem; flex-wrap:wrap; gap:.25rem .9rem; border-block-start:1px solid var(--divider); background:var(--navigation-surface); color:var(--muted); font-size:.76rem; }
 .source-status .source-language { color:var(--ink); }
 .source-position { margin-inline-start:auto; }
+@media(max-height:26rem) {
+  .source-heading { padding-block:.35rem; }
+  .source-tools { padding-block:.2rem; }
+}
 @media(max-width:48rem) { dialog#source-editor { width:100vw; } }
 @media(max-width:30rem) {
   .source-heading,.source-tools,.source-status,.source-notice { padding-inline:.65rem; }

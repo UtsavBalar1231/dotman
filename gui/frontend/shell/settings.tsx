@@ -11,7 +11,7 @@ return (
         <summary>
           <span className="repository-label with-glyph"><Icon name="repository" />Repository</span>
           <span id="repository-path"></span>
-          <span className="paths-label with-glyph">Resolved paths<Icon name="chevron-right" className="disclosure-glyph" /></span>
+          <span className="paths-label with-glyph"><span>Resolved paths</span><Icon name="chevron-right" className="disclosure-glyph" /></span>
         </summary>
         <dl id="paths"></dl>
       </details>

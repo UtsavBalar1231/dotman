@@ -39,7 +39,7 @@ class Element {
   click() { return this.listeners.click(); }
 }
 
-const ids = ["refresh", "cancel", "diff", "diff-key", "diff-message", "diff-text",
+const ids = ["refresh", "cancel", "diff", "comparison-body", "diff-key", "diff-message", "diff-text",
   "rows", "search", "entries", "context", "paths", "message", "notice",
   "cancel-review", "remote", "clean", "held-counts", "close-diff", "review", "review-items", "review-message",
   "review-remote", "close-review", "sync-reviewed", "sync-mass-delete", "sync-lines", "leave-lines", "line-summary", "selected-effect", "selected-lines", "line-edits", "line-edit-list",
