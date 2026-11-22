@@ -3,30 +3,75 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://img.shields.io/github/actions/workflow/status/UtsavBalar1231/dotman/ci.yml?branch=main)](https://github.com/UtsavBalar1231/dotman/actions)
 
-dotman is a dotfiles manager for Linux. It has no learning curve and is safe by default.
+Manage your Linux dotfiles from a desktop app or the command line. Keep them in an ordinary Git repository and edit them where you use them. The desktop app lets you compare a file in your home directory with its repository copy, edit the source, and review what will sync.
 
-Your dotfiles live in a normal git repo. dotman copies them into `$HOME`, works out which side changed, and asks before it overwrites anything. When it does replace a file in `$HOME`, it backs up the old one first. It never writes through a symlink, runs a hook you haven't approved, or runs a command from a template.
+dotman compares both copies with their last recorded state to tell which side changed. Before replacing a different file in `$HOME`, it backs up the old copy. It never writes through a symlink, runs a hook you haven't approved, or runs a command from a template.
 
-## Install
+[Run the desktop app](#linux-desktop) · [Install the CLI](#install-the-cli) · [See the desktop walkthrough](#desktop-walkthrough)
 
-The command is `dotman`. The installers also add a shorter `dot` symlink, unless another `dot` is already on your `PATH` (on most systems `/usr/bin/dot` is Graphviz).
+![Dotman desktop showing a file tree and a side-by-side comparison of the repository and local Helix configuration](docs/images/desktop-workbench.png)
 
-```bash
-# release tarball for Linux, checksum-verified
-curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash
+## Linux desktop
 
-# from source (Rust 1.88 or newer)
-cargo install --git https://github.com/UtsavBalar1231/dotman --locked dotman-cli
+Open **dotman** from your application launcher if you installed a desktop package. Configured repositories open in **Files**. For a new setup, you can create a repository, clone one for review, or import a directory of static dotfiles once its destination is ready.
 
-# Arch Linux, from a checkout
-cd packaging/arch && makepkg -si
+- In **Files**, select a file to compare the two copies. **Edit source** opens the repository copy in the built-in editor.
+- Open **Review changes** to inspect outgoing files or select individual edits for a commit. The confirmation shows what you are about to sync.
+
+The published Linux tarballs contain the CLI. To build the desktop app from a checkout, install Rust 1.90 or newer, Git, and the GTK 3 and WebKitGTK 4.1 development packages. Build the matching CLI and GUI side by side from the repository root. The checkout includes the frontend bundle.
+
+```sh
+cargo build --locked --release --target-dir target --bin dotman
+cargo build --locked --release --manifest-path gui/Cargo.toml --target-dir target
+./target/release/dotman-gui
 ```
 
-The [releases page](https://github.com/UtsavBalar1231/dotman/releases) has tarballs for Linux on x86_64 and aarch64. The glibc builds need glibc 2.39 or newer. The static musl builds run on any Linux, so the installer uses those.
+For Arch, Debian and RPM packaging, supported file types, and keyboard shortcuts, see the [Linux desktop guide](docs/linux-gui.md).
 
-There are no macOS builds yet, and dotman hasn't been built or tested on a Mac, so `install.sh` won't work there. Build it from source instead: `cargo install --git https://github.com/UtsavBalar1231/dotman --tag v0.2.0 --locked dotman-cli`.
+### Desktop walkthrough
 
-## Quick start
+| Edit a repository source | Review an outgoing sync |
+| --- | --- |
+| ![The built-in editor with an unsaved change to Helix’s bufferline setting](docs/images/source-editor.png) | ![The review drawer beside the file tree, with the outgoing changes and confirmation action](docs/images/sync-review.png) |
+
+<details>
+<summary>Watch a Helix edit go from comparison to sync (20 seconds)</summary>
+
+![Dotman compares the Helix configuration, edits and saves the repository source, then reviews and confirms the sync and shows its receipt](docs/images/desktop-workflow.gif)
+
+</details>
+
+## Command line
+
+### Install the CLI
+
+On Linux x86_64 or aarch64, the release installer downloads the static musl build and checks its checksum. It installs `dotman` and adds a shorter `dot` alias when the name is available.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/UtsavBalar1231/dotman/main/install/install.sh | bash
+```
+
+The [release downloads](https://github.com/UtsavBalar1231/dotman/releases) also include glibc builds for systems with glibc 2.39 or newer.
+
+<details>
+<summary>Other CLI installation options</summary>
+
+With Cargo and Rust 1.88 or newer:
+
+```sh
+cargo install --git https://github.com/UtsavBalar1231/dotman --locked dotman-cli
+```
+
+On Arch Linux, build the package from a checkout:
+
+```sh
+cd packaging/arch
+makepkg -si
+```
+
+</details>
+
+### First sync
 
 On your first machine, run `init`. It only asks what it can't work out for itself: your git name and email, the remote (it can create a private GitHub repo for you with `gh`), the host name and profiles, any system files, and an encryption key.
 
@@ -46,24 +91,33 @@ After that, edit your files where they are and run `dotman sync`. It picks up yo
 
 [Getting started](docs/getting-started.md) has the rest, such as how `sync` picks up new files in a directory you've added.
 
-## Demo
+## CLI walkthroughs
 
-Setting up two machines:
+<details>
+<summary>Set up two machines</summary>
 
 https://github.com/user-attachments/assets/a9fac84a-79f5-49c9-802e-d13a6b2af84b
 
-Editing and syncing day to day, and the backups sync makes:
+</details>
+
+<details>
+<summary>Edit and sync files, then inspect the backups</summary>
 
 https://github.com/user-attachments/assets/4068b53a-8dfb-46b2-a1b2-8414b8a904de
 
-Per-machine files, templates and secrets:
+</details>
+
+<details>
+<summary>Use per-machine files, templates and secrets</summary>
 
 https://github.com/user-attachments/assets/8bde50d1-c0ee-4340-8b72-7202184c55ae
+
+</details>
 
 ## Documentation
 
 - [Getting started](docs/getting-started.md): setting up in full, what dotman needs, and using it in Codespaces, Dev Containers and DevPod.
-- [Linux desktop](docs/linux-gui.md): the file workspace, guarded setup, and matching CLI/GUI builds.
+- [Linux desktop](docs/linux-gui.md) covers the editor, review drawer, setup, and matching CLI/GUI builds.
 - [Daily use](docs/daily-use.md): the commands and their exit codes, how `status` and `sync` work, what happens when a pull conflicts, backups and file modes, ignoring files, and the flags that answer prompts.
 - [Per-machine files](docs/per-machine.md): variants, templates and hooks.
 - [Secrets](docs/secrets.md): encrypted files, your age key, and how dotman keeps credentials out of the repo.
@@ -79,7 +133,9 @@ https://github.com/user-attachments/assets/8bde50d1-c0ee-4340-8b72-7202184c55ae
 
 [AGENTS.md](AGENTS.md) explains the layout, the rules and the commands. Before you open a pull request, run `just lint-strict`, `cargo test --workspace --all-targets` and `just e2e`. That last one runs the scenarios in `e2e/`: several machines syncing, recovery after a killed run, and the importers. `just e2e-distros` runs the same journeys in Docker on several distros.
 
-To report a vulnerability, see [SECURITY.md](SECURITY.md).
+For desktop changes, also run `just gui-check`.
+
+Report bugs and request features in [GitHub Issues](https://github.com/UtsavBalar1231/dotman/issues). For vulnerabilities, follow the [security reporting instructions](SECURITY.md).
 
 ## License
 
