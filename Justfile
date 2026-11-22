@@ -59,18 +59,18 @@ lint-strict:
         -W clippy::unwrap_used
 
 gui-frontend:
-    "${TSC:-tsc}" -p gui/tsconfig.json
+    npm --prefix gui run build
 
 gui-frontend-check:
     #!/usr/bin/env bash
     set -euo pipefail
     output=$(mktemp -d)
     trap 'rm -r -- "$output"' EXIT
-    "${TSC:-tsc}" -p gui/tsconfig.json --outDir "$output"
-    for js in "$output"/*.js; do cmp "$js" "gui/dist/${js##*/}"; done
-    for js in gui/dist/*.js; do test -f "$output/${js##*/}"; done
-    node gui/tests/file-tree.js
-    node gui/tests/diff-reader.js
+    npm --prefix gui run build -- --outDir "$output"
+    diff -ru gui/dist "$output"
+    npm --prefix gui run build:controllers
+    node gui/tests/file-tree.js gui/.controller-tests/file-tree.js
+    node gui/tests/diff-reader.js gui/.controller-tests/diff-reader.js
     node gui/tests/ui.js
     node gui/tests/theme.js
     node gui/tests/workbench-layout.js

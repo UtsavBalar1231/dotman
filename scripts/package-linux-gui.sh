@@ -106,6 +106,7 @@ install -Dm644 "$root"/docs/*.md -t "$cli/usr/share/doc/dotman-cli/docs"
 install -Dm644 "$root/LICENSE" "$cli/usr/share/doc/dotman-cli/LICENSE"
 install -Dm644 "$root/LICENSE" "$gui/usr/share/doc/dotman-gui/LICENSE"
 install -Dm644 "$root/gui/dist/LICENSE.txt" "$gui/usr/share/doc/dotman-gui/OFL.txt"
+install -Dm644 "$root/gui/dist/THIRD-PARTY-NOTICES.txt" "$gui/usr/share/doc/dotman-gui/THIRD-PARTY-NOTICES.txt"
 install -Dm644 "$root/packaging/dotman-gui.desktop" "$gui/usr/share/applications/dotman-gui.desktop"
 install -Dm644 "$root/gui/icons/dotman-gui.svg" "$gui/usr/share/icons/hicolor/scalable/apps/dotman-gui.svg"
 printf '%s  %s\n%s  %s\n' "$cli_hash" "$cli/usr/bin/dotman" "$gui_hash" "$gui/usr/bin/dotman-gui" | sha256sum --check --status || {

@@ -1,8 +1,6 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 
 class Element {
   constructor(id = "", tag = "") {
@@ -22,6 +20,7 @@ class Element {
   replaceChildren(...children) { this.children = children; }
   addEventListener(type, fn) { this.listeners[type] = fn; }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   removeAttribute(name) { delete this.attributes[name]; }
   querySelector(selector) {
     const tags = selector.split(",").map(tag => tag.trim());
@@ -43,29 +42,29 @@ class Element {
 const ids = ["refresh", "cancel", "diff", "diff-key", "diff-message", "diff-text",
   "rows", "search", "entries", "context", "paths", "message", "notice",
   "remote", "clean", "held-counts", "close-diff", "review", "review-items", "review-message",
-  "review-remote", "open-review", "close-review", "sync-reviewed", "sync-mass-delete", "sync-lines", "leave-lines", "line-summary", "selected-effect", "selected-lines", "line-edits", "line-edit-list",
+  "review-remote", "close-review", "sync-reviewed", "sync-mass-delete", "sync-lines", "leave-lines", "line-summary", "selected-effect", "selected-lines", "line-edits", "line-edit-list",
   "commit-editor", "commit-message", "commit-error",
   "recovery", "recovery-message", "recovery-steps", "decisions", "decision-message",
   "decision-items", "decision-results", "clear-decisions", "apply-decisions", "diff-actions", "diff-selection",
   "setup", "machine-files", "machine-file-details", "review-identity", "identity-result", "identity-message", "review-hooks", "hooks-result", "hooks-message",
   "age-controls", "create-age", "import-age", "age-message",
-  "start-fresh", "start-import", "setup-result", "setup-message", "clone-controls", "clone-source", "start-clone",
-  "repository-path", "diff-context", "theme-mode", "accent-mode", "group-folders", "group-status",
+  "start-fresh", "start-import", "setup-result", "setup-message", "setup-retry", "clone-controls", "clone-source", "start-clone",
+  "repository-path", "diff-context", "group-folders", "group-status",
   "guide-title", "guide-description", "attention-list", "next-undecided", "reader-tools"];
 ids.push("policy-controls", "policy-directories", "policy-ignores", "policy-message");
 ids.push("variant-result", "variant-message");
 ids.push("replacement-review", "replacement-title", "replacement-source", "replacement-target", "replacement-back", "replacement-batch", "decisions-title");
 ids.push("nav-files", "nav-review", "nav-settings", "settings", "page-heading", "paths-unavailable", "age-unavailable");
 ids.push("recovery-check", "recovery-paths", "recovery-finding", "recovery-details", "setup-check", "setup-paths", "setup-finding", "setup-guidance");
+ids.push("review-decisions", "close-decisions", "retry-decisions");
+ids.push("review-body", "source-edit-details");
 const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
-const html = fs.readFileSync(path.join(__dirname, "../dist/index.html"), "utf8");
-assert.match(html, /<section id="variant-result" hidden[^>]*>[\s\S]*?<p id="variant-message" role="status" aria-live="polite" tabindex="-1"><\/p>[\s\S]*?<\/section>/);
 elements["variant-result"].hidden = true;
 elements["variant-message"].setAttribute("role", "status");
 elements["variant-message"].setAttribute("aria-live", "polite");
 elements["variant-result"].append(elements["variant-message"]);
-elements["group-folders"].setAttribute("aria-pressed", "true");
-elements["group-status"].setAttribute("aria-pressed", "false");
+elements["group-folders"].setAttribute("aria-pressed", "false");
+elements["group-status"].setAttribute("aria-pressed", "true");
 const document = {
   activeElement: null,
   documentElement: new Element(),
@@ -191,12 +190,13 @@ globalThis.HTMLDetailsElement = class extends Element {};
 async function tick() { await new Promise(resolve => setImmediate(resolve)); }
 
 async function main() {
-  await import("../dist/app.js");
+  const { getWorkspaceView } = await import("../.controller-tests/workspace-view.js");
+  await import("../.controller-tests/app.js");
   await tick();
-  assert.equal(elements["guide-title"].textContent, "Changes to inspect");
-  assert.equal(elements["attention-list"].children[0].children[0].children[0].textContent, "x");
+  assert.equal(elements["guide-title"].textContent, "File comparison");
+  assert.equal(elements["attention-list"].children.length, 0);
   elements["nav-settings"].click();
-  assert.equal(elements["nav-settings"].attributes["aria-current"], "page");
+  assert.equal(getWorkspaceView().page, "settings");
   assert.equal(document.activeElement, elements["page-heading"]);
   assert.equal(elements.settings.hidden, false);
   elements["nav-files"].click();
@@ -206,7 +206,7 @@ async function main() {
   elements["nav-settings"].click();
   assert.deepEqual(discards, ["navigation-review"]);
   assert.equal(elements.review.hidden, true);
-  assert.equal(elements["nav-settings"].attributes["aria-current"], "page");
+  assert.equal(getWorkspaceView().page, "settings");
   assert.equal(document.activeElement, elements["page-heading"]);
   assert.equal(writes.length, 0);
   discards.length = 0;
@@ -229,9 +229,9 @@ async function main() {
   elements["nav-settings"].click();
   assert.equal(elements["age-controls"].hidden, false);
   elements["import-age"].click();
-  assert.equal(elements["nav-files"].disabled, true);
+  assert.equal(getWorkspaceView().busy, true);
   elements["nav-files"].click();
-  assert.equal(elements["nav-settings"].attributes["aria-current"], "page");
+  assert.equal(getWorkspaceView().page, "settings");
   elements["import-age"].click();
   assert.deepEqual(keyWrites, [{ id: "key:7", action: "import" }]);
   resolveWriter({ outcome: "declined", message: "Identity installation was not approved.", refresh: true });
@@ -255,7 +255,7 @@ async function main() {
   statusResponse = { ...status, entries: [{ ...status.entries[0], key: "dir/<file>", status: "changed-in-repo", group: "incoming" }] };
   elements.refresh.click();
   await tick();
-  elements["attention-list"].children[0].children[0].click();
+  elements.rows.children[0].children[1].children[0].children[0].click();
   assert.equal(elements["diff-key"].textContent, "dir/<file>");
   assert.match(elements["diff-context"].textContent, /repository copy has changed/);
   resolveDiff({ outcome: "ready", message: "different", text: "", file_actions: [] });
@@ -311,8 +311,11 @@ async function main() {
   assert.equal(elements["decision-items"].children.length, 1);
   elements["replacement-batch"].click();
   assert.equal(elements["replacement-review"].hidden, true);
+  assert.equal(document.activeElement, elements["diff-actions"].children[0]);
+  assert.equal(elements.decisions.hidden, true);
+  assert.notEqual(getWorkspaceView().queued, null);
+  elements["review-decisions"].click();
   assert.equal(document.activeElement, elements["decisions-title"]);
-  assert.equal(elements.decisions.scrolled.block, "start");
   assert.equal(elements["decision-items"].children.length, 2);
   assert.equal(fileWrites.length, 0);
   elements["diff-actions"].children[0].click();
@@ -322,7 +325,7 @@ async function main() {
   assert.deepEqual(fileWrites.at(-1), { answers: [{ id: "conflict", action: "keep_local" }, { id: "incoming", action: "take_repo" }] });
   resolveWriter({ outcome: "declined", message: "No changes.", items: [], refresh: false });
   await tick();
-  assert.equal(elements["decision-message"].textContent, "declined: No changes.");
+  assert.equal(elements["retry-decisions"].hidden, false);
   replacement.click();
   assert.equal(elements["decision-items"].children.length, 0);
   assert.equal(fileWrites.length, 1);
@@ -366,11 +369,11 @@ async function main() {
     { id: "opaque-2", old_line: null, new_line: 2, before: null, after: "added" },
     { id: "opaque-3", old_line: 3, new_line: null, before: "removed", after: null },
   ];
-  elements["open-review"].click();
-  assert.equal(elements["nav-review"].attributes["aria-current"], "page");
-  assert.equal(elements["nav-settings"].disabled, true);
+  elements["nav-review"].click();
+  assert.equal(getWorkspaceView().page, "review");
+  assert.equal(getWorkspaceView().busy, true);
   elements["nav-settings"].click();
-  assert.equal(elements["nav-review"].attributes["aria-current"], "page");
+  assert.equal(getWorkspaceView().page, "review");
   resolveReview({ id: "line-review", outcome: "review", message: "loaded", commit_message: "message",
     items: [{ group: "Capture", text: "full/path", diff_id: "capture" }] });
   await tick();
@@ -388,7 +391,7 @@ async function main() {
   assert.equal(elements["selected-lines"].children.length, 2);
   assert.match(elements["selected-lines"].children[0].textContent, /full\/path/);
   elements["close-diff"].click();
-  assert.equal(elements["nav-review"].attributes["aria-current"], "page");
+  assert.equal(getWorkspaceView().page, "review");
   assert.equal(elements.review.hidden, false);
   assert.equal(document.activeElement, capture);
   boxes[2].checked = true; boxes[2].listeners.change();
@@ -451,7 +454,7 @@ async function main() {
   elements.refresh.click();
   await tick();
   for (const outcome of ["stale", "push_failed"]) {
-    elements["open-review"].click();
+    elements["nav-review"].click();
     resolveReview({ id: `review-${outcome}`, outcome: "review", message: "", commit_message: "message",
       items: [{ group: "Capture", text: "full/path", diff_id: "capture" }] });
     await tick();
@@ -470,7 +473,7 @@ async function main() {
     elements.refresh.click();
     await tick();
   }
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "malformed", outcome: "review", message: "", commit_message: "message",
     items: [{ group: "Capture", text: "full/path", diff_id: "capture" }] });
   await tick();
@@ -481,22 +484,23 @@ async function main() {
   elements["close-diff"].click();
   elements["close-review"].click();
   discards.length = 0;
-  assert.equal(elements["group-folders"].attributes["aria-pressed"], "true");
-  assert.equal(elements["group-status"].attributes["aria-pressed"], "false");
+  assert.equal(elements["group-folders"].attributes["aria-pressed"], "false");
+  assert.equal(elements["group-status"].attributes["aria-pressed"], "true");
+  elements["group-folders"].click();
   statusResponse = { ...status, entries: [{ ...status.entries[0], key: "config/x", status: "template-drift", edit_command: "dotman edit -- '/home/config/x'" }] };
   elements.refresh.click();
   await tick();
-  const folder = elements.rows.children[0].children[0].children[0];
-  assert.equal(folder.tag, "details");
+  const folder = elements.rows.children[0].children[0];
+  assert.equal(folder.attributes.role, "treeitem");
   assert.equal(folder.children[0].children[0].textContent, "config");
-  assert.equal(folder.open, true);
-  folder.open = false;
-  folder.listeners.toggle();
-  folder.children[0].listeners.keydown({ key: "ArrowRight", preventDefault() {} });
-  assert.equal(folder.open, true);
-  folder.children[1].children[0].children[0].click();
+  assert.equal(folder.attributes["aria-expanded"], "true");
+  folder.listeners.click({ target: folder });
+  assert.equal(folder.children[1].hidden, true);
+  folder.listeners.click({ target: folder });
+  assert.equal(folder.attributes["aria-expanded"], "true");
+  folder.children[1].children[0].click();
   assert.equal(diffRequests.at(-1).id, "1:0");
-  const details = elements["diff-actions"].children[0];
+  const details = elements["source-edit-details"].children[0];
   assert.equal(details.tag, "details");
   assert.equal(details.children[0].textContent, "Source editing details");
   const command = details.children[1].children[0];
@@ -507,12 +511,6 @@ async function main() {
   resolveDiff({ outcome: "ready", message: "folder", text: "" });
   await tick();
   elements["close-diff"].click();
-  elements["theme-mode"].value = "dark";
-  elements["theme-mode"].listeners.change();
-  elements["accent-mode"].value = "marine";
-  elements["accent-mode"].listeners.change();
-  assert.equal(document.documentElement.attributes["data-theme"], "dark");
-  assert.equal(document.documentElement.attributes["data-accent"], "marine");
   elements["group-status"].click();
   assert.equal(elements["group-folders"].attributes["aria-pressed"], "false");
   assert.equal(elements["group-status"].attributes["aria-pressed"], "true");
@@ -525,7 +523,7 @@ async function main() {
   assert.equal(elements["diff-actions"].children.length, 0);
   assert.equal(elements.entries.hidden, false);
   assert.equal(elements.diff.hidden, false);
-  assert.equal(elements["diff-context"].textContent, "changed-locally · Repository vs home");
+  assert.equal(elements["diff-context"].textContent, "Local change · Repository vs home");
   assert.equal(document.activeElement, elements["close-diff"]);
   resolveDiff({ outcome: "ready", message: "different", text: "old\nnew\n" });
   await tick();
@@ -554,7 +552,7 @@ async function main() {
   assert.equal(document.activeElement, elements.search);
   elements.search.value = "";
   elements.search.listeners.input();
-  elements["open-review"].click();
+  elements["nav-review"].click();
   assert.equal(elements.entries.hidden, true);
   assert.equal(document.activeElement, elements["close-review"]);
   resolveReview({ id: "7:1", outcome: "review", message: "loaded", items: [{ group: "Hooks due", text: "<script>alert(1)</script>" }] });
@@ -562,11 +560,11 @@ async function main() {
   assert.equal(elements["review-items"].children[1].children[0].textContent, "<script>alert(1)</script>");
   assert.equal(elements["sync-reviewed"].hidden, false);
   elements["close-review"].click();
-  assert.equal(document.activeElement, elements["open-review"]);
+  assert.equal(document.activeElement, elements["nav-review"]);
   assert.equal(elements.entries.hidden, false);
   assert.deepEqual(window.restored, [0, 1234]);
   assert.deepEqual(discards, ["7:1"]);
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "7:2", outcome: "review", message: "new", items: [] });
   await tick();
   rejectDiscard(new Error("late failure"));
@@ -584,7 +582,7 @@ async function main() {
   assert.equal(elements.entries.hidden, true);
   elements.refresh.click();
   await tick();
-  elements["open-review"].click();
+  elements["nav-review"].click();
   elements["close-review"].click();
   resolveReview({ outcome: "review", message: "late", items: [{ group: "x", text: "late" }] });
   await tick();
@@ -592,21 +590,21 @@ async function main() {
   assert.equal(elements["review-items"].children.length, 0);
   elements.refresh.click();
   await tick();
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: null, outcome: "unsupported", message: "not supported", items: [], commit_message: "not editable" });
   await tick();
   assert.equal(elements["sync-reviewed"].hidden, true);
   assert.equal(elements["commit-editor"].hidden, true);
   elements["close-review"].click();
 
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "partial", outcome: "partial", message: "partial", items: [], commit_message: "not editable" });
   await tick();
   assert.equal(elements["commit-editor"].hidden, true);
   elements["close-review"].click();
 
   const suggestion = "<script>safe</script>\nsecond line";
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "edit-id", outcome: "review", message: "loaded", items: [], commit_message: suggestion });
   await tick();
   assert.equal(elements["commit-editor"].hidden, false);
@@ -639,7 +637,7 @@ async function main() {
   elements.refresh.click();
   await tick();
   assert.equal(elements["commit-message"].value, "");
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "default-id", outcome: "review", message: "loaded", items: [], commit_message: suggestion });
   await tick();
   elements["sync-reviewed"].click();
@@ -648,19 +646,19 @@ async function main() {
   await tick();
   elements.refresh.click();
   await tick();
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "clear-id", outcome: "review", message: "loaded", items: [], commit_message: "original" });
   await tick();
   elements["commit-message"].value = "discard me";
   elements["close-review"].click();
   assert.equal(elements["commit-message"].value, "");
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "next-id", outcome: "review", message: "loaded", items: [], commit_message: "" });
   await tick();
   assert.equal(elements["commit-editor"].hidden, true);
   assert.equal(elements["commit-message"].value, "");
   elements["close-review"].click();
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "refresh-id", outcome: "review", message: "loaded", items: [], commit_message: "fresh" });
   await tick();
   assert.equal(elements["commit-message"].value, "fresh");
@@ -671,7 +669,7 @@ async function main() {
 
   async function startWriter(id) {
     if (!elements.entries.hidden) {
-      elements["open-review"].click();
+      elements["nav-review"].click();
       resolveReview({ id, outcome: "review", message: "loaded", items: [] });
       await tick();
     }
@@ -682,7 +680,7 @@ async function main() {
     assert.equal(writes.at(-1).id, id);
     assert.deepEqual(Object.keys(writes.at(-1)), ["id", "progress"]);
     assert.equal(elements["sync-reviewed"].hidden, true);
-    assert.equal(elements.refresh.disabled, true);
+    assert.equal(getWorkspaceView().busy, true);
     assert.equal(elements["close-review"].disabled, true);
     assert.equal(document.activeElement, elements["review-message"]);
     assert.match(elements["review-message"].textContent, /Waiting for native confirmation/);
@@ -717,7 +715,7 @@ async function main() {
   await tick();
   firstProgress.onmessage("push");
   assert.match(elements["review-message"].textContent, /waiting for the result/);
-  assert.equal(elements.refresh.disabled, true);
+  assert.equal(getWorkspaceView().busy, true);
   resolveCancel();
   delayCancel = false;
   await tick();
@@ -842,7 +840,7 @@ async function main() {
   async function captureReview(outcome = "review", id = "review-capture") {
     elements.refresh.click();
     await tick();
-    elements["open-review"].click();
+    elements["nav-review"].click();
     resolveReview({ id, outcome, message: "review", commit_message: "suggested", items: [
       { group: "Capture", text: "<script>literal</script>", diff_id: "--opaque <id>" },
       { group: "Capture", text: "unavailable", diff_id: null },
@@ -890,7 +888,7 @@ async function main() {
   assert.equal(elements["commit-message"].value, "unsent draft");
   assert.equal(document.activeElement, captureButton);
   elements["close-review"].click();
-  assert.equal(document.activeElement, elements["open-review"]);
+  assert.equal(document.activeElement, elements["nav-review"]);
   assert.deepEqual(window.restored, [0, 1234]);
   captureRows = await captureReview();
   const recoveryButton = captureRows[0].children[0];
@@ -949,9 +947,9 @@ async function main() {
   ] };
   elements.refresh.click();
   await tick();
-  assert.equal(elements["guide-title"].textContent, "Needs a decision");
+  assert.equal(elements["guide-title"].textContent, "File decisions");
   assert.match(elements["guide-description"].textContent, /2 to inspect/);
-  assert.equal(elements["attention-list"].children.length, 2);
+  assert.equal(elements["attention-list"].children.length, 1);
   const beforeNavigationCalls = calls.length;
   const beforeNavigationWrites = fileWrites.length;
   elements["attention-list"].children[0].children[0].click();
@@ -1000,16 +998,19 @@ async function main() {
   fileRows[0].click();
   resolveDiff({ outcome: "ready", message: "ready", text: "", file_actions: ["keep_local", "take_repo", "unknown"] });
   await tick();
-  assert.deepEqual(elements["diff-actions"].children.map(button => button.textContent),
-    ["Keep local", "Take repo (backs up replaced home bytes)", "Skip / clear choice"]);
+  assert.equal(elements["diff-actions"].children.length, 3);
+  assert.equal(elements["diff-actions"].children[2].hidden, true);
   elements["diff-actions"].children[0].click();
-  assert.equal(elements.decisions.hidden, false);
+  assert.equal(elements["diff-actions"].children[2].hidden, false);
+  assert.equal(elements.decisions.hidden, true);
+  assert.notEqual(getWorkspaceView().queued, null);
   assert.equal(elements["diff-actions"].children[0].attributes["aria-pressed"], "true");
-  assert.equal(elements["diff-selection"].textContent, "Selected: Keep local");
   elements["diff-actions"].children[1].click();
   assert.equal(elements["diff-actions"].children[0].attributes["aria-pressed"], "false");
   assert.equal(elements["diff-actions"].children[1].attributes["aria-pressed"], "true");
   elements["diff-actions"].children[2].click();
+  assert.equal(elements["diff-actions"].children[2].hidden, true);
+  assert.equal(document.activeElement, elements["diff-actions"].children[1]);
   assert.equal(elements.decisions.hidden, true);
   assert.equal(elements["diff-actions"].children[1].attributes["aria-pressed"], "false");
   elements["diff-actions"].children[1].click();
@@ -1022,7 +1023,7 @@ async function main() {
   await tick();
   elements["diff-actions"].children[0].click();
   elements["diff-actions"].children[1].click();
-  assert.equal(elements["diff-selection"].textContent, "No choice selected.");
+  assert.equal(elements["diff-selection"].textContent, "");
   assert.equal(elements["decision-items"].children.length, 1);
   elements["diff-actions"].children[0].click();
   elements["close-diff"].click();
@@ -1031,9 +1032,8 @@ async function main() {
   resolveDiff({ outcome: "ready", message: "ready", text: "", file_actions: ["take_repo"] });
   await tick();
   assert.equal(elements["diff-actions"].children[0].attributes["aria-pressed"], "true");
-  assert.equal(elements["diff-selection"].textContent, "Selected: Take repo (backs up replaced home bytes)");
   elements["close-diff"].click();
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "queue-capture", outcome: "review", message: "review", items: [
     { group: "Capture", text: "capture", diff_id: "opaque-a" },
   ] });
@@ -1061,7 +1061,7 @@ async function main() {
     if (response) resolveDiff(response); else rejectDiff(new Error("failed"));
     await tick();
     assert.equal(elements["decision-items"].children.length, 1);
-    assert.equal(elements["decision-items"].children[0].children[1].textContent, " — Restore");
+    assert.equal(elements["decision-items"].children[0].children[0].textContent, "same <path>");
     elements["close-diff"].click();
     fileRows[0].click();
     resolveDiff({ outcome: "ready", message: "ready", text: "", file_actions: ["take_repo"] });
@@ -1094,7 +1094,7 @@ async function main() {
   delayCancel = false;
   await tick();
   assert.equal(refreshes, beforeFileRefresh + 1);
-  assert.equal(elements["decision-message"].textContent, "partial: some stale");
+  assert.equal(elements["decision-message"].textContent, "some stale");
   assert.equal(elements.decisions.hidden, false);
   assert.equal(elements["decision-results"].children[0].textContent, "Result: <literal>");
   const freshRow = elements.rows.children[0].children[1].children[0].children[0];
@@ -1112,7 +1112,7 @@ async function main() {
   await tick();
   staleChoice.click();
   assert.equal(elements["decision-items"].children.length, 0);
-  assert.equal(elements.decisions.hidden, false);
+  assert.equal(elements.decisions.hidden, true);
   const heldRow = elements.rows.children[1].children[1].children[0].children[0];
   assert.equal(heldRow.className, "held-row");
   heldRow.open = true;
@@ -1161,7 +1161,7 @@ async function main() {
   await tick();
   assert.equal(refreshes, beforeFileRecovery);
   assert.equal(elements.recovery.hidden, false);
-  assert.equal(elements["decision-message"].textContent, "terminal_recovery: recover");
+  assert.equal(elements["decision-message"].textContent, "recover");
   statusResponse = { ...status, held_counts: { new_files: 2, home_edits: 1, repo_edits: 1 }, entries: [
     { id: "new1", key: "<redacted>", status: "held", group: "held", supported: true,
       hold: { origin: "new_file", reason: "<reason>", rule: "<rule>", location: "line 7", guidance: "<terminal guidance>" } },
@@ -1185,8 +1185,8 @@ async function main() {
     hold.listeners.toggle();
     hold.listeners.toggle();
   }
-  assert.equal(holds[0].children[0].children[0].textContent, "<redacted>");
-  assert.equal(holds[1].children[0].children[0].textContent, "<redacted>");
+  assert.equal(holds[0].children[0].children[1].children[0].textContent, "<redacted>");
+  assert.equal(holds[1].children[0].children[1].children[0].textContent, "<redacted>");
   assert.deepEqual(holds[0].children.slice(1).map(item => item.textContent), [
     "Origin: New file", "Reason: <reason>", "Rule: <rule>", "Location: line 7", "Terminal guidance: <terminal guidance>",
   ]);
@@ -1217,7 +1217,7 @@ async function main() {
   assert.equal(diffRequests.at(-1).id, "ordinary");
   resolveDiff({ outcome: "ready", message: "ready", text: "", file_actions: ["keep_local"] });
   await tick();
-  assert.equal(elements["diff-actions"].children[0].textContent, "Keep local");
+  assert.equal(elements["diff-actions"].children.length, 2);
   elements["close-diff"].click();
   statusResponse = { ...status, held_counts: { new_files: 1 }, entries: [] };
   elements.refresh.click();
@@ -1283,7 +1283,7 @@ async function main() {
   assert.equal(elements.setup.hidden, false);
   assert.equal(elements["start-fresh"].hidden, true);
   assert.equal(elements["setup-check"].disabled, false);
-  assert.equal(elements.message.textContent, "Status read failed.");
+  assert.equal(getWorkspaceView().status, "Status read failed.");
   for (const response of [
     { ...status, success: false, repo_unavailable: false, message: "guard", entries: [] },
     { ...status, success: false, message: "generic", entries: [] },
@@ -1327,7 +1327,7 @@ async function main() {
   await tick();
   assert.equal(machineRoot.children[1].children.length, 1);
   assert.equal(machineRoot.children[1].children[0].children[0].textContent, "changed");
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ outcome: "terminal_recovery", id: null, message: "recovery", items: [] });
   await tick();
   assert.equal(elements["machine-files"].hidden, true);
@@ -1449,7 +1449,7 @@ async function main() {
   assert.equal(elements["review-identity"].hidden, true);
 
   await identityStatus("invalidated-by-sync");
-  elements["open-review"].click();
+  elements["nav-review"].click();
   elements["review-identity"].click();
   assert.equal(identityWrites.length, 4);
   resolveReview({ id: "sync-invalidates", outcome: "review", message: "ready", items: [] });
@@ -1500,21 +1500,28 @@ async function main() {
   assert.equal(setupWrites.length, 1);
   assert.deepEqual(Object.keys(setupWrites[0]), ["id"]);
   assert.equal(setupWrites[0].id, "opaque <setup>");
-  assert.equal(elements.refresh.disabled, true);
+  assert.equal(getWorkspaceView().busy, true);
   assert.equal(elements.setup.hidden, true);
   assert.equal(document.activeElement, elements["setup-message"]);
   const beforeDecline = refreshes;
   resolveWriter({ outcome: "declined", message: "not approved", items: [], refresh: false });
   await tick();
   assert.equal(refreshes, beforeDecline);
-  assert.equal(elements["setup-message"].textContent, "declined: not approved");
+  assert.equal(elements["setup-message"].textContent, "not approved");
+  assert.equal(elements["setup-retry"].hidden, false);
+  assert.equal(getWorkspaceView().status, "Repository setup cancelled.");
   elements["start-fresh"].click();
   assert.equal(setupWrites.length, 1);
-  statusResponse = unavailable;
-  elements.refresh.click();
+  statusResponse = { ...unavailable, setup_review_id: "refreshed-setup" };
+  elements["setup-retry"].focus();
+  elements["setup-retry"].click();
   await tick();
-  assert.equal(elements["setup-message"].textContent, "declined: not approved");
-  assert.equal(elements["setup-result"].hidden, false);
+  assert.equal(refreshes, beforeDecline + 1);
+  assert.equal(elements.setup.hidden, false);
+  assert.equal(elements["start-fresh"].hidden, false);
+  assert.equal(elements["setup-retry"].hidden, true);
+  assert.equal(elements["setup-result"].hidden, true);
+  assert.equal(document.activeElement, elements["setup-check"]);
 
   await setupStatus("cancel");
   elements["start-fresh"].click();
@@ -1527,7 +1534,8 @@ async function main() {
   resolveCancel();
   delayCancel = false;
   await tick();
-  assert.equal(elements["setup-message"].textContent, "cancelled: stopped");
+  assert.equal(elements["setup-message"].textContent, "stopped");
+  assert.equal(elements["setup-retry"].hidden, false);
   elements["start-fresh"].click();
   assert.equal(setupWrites.length, 2);
 
@@ -1632,7 +1640,7 @@ async function main() {
   assert.equal(elements["start-fresh"].hidden, true);
   resolveWriter({ outcome: "declined", message: "not approved", items: [], refresh: false });
   await tick();
-  assert.equal(elements["setup-message"].textContent, "declined: not approved");
+  assert.equal(elements["setup-message"].textContent, "not approved");
   elements["start-clone"].click();
   assert.equal(cloneWrites.length, 1);
 
@@ -1694,7 +1702,7 @@ async function main() {
   resolveCancel();
   delayCancel = false;
   await tick();
-  assert.equal(elements["setup-message"].textContent, "cancelled: stopped");
+  assert.equal(elements["setup-message"].textContent, "stopped");
   assert.equal(elements["clone-source"].value, "");
   assert.equal(elements["clone-controls"].hidden, true);
   await setupStatus("clone-recovery");
@@ -1715,10 +1723,10 @@ async function main() {
   await tick();
   const contextRows = elements.rows.children[0].children[1].children.map(item => item.children[0]);
   contextRows[1].click();
-  assert.equal(elements["diff-context"].textContent, "changed · Repository vs home · Recorded source: <source>");
+  assert.equal(elements["diff-context"].textContent, "Changed · Repository vs home · Recorded source: <source>");
   resolveDiff({ outcome: "ready", message: "ready", text: "old", file_actions: ["keep_local"] });
   await tick();
-  elements["open-review"].click();
+  elements["nav-review"].click();
   assert.equal(elements.diff.hidden, true);
   assert.equal(elements["diff-text"].textContent, "");
   assert.equal(elements["diff-actions"].children.length, 0);
@@ -1738,7 +1746,7 @@ async function main() {
   await tick();
   assert.equal(elements.recovery.hidden, true);
   elements.rows.children[0].children[1].children[0].children[0].click();
-  assert.equal(elements["diff-context"].textContent, "changed · Repository vs system");
+  assert.equal(elements["diff-context"].textContent, "Changed · Repository vs system");
   resolveDiff({ outcome: "terminal_recovery", message: "<diff warning>", text: null });
   await tick();
   assert.equal(elements["recovery-message"].textContent, "<diff warning>");
@@ -1754,7 +1762,7 @@ async function main() {
   assert.equal(elements.recovery.hidden, false);
   assert.equal(elements["recovery-steps"].children.length, 0);
   assert.equal(elements["recovery-details"].hidden, true);
-  assert.equal(elements.message.textContent, "Repository status needs attention.");
+  assert.equal(getWorkspaceView().status, "Repository status needs attention.");
   assert.equal(elements["recovery-message"].textContent, "Repository status needs attention.");
   assert.match(elements["recovery-finding"].textContent, /operation in progress/);
   assert.equal(elements["recovery-paths"].children[3].textContent, "/r");
@@ -1790,9 +1798,9 @@ async function main() {
   assert.equal(elements.recovery.hidden, true);
   const beforeUnsupported = diffRequests.length;
   elements.rows.children[0].children[1].children[0].children[0].click();
-  assert.equal(elements["diff-context"].textContent, "new");
+  assert.equal(elements["diff-context"].textContent, "New file");
   assert.equal(diffRequests.length, beforeUnsupported);
-  elements["open-review"].click();
+  elements["nav-review"].click();
   resolveReview({ id: "mass-review", outcome: "mass_delete", message: "approval needed", items: [] });
   await tick();
   assert.equal(elements["sync-reviewed"].hidden, true);

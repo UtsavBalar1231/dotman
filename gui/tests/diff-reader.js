@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
+const { pathToFileURL } = require("node:url");
 
 class Element {
   constructor() {
@@ -53,8 +53,7 @@ const windowListeners = {};
 global.window = { addEventListener: (name, listener) => { windowListeners[name] = listener; } };
 
 async function main() {
-const compiled = fs.readFileSync(process.argv[2] ?? "gui/dist/diff-reader.js");
-const { show, clear } = await import(`data:text/javascript;base64,${compiled.toString("base64")}`);
+const { show, clear } = await import(pathToFileURL(process.argv[2] ?? "gui/.controller-tests/diff-reader.js").href);
 const patch = "diff --git repo/x home/x\nindex 123..456 100644\n--- repo/x\n+++ home/x\n@@ -10,3 +20,4 @@ section\n same\n-old value\n+new value\n+added\n tail\n@@ -30 +41 @@\n-before\n+after\n";
 show(patch);
 assert.equal(tools.hidden, false);
@@ -74,7 +73,11 @@ assert.ok(rows[1].children[0].children[2].children.some(child => child.className
 const groups = pre.children.filter(child => child.className === "dr-change");
 groups[0].offset = 40;
 groups[1].offset = 200;
-const [toggle, metadata, position, previous, next] = tools.children;
+const [options, navigation] = tools.children;
+const [summary, optionsList] = options.children;
+assert.equal(summary.textContent, "View options");
+const [toggle, metadata] = optionsList.children;
+const [position, previous, next] = navigation.children;
 assert.deepEqual([previous, next].map(b => [b.attributes["aria-label"], b.className, b.children[0].attributes["aria-hidden"]]),
   [["Previous change", "icon-button", "true"], ["Next change", "icon-button", "true"]]);
 assert.equal(position.textContent, "Change 1 of 2");

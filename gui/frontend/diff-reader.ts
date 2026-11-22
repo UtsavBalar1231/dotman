@@ -1,3 +1,6 @@
+import { icon } from "./fluent-icons.js";
+import type { IconName } from "./fluent-icons.js";
+
 type Side = "Home" | "System";
 type Line = { type: string; text: string; old: number | null; next: number | null };
 type Hunk = { header: string; lines: Line[] };
@@ -16,6 +19,7 @@ let current = -1;
 let previous: HTMLButtonElement;
 let next: HTMLButtonElement;
 let position: HTMLElement;
+let copyLabels: HTMLElement | undefined;
 let anchorTop = 0;
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -25,20 +29,9 @@ function node<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, 
   return result;
 }
 
-function icon(path: string): SVGSVGElement {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
-  svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("focusable", "false");
-  const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  shape.setAttribute("d", path);
-  svg.append(shape);
-  return svg;
-}
-
-function heading(label: string, className: string, path: string): HTMLElement {
+function heading(label: string, className: string, name: IconName): HTMLElement {
   const result = node("span", className, label);
-  result.prepend(icon(path));
+  result.prepend(icon(name));
   return result;
 }
 
@@ -136,11 +129,10 @@ function render(patch: Patch, sideLabel: Side): HTMLElement {
   header.hidden = true;
   fragment.append(header);
   const headings = node("span", "dr-headings");
+  copyLabels = headings;
   headings.append(
-    heading("Repository", "dr-repository", "M2.5 2.25h11v11h-11z M2.5 5.25h11 M5 8h6 M5 10.75h4"),
-    heading(sideLabel === "Home" ? "This computer" : "System", `dr-${sideLabel.toLowerCase()}`, sideLabel === "Home"
-      ? "M1.75 7.5 8 2l6.25 5.5 M3.5 6.25v7.25h9V6.25 M6.5 13.5v-4h3v4"
-      : "M2.25 3h11.5v8.5H2.25z M5 13.5h6 M8 11.5v2"),
+    heading("Repository", "dr-repository", "repository"),
+    heading(sideLabel === "Home" ? "This computer" : "System", `dr-${sideLabel.toLowerCase()}`, sideLabel === "Home" ? "home" : "desktop"),
   );
   fragment.append(headings);
   for (const hunk of patch.hunks) {
@@ -179,29 +171,32 @@ function button(label: string, action: () => void): HTMLButtonElement {
 function changeButton(label: string, step: -1 | 1): HTMLButtonElement {
   const result = button("", () => navigate(step));
   result.className = "icon-button";
+  result.title = label;
   result.setAttribute("aria-label", label);
-  const glyph = icon(step === -1 ? "m3 10 5-5 5 5" : "m3 6 5 5 5-5");
-  glyph.setAttribute("class", "workspace-glyph");
-  result.append(glyph);
+  result.append(icon(step === -1 ? "chevron-up" : "chevron-down"));
   return result;
+}
+
+function contentTop(): number {
+  return pre.getBoundingClientRect().top + (copyLabels?.offsetHeight ?? 0);
 }
 
 function updateNavigation(): void {
   previous.disabled = current <= 0;
   next.disabled = current >= changes.length - 1;
   position.textContent = `Change ${current + 1} of ${changes.length}`;
-  anchorTop = changes[current].getBoundingClientRect().top - pre.getBoundingClientRect().top;
+  anchorTop = changes[current].getBoundingClientRect().top - contentTop();
 }
 
 function navigate(step: number): void {
   current = Math.max(0, Math.min(changes.length - 1, current + step));
-  pre.scrollTop += changes[current].getBoundingClientRect().top - pre.getBoundingClientRect().top;
+  pre.scrollTop += changes[current].getBoundingClientRect().top - contentTop();
   updateNavigation();
 }
 
 pre.addEventListener("scroll", () => {
   if (!changes.length) return;
-  const top = pre.getBoundingClientRect().top;
+  const top = contentTop();
   let index = 0;
   if (pre.scrollHeight > pre.clientHeight && pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 2) {
     index = changes.length - 1;
@@ -221,11 +216,12 @@ pre.addEventListener("scroll", () => {
 
 window.addEventListener("resize", () => {
   if (!changes.length) return;
-  pre.scrollTop += changes[current].getBoundingClientRect().top - pre.getBoundingClientRect().top - anchorTop;
+  pre.scrollTop += changes[current].getBoundingClientRect().top - contentTop() - anchorTop;
 });
 
 export function clear(): void {
   changes = [];
+  copyLabels = undefined;
   current = -1;
   tools.hidden = true;
   tools.replaceChildren();
@@ -265,6 +261,21 @@ export function show(text: string, sideLabel: Side = "Home"): void {
   position = node("span", "dr-position");
   position.setAttribute("aria-live", "polite");
   updateNavigation();
-  tools.append(toggle, metadata, position, previous, next);
+  const navigation = node("span", "dr-navigation");
+  navigation.append(position, previous, next);
+  navigation.hidden = changes.length === 1;
+  const options = node("details", "dr-options");
+  const summary = node("summary", "", "View options");
+  summary.prepend(icon("chevron-right", "disclosure-glyph"));
+  const optionsList = node("div", "dr-options-list");
+  optionsList.append(toggle, metadata);
+  options.append(summary, optionsList);
+  options.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !options.open) return;
+    event.preventDefault();
+    options.open = false;
+    summary.focus();
+  });
+  tools.append(options, navigation);
   tools.hidden = false;
 }

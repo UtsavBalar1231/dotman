@@ -1,18 +1,21 @@
 # dotman on Linux desktop
 
-- **Files** is where you inspect changes. The file tree combines folders with
-  a single child folder into one path. Browse folders, switch to **Status**
-  to group files by what changed, or search by path or status. A wide window
+- **Files** opens on **Changed**, which groups files by what changed. Switch
+  to **All files** to browse the repository by folder. The tree combines
+  folders with a single child into one path. Press **Ctrl+F** to search.
+  A wide window
   keeps the navigator beside the comparison. On an ultrawide display, the file
   browser stops growing and the diff uses the remaining width. When the comparison
   pane is too narrow for two copies, it shows a unified diff. In a narrow window
-  the diff gets the available width; close it to return to the file list.
+  the diff gets the available width. Choose **Back to files** to return to
+  the navigator.
 - **Review** previews the outgoing sync. Open a capture diff from the preview
   to inspect what would be committed. Opening the page does not start a sync.
 - **Settings** contains appearance, repository paths and local capture policy.
   Expand **Resolved paths** to check which Home, repository and state directory
-  the app is using. The window starts in **Light**. Choose **System** to follow
-  the desktop’s appearance, or choose **Dark**. Theme and accent apply to the open window.
+  the app is using. **System** follows the desktop’s appearance. Choose
+  **Light** or **Dark** to override it. Dotman remembers the choice on this
+  computer.
 
 ## Set up a repository
 
@@ -74,9 +77,11 @@ Skip a file by leaving it undecided.
 
 For an eligible plain file marked **changed-in-repo**, choose **Review
 replacement** to see the repository source and local destination. **Back to
-comparison** leaves your decisions untouched. **Add to file decisions** queues
-the replacement alongside any other choices. **Apply file decisions** asks
-for native confirmation of the full list. If a copy has changed since review,
+comparison** returns to the diff. **Add to file decisions** queues the
+replacement alongside any other choices and keeps the diff open. Open
+**Review decisions** from the status bar, then choose **Apply file decisions**
+to confirm the full list in a native dialog. If you decline, choose **Refresh
+and review again** to start a fresh review. If a copy changes during review,
 refresh and compare it again.
 
 **Review outgoing sync** previews the outgoing changes from the current report. It
@@ -118,12 +123,11 @@ Linux with GTK 3 and WebKitGTK 4.1; the CLI needs Git. See [the CLI requirements
 for age and rage support. Build the CLI with Rust 1.88 or newer and the
 separate GUI workspace with Rust 1.90 or newer.
 
-Frontend source is strict TypeScript in `gui/frontend`. The WebView loads the
-compiled ES modules in `gui/dist` without a JavaScript runtime package or a
-bundler. After editing the frontend, run `just gui-frontend` with the TypeScript
-6.0.3 compiler (`tsc` on PATH, or set `TSC` to its executable). Run
-`just gui-frontend-check` to check the generated modules and frontend tests.
-Building from an unchanged release checkout uses the supplied modules.
+Frontend source is React and strict TypeScript in `gui/frontend`. With Node 24,
+run `npm ci --prefix gui` and `just gui-frontend` to regenerate the Vite
+bundle in `gui/dist`. Run `just gui-frontend-check` to compare the shipped
+assets and run the frontend tests. A release source checkout includes the
+bundle for the Rust build, and the installed app embeds it.
 
 ```sh
 cargo build --release --locked
@@ -146,8 +150,8 @@ bash scripts/package-linux-gui.sh rpm /path/to/binaries /path/to/output
 These builders package local artifacts; they do not install them or make
 an older distribution compatible with binaries built on a newer system.
 The checked host binaries need glibc 2.39. Build and verify on the intended
-distribution for release. Departure Mono is bundled under the SIL Open Font
-License 1.1; the package includes its notice.
+distribution for release. The packages include the notice for bundled
+frontend dependencies.
 
 ## Display and graphics
 

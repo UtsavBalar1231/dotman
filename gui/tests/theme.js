@@ -1,18 +1,17 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const withBrowser = require("./browser");
 
-const css = fs.readFileSync(path.join(__dirname, "../dist/style.css"), "utf8");
+const { readCss, statusFixture, withDesktop } = require("./desktop-browser");
+
+const css = readCss();
 const html = `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <style>${css}</style><div id="tab-start" tabindex="-1"></div><button>Focus</button><select><option>Theme</option></select>`;
 
-function prepare(theme, accent) {
+function prepare(theme) {
   const { dataset } = document.documentElement;
   if (theme === "system") delete dataset.theme; else dataset.theme = theme;
-  if (accent === "default") delete dataset.accent; else dataset.accent = accent;
   const start = document.querySelector("#tab-start");
   start.focus();
   return document.activeElement === start;
@@ -43,6 +42,9 @@ function measure() {
     ["green", "paper", "text", 4.5], ["blue", "selected", "text", 4.5],
     ["amber", "selected", "text", 4.5], ["green", "selected", "text", 4.5],
     ["ink", "add-bg", "text", 4.5], ["ink", "del-bg", "text", 4.5],
+    ["ink", "add-token", "text", 4.5], ["ink", "del-token", "text", 4.5],
+    ["ink", "text-selection", "text", 4.5], ["ink", "hover", "text", 4.5],
+    ["on-accent", "accent-fill", "text", 4.5],
     ["added", "add-bg", "text", 4.5],
     ["removed", "del-bg", "text", 4.5], ["accent", "surface", "text", 4.5],
     ["accent", "selected", "text", 4.5], ["rule", "surface", "controls", 3],
@@ -82,9 +84,9 @@ async function checkThemes(send) {
     await page("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: preference }] });
     const floors = { text: Infinity, controls: Infinity };
     const failures = [];
-    for (const theme of ["system", "light", "dark"]) for (const accent of ["default", "marine", "mulberry"]) {
-      const label = `system ${preference}, ${theme}/${accent}`;
-      assert.equal(await evaluate(`(${prepare})(${JSON.stringify(theme)}, ${JSON.stringify(accent)})`), true,
+    for (const theme of ["system", "light", "dark"]) {
+      const label = `system ${preference}, ${theme}`;
+      assert.equal(await evaluate(`(${prepare})(${JSON.stringify(theme)})`), true,
         `${label}: could not reset focus before Tab`);
       const tab = { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 };
       await page("Input.dispatchKeyEvent", { type: "rawKeyDown", ...tab });
@@ -98,88 +100,54 @@ async function checkThemes(send) {
     console.log(`system ${preference}: text floor ${floors.text.toFixed(2)}, controls floor ${floors.controls.toFixed(2)}`);
   }
 
-  const appHtml = fs.readFileSync(path.join(__dirname, "../dist/index.html"), "utf8")
-    .replace(/<link rel="stylesheet"[^>]*>/g, "")
-    .replace(/<script type="module"[^>]*><\/script>/, `<style>${css}</style>`);
-  await page("Page.setDocumentContent", { frameId: frameTree.frame.id, html: appHtml });
-  await page("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
-  assert.deepEqual(await evaluate(`({
-    theme: document.documentElement.dataset.theme,
-    selection: document.querySelector("#theme-mode").value,
-    scheme: getComputedStyle(document.documentElement).colorScheme
-  })`), { theme: "light", selection: "light", scheme: "light" });
-  assert.equal(await evaluate(`document.documentElement.dataset.theme = "system"; getComputedStyle(document.documentElement).colorScheme`), "light dark");
-  assert.equal(await evaluate(`getComputedStyle(document.body).backgroundColor`),
-    await evaluate(`document.documentElement.dataset.theme = "dark"; getComputedStyle(document.body).backgroundColor`));
-
-  await evaluate(`document.querySelector("#cancel").hidden = false;
-    document.querySelector("#review").hidden = false; document.querySelector("#diff").hidden = false;`);
-  const { root } = await page("DOM.getDocument");
-  for (const [id, name] of [["refresh", "Refresh status"], ["cancel", "Cancel read"],
-    ["close-review", "Close review"], ["close-diff", "Close diff"]]) {
-    const { nodeId } = await page("DOM.querySelector", { nodeId: root.nodeId, selector: `#${id}` });
-    const { nodes } = await page("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
-    assert.equal(nodes[0].role.value, "button");
-    assert.equal(nodes[0].name.value, name);
-    if (id === "cancel") {
-      assert.ok(nodes[0].properties.some(property => property.name === "disabled" && property.value.value));
-      await evaluate(`document.querySelector("#cancel").disabled = false`);
-    }
-    for (const width of [360, 960]) {
-      await page("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      const report = await evaluate(`(() => {
-        const button = document.querySelector("#${id}");
-        button.focus();
-        const rect = button.getBoundingClientRect(), tip = getComputedStyle(button, "::after");
-        return { width: rect.width, height: rect.height, radius: getComputedStyle(button).borderRadius,
-          focused: button.matches(":focus-visible"), tip: tip.visibility, text: tip.content,
-          tipLeft: rect.right - parseFloat(tip.width), tipRight: rect.right };
-      })()`);
-      assert.ok(report.width >= 44 && report.height >= 44, `${id}: target size`);
-      assert.equal(report.radius, "50%");
-      assert.equal(report.focused, true, `${id}: keyboard focus`);
-      assert.equal(report.tip, "visible");
-      assert.equal(report.text, `"${name}"`);
-      assert.ok(report.tipLeft >= 0 && report.tipRight <= width, `${id}: tooltip fits at ${width}px`);
-      const center = await evaluate(`(() => {
-        const rect = document.querySelector("#${id}").getBoundingClientRect();
-        document.activeElement.blur();
-        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-      })()`);
-      await page("Input.dispatchMouseEvent", { type: "mouseMoved", ...center });
-      assert.equal(await evaluate(`getComputedStyle(document.querySelector("#${id}"), "::after").visibility`), "visible",
-        `${id}: hover tooltip`);
-      await page("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
-    }
-  }
-
-  const readerCss = fs.readFileSync(path.join(__dirname, "../dist/diff-reader.css"), "utf8");
-  await page("Page.setDocumentContent", { frameId: frameTree.frame.id, html: `<!doctype html>
-    <style>${css}\n${readerCss}</style><main><div class="desk">
-    <section id="entries">File browser</section><section id="diff"><div id="reader-tools"><button class="dr-toggle">Unified view</button></div>
-    <pre id="diff-text" class="diff-reader"><span class="dr-row"><span class="dr-cell">old</span><span class="dr-cell">new</span></span></pre>
-    </section></div></main>` });
-  for (const [width, height, navigator, columns] of [
-    [1440, 900, true, 2], [960, 640, true, 1], [360, 640, false, 1],
-    [2560, 1080, true, 2], [3440, 1440, true, 2], [5120, 1440, true, 2], [960, 640, true, 1]
-  ]) {
-    await page("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
-    const layout = await evaluate(`({
-      navigator: document.querySelector("#entries").getClientRects().length > 0,
-      columns: getComputedStyle(document.querySelector(".dr-row")).gridTemplateColumns.split(" ").length,
-      toggle: document.querySelector(".dr-toggle").getClientRects().length > 0,
-      bodySize: parseFloat(getComputedStyle(document.body).fontSize),
-      fits: document.documentElement.scrollWidth <= innerWidth
-    })`);
-    assert.deepEqual(layout, { navigator, columns, toggle: columns === 2, bodySize: 18, fits: true }, `resized to ${width}px`);
-    if (width >= 2560) {
-      const sizes = await evaluate(`[document.querySelector("#entries").clientWidth, document.querySelector("#diff").clientWidth]`);
-      assert.ok(sizes[0] <= 25 * layout.bodySize && sizes[1] > width * .75, `ultrawide ${width}px: panes ${sizes}`);
-    }
-  }
 }
 
-withBrowser(checkThemes).catch(error => {
+async function checkPreferences({ page, evaluate, waitFor, resize }) {
+  const scheme = value => page("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value }] });
+  const theme = () => evaluate("document.querySelector('#theme-mode').value");
+  const background = () => evaluate("getComputedStyle(document.body).backgroundColor");
+  const ready = () => waitFor("Boolean(document.querySelector('#rows .row'))");
+  await ready();
+  assert.equal(await theme(), "system");
+  await scheme("dark");
+  const dark = await background();
+  await scheme("light");
+  assert.notEqual(await background(), dark, "System theme follows the platform");
+  await evaluate(`document.querySelector("#nav-settings").click();
+    const control = document.querySelector("#theme-mode");
+    control.value = "dark";
+    control.dispatchEvent(new Event("change", { bubbles: true }));`);
+  await waitFor("document.documentElement.dataset.theme === 'dark'");
+  assert.equal(await background(), dark);
+  await page("Page.reload");
+  await ready();
+  assert.equal(await theme(), "dark", "Explicit theme survives reopening the renderer");
+  assert.equal(await background(), dark);
+
+  for (const width of [360, 960]) {
+    await resize(width, 900);
+    await evaluate("document.querySelector('#refresh').focus()");
+    const { root } = await page("DOM.getDocument");
+    const { nodeId } = await page("DOM.querySelector", { nodeId: root.nodeId, selector: "#refresh" });
+    const { nodes } = await page("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
+    assert.equal(nodes[0].role.value, "button");
+    assert.equal(nodes[0].name.value, "Refresh status");
+    assert.equal(await evaluate(`(() => {
+      const button = document.querySelector("#refresh");
+      const box = button.getBoundingClientRect();
+      return box.width >= 44 && box.height >= 44 && box.right <= innerWidth &&
+        document.activeElement === button && button.matches(":focus-visible");
+    })()`), true, `Accessible refresh target at ${width}px`);
+  }
+  assert.deepEqual(await evaluate("window.violations"), []);
+}
+
+async function main() {
+  await withBrowser(checkThemes);
+  await withDesktop(statusFixture, checkPreferences);
+}
+
+main().catch(error => {
   console.error(error);
   process.exitCode = 1;
 });

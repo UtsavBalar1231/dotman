@@ -3,6 +3,7 @@
 *massif*
 .bacon-locations
 dist/
+!/gui/dist/
 flamegraph.svg
 perf.data
 perf.data.old
@@ -11,6 +12,10 @@ target/
 # demo video renderer (video/README.md)
 /video/node_modules/
 /video/__pycache__/
+
+# Desktop frontend dependencies and test output
+/gui/node_modules/
+/gui/.controller-tests/
 
 # Local agent configuration, installed skills, and run artifacts
 /.agents/

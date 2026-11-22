@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".controller-tests"
+  },
+  "include": ["frontend/*.ts"],
+  "exclude": ["frontend/main.ts"]
+}

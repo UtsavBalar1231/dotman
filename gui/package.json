@@ -1,0 +1,28 @@
+{
+  "name": "dotman-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "packageManager": "npm@11.19.1",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build",
+    "build:controllers": "tsc -p tsconfig.controller-tests.json && node -e \"require('node:fs').writeFileSync('.controller-tests/package.json', JSON.stringify({type:'module'}))\"",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@base-ui/react": "1.9.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "tailwindcss": "4.3.5",
+    "typescript": "6.0.3",
+    "vite": "8.3.8"
+  }
+}

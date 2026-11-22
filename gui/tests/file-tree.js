@@ -1,8 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
+const { pathToFileURL } = require("node:url");
 const withBrowser = require("./browser");
+const { readCss } = require("./desktop-browser");
 
 class Element {
   constructor(tag) {
@@ -11,16 +12,20 @@ class Element {
     this.listeners = {};
     this.attributes = {};
   }
-  append(...children) { this.children.push(...children); }
+  append(...children) {
+    for (const child of children) child.parentElement = this;
+    this.children.push(...children);
+  }
   prepend(...children) { this.children.unshift(...children); }
   replaceChildren(...children) { this.children = children; }
   addEventListener(type, callback) { this.listeners[type] = callback; }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   querySelector(selector) {
     const stack = [...this.children].reverse();
     while (stack.length) {
       const node = stack.pop();
-      if (selector === ".row-key" ? node.className === "row-key" : node.tag === "button" || node.tag === "summary") return node;
+      if (node.tag === selector) return node;
       stack.push(...[...node.children].reverse());
     }
     return null;
@@ -30,8 +35,7 @@ class Element {
 const document = { createElement: tag => new Element(tag), createElementNS: (_ns, tag) => new Element(tag) };
 globalThis.document = document;
 async function main() {
-const source = fs.readFileSync(process.argv[2] ?? "gui/dist/file-tree.js", "utf8");
-const fileTree = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const fileTree = await import(pathToFileURL(process.argv[2] ?? "gui/.controller-tests/file-tree.js").href);
 const root = new Element("div");
 const entries = [
   { id: "a", key: "config/nested/same", status: "changed", supported: true },
@@ -41,91 +45,97 @@ const entries = [
 ];
 const makeLeaf = (entry, name) => {
   const li = new Element("li");
-  const button = new Element("button");
-  button.textContent = name;
-  button.id = entry.id;
+  li.textContent = name;
+  li.id = entry.id;
   const key = new Element("span");
   key.className = "row-key";
-  button.append(key);
-  li.append(button);
+  if (entry.group === "held") {
+    const details = new Element("details");
+    details.open = false;
+    const summary = new Element("summary");
+    summary.append(key);
+    details.append(summary);
+    li.append(details);
+  } else {
+    li.append(key);
+  }
   return li;
 };
 const render = query => fileTree.render(root, entries, query, makeLeaf);
-const folder = () => root.children[0].children[0].children[0];
-const nested = () => folder().children[1].children[0].children[0];
+const folder = () => root.children[0].children[0];
+const nested = () => folder().children[1].children[0];
+const toggle = item => item.listeners.click({ target: item });
+const expanded = item => item.attributes["aria-expanded"] === "true";
 
 assert.equal(render(""), 4);
-assert.equal(folder().open, true);
+assert.equal(expanded(folder()), true);
 assert.equal(folder().children[0].children[1].textContent, "3");
 assert.equal(folder().children[0].children[0].children[0].attributes["aria-hidden"], "true");
 assert.equal(nested().children[0].children[1].textContent, "2");
-const duplicates = nested().children[1].children.map(li => li.children[0]);
-assert.deepEqual(duplicates.map(button => button.id), ["a", "b"]);
+const duplicates = nested().children[1].children;
+assert.deepEqual(duplicates.map(item => item.id), ["a", "b"]);
 assert.equal(duplicates[0].textContent, "same");
 assert.equal(duplicates[0].children[0].children.length, 0);
 assert.equal(duplicates[0].attributes["aria-label"], "config/nested/same — changed");
 assert.equal(duplicates[1].attributes["aria-label"], "config/nested/same — held · details");
-assert.equal(root.children[0].children[1].children[0].id, "d");
+const held = duplicates[1].children[0];
+assert.equal(expanded(duplicates[1]), false);
+assert.equal(held.children[0].attributes.tabindex, "-1");
+held.open = true;
+held.listeners.toggle();
+assert.equal(expanded(duplicates[1]), true);
+assert.equal(root.children[0].children[1].id, "d");
 
-folder().open = false;
-const pendingToggle = folder().listeners.toggle;
+toggle(folder());
 assert.equal(render("held"), 1);
-pendingToggle();
-assert.equal(folder().open, true);
+assert.equal(expanded(folder()), true);
 assert.equal(folder().children[0].children[0].textContent, "config/nested");
-assert.equal(folder().children[1].children[0].children[0].id, "b");
+assert.equal(folder().children[1].children[0].id, "b");
 assert.equal(render(""), 4);
-assert.equal(folder().open, false);
+assert.equal(expanded(folder()), false);
 assert.equal(nested().children[1].children.length, 2);
-const summary = folder().children[0];
-let prevented = false;
-summary.listeners.keydown({ key: "ArrowRight", preventDefault: () => { prevented = true; } });
-assert.equal(folder().open, true);
-assert.equal(prevented, true);
-const nestedSummary = nested().children[0];
-nested().open = false;
-nestedSummary.listeners.keydown({ key: "ArrowLeft", preventDefault() {} });
-assert.equal(document.activeElement, summary);
+toggle(nested());
+fileTree.reveal(nested().children[1].children[0]);
+assert.equal(expanded(folder()), true);
+assert.equal(expanded(nested()), true);
 assert.equal(render("not found"), 0);
 assert.equal(root.children.length, 0);
 
 const deep = `${"dir/".repeat(5000)}<script>`;
 assert.equal(fileTree.render(root, [{ id: "deep", key: deep, status: "changed" }], "", makeLeaf), 1);
-const deepFolder = root.children[0].children[0].children[0];
+const deepFolder = root.children[0].children[0];
 assert.equal(deepFolder.children[0].children[0].textContent, "dir/".repeat(4999) + "dir");
 const list = deepFolder.children[1];
-assert.equal(list.children[0].children[0].textContent, "<script>");
-assert.equal(list.children[0].children[0].attributes["aria-label"], `${deep} — changed · diff unavailable`);
+assert.equal(list.children[0].textContent, "<script>");
+assert.equal(list.children[0].attributes["aria-label"], `${deep} — changed · diff unavailable`);
 
 assert.equal(fileTree.render(root, [{ id: "compact", key: ".config/helix/config.toml", status: "changed", supported: true }], "", makeLeaf), 1);
 assert.equal(folder().children[0].children[0].textContent, ".config/helix");
-assert.equal(folder().children[1].children[0].children[0].textContent, "config.toml");
-folder().open = false;
-folder().listeners.toggle();
+assert.equal(folder().children[1].children[0].textContent, "config.toml");
+toggle(folder());
 fileTree.render(root, [{ id: "compact", key: ".config/helix/config.toml", status: "changed", supported: true }], "config", makeLeaf);
-assert.equal(folder().open, true);
+assert.equal(expanded(folder()), true);
 fileTree.render(root, [{ id: "compact", key: ".config/helix/config.toml", status: "changed", supported: true }], "", makeLeaf);
-assert.equal(folder().open, false);
+assert.equal(expanded(folder()), false);
 
 const many = Array.from({ length: 2000 }, (_, i) => ({ id: String(i), key: `common/${i}`, status: "changed" }));
 assert.equal(fileTree.render(root, many, "", makeLeaf), 2000);
-assert.equal(folder().open, true);
+assert.equal(expanded(folder()), true);
 assert.equal(folder().children[1].children.length, 2000);
 assert.equal(fileTree.render(root, [{ id: "fallback", key: "", status: "held" }], "held", makeLeaf), 1);
-assert.equal(root.children[0].children[0].children[0].textContent, "held");
+assert.equal(root.children[0].children[0].textContent, "held");
 
 fileTree.render(root, entries, "", makeLeaf);
-folder().open = false;
-folder().listeners.toggle();
+toggle(folder());
 fileTree.render(root, many, "", makeLeaf);
 fileTree.render(root, entries, "", makeLeaf);
-assert.equal(folder().open, true);
+assert.equal(expanded(folder()), true);
 await withBrowser(async send => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
   const page = (method, params) => send(method, params, sessionId);
-  const css = fs.readFileSync("gui/dist/style.css", "utf8") + fs.readFileSync("gui/dist/file-tree.css", "utf8");
-  const html = `<style>${css}</style><div style="width: 200px"><ul class="file-tree"><li class="file-tree-folder"><details open><summary><span class="file-tree-name">.config/helix</span><span class="file-tree-count">1</span></summary><ul><li><button class="row" aria-current="true" data-group="outgoing"><span class="row-key">configuration-with-a-very-long-unbroken-name.toml</span><span class="row-status">changed-locally · system (read only)</span></button></li></ul></details></li></ul></div>`;
+  const css = readCss();
+  const html = `<style>${css}</style><div style="width: 200px"><ul class="file-tree" role="tree"><li class="file-tree-folder" role="treeitem" aria-expanded="true"><div class="file-tree-branch"><span class="file-tree-name">.config/helix</span><span class="file-tree-count">1</span></div><ul role="group"><li class="row" role="treeitem" tabindex="0" aria-current="true" data-group="outgoing"><span class="row-key">configuration-with-a-very-long-unbroken-name.toml</span><span class="row-status">changed-locally · system (read only)</span></li></ul></li></ul></div>`;
   const { frameTree } = await page("Page.getFrameTree");
   await page("Page.setDocumentContent", { frameId: frameTree.frame.id, html });
   for (const theme of ["light", "dark"]) {
@@ -135,14 +145,14 @@ await withBrowser(async send => {
         document.querySelector("div").style.width = "${width}px";
         const row = document.querySelector(".row"), key = row.querySelector(".row-key"), status = row.querySelector(".row-status");
         row.focus();
-        return { height: row.offsetHeight, folderHeight: document.querySelector("summary").offsetHeight,
+        return { height: row.offsetHeight, folderHeight: document.querySelector(".file-tree-branch").offsetHeight,
           fits: row.scrollWidth <= row.clientWidth && key.scrollWidth <= key.clientWidth && status.scrollWidth <= status.clientWidth,
           status: status.textContent, focused: document.activeElement === row,
-          stripe: getComputedStyle(row).borderLeftWidth, connector: getComputedStyle(key, "::before").borderLeftWidth };
+          connector: getComputedStyle(key, "::before").borderLeftWidth };
       })()` });
       assert.deepEqual(result.value, { height: result.value.height, folderHeight: result.value.folderHeight, fits: true,
-        status: "changed-locally · system (read only)", focused: true, stripe: "0px", connector: "1px" });
-      assert.ok(result.value.height >= 44 && result.value.folderHeight >= 44);
+        status: "changed-locally · system (read only)", focused: true, connector: "1px" });
+      assert.ok(result.value.height >= 36 && result.value.folderHeight >= 36);
     }
   }
   await page("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });

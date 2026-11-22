@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 .title("dotman")
                 .inner_size(1000.0, 720.0)
+                .min_inner_size(320.0, 320.0)
                 .devtools(false)
                 .on_navigation(|url| bundled_document(url.as_str()))
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
