@@ -815,11 +815,11 @@ pub async fn run_held(
         if !still_current(&context, &entry, &worker_flag, action, &key, &bound) { return attention(); }
         let Ok(review) = preflight(&context, &entry, &key, &bound, action, &worker_flag) else { return attention(); };
         let Ok(text) = modal(&context, &entry, &review) else { return attention(); };
-        if matches!(action, Action::Plain) && !crate::confirm::ask(&window, "Store unencrypted?", "This name is classified as sensitive. Storing it unencrypted may publish its contents in a future sync. Do you want to continue to the exact-file review?".into(), worker_flag.clone()).unwrap_or(false) {
+        if matches!(action, Action::Plain) && !crate::confirm::ask(&window, "Store unencrypted?", "Review unencrypted storage", "This name is classified as sensitive. Storing it unencrypted may publish its contents in a future sync. Do you want to continue to the exact-file review?".into(), worker_flag.clone()).unwrap_or(false) {
             return writer_view("declined", "Plaintext storage was not approved.", true);
         }
-        let title = match action { Action::Encrypt => "Encrypt held file?", Action::Forget => "Forget held file?", _ => "Add held file?" };
-        if !approved(crate::confirm::ask(&window, title, text, worker_flag.clone()).unwrap_or(false), &worker_flag) {
+        let (title, label) = match action { Action::Encrypt => ("Encrypt held file?", "Encrypt held file"), Action::Forget => ("Forget held file?", "Forget held file"), _ => ("Add held file?", "Add held file") };
+        if !approved(crate::confirm::ask(&window, title, label, text, worker_flag.clone()).unwrap_or(false), &worker_flag) {
             return writer_view("declined", "Held-file action was not approved.", true);
         }
         if !still_current(&context, &entry, &worker_flag, action, &key, &bound) { return attention(); }

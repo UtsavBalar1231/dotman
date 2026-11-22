@@ -1129,7 +1129,27 @@ fn apply_modal(
         text.push_str(": ");
         quoted(&mut text, &entry.key.shown)?;
     }
-    text.push_str("\n\nKeep local leaves the home file and records the repository version. Take repository backs up replaced bytes. Restore applies only when the home file is missing. No hooks or system files; no commit or push.\n\nContinue?");
+    if choices
+        .iter()
+        .any(|(_, action)| matches!(action, FileAction::KeepLocal))
+    {
+        text.push_str("\n\nKeep local leaves the home file and records the repository version.");
+    }
+    if choices
+        .iter()
+        .any(|(_, action)| matches!(action, FileAction::TakeRepo))
+    {
+        text.push_str("\n\nTake repository backs up replaced bytes before applying the repository version to the home file.");
+    }
+    if choices
+        .iter()
+        .any(|(_, action)| matches!(action, FileAction::Restore))
+    {
+        text.push_str(
+            "\n\nRestore applies the repository version only when the home file is missing.",
+        );
+    }
+    text.push_str("\n\nNo hooks or system files; no commit or push.");
     if text.len() > LIMIT {
         return Err("File review is too large for confirmation");
     }
@@ -1377,6 +1397,7 @@ pub async fn open_diff(
             crate::confirm::ask(
                 &window,
                 "Show encrypted diff?",
+                "Decrypt and show diff",
                 format!(
                     "Key: {}\nSource: {}\n\nDecrypt and show this comparison?",
                     selection.entry.key.shown, source
@@ -1570,6 +1591,8 @@ fn capture_text(capture: &protocol::SyncCapture, paths: &HeldPaths<'_>) -> Strin
         || paths.redacted_repo.contains(capture.source.path.as_path())
     {
         "[redacted filename]".into()
+    } else if capture.key.raw.as_bytes() == capture.source.path.as_os_str().as_bytes() {
+        format!("{} · {}", capture.key.shown, capture.scope)
     } else {
         format!(
             "{} · {} · {}",
@@ -2474,17 +2497,17 @@ async fn run_setup(
         let mut inner = state.inner.lock().map_err(|_| "Status state unavailable")?;
         reserve_setup(&mut inner, &id, source, flag.clone())?
     };
-    let title = if intent.source().is_some() {
-        "Clone dotman repository?"
+    let (title, action) = if intent.source().is_some() {
+        ("Clone dotman repository?", "Clone repository")
     } else {
-        "Create new dotman repository?"
+        ("Create new dotman repository?", "Create repository")
     };
     let shared = state.inner.clone();
     let cancelled = flag.clone();
     let uncertain = Arc::new(AtomicBool::new(false));
     let worker_uncertain = uncertain.clone();
     let worker = tauri::async_runtime::spawn_blocking(move || -> Result<WriterView, String> {
-        let approved = crate::confirm::ask(&window, title, text, cancelled.clone())?;
+        let approved = crate::confirm::ask(&window, title, action, text, cancelled.clone())?;
         let mut run = {
             let guard = shared.lock().map_err(|_| "Status state unavailable")?;
             if cancelled.load(Ordering::Acquire) {
@@ -2703,7 +2726,7 @@ pub async fn approve_pending_hooks(
     let uncertain = Arc::new(AtomicBool::new(false));
     let worker_uncertain = uncertain.clone();
     let worker = tauri::async_runtime::spawn_blocking(move || -> Result<WriterView, String> {
-        let approved = crate::confirm::ask(&window, "Approve pending hooks?", text, flag.clone())?;
+        let approved = crate::confirm::ask(&window, "Approve pending hooks?", "Approve and run hooks", text, flag.clone())?;
         let review = HookReview::new(&report)?;
         let mut run = {
             let guard = shared.lock().map_err(|_| "Status state unavailable")?;
@@ -2776,6 +2799,7 @@ pub async fn accept_reviewed_identity(
         let approved = crate::confirm::ask(
             &window,
             "Accept machine identity change?",
+            "Accept identity change",
             text,
             flag.clone(),
         )?;
@@ -2849,6 +2873,7 @@ pub async fn apply_reviewed_files(
         let approved = crate::confirm::ask(
             &window,
             "Apply reviewed file decisions?",
+            "Apply reviewed decisions",
             reservation.text.clone(),
             flag.clone(),
         )?;
@@ -2963,7 +2988,12 @@ pub async fn run_reviewed_sync(
     let start_uncertain = Arc::new(AtomicBool::new(false));
     let worker_uncertain = start_uncertain.clone();
     let worker = tauri::async_runtime::spawn_blocking(move || -> Result<WriterView, String> {
-        let approved = crate::confirm::ask(&window, "Run reviewed sync?", text, flag.clone())?;
+        let (title, action) = if selected.is_some() {
+            ("Commit selected lines?", "Commit selected lines")
+        } else {
+            ("Run reviewed sync?", "Run reviewed sync")
+        };
+        let approved = crate::confirm::ask(&window, title, action, text, flag.clone())?;
         let mut run = {
             let mut inner = shared.lock().map_err(|_| "Status state unavailable")?;
             if flag.load(Ordering::Acquire) { return Ok(writer_view("cancelled", "Sync cancelled before starting.", false)); }

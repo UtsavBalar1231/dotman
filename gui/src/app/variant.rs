@@ -358,7 +358,7 @@ pub async fn run_host_variant(
         let text = format!("Create a variant for this machine?\n\nHost: {}\nRepository: {}\nState: {}\nKey: {}\nCurrent source: {}\nNew source: {}\nRecipients: {}\n\nThe new source is absent and will be created. The local state entry will select it. Home, the original source, other variants, settings and index stay unchanged. No hooks, commit or sync run.\n\nContinue?",
             shown(&review.host.raw), shown_path(&review.repo.path), shown_path(&review.state.path), shown(&review.key.raw), shown(&review.selected.raw), shown(&review.target.raw),
             if review.encrypted { review.recipients.join(", ") } else { "none (unencrypted)".into() });
-        if !crate::confirm::ask(&window, "Create host variant?", text, flag.clone()).unwrap_or(false) || flag.load(Ordering::Acquire) {
+        if !crate::confirm::ask(&window, "Create host variant?", "Create host variant", text, flag.clone()).unwrap_or(false) || flag.load(Ordering::Acquire) {
             return writer_view("declined", "Host variant was not created.", true);
         }
         if !still_current(&context, &entry, &flag) { return attention() }

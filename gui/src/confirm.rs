@@ -15,6 +15,7 @@ fn approved(response: gtk::ResponseType, cancelled: bool) -> bool {
 pub fn ask(
     window: &tauri::WebviewWindow,
     title: &str,
+    action: &'static str,
     text: String,
     cancelled: Arc<AtomicBool>,
 ) -> Result<bool, &'static str> {
@@ -40,11 +41,13 @@ pub fn ask(
                 Some(&parent),
                 gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
                 gtk::MessageType::Question,
-                gtk::ButtonsType::YesNo,
+                gtk::ButtonsType::None,
                 &text,
             );
             dialog.set_title(&title);
-            dialog.set_default_response(gtk::ResponseType::No);
+            dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            dialog.add_button(action, gtk::ResponseType::Yes);
+            dialog.set_default_response(gtk::ResponseType::Cancel);
             let completion = Rc::new(RefCell::new(Some(sender)));
             let on_response = completion.clone();
             let response_cancelled = cancelled.clone();
@@ -95,8 +98,8 @@ pub fn ask(
                 gtk::glib::ControlFlow::Continue
             });
             dialog.show_all();
-            if let Some(no) = dialog.widget_for_response(gtk::ResponseType::No) {
-                no.grab_focus();
+            if let Some(cancel) = dialog.widget_for_response(gtk::ResponseType::Cancel) {
+                cancel.grab_focus();
             }
         })
         .map_err(|_| "Could not show confirmation")?;

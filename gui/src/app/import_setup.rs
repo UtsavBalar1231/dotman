@@ -81,7 +81,7 @@ pub async fn run_import_setup(
         let Ok(text) = review.confirmation() else {
             return writer_view("attention", "The complete import cannot be shown safely; nothing was imported.", true);
         };
-        let approved = crate::confirm::ask(&window, "Import dotfiles snapshot?", text, flag.clone()).unwrap_or(false);
+        let approved = crate::confirm::ask(&window, "Import dotfiles snapshot?", "Import snapshot", text, flag.clone()).unwrap_or(false);
         if !approved || flag.load(Ordering::Acquire) {
             return writer_view("declined", "Import was not approved.", true);
         }

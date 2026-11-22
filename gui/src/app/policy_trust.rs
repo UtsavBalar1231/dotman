@@ -116,6 +116,7 @@ pub async fn review_policy(
         let approved = crate::confirm::ask(
             &window,
             "Approve local capture policy?",
+            "Approve capture policy",
             text,
             cancelled.clone(),
         )?;

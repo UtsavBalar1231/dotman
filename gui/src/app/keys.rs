@@ -633,6 +633,7 @@ fn finish_grant(
             let _ = crate::confirm::ask(
                 window,
                 "Settings recovery retained",
+                "Acknowledge recovery",
                 text,
                 cancelled.clone(),
             );
@@ -710,7 +711,7 @@ pub async fn run_key(
         let Ok(text) = install_modal(&intent) else {
             return writer_view("attention", "Identity paths cannot be shown safely; nothing was started.", true);
         };
-        let approved = crate::confirm::ask(&window, "Install age identity?", text, worker_flag.clone()).unwrap_or(false);
+        let approved = crate::confirm::ask(&window, "Install age identity?", "Install identity", text, worker_flag.clone()).unwrap_or(false);
         if !approved || worker_flag.load(Ordering::Acquire) {
             return writer_view("declined", "Identity installation was not approved.", true);
         }
@@ -736,7 +737,7 @@ pub async fn run_key(
         let Ok(text) = grant_modal(&intent, &token.recipients) else {
             return writer_view("attention", "Identity installed. Repository paths cannot be shown safely; recipient addition was not started.", true);
         };
-        let approved = crate::confirm::ask(&window, "Add recipient?", text, worker_flag.clone()).unwrap_or(false);
+        let approved = crate::confirm::ask(&window, "Add recipient?", "Add recipient", text, worker_flag.clone()).unwrap_or(false);
         let outcome = grant_after_approval(approved, || {
             if worker_flag.load(Ordering::Acquire) || !current(&intent.context, &worker_flag) {
                 return Err("Recipient review changed");
