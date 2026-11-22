@@ -115,6 +115,8 @@ e2e_remote_url() { printf 'file://%s' "$(e2e_remote)"; }
 e2e_make_remote() {
     # symbolic-ref, not --initial-branch, which needs git 2.28 where the floor is 2.25.
     e2e_tool git init -q --bare --template= "$(e2e_remote)" >/dev/null
+    # Keep post-receive maintenance from replacing pack indexes during fixture fsck.
+    e2e_tool git --git-dir="$(e2e_remote)" config gc.autoDetach false
     e2e_tool git --git-dir="$(e2e_remote)" symbolic-ref HEAD refs/heads/main
 }
 
