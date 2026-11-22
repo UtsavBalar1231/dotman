@@ -1,0 +1,18 @@
+.dotman-sync { background-color: #f4f5f7; color: #242831; }
+.dotman-sync.amoled { background-color: #09090b; color: #edf0f6; }
+.dotman-sync label, .dotman-sync image { color: inherit; }
+.dotman-sync scrolledwindow { border: 1px solid #ccd4df; border-radius: 6px; }
+.dotman-sync.amoled scrolledwindow { border-color: #343a46; }
+.dotman-sync textview, .dotman-sync textview text { background-color: #fff; color: #242831; }
+.dotman-sync.amoled textview, .dotman-sync.amoled textview text { background-color: #000; color: #edf0f6; }
+.dotman-sync textview { font-family: "Departure Mono", monospace; }
+.dotman-sync button {
+  border-radius: 22px; min-height: 34px; padding: 2px 16px;
+  background-image: none; box-shadow: none; text-shadow: none;
+}
+.dotman-sync.amoled button { background-color: #151619; color: #edf0f6; border-color: #5c6575; }
+.dotman-sync button.suggested-action { background-color: #513eab; border-color: #513eab; color: white; }
+.dotman-sync.amoled button.suggested-action { background-color: #bbb6ff; border-color: #bbb6ff; color: #121019; }
+.dotman-sync button.destructive-action { background-color: #a82b3a; border-color: #a82b3a; color: white; }
+.dotman-sync button:hover { box-shadow: inset 0 0 0 2px alpha(currentColor,.4); }
+.dotman-sync button:focus { outline: 2px solid currentColor; outline-offset: -5px; }

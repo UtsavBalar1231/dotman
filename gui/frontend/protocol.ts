@@ -118,7 +118,7 @@ export interface Commands {
   discard_review: { args: { id: string }; result: void };
   open_diff: { args: { id: string }; result: DiffView };
   open_review: { args: undefined; result: ReviewView };
-  run_reviewed_sync: { args: { id: string; progress: Channel; commitMessage?: string; selectedLines?: string[]; massDelete?: boolean }; result: WriterView };
+  run_reviewed_sync: { args: { id: string; progress: Channel; dark?: boolean; commitMessage?: string; selectedLines?: string[]; massDelete?: boolean }; result: WriterView };
   apply_reviewed_files: { args: { answers: { id: string; action: FileAction }[] }; result: WriterView };
   accept_reviewed_identity: { args: { id: string }; result: WriterView };
   approve_pending_hooks: { args: { id: string }; result: WriterView };

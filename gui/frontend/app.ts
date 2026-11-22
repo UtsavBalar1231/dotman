@@ -16,7 +16,7 @@ declare global {
 
 const invoke = window.__TAURI__.core.invoke;
 type InputId = "search" | "clone-source";
-type ButtonId = "cancel-review" | "refresh" | "cancel" | "start-fresh" | "start-clone" | "start-import" | "setup-check" | "setup-retry" | "recovery-check" | "create-age" | "import-age" | "review-identity" | "review-hooks" | "sync-reviewed" | "sync-mass-delete" | "sync-lines" | "leave-lines" | "close-review" | "apply-decisions" | "clear-decisions" | "review-decisions" | "close-decisions" | "retry-decisions" | "next-undecided" | "close-diff" | "group-folders" | "group-status";
+type ButtonId = "review-return" | "cancel-review" | "refresh" | "cancel" | "start-fresh" | "start-clone" | "start-import" | "setup-check" | "setup-retry" | "recovery-check" | "create-age" | "import-age" | "review-identity" | "review-hooks" | "sync-reviewed" | "sync-mass-delete" | "sync-lines" | "leave-lines" | "close-review" | "apply-decisions" | "clear-decisions" | "review-decisions" | "close-decisions" | "retry-decisions" | "next-undecided" | "close-diff" | "group-folders" | "group-status";
 type ElementFor<T extends string> = T extends InputId ? HTMLInputElement
   : T extends ButtonId ? HTMLButtonElement
   : T extends "commit-message" ? HTMLTextAreaElement
@@ -292,7 +292,8 @@ function controls() {
   el("sync-lines").hidden = reviewId === null || !selectedOnly;
   el("sync-lines").disabled = busy || cancelPending || !!commitError() || !Array.from(lineReceipts.values()).some(receipt => receipt.selected.size);
   el("leave-lines").disabled = busy || cancelPending;
-  el("close-review").disabled = writerActive;
+  el("review-return").disabled = busy || cancelPending;
+  el("close-review").disabled = writerActive || (!el("review-return").hidden && busy);
   el("cancel-review").hidden = !writerActive || writerKind !== "sync";
   el("cancel-review").disabled = cancelPending;
   el("apply-decisions").disabled = busy || cancelPending || !statusLoaded || !decisions.size;
@@ -788,7 +789,7 @@ async function refresh(preserveReview = false, preserveVariantResult = false) {
     renderHeldCounts(view.held_counts);
     renderRows();
     renderWorklist();
-    el("entries").hidden = preserveReview || !view.success;
+    el("entries").hidden = !view.success;
   } catch {
     if (token === serial) {
       updateWorkspace({ status: "Status read failed." });
@@ -1075,16 +1076,27 @@ function displayReview(open: boolean) {
 }
 el("review").addEventListener("cancel", event => { event.preventDefault(); void closeReview(); });
 
+function reviewHeading(title: string, phase: "preview" | "running" | "success" | "attention" | "neutral") {
+  el("review-title").textContent = title;
+  el("review").setAttribute("data-phase", phase);
+  el("review-icon").replaceChildren(icon(({ preview: "repository", running: "refresh", success: "review", attention: "warning", neutral: "repository" } as const)[phase]));
+  el("review-remote").hidden = phase !== "preview";
+  el("review-footnote").hidden = true;
+  el("review-return").hidden = phase === "preview" || phase === "running";
+}
+
 async function openReview() {
   if (busy || cancelPending || !statusLoaded) return;
   clearLines();
   previousScroll = [window.scrollX, window.scrollY];
+  reviewHeading("Outgoing sync", "preview");
   displayReview(true);
   el("review-items").replaceChildren();
   clearCommitEditor();
   reviewId = null;
   controls();
-  el("review-remote").textContent = el("remote").textContent;
+  const remote = el("remote").textContent;
+  el("review-remote").textContent = remote === "Last fetched: 0 ahead · 0 behind" ? "Branches matched at last fetch" : remote;
   el("review-message").textContent = "Loading outgoing preview…";
   el("close-review").focus();
   const token = ++serial;
@@ -1103,7 +1115,9 @@ async function openReview() {
       el("commit-message").value = suggestedMessage;
       el("commit-editor").hidden = false;
     }
-    el("review-message").textContent = view.message;
+    el("review-footnote").hidden = !reviewId;
+    el("review-message").textContent = view.outcome === "review" && view.message === "Outgoing preview loaded."
+      ? (view.items.length ? "" : "No outgoing changes to review.") : view.message;
     if (view.outcome === "terminal_recovery") {
       showRecovery(view.message);
       clearDecisions();
@@ -1128,21 +1142,41 @@ function renderReviewItems(items: ReviewItem[], captureDiffs = false) {
     if (!groups.has(item.group)) groups.set(item.group, []);
     groups.get(item.group)?.push(item);
   }
-  const previewOrder = ["Held or undecided", "Hypothetical effects", "Captures", "Repository changes", "Already-ahead commits"];
-  const labels = [...previewOrder.filter(label => groups.has(label)), ...[...groups.keys()].filter(label => !previewOrder.includes(label))];
+  const order = ["Attention", "Refusals", "Held or undecided", "Changes", "Captures", "Repository changes", "Hypothetical effects", "Already-ahead commits", "Hooks", "Reached stages"];
+  const labels = [...order.filter(label => groups.has(label)), ...[...groups.keys()].filter(label => !order.includes(label))];
+  const titles = new Map([
+    ["Reached stages", "Sync activity"], ["Changes", "File changes"], ["Hypothetical effects", "Planned changes"],
+    ["Already-ahead commits", "Local commits"], ["Captures", "Capture from this computer"], ["Refusals", "Blocked changes"],
+    ["Held or undecided", "Needs a decision"], ["Hooks", "Hook activity"],
+  ]);
   for (const label of labels) {
     const items = groups.get(label);
-    if (!items) continue;
-    if (label === "Suggested message" && !el("commit-editor").hidden) continue;
+    if (!items || (label === "Suggested message" && !el("commit-editor").hidden)) continue;
     const section = document.createElement("details");
-    section.open = ["Captures", "Held or undecided"].includes(label) || labels.length === 1;
+    section.className = label === "Reached stages" ? "sync-activity" : "sync-group";
+    section.open = ["Changes", "Attention", "Refusals", "Captures", "Held or undecided"].includes(label) || labels.length === 1;
     const heading = document.createElement("summary");
-    heading.textContent = `${label} (${items.length})`;
-    heading.prepend(icon("chevron-right", "disclosure-glyph"));
+    heading.textContent = titles.get(label) ?? label;
+    const count = document.createElement("span");
+    count.className = "sync-count";
+    count.textContent = String(items.length);
+    heading.append(count, icon("chevron-right", "disclosure-glyph"));
     const list = document.createElement("ul");
     for (const item of items) {
       const row = document.createElement("li");
-      row.textContent = item.text;
+      const description = label === "Reached stages" ? stageNames.get(item.text) : label === "Hooks" ? hookNames.get(item.text) : undefined;
+      const separator = label === "Changes" || label === "Hypothetical effects" ? item.text.lastIndexOf(" · ") : -1;
+      if (separator >= 0) {
+        const path = document.createElement("span");
+        path.textContent = item.text.slice(0, separator);
+        const effect = document.createElement("span");
+        effect.className = "sync-effect";
+        effect.textContent = item.text.slice(separator + 3);
+        row.className = "sync-file";
+        row.append(icon("changed"), path, effect);
+      } else {
+        row.textContent = description ?? item.text;
+      }
       if (captureDiffs && typeof item.diff_id === "string" && item.diff_id.length) {
         const button = document.createElement("button");
         button.type = "button";
@@ -1205,6 +1239,13 @@ function showRecovery(message: string, steps?: RecoveryRow[]) {
   el("recovery").hidden = false;
 }
 
+const stageNames = new Map([
+  ["capture", "Capture local changes"], ["commit", "Commit repository changes"], ["pull", "Pull from remote"],
+  ["apply", "Apply repository files"], ["reencrypt", "Update encryption"], ["hooks", "Check hooks"],
+  ["push", "Push to remote"], ["blocked_by_repo_hold", "Stopped at repository hold"],
+]);
+const hookNames = new Map([["deferred", "Deferred for separate review"], ["disabled", "Disabled for this sync"]]);
+
 const syncStages = new Map([
   ["started", "Sync process started."],
   ["capture", "Sync stage reached: capturing changes."],
@@ -1240,6 +1281,7 @@ async function syncReviewed(selected = false, massDelete = false) {
   clearMachineFiles();
   el("entries").hidden = true;
   el("review-items").replaceChildren();
+  reviewHeading("Confirm outgoing sync", "running");
   el("review-message").textContent = "Waiting for native confirmation…";
   el("review-message").focus();
   controls();
@@ -1250,16 +1292,25 @@ async function syncReviewed(selected = false, massDelete = false) {
     progress.onmessage = stage => {
       if (!acceptingProgress || writerCancel || typeof stage !== "string") return;
       const label = syncStages.get(stage);
-      if (label) el("review-message").textContent = label;
+      if (label) {
+        reviewHeading("Sync in progress", "running");
+        el("review-message").textContent = label;
+      }
     };
-    const args: { id: string; progress: typeof progress; commitMessage?: string; selectedLines?: string[]; massDelete?: boolean } = { id, progress };
+    const theme = document.documentElement.getAttribute("data-theme");
+    const dark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const args: { id: string; progress: typeof progress; dark: boolean; commitMessage?: string; selectedLines?: string[]; massDelete?: boolean } = { id, progress, dark };
     if (commitMessage !== null) args.commitMessage = commitMessage;
     if (selected) args.selectedLines = selectedLines;
     if (massDelete) args.massDelete = true;
     const result = await invoke("run_reviewed_sync", args);
     acceptingProgress = false;
     if (writerCancel) await writerCancel;
-    el("review-message").textContent = `${result.outcome}: ${result.message}`;
+    const titles = new Map([["done", "Sync complete"], ["declined", "Sync declined"], ["cancelled", "Sync cancelled"], ["error", "Sync failed"]]);
+    const neutral = result.outcome === "declined" || result.outcome === "cancelled";
+    reviewHeading(titles.get(result.outcome) ?? "Sync needs attention", result.outcome === "done" ? "success" : neutral ? "neutral" : "attention");
+    el("review-message").textContent = result.outcome === "done" && result.message === "Sync completed."
+      ? (result.items.some(item => item.group === "Changes") ? "" : "No file changes reported.") : result.message;
     renderReviewItems(result.items);
     if (result.outcome === "terminal_recovery") {
       el("review-message").textContent += " Open a terminal and follow dotman's recovery instructions before continuing.";
@@ -1267,11 +1318,12 @@ async function syncReviewed(selected = false, massDelete = false) {
     } else if (result.outcome === "cleanup_unresolved") {
       el("review-message").textContent += " Cleanup is unresolved. Check dotman in a terminal before continuing.";
     } else {
-      shouldRefresh = result.refresh;
+      shouldRefresh = result.refresh || result.outcome === "declined";
     }
   } catch {
     acceptingProgress = false;
     if (writerCancel) await writerCancel;
+    reviewHeading("Sync needs attention", "attention");
     el("review-message").textContent = "Sync request failed. Check dotman in a terminal before refreshing.";
   } finally {
     writerActive = false;
@@ -1516,7 +1568,7 @@ async function runSetup(kind: "fresh" | "clone" | "import") {
 }
 
 async function closeReview() {
-  if (writerActive) return;
+  if (el("close-review").disabled) return;
   clearLines();
   const token = ++serial;
   const id = reviewId;
@@ -1570,6 +1622,8 @@ function navigate(next: Page) {
   if (next === "review") {
     if (statusLoaded) void openReview();
     else {
+      reviewHeading("Outgoing sync", "preview");
+      el("review-remote").textContent = "";
       displayReview(true);
       el("review-message").textContent = "Status is unavailable. Refresh status before opening an outgoing preview.";
       controls();
@@ -1641,6 +1695,7 @@ el("next-undecided").addEventListener("click", () => {
   if (entry) void openDiff(entry, rowNodes.get(entry.id));
 });
 el("close-review").addEventListener("click", closeReview);
+el("review-return").addEventListener("click", closeReview);
 el("sync-reviewed").addEventListener("click", () => syncReviewed());
 el("sync-mass-delete").addEventListener("click", () => syncReviewed(false, true));
 el("sync-lines").addEventListener("click", () => syncReviewed(true));

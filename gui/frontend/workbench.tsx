@@ -35,23 +35,25 @@ return <>
         <ul id="attention-list" className="attention-list"></ul>
      </section>
     <dialog id="review" hidden aria-labelledby="review-title">
-      <div className="section-head"><h2 id="review-title">Review outgoing sync</h2><button id="close-review" className="icon-button" aria-label="Close review" title="Close review"><Icon name="close" /></button></div>
+      <div className="section-head">
+        <span className="sync-emblem" id="review-icon" aria-hidden="true"><Icon name="repository" /></span>
+        <div className="sync-heading"><h2 id="review-title" aria-live="polite">Outgoing sync</h2><p id="review-remote"></p></div><button id="close-review" className="icon-button" aria-label="Close review" title="Close review"><Icon name="close" /></button></div>
       <div id="review-body">
-      <details><summary>About this preview</summary><p>Based on the last fetch. Hooks require separate approval. Confirm the sync before writing.</p></details>
-      <p id="review-remote"></p>
       <p id="review-message" role="status" aria-live="polite" tabIndex={-1}></p>
       <div id="review-items"></div>
       <div id="line-summary" hidden><p id="selected-effect"></p><ul id="selected-lines"></ul><button id="leave-lines" type="button">Leave selected-only mode</button></div>
       <div id="commit-editor" hidden>
         <label htmlFor="commit-message">Commit message (optional)</label>
-        <p id="commit-hint">Used for a new commit if one is made. Edits require native confirmation. Up to 1024 UTF-8 bytes and six lines; no control or invisible formatting characters.</p>
+        <p id="commit-hint">Used if sync creates a commit. Up to six lines and 1,024 UTF-8 bytes.</p>
         <textarea id="commit-message" rows={4} aria-describedby="commit-hint commit-error"></textarea>
         <p id="commit-error" role="status" aria-live="polite"></p>
       </div>
       </div>
       <div className="review-action-strip">
+      <p id="review-footnote" hidden>Hooks require separate approval.</p>
+      <button id="review-return" hidden>Back to files</button>
       <button id="cancel-review" hidden>Cancel sync</button>
-      <button id="sync-reviewed" hidden>Sync without hooks</button>
+      <button id="sync-reviewed" hidden>Continue to confirmation</button>
       <button id="sync-mass-delete" type="button" hidden>Review and approve mass deletion</button>
       <button id="sync-lines" type="button" hidden>Commit selected lines</button>
       </div>

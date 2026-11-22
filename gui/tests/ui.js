@@ -57,7 +57,7 @@ ids.push("replacement-review", "replacement-title", "replacement-source", "repla
 ids.push("nav-files", "nav-review", "nav-settings", "settings", "page-heading", "paths-unavailable", "age-unavailable");
 ids.push("recovery-check", "recovery-paths", "recovery-finding", "recovery-details", "setup-check", "setup-paths", "setup-finding", "setup-guidance");
 ids.push("review-decisions", "close-decisions", "retry-decisions");
-ids.push("review-body", "source-edit-details");
+ids.push("review-body", "source-edit-details", "review-title", "review-icon", "review-return", "review-footnote");
 const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
 elements["variant-result"].hidden = true;
 elements["variant-message"].setAttribute("role", "status");
@@ -621,7 +621,7 @@ async function main() {
   elements["sync-reviewed"].click();
   assert.equal(writes.length, 1);
   assert.equal(writes[0].id, "edit-id");
-  assert.deepEqual(Object.keys(writes[0]), ["id", "progress", "commitMessage"]);
+  assert.deepEqual(Object.keys(writes[0]), ["id", "progress", "dark", "commitMessage"]);
   assert.equal(writes[0].commitMessage, draft);
   assert.equal(elements["commit-editor"].hidden, true);
   assert.equal(elements["commit-message"].value, "");
@@ -637,7 +637,7 @@ async function main() {
   resolveReview({ id: "default-id", outcome: "review", message: "loaded", items: [], commit_message: suggestion });
   await tick();
   elements["sync-reviewed"].click();
-  assert.deepEqual(Object.keys(writes.at(-1)), ["id", "progress"]);
+  assert.deepEqual(Object.keys(writes.at(-1)), ["id", "progress", "dark"]);
   resolveWriter({ outcome: "declined", message: "no", items: [], refresh: false });
   await tick();
   elements.refresh.click();
@@ -674,7 +674,7 @@ async function main() {
     assert.equal(writes.length, idsWritten.length + 1);
     idsWritten.push(id);
     assert.equal(writes.at(-1).id, id);
-    assert.deepEqual(Object.keys(writes.at(-1)), ["id", "progress"]);
+    assert.deepEqual(Object.keys(writes.at(-1)), ["id", "progress", "dark"]);
     assert.equal(elements["sync-reviewed"].hidden, true);
     assert.equal(getWorkspaceView().busy, true);
     assert.equal(elements["close-review"].disabled, true);
@@ -715,9 +715,9 @@ async function main() {
   resolveCancel();
   delayCancel = false;
   await tick();
-  assert.equal(elements["review-message"].textContent, "cancelled: reaped");
+  assert.equal(elements["review-message"].textContent, "reaped");
   firstProgress.onmessage("push");
-  assert.equal(elements["review-message"].textContent, "cancelled: reaped");
+  assert.equal(elements["review-message"].textContent, "reaped");
   assert.equal(elements["review-items"].children[0].children[1].children[0].textContent, "<cancelled>");
   assert.equal(refreshes, beforeCancel);
   assert.equal(elements.entries.hidden, true);
@@ -732,7 +732,7 @@ async function main() {
   assert.match(elements["review-message"].textContent, /Cancelling sync/);
   resolveWriter({ outcome: "cancelled", message: "reaped", items: [], refresh: false });
   await tick();
-  assert.equal(elements["review-message"].textContent, "cancelled: reaped");
+  assert.equal(elements["review-message"].textContent, "reaped");
 
   for (const outcome of ["declined", "error", "done", "terminal_recovery", "cleanup_unresolved"]) {
     elements.refresh.click();
@@ -746,13 +746,13 @@ async function main() {
     const before = refreshes;
     resolveWriter({ outcome, message: "actual result", items: [{ group: "<group>", text: "<item>", diff_id: "summary-id" }], refresh: outcome === "done" || outcome === "terminal_recovery" || outcome === "cleanup_unresolved" });
     await tick();
-    assert.equal(refreshes, before + (outcome === "done" ? 1 : 0));
-    assert.match(elements["review-message"].textContent, new RegExp(`^${outcome}: actual result`));
+    assert.equal(refreshes, before + (outcome === "done" || outcome === "declined" ? 1 : 0));
+    assert.match(elements["review-message"].textContent, /^actual result/);
     progress.onmessage("push");
-    assert.match(elements["review-message"].textContent, new RegExp(`^${outcome}: actual result`));
+    assert.match(elements["review-message"].textContent, /^actual result/);
     assert.equal(elements.review.hidden, false);
-    assert.equal(elements.entries.hidden, true);
-    assert.equal(elements["review-items"].children[0].children[0].textContent, "<group> (1)");
+    assert.equal(elements.entries.hidden, outcome !== "done" && outcome !== "declined");
+    assert.equal(elements["review-items"].children[0].children[0].textContent, "<group>");
     assert.equal(elements["review-items"].children[0].children[1].children[0].textContent, "<item>");
     assert.equal(elements["review-items"].children[0].children[1].children[0].children.length, 0);
     if (outcome === "terminal_recovery" || outcome === "cleanup_unresolved") {

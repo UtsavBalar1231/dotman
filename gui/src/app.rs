@@ -1999,37 +1999,44 @@ fn modal_text(
         text.push('\n');
         Ok(())
     }
-    let mut text = String::from("Repository: ");
-    add(&mut text, "", &review.context.repo.shown)?;
+    let mut text = String::from("Repository\n");
+    add(&mut text, "  ", &review.context.repo.shown)?;
     if let Some(message) = message {
         text.push_str(if edited {
-            "Edited commit message (each line follows |):\n"
+            "\nEdited commit message\n"
         } else {
-            "Suggested commit message (CLI may recompute it; each line follows |):\n"
+            "\nSuggested commit message (may be regenerated)\n"
         });
         for line in message.as_str().split('\n') {
-            add(&mut text, "| ", line)?;
+            add(&mut text, "│ ", line)?;
         }
-        text.push_str("End of commit message\n");
     }
+    let mut previous = "";
     for record in &review.records {
-        match record {
+        let (heading, value) = match record {
             protocol::SyncRecord::Capture(capture) => {
-                add(&mut text, "Capture: ", &capture.key.shown)?;
+                ("Capture from this computer", &capture.key.shown)
             }
             protocol::SyncRecord::RepoEdit(edit) | protocol::SyncRecord::Own(edit) => {
-                add(&mut text, "Repository change: ", &edit.path.shown)?;
+                ("Repository changes", &edit.path.shown)
             }
-            protocol::SyncRecord::AheadCommit { subject, paths, .. } => {
-                add(&mut text, "Already-ahead commit: ", &subject.shown)?;
-                for path in paths {
-                    add(&mut text, "  Path: ", &path.shown)?;
-                }
+            protocol::SyncRecord::AheadCommit { subject, .. } => {
+                ("Local commits to publish", &subject.shown)
             }
-            _ => {}
+            _ => continue,
+        };
+        if previous != heading {
+            writeln!(text, "\n{heading}").map_err(|_| "Review is too large for confirmation")?;
+            previous = heading;
+        }
+        add(&mut text, "  ", value)?;
+        if let protocol::SyncRecord::AheadCommit { paths, .. } = record {
+            for path in paths {
+                add(&mut text, "    · ", &path.shown)?;
+            }
         }
     }
-    text.push_str("\nSync may commit, pull and push using the locally configured origin. The preview cannot predict incoming changes or verify the origin URL. Hooks are disabled and no system files will be written.\n\nContinue?");
+    text.push_str("\nSync scope\nUses the locally configured origin. Incoming changes and the origin URL are unverified. System files are excluded and hooks stay off.");
     if text.len() > LIMIT {
         return Err("Review is too large for confirmation");
     }
@@ -2944,12 +2951,13 @@ pub async fn run_reviewed_sync(
     mass_delete: Option<bool>,
     progress: tauri::ipc::Channel<WriterStage>,
     window: tauri::WebviewWindow,
-    state: tauri::State<'_, AppState>,
+    dark: Option<bool>,
 ) -> Result<WriterView, String> {
+    let inner_state = tauri::Manager::state::<AppState>(&window).inner.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     let commit_message = commit_message.map(runner::CommitMessage::new).transpose()?;
     let (review, context, text, selected, selected_target) = {
-        let mut inner = state.inner.lock().map_err(|_| "Status state unavailable")?;
+        let mut inner = inner_state.lock().map_err(|_| "Status state unavailable")?;
         let selected = selected_lines
             .as_ref()
             .map(|tokens| selected_review(&inner, &id, tokens, commit_message.as_ref()))
@@ -2984,17 +2992,23 @@ pub async fn run_reviewed_sync(
         drop(inner);
         (review, context, text, selected, selected_target)
     };
-    let shared = state.inner.clone();
+    let shared = inner_state.clone();
     let flag = cancelled.clone();
     let start_uncertain = Arc::new(AtomicBool::new(false));
     let worker_uncertain = start_uncertain.clone();
     let worker = tauri::async_runtime::spawn_blocking(move || -> Result<WriterView, String> {
-        let (title, action) = if selected.is_some() {
-            ("Commit selected lines?", "Commit selected lines")
+        let prompt = if mass_delete == Some(true) {
+            crate::confirm::SyncPrompt { title: "Approve repository deletions?", action: "Approve deletions and sync", scope: "This sync includes the exact deletions listed below.", destructive: true, dark }
+        } else if let Some(target) = selected_target {
+            let scope = match target {
+                writer_outcome::SelectedTarget::Local => "Create a local commit with the selected edits.",
+                writer_outcome::SelectedTarget::Push => "Commit the selected edits and push the local branch.",
+            };
+            crate::confirm::SyncPrompt { title: "Commit selected lines?", action: "Commit selected lines", scope, destructive: false, dark }
         } else {
-            ("Run reviewed sync?", "Run reviewed sync")
+            crate::confirm::SyncPrompt { title: "Confirm outgoing sync", action: "Sync without hooks", scope: "Sync can capture files, commit, pull and push. Hooks stay off.", destructive: false, dark }
         };
-        let approved = crate::confirm::ask(&window, title, action, text, flag.clone())?;
+        let approved = crate::confirm::ask_sync(&window, prompt, text, flag.clone())?;
         let mut run = {
             let mut inner = shared.lock().map_err(|_| "Status state unavailable")?;
             if flag.load(Ordering::Acquire) { return Ok(writer_view("cancelled", "Sync cancelled before starting.", false)); }
@@ -3060,7 +3074,7 @@ pub async fn run_reviewed_sync(
             }
         }
     }).await;
-    let mut inner = state.inner.lock().map_err(|_| "Status state unavailable")?;
+    let mut inner = inner_state.lock().map_err(|_| "Status state unavailable")?;
     let Ok(result) = worker else {
         inner.reply = None;
         inner.source_doc = None;
@@ -4915,9 +4929,11 @@ mod tests {
         assert_ne!(first_id, second_id);
         assert!(inner.consume_review(&first_id, None).is_err());
         let (_, _, modal) = inner.consume_review(&second_id, None)?;
-        assert!(modal.contains("Repository: /repo"));
-        assert!(modal.contains("Suggested commit message (CLI may recompute it; each line follows |):\n| private-message\n"));
-        assert!(modal.contains("Repository change: shown path"));
+        assert!(modal.contains("Repository\n  /repo"));
+        assert!(
+            modal.contains("Suggested commit message (may be regenerated)\n│ private-message\n")
+        );
+        assert!(modal.contains("Repository changes\n  shown path"));
         assert!(!modal.contains("private-path"));
         assert!(inner.consume_review(&second_id, None).is_err());
         assert_oversized_review_is_not_consumed(&mut inner, &input, &selected.context)?;
@@ -5026,8 +5042,9 @@ mod tests {
         let draft = runner::CommitMessage::new("--approve-hooks <é> \"\nnext".into())?;
         assert!(inner.consume_review("stale", Some(&draft)).is_err());
         let (_, _, modal) = inner.consume_review(&id, Some(&draft))?;
-        assert!(modal.contains("Edited commit message (each line follows |):\n| --approve-hooks <é> \"\n| next\nEnd of commit message\n"));
-        assert!(modal.find("End of commit message") < modal.find("Repository change:"));
+        assert!(modal.contains(
+            "Edited commit message\n│ --approve-hooks <é> \"\n│ next\n\nRepository changes\n"
+        ));
         assert!(!modal.contains("private-message"));
         assert!(inner.consume_review(&id, Some(&draft)).is_err());
 

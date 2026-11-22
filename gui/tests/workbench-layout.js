@@ -233,7 +233,7 @@ async function check({ page, evaluate, waitFor, resize, key }) {
     const box = drawer.getBoundingClientRect();
     return drawer.matches(":modal") && box.right === innerWidth && box.width < innerWidth * .6;
   })()`), true, "Review is docked to the right of the workspace");
-  assert.equal(await evaluate("document.querySelector('#review-items summary').textContent.startsWith('Hypothetical effects')"), true);
+  assert.equal(await evaluate("document.querySelector('#review-items summary').textContent.startsWith('Planned changes')"), true);
   await evaluate(`(() => {
     const draft = document.querySelector("#commit-message");
     draft.value = "Edited draft";
@@ -376,8 +376,38 @@ async function checkSourceEditor({ page, evaluate, waitFor, key, resize }) {
   assert.deepEqual(await evaluate("window.violations"), []);
 }
 
+async function checkSyncReceipt({ evaluate, waitFor, resize, key }) {
+  const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  await waitFor("document.querySelector('#rows .row')");
+  await click("#nav-review");
+  await waitFor("!document.querySelector('#sync-reviewed').hidden");
+  await click("#sync-reviewed");
+  await waitFor("document.querySelector('#review-title').textContent === 'Sync complete' && !document.querySelector('#review-return').disabled");
+  assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll("#review-items summary"), row => [row.firstChild.textContent, row.parentElement.open])`),
+    [["File changes", true], ["Hook activity", false], ["Sync activity", false]]);
+  assert.equal(await evaluate("document.querySelector('.sync-effect').textContent"), "captured");
+  assert.equal(await evaluate("document.querySelector('#review-remote').hidden"), true);
+  await resize(360, 420);
+  await evaluate("document.querySelector('.sync-activity summary').focus()");
+  assert.equal(await evaluate("document.activeElement.matches('.sync-activity summary')"), true, "Activity disclosure receives keyboard focus");
+  await key(" ");
+  await waitFor("document.querySelector('.sync-activity[open]')");
+  assert.equal(await evaluate("document.querySelector('.sync-activity[open] li').textContent"), "Capture local changes");
+  assert.equal(await evaluate("document.querySelector('#review').scrollWidth <= innerWidth"), true);
+  await click("#review-return");
+  assert.equal(await evaluate("document.querySelector('#review').open"), false);
+  assert.deepEqual(await evaluate("window.violations"), []);
+}
+
 async function main() {
   await withDesktop(statusFixture, check);
+  await withDesktop(statusFixture + `
+    const original = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = (command, args) => command !== "run_reviewed_sync" ? original(command, args) : Promise.resolve({
+      outcome: "done", message: "Sync completed.", refresh: true,
+      items: [{ group: "Reached stages", text: "capture" }, { group: "Changes", text: "a · b · captured" }, { group: "Hooks", text: "deferred" }],
+    });
+  `, checkSyncReceipt);
   await withDesktop(statusFixture + `
     window.fixtureStatus.entries[2].editable = true;
     window.sourceText = "initial\\r\\n";

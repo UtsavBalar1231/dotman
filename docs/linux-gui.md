@@ -101,9 +101,15 @@ to confirm the full list in a native dialog. If you decline, choose **Refresh
 and review again** to start a fresh review. If a copy changes during review,
 refresh and compare it again.
 
-**Review outgoing sync** previews the outgoing changes from the current report. It
-does not fetch or predict what is upstream. A whole desktop sync requires native
-confirmation and never executes hooks itself. Matching writes are held in the
+**Review changes** opens the outgoing sync drawer. Expand a file group to
+inspect its contents. The branch counts describe the last fetch. Choose
+**Continue to confirmation** to inspect the reviewed files and commit message
+in the native dialog. **Sync without hooks** starts the whole sync.
+The receipt lists file changes first. Expand **Sync activity** to see the
+stages reached, or **Hook activity** for the reported hook outcome.
+
+A whole desktop sync requires native confirmation and never executes hooks itself.
+Matching writes are held in the
 same pending queue as the terminal for a separate native hook confirmation.
 Selected commits and plain file apply do not queue hooks. If a run stops for terminal
 recovery, use the same configuration in the terminal, then refresh when ready.
