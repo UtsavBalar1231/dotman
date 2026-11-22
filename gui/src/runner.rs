@@ -922,8 +922,9 @@ mod tests {
 
     #[test]
     fn exited_child_waits_for_pipe_closure_and_keeps_late_output() {
+        // A noninteractive shell may replace a background job's stdin with /dev/null.
         let mut run = input_fixture(
-            "/bin/sh -c 'IFS= read -r x; printf late' <&0 & exit 7",
+            "exec 3<&0; (IFS= read -r x <&3 && printf late) & exit 7",
             Vec::new(),
         );
         let mut control = run.input.take().expect("control pipe").pipe;
