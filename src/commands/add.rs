@@ -38,6 +38,7 @@ use walkdir::WalkDir;
 pub(crate) mod held_encrypt;
 
 pub(crate) mod host_variant;
+pub(crate) mod tracking;
 
 #[cfg(target_os = "linux")]
 pub(crate) mod trust_scan;
@@ -1900,12 +1901,29 @@ pub(crate) fn commit_one(
 
 /// How [`commit_stored`] puts the bytes of H in the repo.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Store {
+enum Store<'a> {
+    ReviewedNew(&'a str),
     Plain,
     Encrypted,
     /// As text that renders back to the bytes, between `{% raw %}` and `{% endraw %}` when it
     /// would not otherwise. The content guard still scans the bytes of H.
     Template,
+}
+
+fn store_destination(
+    repo: &Path,
+    source: &str,
+    store: Store<'_>,
+) -> Result<(Option<fs::File>, PathBuf)> {
+    #[cfg(target_os = "linux")]
+    if matches!(store, Store::ReviewedNew(_)) {
+        let (parent, target) = tracking::destination(repo, source)?;
+        return Ok((Some(parent), target));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = store;
+    ensure_worktree_parents(repo, source)?;
+    Ok((None, repo.join(source)))
 }
 
 fn commit_stored(
@@ -1915,17 +1933,23 @@ fn commit_stored(
     key: &str,
     source: &str,
     expected: Kind,
-    store: Store,
+    store: Store<'_>,
 ) -> Result<Entry> {
     let encrypted = store == Store::Encrypted;
     validate_key(source)?;
     let home = &ctx.paths.home;
     let repo = &ctx.paths.repo;
-    let target = repo.join(source);
     if let Some(what) = ctx.keys().alias(home, key, true) {
         return Err(OwnPath::new(key, what).into());
     }
     let node = read_node(home, key)?;
+    if let Store::ReviewedNew(expected) = store {
+        anyhow::ensure!(
+            tracking::fingerprint(ctx, &node)? == expected
+                && Stored::read(repo, Path::new(source))? == Stored::Missing,
+            crate::context::ReviewChanged
+        );
+    }
     if let Some(review) = &ctx.reviewed {
         let stored = Stored::read(repo, Path::new(source))?;
         if !review.capture(key).is_some_and(|capture| {
@@ -1939,7 +1963,8 @@ fn commit_stored(
     if let Some(found) = node_hold(ctx, &node, key, source, encrypted) {
         return Err(Held(found).into());
     }
-    ensure_worktree_parents(repo, source)?;
+    let (_parent, target) = store_destination(repo, source, store)?;
+    let target = target.as_path();
     let file_mode = match (expected, &node) {
         (Kind::File, Node::File { mode, .. }) => Some(*mode),
         _ => None,
@@ -1965,7 +1990,7 @@ fn commit_stored(
             // expressions with their output.
             if !renders_to(ctx, source, &bytes) {
                 let text = template_text(ctx, key, source, &bytes, false)?;
-                write_atomic(&target, &text, stored_mode(mode))?;
+                write_atomic(target, &text, stored_mode(mode))?;
             }
             rendered = Some(bytes);
             None
@@ -1975,7 +2000,12 @@ fn commit_stored(
             Some(Tuple::of_file(&bytes, safe_mode(mode)).entry(source))
         }
         (Kind::File, Node::File { bytes, mode, .. }) => {
-            write_atomic(&target, &bytes, stored_mode(mode))?;
+            crate::paths::publish_atomic(
+                target,
+                &bytes,
+                stored_mode(mode),
+                !matches!(store, Store::ReviewedNew(_)),
+            )?;
             None
         }
         (Kind::Symlink, Node::Symlink(_)) if encrypted => {
@@ -1983,7 +2013,11 @@ fn commit_stored(
         }
         (Kind::Symlink, Node::Symlink(link)) => {
             let relative = portable_link_target(&link, key, home, ctx.paths.home_real.as_deref());
-            replace_with_symlink(&target, &relative)?;
+            if matches!(store, Store::ReviewedNew(_)) {
+                symlink(&relative, target)?;
+            } else {
+                replace_with_symlink(target, &relative)?;
+            }
             repo_config.modes.remove(source);
             None
         }

@@ -93,3 +93,16 @@ After a parsed request is refused, a `remedy_error` record supplies a sanitized
 `refused` or `partial` code and message; the final result record carries the
 exit status. A partial result means a mode setting or file may already have
 been installed. Review again rather than retrying automatically.
+
+## Tracking a Home selection
+
+The desktop also sends `track_files`, `track_folder` and `stop_tracking`
+operations to this endpoint. A request has `schema_version: 1`, the repository
+identity in `repo_id`, and Home-relative `paths`. Folder and stop requests each
+take one path. With no `expected` token the CLI returns a `tracking_review`
+containing `files`, `folders`, `held` (path to reason), `existing`, and a token.
+The token binds the action, selection, effective settings, state and inventory.
+Execution takes `expected` from that review, rebuilds the plan under the
+repository lock, and returns `tracking_done` followed by the terminal result.
+The native caller requires both records and a successful exit. On failure,
+refresh status to inspect the current repository before retrying.

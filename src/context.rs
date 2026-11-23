@@ -663,16 +663,25 @@ impl Context {
     /// gets git's built-in text merge before anything is merged or checked out. When it cannot
     /// write the file, it warns and the command goes on.
     pub(crate) fn lock(&self, dry_run: bool) -> Result<Lock> {
+        self.lock_inner(dry_run, !dry_run)
+    }
+
+    /// A reviewed writer needs exclusion without recovering a pull or changing Git attributes.
+    pub(crate) fn lock_for_review(&self, execute: bool) -> Result<Lock> {
+        self.lock_inner(!execute, false)
+    }
+
+    fn lock_inner(&self, dry_run: bool, maintain_repo: bool) -> Result<Lock> {
         let lock = Lock::acquire(&self.paths.lock_file(), dry_run)?;
         if let Some(reviewed) = &self.reviewed {
             reviewed.recheck(self)?;
         }
-        if !dry_run {
+        if maintain_repo {
             self.recover_pull()?;
         }
         self.guard()?;
         let git_dir = self.paths.repo.join(".git");
-        if dry_run || !is_real_dir(&git_dir) || !git_dir.join("dotman-id").is_file() {
+        if !maintain_repo || !is_real_dir(&git_dir) || !git_dir.join("dotman-id").is_file() {
             return Ok(lock);
         }
         let attributes = git_dir.join("info/attributes");

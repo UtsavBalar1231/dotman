@@ -517,6 +517,10 @@ pub(crate) fn private_temp_dir(prefix: &str, base: &Path) -> Result<tempfile::Te
 /// Writes `bytes` to a temp file beside `path`, fsyncs it, renames it over `path` and fsyncs the
 /// directory. The final mode is exactly `mode`, whatever the umask. `path`'s directory must exist.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    publish_atomic(path, bytes, mode, true)
+}
+
+pub(crate) fn publish_atomic(path: &Path, bytes: &[u8], mode: u32, replace: bool) -> Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
@@ -528,9 +532,13 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     tmp.as_file()
         .set_permissions(Permissions::from_mode(mode))?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path)
-        .map_err(|e| e.error)
-        .with_context(|| format!("cannot replace {}", path.display()))?;
+    if replace {
+        tmp.persist(path)
+    } else {
+        tmp.persist_noclobber(path)
+    }
+    .map_err(|e| e.error)
+    .with_context(|| format!("cannot replace {}", path.display()))?;
     File::open(dir)
         .and_then(|d| d.sync_all())
         .with_context(|| format!("cannot fsync {}", dir.display()))

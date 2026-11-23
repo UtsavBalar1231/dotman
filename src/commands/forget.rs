@@ -74,26 +74,91 @@ pub fn run(args: &ForgetArgs) -> Result<()> {
         return save_repo_edits(&ctx, &state, &gone, &backups, true);
     }
 
+    remove_folder_rules(&mut repo_config, &mut state, &inputs, &gone, &dirs)?;
+    remove_keys(&ctx, &mut repo_config, &mut state, &gone, &backups)?;
+
+    repo_config.save(&ctx.repo_config_file(), false)?;
+    state.save(&ctx.paths.state_file(), false)?;
+    Ok(())
+}
+
+fn remove_folder_rules(
+    repo_config: &mut RepoConfig,
+    state: &mut State,
+    inputs: &[String],
+    gone: &BTreeSet<String>,
+    dirs: &BTreeSet<String>,
+) -> Result<()> {
     repo_config.dirs.paths.retain(|d| !dirs.contains(d));
     // Should another machine list the entry again, this one is asked again.
     if let Some(approved) = state.capture_dirs.as_mut() {
         approved.retain(|d| !dirs.contains(d));
     }
-    for key in &inputs {
-        let is_key = gone.contains(key) || sources.contains(key);
-        if !is_key && !dirs.contains(key) && under_dirs(&repo_config, key) {
+    for key in inputs {
+        let is_key = gone.contains(key);
+        if !is_key && !dirs.contains(key) && under_dirs(repo_config, key) {
             ignore_forgotten(
-                &mut repo_config,
+                repo_config,
                 &format!("{}/**", Pattern::escape(key)),
                 key,
                 true,
             )?;
         }
     }
-    remove_keys(&ctx, &mut repo_config, &mut state, &gone, &backups)?;
+    Ok(())
+}
 
-    repo_config.save(&ctx.repo_config_file(), false)?;
+pub(super) fn stop_tracking(
+    ctx: &Context,
+    config: &mut RepoConfig,
+    state: &mut State,
+    inputs: &[String],
+    keys: &BTreeSet<String>,
+    dirs: &BTreeSet<String>,
+    sources: &std::collections::BTreeMap<String, Vec<reviewed::Source>>,
+) -> Result<()> {
+    let backups = backup_run_dir(&ctx.paths.state_dir.join("backups"), SystemTime::now())?;
+    save_repo_edits(ctx, state, keys, &backups, false)?;
+    let grouped =
+        crate::variant::Sources::group(sources.values().flatten().map(|s| s.path.as_str()));
+    remove_folder_rules(config, state, inputs, keys, dirs)?;
+    for key in inputs {
+        if dirs.contains(key) && under_dirs(config, key) {
+            ignore_forgotten(config, &format!("{}/**", Pattern::escape(key)), key, true)?;
+        }
+    }
+    remove_metadata(config, state, keys, &grouped)?;
+    #[cfg(target_os = "linux")]
+    let mut moved = Vec::new();
+    for (key, entries) in sources {
+        for source in entries {
+            #[cfg(target_os = "linux")]
+            moved.push(reviewed::quarantine(ctx, key, source)?);
+            #[cfg(not(target_os = "linux"))]
+            {
+                anyhow::ensure!(
+                    reviewed::inventory(ctx, key)?.contains(source),
+                    "source changed"
+                );
+                remove_source(&ctx.paths.repo, &source.path)?;
+            }
+        }
+    }
+    let remaining = ctx
+        .sources()?
+        .keys()
+        .map(str::to_owned)
+        .chain(state.files.keys().cloned())
+        .collect();
+    prune_dir_modes(config, &remaining);
+    config.save(&ctx.repo_config_file(), false)?;
     state.save(&ctx.paths.state_file(), false)?;
+    #[cfg(target_os = "linux")]
+    reviewed::clear_quarantine(
+        &moved,
+        &sources.values().flatten().cloned().collect::<Vec<_>>(),
+        &backups,
+    )?;
     Ok(())
 }
 

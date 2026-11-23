@@ -1036,3 +1036,195 @@ fn forget_review_checks_the_exact_tracked_repo_occurrence() {
         secret.as_bytes()
     );
 }
+
+fn first_tracking_record(output: &std::process::Output) -> serde_json::Result<Value> {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(
+        output
+            .stdout
+            .split(|b| *b == b'\n')
+            .next()
+            .unwrap_or_default(),
+    )
+}
+
+fn tracking_request(
+    env: &TestEnv,
+    repo_id: &str,
+    operation: &str,
+    paths: &[&str],
+    expected: Option<&str>,
+) -> std::process::Output {
+    let input = json!({"schema_version":1, "operation":operation, "paths":paths, "repo_id":repo_id.trim(),"expected":expected});
+    env.run_stdin(
+        &[],
+        input.to_string().as_bytes(),
+        &["remedy", "--from", "-", "--json"],
+    )
+}
+
+#[test]
+fn tracking_multiple_files_reports_holds_and_redacts_sensitive_names() {
+    let parsed_tracking = |output: &std::process::Output| first_tracking_record(output).unwrap();
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let repo_id = std::fs::read_to_string(env.repo().join(".git/dotman-id")).unwrap();
+    env.write(".config/app/.env", b"example=1", 0o600);
+    env.write(".editorrc", b"editor", 0o644);
+    env.write(".shellrc", b"shell", 0o600);
+    let selection = [".editorrc", ".shellrc", ".config/app/.env"];
+    let multi = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "track_files",
+        &selection,
+        None,
+    ));
+    assert_eq!(multi.get("files"), Some(&json!([".editorrc", ".shellrc"])));
+    assert!(multi.pointer("/held/.config~1app~1.env").is_some());
+    parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "track_files",
+        &selection,
+        multi.get("token").and_then(Value::as_str),
+    ));
+    assert_eq!(
+        std::fs::read(env.repo().join(".shellrc")).unwrap(),
+        b"shell"
+    );
+    assert_eq!(
+        std::fs::read(env.repo().join(".editorrc")).unwrap(),
+        b"editor"
+    );
+    let repeat = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "track_files",
+        &selection,
+        None,
+    ));
+    assert_eq!(
+        repeat.get("existing"),
+        Some(&json!([".editorrc", ".shellrc"]))
+    );
+    let protected = format!("ghp_{}", "a1B2".repeat(9));
+    env.write(&protected, b"fixture", 0o600);
+    let review = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "track_files",
+        &[protected.as_str()],
+        None,
+    ));
+    assert!(!review.to_string().contains(&protected));
+    assert_eq!(
+        review.pointer("/held/~1[protected filename 1]"),
+        Some(&json!("Protected filename"))
+    );
+}
+
+#[test]
+fn tracking_binds_the_folder_inventory_and_keeps_local_files_on_forget() {
+    let parsed_tracking = |output: &std::process::Output| first_tracking_record(output).unwrap();
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let repo_id = std::fs::read_to_string(env.repo().join(".git/dotman-id")).unwrap();
+    env.write(".config/app/config.toml", b"mode=1", 0o600);
+    env.write(".config/app/.env", b"example=1", 0o600);
+    let folder = [".config/app"];
+    let first = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "track_folder",
+        &folder,
+        None,
+    ));
+    assert_eq!(
+        first.get("files"),
+        Some(&json!([".config/app/config.toml"]))
+    );
+    assert!(first.pointer("/held/.config~1app~1.env").is_some());
+    env.write(".config/app/later", b"later", 0o644);
+    assert_eq!(
+        tracking_request(
+            &env,
+            &repo_id,
+            "track_folder",
+            &folder,
+            first.get("token").and_then(Value::as_str)
+        )
+        .status
+        .code(),
+        Some(3)
+    );
+    assert!(!env.repo().join(".config/app/config.toml").exists());
+    let current = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "track_folder",
+        &folder,
+        None,
+    ));
+    let receipt = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "track_folder",
+        &folder,
+        current.get("token").and_then(Value::as_str),
+    ));
+    assert_eq!(receipt.get("record"), Some(&json!("tracking_done")));
+    assert!(!env.repo().join(".config/app/.env").exists());
+
+    let file = [".config/app/config.toml"];
+    let stop = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "stop_tracking",
+        &file,
+        None,
+    ));
+    std::fs::write(env.repo().join(".config/app/config.toml"), b"repo edit").unwrap();
+    assert_eq!(
+        tracking_request(
+            &env,
+            &repo_id,
+            "stop_tracking",
+            &file,
+            stop.get("token").and_then(Value::as_str)
+        )
+        .status
+        .code(),
+        Some(3)
+    );
+    let stop = parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "stop_tracking",
+        &file,
+        None,
+    ));
+    parsed_tracking(&tracking_request(
+        &env,
+        &repo_id,
+        "stop_tracking",
+        &file,
+        stop.get("token").and_then(Value::as_str),
+    ));
+    assert_eq!(
+        std::fs::read(env.home().join(".config/app/config.toml")).unwrap(),
+        b"mode=1"
+    );
+    assert!(!env.repo().join(".config/app/config.toml").exists());
+    assert!(
+        env.repo_config()
+            .ignore
+            .patterns
+            .iter()
+            .any(|p| p == ".config/app/config.toml")
+    );
+}

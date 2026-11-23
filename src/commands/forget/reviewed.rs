@@ -1138,7 +1138,7 @@ fn source_copies(ctx: &Context, sources: &[Source]) -> Result<Vec<Vec<u8>>> {
 }
 
 #[cfg(target_os = "linux")]
-fn clear_quarantine(
+pub(super) fn clear_quarantine(
     paths: &[std::path::PathBuf],
     sources: &[Source],
     backups: &Path,

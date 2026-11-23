@@ -171,7 +171,14 @@ impl std::fmt::Display for EncryptFailure {
 
 impl std::error::Error for EncryptFailure {}
 
-/// Reviews or captures an unmanaged held regular leaf.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Input {
+    Held(Request),
+    Tracking(add::tracking::Request),
+}
+
+/// Reviews and executes a held-file remedy or a desktop tracking selection.
 ///
 /// # Errors
 ///
@@ -180,8 +187,12 @@ pub fn run(_args: &RemedyArgs) -> Result<()> {
     let mut input = Vec::new();
     io::stdin().take(65_537).read_to_end(&mut input)?;
     ensure!(input.len() <= 65_536, "request is too large");
-    let request: Request =
-        serde_json::from_slice(&input).map_err(|_| anyhow::anyhow!("invalid remedy request"))?;
+    let request = match serde_json::from_slice(&input)
+        .map_err(|_| anyhow::anyhow!("invalid remedy request"))?
+    {
+        Input::Held(request) => request,
+        Input::Tracking(request) => return add::tracking::run(&request),
+    };
     ensure!(request.schema_version == 1, "unsupported schema version");
     validate_request(&request).map_err(|_| anyhow::anyhow!("invalid remedy request"))?;
     let ctx = Context::resolve("remedy")?;
