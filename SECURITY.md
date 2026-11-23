@@ -124,6 +124,13 @@ If `DOTMAN_AGE_KEY` is set on launch, the GUI re-executes without it before crea
 
 Cancellation requests SIGTERM for the verified process group while the direct CLI child is still owned. It does not undo a completed write or guarantee that descendants have stopped. If recovery is required, the desktop directs you to a terminal and does not resume the writer.
 
+The Linux desktop can update the managed repository’s local Git configuration
+after native review of the fetch and push destinations. The paired CLI binds
+the change to the repository identity, configuration contents and resolved
+origin addresses, and replaces the configuration under Git’s config lock.
+Reading or saving a destination does not contact the remote. Browser links
+from this panel open only HTTPS repository URLs on github.com.
+
 ## Not tested
 
 - `restorecon` runs after a system write when SELinux is enforcing, but it has never run: there is no SELinux in CI.

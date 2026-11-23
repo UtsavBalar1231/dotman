@@ -1228,3 +1228,92 @@ fn tracking_binds_the_folder_inventory_and_keeps_local_files_on_forget() {
             .any(|p| p == ".config/app/config.toml")
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn desktop_origin_reads_effective_routes_and_reviews_local_config() {
+    let env = TestEnv::new();
+    env.ok(&["init", "--no-remote"]);
+    let id = std::fs::read_to_string(env.repo().join(".git/dotman-id")).unwrap();
+    let request = |change: Value, expected: Value| {
+        let data = json!({"schema_version":1,"operation":"sync_destination","repo_id":id.trim(),"change":change,"expected":expected});
+        env.run_stdin(
+            &[],
+            data.to_string().as_bytes(),
+            &["remedy", "--from", "-", "--json"],
+        )
+    };
+    let view = |change, token| {
+        let result = request(change, token);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(result.stdout.split(|b| *b == b'\n').next().unwrap())
+            .unwrap()
+    };
+    let git = |args: &[&str]| {
+        let path = env.repo();
+        let mut in_repo = vec!["-C", path.to_str().unwrap()];
+        in_repo.extend(args);
+        env.git(&in_repo).trim_end().to_owned()
+    };
+    let none = Value::Null;
+    let initial = view(none.clone(), none.clone());
+    assert_eq!(initial.get("push"), Some(&json!([])));
+    let change = json!({"fetch":"ssh://git@github.com/example/fetch.git","push":"git@github.com:example/push.git"});
+    let config = env.repo().join(".git/config");
+    let original = std::fs::read(&config).unwrap();
+    let preview = view(change.clone(), none.clone());
+    assert_eq!(original, std::fs::read(&config).unwrap());
+    assert_eq!(preview, initial);
+    let applied = view(change.clone(), initial.get("token").unwrap().clone());
+    assert_eq!(
+        applied.get("push"),
+        Some(&json!(["git@github.com:example/push.git"]))
+    );
+    assert_eq!(
+        git(&["remote", "get-url", "origin"]),
+        "ssh://git@github.com/example/fetch.git"
+    );
+    assert_eq!(
+        git(&["remote", "get-url", "--push", "origin"]),
+        "git@github.com:example/push.git"
+    );
+    assert!(
+        !request(change.clone(), initial.get("token").unwrap().clone())
+            .status
+            .success()
+    );
+    let shared = view(
+        json!({"fetch":"git@github.com:example/shared.git","push":null}),
+        applied.get("token").unwrap().clone(),
+    );
+    assert_eq!(shared.get("separate_push"), Some(&json!(false)));
+    assert_eq!(shared.get("fetch"), shared.get("push"));
+    git(&[
+        "config",
+        "--add",
+        "remote.origin.pushurl",
+        "git@github.com:example/one",
+    ]);
+    git(&[
+        "config",
+        "--add",
+        "remote.origin.pushurl",
+        concat!("https://user:", "private", "@example.invalid/two"),
+    ]);
+    let multiple = view(none.clone(), none);
+    assert_eq!(multiple.get("editable"), Some(&json!(false)));
+    assert_eq!(
+        multiple.get("push"),
+        Some(&json!(["git@github.com:example/one", null]))
+    );
+    assert!(!multiple.to_string().contains("private@"));
+    assert!(
+        !request(change, multiple.get("token").unwrap().clone())
+            .status
+            .success()
+    );
+}

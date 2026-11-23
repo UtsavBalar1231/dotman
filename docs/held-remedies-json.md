@@ -106,3 +106,18 @@ Execution takes `expected` from that review, rebuilds the plan under the
 repository lock, and returns `tracking_done` followed by the terminal result.
 The native caller requires both records and a successful exit. On failure,
 refresh status to inspect the current repository before retrying.
+
+## Desktop sync destination
+
+On Linux, `sync_destination` takes the repository ID, schema version 1, and
+optional `change` and `expected` fields. Omitting both reads the effective
+fetch and push URLs for origin without contacting the remote. A change
+contains a fetch URL and an optional push override. Without an expected token
+the CLI checks the proposed URLs without saving. With the inspected token it
+rechecks the repository and routes under the local configuration lock before
+replacing the configuration. A null push override uses the fetch URL.
+
+The projection lists effective fetch and push addresses, indicates whether a
+push override exists, and marks simple local configurations as editable.
+Private or unsupported addresses appear as null. Multiple destinations and
+rewritten origins are available for inspection.

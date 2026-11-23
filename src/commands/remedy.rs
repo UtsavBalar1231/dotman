@@ -176,6 +176,8 @@ impl std::error::Error for EncryptFailure {}
 enum Input {
     Held(Request),
     Tracking(add::tracking::Request),
+    #[cfg(target_os = "linux")]
+    Destination(crate::git::origin::Request),
 }
 
 /// Reviews and executes a held-file remedy or a desktop tracking selection.
@@ -190,6 +192,8 @@ pub fn run(_args: &RemedyArgs) -> Result<()> {
     let request = match serde_json::from_slice(&input)
         .map_err(|_| anyhow::anyhow!("invalid remedy request"))?
     {
+        #[cfg(target_os = "linux")]
+        Input::Destination(request) => return crate::git::origin::run(&request),
         Input::Held(request) => request,
         Input::Tracking(request) => return add::tracking::run(&request),
     };

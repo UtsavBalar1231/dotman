@@ -5616,3 +5616,36 @@ fn a_recorded_rerere_resolution_never_answers_a_conflict() {
         "the recorded resolution was pushed"
     );
 }
+
+/// A reviewed origin update cannot follow a replacement Git configuration symlink.
+#[cfg(target_os = "linux")]
+#[test]
+fn desktop_origin_refuses_a_symlinked_configuration() -> R {
+    let env = TestEnv::new();
+    env.ok(&["init", "--no-remote"]);
+    let config = env.repo().join(".git/config");
+    let id = fs::read_to_string(env.repo().join(".git/dotman-id"))?;
+    let req =
+        serde_json::json!({"schema_version":1,"operation":"sync_destination","repo_id":id.trim()});
+    let send = |value: &serde_json::Value| {
+        env.run_stdin(
+            &[],
+            value.to_string().as_bytes(),
+            &["remedy", "--from", "-", "--json"],
+        )
+    };
+    let result = send(&req);
+    assert!(result.status.success());
+    let view: serde_json::Value =
+        serde_json::from_slice(result.stdout.split(|b| *b == b'\n').next().unwrap())?;
+    let outside = env.root().join("private-git-config");
+    let original = fs::read(&config)?;
+    fs::rename(&config, &outside)?;
+    symlink(&outside, &config)?;
+    let req = serde_json::json!({"schema_version":1,"operation":"sync_destination","repo_id":id.trim(),
+        "expected":view.get("token").unwrap(),"change":{"fetch":"git@github.com:example/changed.git","push":null}});
+    assert!(!send(&req).status.success());
+    assert_eq!(fs::read(outside)?, original);
+    assert!(config.is_symlink());
+    Ok(())
+}

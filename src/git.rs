@@ -2,6 +2,9 @@
 //!
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
 
+#[cfg(target_os = "linux")]
+pub mod origin;
+
 use crate::engine::write::backup_run_dir;
 use crate::paths::write_atomic;
 use anyhow::{Context, Result, anyhow, bail, ensure};
