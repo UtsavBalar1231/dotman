@@ -30,8 +30,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(app::AppState::new(stripped))
         .invoke_handler(tauri::generate_handler![
             app::refresh,
+            app::open_workspace_folder,
+            app::destination::sync_destination,
+            app::destination::open_github_repository,
             app::cancel,
             app::open_diff,
+            app::tracking::preview_tracking,
+            app::tracking::apply_tracking,
             app::source::open_source,
             app::source::save_source,
             app::open_review,
@@ -60,10 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            ) {
+            // A close request may be declined while the editor still owns a draft.
+            if matches!(event, tauri::WindowEvent::Destroyed) {
                 let _ = window.state::<app::AppState>().stop();
             }
         })

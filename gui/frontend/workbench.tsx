@@ -1,3 +1,4 @@
+import { TreeTracking, TrackingDrawer } from "./shell/tracking.js";
 import { TreeDivider } from "./shell/tree-divider.js";
 import { WorkspaceHeader } from "./shell/workspace-header.js";
 import { Icon, Symbols } from "./shell/symbols.js";
@@ -11,15 +12,25 @@ return <>
     <WorkspaceHeader />
     <p id="notice" className="notice" hidden>DOTMAN_AGE_KEY was removed before launch. Encrypted files may be locked; use a key file or import an identity with dotman.</p>
 <StatusPanels />
+    <dialog id="discard-review-work" aria-labelledby="discard-work-title" aria-describedby="discard-work-description">
+      <h2 id="discard-work-title"></h2>
+      <p id="discard-work-description"></p>
+      <div className="actions">
+        <button id="keep-review-work" type="button">Keep reviewing</button>
+        <button id="discard-review-work-confirm" type="button"></button>
+      </div>
+    </dialog>
     <div className="desk">
     <section id="entries" hidden aria-labelledby="files-title">
-      <h2 id="files-title">File browser</h2>
-      <p className="queue-meta"><span id="remote"></span><span id="clean"></span></p>
+      <TreeTracking />
+      <div className="queue-meta"><button id="open-destination" type="button" disabled title="View or change sync destination">
+        <Icon name="repository" /><span id="remote"></span><Icon name="chevron-right" /></button><span id="clean"></span></div>
       <button id="review-hooks" type="button" hidden>Review pending hooks</button>
-      <label htmlFor="search">Search files</label>
+      <div className="search-heading"><label htmlFor="search">Search files</label><span id="search-count" role="status"></span></div>
       <div className="file-search">
         <Icon name="search" />
-        <input id="search" type="search" placeholder="Name, path or status" autoComplete="off" />
+        <input id="search" type="text" role="searchbox" inputMode="search" placeholder="Name, path or status" autoComplete="off" aria-keyshortcuts="Control+f" title="Search files (Ctrl+F)" />
+        <button id="clear-search" type="button" aria-label="Clear search" title="Clear search (Esc)" hidden><Icon name="close" /></button>
       </div>
       <div className="nav-modes" role="group" aria-label="Group files">
         <button id="group-folders" className="with-glyph" aria-pressed="true"><Icon name="folder" />All files</button>
@@ -29,10 +40,11 @@ return <>
       <div id="rows" tabIndex={0} aria-label="File change queue"></div>
       <TreeDivider />
      </section>
-     <section className="desk-guide" aria-labelledby="guide-title">
+     <section id="comparison-guide" className="desk-guide" aria-labelledby="guide-title">
         <h2 id="guide-title">File comparison</h2>
         <p id="guide-description"></p>
         <ul id="attention-list" className="attention-list"></ul>
+        <button id="more-comparisons" type="button" aria-controls="attention-list" hidden></button>
      </section>
     <dialog id="review" hidden aria-labelledby="review-title">
       <div className="section-head">
@@ -42,12 +54,14 @@ return <>
       <p id="review-message" role="status" aria-live="polite" tabIndex={-1}></p>
       <div id="review-items"></div>
       <div id="line-summary" hidden><p id="selected-effect"></p><ul id="selected-lines"></ul><button id="leave-lines" type="button">Leave selected-only mode</button></div>
-      <div id="commit-editor" hidden>
-        <label htmlFor="commit-message">Commit message (optional)</label>
+      <details id="commit-editor" hidden>
+        <summary title="View or edit the commit message"><Icon name="chevron-right" className="disclosure-glyph" />
+          <span>Commit message</span><span id="commit-preview"></span></summary>
         <p id="commit-hint">Used if sync creates a commit. Up to six lines and 1,024 UTF-8 bytes.</p>
-        <textarea id="commit-message" rows={4} aria-describedby="commit-hint commit-error"></textarea>
+        <textarea id="commit-message" aria-label="Commit message" rows={4} aria-describedby="commit-hint commit-error"></textarea>
         <p id="commit-error" role="status" aria-live="polite"></p>
-      </div>
+        <button id="restore-commit-message" type="button" hidden>Use suggested message</button>
+      </details>
       </div>
       <div className="review-action-strip">
       <p id="review-footnote" hidden>Hooks require separate approval.</p>
@@ -95,13 +109,14 @@ return <>
       <div className="diff-action-strip">
         <p id="diff-selection" role="status" aria-live="polite"></p>
         <div className="comparison-actions">
-          <div id="diff-actions" className="actions"></div>
+          <div id="tracking-file-action"></div><div id="diff-actions" className="actions"></div>
           <button id="next-undecided" hidden>Next undecided</button>
         </div>
       </div>
     </section>
     </div>
 <Settings />
+    <TrackingDrawer />
     <dialog id="source-editor" aria-labelledby="editor-key">
       <header className="source-heading">
         <div className="source-location">
@@ -118,7 +133,11 @@ return <>
         <button className="source-wrap" aria-pressed="false" title="Wrap long lines">Wrap lines</button>
       </fieldset>
       <div id="source-buffer"></div>
-      <div className="source-notice"><p role="status" aria-live="polite"></p><button className="source-discard" hidden>Discard edits</button></div>
+      <div className="source-notice"><p role="status" aria-live="polite"></p>
+        <button className="source-copy" title="Copy the full unsaved source to the clipboard" hidden>Copy draft</button>
+        <div className="source-exit" role="group" aria-label="Unsaved edits" hidden>
+        <button className="source-continue">Keep editing</button><button className="source-save-exit">Save and close…</button><button className="source-discard">Discard edits</button>
+      </div></div>
       <footer className="source-status">
         <span className="source-language"></span>
         <span className="source-eol"></span>

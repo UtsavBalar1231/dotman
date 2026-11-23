@@ -1,4 +1,22 @@
+import { matchesSearch } from "./file-status.js";
 import { icon } from "./fluent-icons.js";
+
+export function pathLabel(path: string) {
+  const label = document.createElement("span");
+  label.className = "row-key";
+  const split = path.lastIndexOf("/") + 1;
+  if (split) {
+    const parent = document.createElement("span");
+    parent.className = "row-directory";
+    parent.textContent = path.slice(0, split);
+    label.append(parent);
+  }
+  const name = document.createElement("span");
+  name.className = "row-name";
+  name.textContent = path.slice(split);
+  label.append(name);
+  return label;
+}
 
 export interface TreeEntry {
   key: string;
@@ -104,6 +122,7 @@ export function render<T extends TreeEntry>(
   entries: readonly T[],
   query: string,
   makeLeaf: (entry: T, displayName: string) => HTMLLIElement,
+  matches: (entry: T, query: string) => boolean = matchesSearch,
 ): number {
   const previous = states.get(root);
   const state: FolderState = { children: new Map(), expansion: { closed: false } };
@@ -113,7 +132,7 @@ export function render<T extends TreeEntry>(
   let count = 0;
 
   for (const entry of entries) {
-    const matched = entry.key.toLocaleLowerCase().includes(needle) || entry.status.toLocaleLowerCase().includes(needle);
+    const matched = matches(entry, needle);
     const parts = entry.key ? entry.key.split("/") : [entry.status];
     let node = tree;
     let saved = state;
@@ -152,7 +171,7 @@ export function render<T extends TreeEntry>(
   list.setAttribute("aria-label", "All files");
   root.append(list);
   let first: HTMLElement | undefined;
-  const stack = [{ node: tree, list }];
+  const stack = [{ node: tree, list, prefix: "" }];
   while (stack.length) {
     const current = stack.pop();
     if (!current) break;
@@ -203,6 +222,8 @@ export function render<T extends TreeEntry>(
         end = child;
       }
       const label = names.join("/");
+      const path = current.prefix ? `${current.prefix}/${label}` : label;
+      li.setAttribute("data-folder-path", path);
       name.textContent = label;
       li.setAttribute("data-tree-label", label);
       li.setAttribute("aria-label", `${label} (${item.count})`);
@@ -228,7 +249,7 @@ export function render<T extends TreeEntry>(
         li.focus();
         expand(children.hidden === true);
       });
-      stack.push({ node: end, list: children });
+      stack.push({ node: end, list: children, prefix: path });
     }
   }
   if (first) treeKeyboard(list, first);

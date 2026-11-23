@@ -2,6 +2,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "refresh",
+            "open_workspace_folder",
+            "sync_destination",
+            "open_github_repository",
+            "preview_tracking",
+            "apply_tracking",
             "cancel",
             "open_diff",
             "open_source",

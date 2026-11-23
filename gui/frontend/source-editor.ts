@@ -11,6 +11,10 @@ export async function editSource(
   const tools = dialog.querySelector("fieldset")!;
   const message = dialog.querySelector<HTMLElement>("[role=status]")!;
   const indent = dialog.querySelector<HTMLSelectElement>(".source-indent")!;
+  const exitChoices = dialog.querySelector<HTMLElement>(".source-exit")!;
+  const copy = button("copy");
+  const resume = button("continue");
+  const saveExit = button("save-exit");
   const position = button("position");
   const save = button("save"), closeButton = button("cancel"), discard = button("discard");
   const wrap = button("wrap"), undo = button("undo"), redo = button("redo");
@@ -19,11 +23,14 @@ export async function editSource(
   let buffer: Awaited<ReturnType<typeof createBuffer>>;
   let writing = false;
   let crlf = false;
+  let quitRequested = false;
+  let unlisten: (() => void) | undefined;
+  const nativeWindow = window.__TAURI__.window.getCurrentWindow();
 
   function controls() {
     const locked = !buffer || writing;
     tools.disabled = locked;
-    indent.disabled = position.disabled = locked;
+    indent.disabled = position.disabled = copy.disabled = locked;
     closeButton.disabled = writing;
     save.disabled = locked || !buffer?.dirty;
     undo.disabled = !buffer?.canUndo;
@@ -31,55 +38,109 @@ export async function editSource(
     position.textContent = buffer?.position ?? "";
   }
   function close() {
+    unlisten?.();
     session.abort();
     buffer?.destroy();
     buffer = undefined;
     dialog.close();
   }
-  function requestClose() {
+  function requestClose(quit = false) {
     if (writing) return;
     if (!buffer?.dirty) { close(); return; }
-    discard.hidden = false;
-    message.textContent = "Discard your unsaved edits?";
-    discard.focus();
+    quitRequested = quit;
+    copy.hidden = true;
+    exitChoices.hidden = false;
+    discard.textContent = quit ? "Discard and quit" : "Discard edits";
+    saveExit.textContent = quit ? "Save and quit…" : "Save and close…";
+    message.textContent = quit ? "Save your edits before quitting Dotman?" : "Save your edits before closing this file?";
+    resume.focus();
   }
-  async function write() {
+  function keepEditing() {
+    quitRequested = false;
+    exitChoices.hidden = true;
+    message.textContent = "Unsaved changes";
+    buffer?.focus();
+  }
+  function escapeEditor() {
+    if (exitChoices.hidden) requestClose();
+    else keepEditing();
+  }
+  async function quitWindow() {
+    writing = true;
+    host.inert = true;
+    controls();
+    exitChoices.hidden = true;
+    message.textContent = "Closing Dotman…";
+    try {
+      await nativeWindow.destroy();
+      return true;
+    } catch {
+      writing = false;
+      host.inert = false;
+      quitRequested = false;
+      controls();
+      message.textContent = "Could not close the window.";
+      buffer?.focus();
+      return false;
+    }
+  }
+  function withLineEndings(text: string) {
+    return crlf ? text.replaceAll("\n", "\r\n") : text;
+  }
+  async function copyDraft() {
+    if (!buffer || writing) return;
+    try {
+      await navigator.clipboard.writeText(withLineEndings(buffer.text()));
+      if (!signal.aborted) message.textContent = "Draft copied to the clipboard.";
+    } catch {
+      if (signal.aborted) return;
+      buffer.focus();
+      message.textContent = "Clipboard unavailable. Press Ctrl+A, then Ctrl+C to copy the draft.";
+    }
+  }
+  async function write(quit = false) {
     if (!buffer?.dirty || writing) return;
     writing = true;
     controls();
     host.inert = true;
-    discard.hidden = true;
+    exitChoices.hidden = true;
     message.textContent = "Waiting for save confirmation…";
-    const contents = buffer.text();
+    copy.hidden = true;
     try {
-      await invoke("save_source", { id: entry.id, text: crlf ? contents.replaceAll("\n", "\r\n") : contents });
+      await invoke("save_source", { id: entry.id, text: withLineEndings(buffer.text()) });
     } catch (error) {
       writing = false;
+      quitRequested = false;
       host.inert = false;
       message.textContent = String(error);
+      copy.hidden = false;
       controls();
       buffer.focus();
       return;
     }
+    if (quit && await quitWindow()) return;
     close();
     await saved();
   }
-  closeButton.addEventListener("click", requestClose, { signal });
-  discard.addEventListener("click", close, { signal });
-  save.addEventListener("click", write, { signal });
-  dialog.addEventListener("cancel", event => { event.preventDefault(); requestClose(); }, { signal });
+  closeButton.addEventListener("click", () => requestClose(), { signal });
+  copy.addEventListener("click", copyDraft, { signal });
+  resume.addEventListener("click", keepEditing, { signal });
+  discard.addEventListener("click", () => { if (quitRequested) void quitWindow(); else close(); }, { signal });
+  saveExit.addEventListener("click", () => void write(quitRequested), { signal });
+  save.addEventListener("click", () => void write(), { signal });
+  dialog.addEventListener("cancel", event => { event.preventDefault(); escapeEditor(); }, { signal });
   dialog.addEventListener("keydown", event => {
     if (event.key !== "Escape" || buffer?.hasPanel()) return;
     event.preventDefault();
     event.stopPropagation();
-    requestClose();
+    escapeEditor();
   }, { capture: true, signal });
   dialog.addEventListener("keydown", event => {
     event.stopPropagation();
     if (event.defaultPrevented) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      requestClose();
+      escapeEditor();
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
       void write();
@@ -93,13 +154,21 @@ export async function editSource(
   dialog.querySelector(".source-language")!.textContent = "";
   dialog.querySelector(".source-eol")!.textContent = "";
   wrap.setAttribute("aria-pressed", "false");
-  discard.hidden = true;
+  exitChoices.hidden = true;
+  copy.hidden = true;
   host.inert = false;
   message.textContent = "Opening repository source…";
   controls();
   dialog.showModal();
 
   try {
+    unlisten = await nativeWindow.onCloseRequested(event => {
+      if (writing || buffer?.dirty) {
+        event.preventDefault();
+        requestClose(true);
+      }
+    });
+    if (signal.aborted) { unlisten(); return; }
     const [contents, editor] = await Promise.all([invoke("open_source", { id: entry.id }), import("./editor-buffer.js")]);
     if (signal.aborted) return;
     const withoutPairs = contents.replaceAll("\r\n", "");
@@ -110,8 +179,9 @@ export async function editSource(
     buffer = await editor.createBuffer(host, contents.replaceAll("\r\n", "\n"), entry.key, signal, docChanged => {
       if (!buffer) return;
       if (docChanged) {
+        quitRequested = false;
         message.textContent = buffer.dirty ? "Unsaved changes" : "Saved in repository";
-        discard.hidden = true;
+        exitChoices.hidden = true;
       }
       controls();
     });

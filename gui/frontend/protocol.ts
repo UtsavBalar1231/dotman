@@ -15,7 +15,7 @@ export interface EntryView {
     reason: string;
     rule: string | null;
     location: string | null;
-    guidance: string;
+    guidance: string | null;
   } | null;
   machine_file?: {
     selected: string | null;
@@ -47,7 +47,7 @@ interface ContextView {
 interface StatusView {
   success: boolean;
   repo_unavailable: boolean;
-  finding: "available" | "unavailable" | "in_progress" | "pull_conflict" | "stopped" | "unknown";
+  finding: "available" | "unavailable" | "in_progress" | "pull_conflict" | "stopped" | "unknown" | "companion_unavailable" | "invalid_report" | "timeout";
   message: string;
   context: ContextView | null;
   entries: EntryView[];
@@ -110,7 +110,31 @@ export interface Channel {
   onmessage: (message: unknown) => void;
 }
 
+export type TrackingAction = "track_files" | "track_folder" | "stop_tracking";
+export interface TrackingPreview {
+  files: string[];
+  folders: string[];
+  held: Record<string,string>;
+  existing: string[];
+}
+
+export interface Destination {
+  branch: string | null;
+  fetch: (string | null)[];
+  push: (string | null)[];
+  separate_push: boolean;
+  editable: boolean;
+  token: string;
+}
+
+export interface DestinationChange { fetch: string; push: string | null }
+
 export interface Commands {
+  sync_destination: { args: {change: DestinationChange | null; expected: string | null; dark: boolean}; result: Destination };
+  open_workspace_folder: { args: {folder: "installation" | "repository"}; result: void };
+  open_github_repository: { args: {repository: string}; result: void };
+  preview_tracking: { args: {action: TrackingAction; key: string | null}; result: [string,TrackingPreview] | null };
+  apply_tracking: { args: {id: string; dark: boolean}; result: boolean };
   open_source: { args: { id: string }; result: string };
   save_source: { args: { id: string; text: string }; result: void };
   refresh: { args: undefined; result: StatusView };
@@ -129,6 +153,11 @@ export interface Commands {
   run_held: { args: { id: string; action: "add" | "plain" | "encrypt" | "forget" }; result: WriterView };
   run_host_variant: { args: { id: string }; result: WriterView };
   review_policy: { args: { id: string; action: "directories" | "ignores" }; result: WriterView };
+}
+
+export interface DesktopWindow {
+  onCloseRequested(handler: (event: { preventDefault(): void }) => void): Promise<() => void>;
+  destroy(): Promise<void>;
 }
 
 export interface TauriCore {

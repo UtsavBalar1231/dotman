@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from "react";
 
 const minWidth = 220;
+const defaultWidth = 320;
 const storageKey = "dotman.treeWidth";
 
 export function TreeDivider() {
@@ -8,7 +9,7 @@ export function TreeDivider() {
   useLayoutEffect(() => {
     const divider = ref.current!;
     const desk = divider.closest<HTMLElement>(".desk")!;
-    let preferred = 320;
+    let preferred = defaultWidth;
     try {
       const saved = Number(localStorage.getItem(storageKey));
       if (Number.isFinite(saved) && saved >= minWidth) preferred = saved;
@@ -25,10 +26,16 @@ export function TreeDivider() {
       try { localStorage.setItem(storageKey, String(preferred)); }
       catch { /* Keep the width for this window. */ }
     }
+    function setWidth(width: number) {
+      preferred = width;
+      resize();
+      remember();
+    }
     let dragging: number | undefined;
     divider.onpointerdown = event => {
       if (event.button !== 0) return;
       dragging = event.pointerId;
+      divider.dataset.dragging = "true";
       divider.setPointerCapture(event.pointerId);
       event.preventDefault();
       divider.focus();
@@ -41,18 +48,29 @@ export function TreeDivider() {
     const finish = (event: PointerEvent) => {
       if (event.pointerId !== dragging) return;
       dragging = undefined;
+      delete divider.dataset.dragging;
       remember();
     };
+    divider.ondblclick = () => setWidth(defaultWidth);
     window.addEventListener("pointermove", drag);
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
     divider.onlostpointercapture = finish;
     divider.onkeydown = event => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const current = Number(divider.getAttribute("aria-valuenow"));
+      const maximum = Number(divider.getAttribute("aria-valuemax"));
+      const step = event.shiftKey ? 64 : 16;
+      let width: number;
+      switch (event.key) {
+        case "ArrowLeft": width = Math.max(minWidth, current - step); break;
+        case "ArrowRight": width = Math.min(maximum, current + step); break;
+        case "Home": width = minWidth; break;
+        case "End": width = maximum; break;
+        case "Enter": width = defaultWidth; break;
+        default: return;
+      }
       event.preventDefault();
-      preferred = Number(divider.getAttribute("aria-valuenow")) + (event.key === "ArrowRight" ? 16 : -16);
-      resize();
-      remember();
+      setWidth(width);
     };
     const observer = new ResizeObserver(resize);
     observer.observe(desk);
@@ -66,5 +84,5 @@ export function TreeDivider() {
   }, []);
   return <div ref={ref} className="tree-divider" tabIndex={0} role="separator"
     aria-controls="entries" aria-label="Resize file tree" aria-orientation="vertical"
-    aria-valuemin={minWidth} title="Drag to resize the file tree. Use arrow keys when focused." />;
+    aria-valuemin={minWidth} title="Drag or use arrow keys to resize. Double-click or press Enter to reset." />;
 }

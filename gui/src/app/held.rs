@@ -873,7 +873,13 @@ pub async fn run_held(
         if !success {
             return recovery_writer_view(true);
         }
-        writer_view("done", "Held-file action completed.", true)
+        let completed = match action {
+            Action::Add => "File tracked. The local copy was kept.",
+            Action::Plain => "File tracked without encryption. The local copy was kept.",
+            Action::Encrypt => "Encrypted repository source saved. The local copy was kept.",
+            Action::Forget => "Tracking stopped. The local copy was kept.",
+        };
+        writer_view("done", completed, true)
     }).await;
     let mut inner = state.inner.lock().map_err(|_| "Status state unavailable")?;
     if !uncertain.load(Ordering::Acquire) {

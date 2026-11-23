@@ -14,11 +14,13 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+pub mod destination;
 pub mod held;
 pub mod import_setup;
 pub mod keys;
 pub mod policy_trust;
 pub mod source;
+pub mod tracking;
 pub mod variant;
 
 #[derive(Serialize)]
@@ -138,7 +140,7 @@ struct HoldView {
     reason: &'static str,
     rule: Option<&'static str>,
     location: Option<String>,
-    guidance: &'static str,
+    guidance: Option<&'static str>,
 }
 
 #[derive(Default, Serialize)]
@@ -378,10 +380,12 @@ fn hold_view(entry: &protocol::StatusEntry) -> Option<HoldView> {
         _ => None,
     });
     let guidance = match finding.map(|f| f.place) {
-        Some(FindingPlace::Name) => "Rename the file; encryption cannot hide its name.",
-        Some(FindingPlace::Target) => "Point the symlink elsewhere.",
-        Some(FindingPlace::Content) => "Review the finding in a terminal.",
-        _ => "Review this hold in a terminal.",
+        Some(FindingPlace::Name) => {
+            Some("Encryption protects the contents. The filename remains visible.")
+        }
+        Some(FindingPlace::Target) => Some("A symlink stores its target path as readable text."),
+        Some(FindingPlace::Content) => Some("The matching contents are hidden from this preview."),
+        _ => None,
     };
     Some(HoldView {
         origin,
@@ -531,11 +535,20 @@ fn project(reply: &protocol::StatusReply, key_stripped: bool, generation: u64) -
     }
 }
 
-const fn failure(message: &'static str, key_stripped: bool) -> View {
+const COMPANION_UNAVAILABLE: &str = "Could not start the dotman companion";
+const INVALID_REPORT: &str = "Invalid status response";
+const STATUS_TIMEOUT: &str = "Status read timed out";
+
+fn failure(message: &'static str, key_stripped: bool) -> View {
     View {
         success: false,
         repo_unavailable: false,
-        finding: "unknown",
+        finding: match message {
+            COMPANION_UNAVAILABLE => "companion_unavailable",
+            INVALID_REPORT => "invalid_report",
+            STATUS_TIMEOUT => "timeout",
+            _ => "unknown",
+        },
         message,
         context: None,
         entries: Vec::new(),
@@ -559,6 +572,7 @@ const fn failure(message: &'static str, key_stripped: bool) -> View {
 struct Inner {
     active: Option<Arc<AtomicBool>>,
     source_doc: Option<(String, Arc<source::Document>)>,
+    tracking: Option<tracking::Pending>,
     reply: Option<protocol::StatusReply>,
     review: Option<RetainedReview>,
     generation: u64,
@@ -602,6 +616,7 @@ impl AppState {
         }
         inner.reply = None;
         inner.source_doc = None;
+        inner.tracking = None;
         inner.review = None;
         inner.diff_receipts.clear();
         inner.setup = None;
@@ -634,6 +649,53 @@ pub fn discard_review(id: String, state: tauri::State<'_, AppState>) -> Result<(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceFolder {
+    Installation,
+    Repository,
+}
+
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri extracts command arguments by value."
+)]
+pub fn open_workspace_folder(
+    folder: WorkspaceFolder,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), &'static str> {
+    use gtk::gio::{self, prelude::AppInfoExt as _};
+    let path = match folder {
+        WorkspaceFolder::Installation => std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_owned))
+            .ok_or("Installation folder unavailable.")?,
+        WorkspaceFolder::Repository => {
+            let inner = state.inner.lock().map_err(|_| "Status unavailable.")?;
+            let context = match inner.reply.as_ref() {
+                Some(protocol::StatusReply::Report(report)) => &report.context,
+                Some(protocol::StatusReply::Error {
+                    context: Some(context),
+                    ..
+                }) => context,
+                _ => return Err("Refresh repository status first."),
+            };
+            let path = context.repo.path.clone();
+            drop(inner);
+            path
+        }
+    };
+    if !path.is_absolute() || !path.is_dir() {
+        return Err("Folder unavailable.");
+    }
+    let manager = gio::AppInfo::default_for_type("inode/directory", false)
+        .ok_or("File manager unavailable.")?;
+    manager
+        .launch(&[gio::File::for_path(path)], None::<&gio::AppLaunchContext>)
+        .map_err(|_| "Could not open the file manager.")
+}
+
 #[tauri::command]
 pub async fn refresh(state: tauri::State<'_, AppState>) -> Result<View, String> {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -649,6 +711,7 @@ pub async fn refresh(state: tauri::State<'_, AppState>) -> Result<View, String> 
         }
         inner.reply = None;
         inner.source_doc = None;
+        inner.tracking = None;
         inner.review = None;
         inner.diff_receipts.clear();
         inner.setup = None;
@@ -715,6 +778,9 @@ impl Inner {
     }
 
     fn discard_review(&mut self, id: &str) {
+        if self.tracking.as_ref().is_some_and(|p| p.id == id) {
+            self.tracking = None;
+        }
         if self.review.as_ref().is_some_and(|review| review.id == id) {
             self.review = None;
         }
@@ -2926,6 +2992,7 @@ pub async fn apply_reviewed_files(
     let Ok(result) = worker else {
         inner.reply = None;
         inner.source_doc = None;
+        inner.tracking = None;
         inner.review = None;
         inner.diff_receipts.clear();
         return Err("Apply worker failed; check the terminal before continuing".into());
@@ -3078,6 +3145,7 @@ pub async fn run_reviewed_sync(
     let Ok(result) = worker else {
         inner.reply = None;
         inner.source_doc = None;
+        inner.tracking = None;
         inner.review = None;
         inner.diff_receipts.clear();
         drop(inner);
@@ -3092,7 +3160,7 @@ pub async fn run_reviewed_sync(
 }
 
 fn run_status(cancelled: &AtomicBool) -> Result<protocol::StatusReply, &'static str> {
-    let mut run = runner::start_status().map_err(|_| "Could not start the dotman companion")?;
+    let mut run = runner::start_status().map_err(|_| COMPANION_UNAVAILABLE)?;
     let start = Instant::now();
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -3102,12 +3170,12 @@ fn run_status(cancelled: &AtomicBool) -> Result<protocol::StatusReply, &'static 
         if start.elapsed() >= Duration::from_secs(30) {
             run.cancel()
                 .map_err(|_| "Could not cancel timed-out status")?;
-            return Err("Status read timed out");
+            return Err(STATUS_TIMEOUT);
         }
         match run.poll().map_err(|_| "Status process failed")? {
             Some(receipt) => {
                 return protocol::parse_status(&receipt.stdout, receipt.status.code())
-                    .map_err(|_| "Invalid status response");
+                    .map_err(|_| INVALID_REPORT);
             }
             None => run.wait_readable().map_err(|_| "Status process failed")?,
         }
@@ -3751,6 +3819,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut inner = Inner {
+            tracking: None,
             source_doc: None,
             active: Some(cancelled.clone()),
             reply: Some(report()?),
@@ -3763,11 +3832,14 @@ mod tests {
             setup: None,
             key_recovery: Vec::new(),
         };
-        for message in [
-            "Could not start the dotman companion",
-            "Invalid status response",
+        for (message, finding) in [
+            (COMPANION_UNAVAILABLE, "companion_unavailable"),
+            (INVALID_REPORT, "invalid_report"),
+            (STATUS_TIMEOUT, "timeout"),
+            ("Status process failed", "unknown"),
         ] {
             let view = inner.finish(Err(message), &cancelled, true);
+            assert_eq!(view.finding, finding);
             assert!(
                 !view.success
                     && view.key_stripped
@@ -3793,6 +3865,7 @@ mod tests {
     fn selection_ids_are_generation_bound_and_denial_never_starts()
     -> Result<(), Box<dyn std::error::Error>> {
         let inner = Inner {
+            tracking: None,
             source_doc: None,
             active: None,
             reply: Some(report()?),
@@ -3849,6 +3922,7 @@ mod tests {
         let result = r#"{"record":"result","outcome":"error","exit_code":4,"error_kind":"other","recovery":[{"kind":"command","argv":["private-recovery-arg"],"shown":["shown-recovery"],"when":null}]}"#;
         let diff_context = CONTEXT.replace(r#""command":"status""#, r#""command":"diff""#);
         let mut inner = Inner {
+            tracking: None,
             source_doc: None,
             active: None,
             reply: Some(report()?),

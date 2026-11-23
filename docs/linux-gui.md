@@ -1,10 +1,16 @@
 # dotman on Linux desktop
 
 - **Files** opens on **All files**, a folder tree that folds single-child
-  directories into one path. Choose **Changed** to group files by status.
-  Press **Ctrl+F** to search. In a wide window, drag the divider or focus it
-  and use the arrow keys to adjust the tree width. Dotman remembers the width
-  when you reopen the app. A narrow comparison switches to a unified diff.
+  directories into one path. Opening the app or returning to an idle file browser
+  refreshes local status. Remote counts reflect the last fetch. Choose **Changed** to group files by status.
+  Press **Ctrl+F** to find a filename, path or status such as `Local change`.
+  The match count follows the current view. **Esc** clears a focused search.
+  In a wide window, the comparison pane lists files that need a decision and
+  shows which choices are queued. When no file needs a decision, it lists
+  changes you can compare. **Back to files** returns to the row you opened.
+  Drag the divider or use its arrow keys to adjust the tree width. Double-click
+  the divider or press **Enter** on it to restore the default. Dotman remembers
+  the width when you reopen the app. A narrow comparison switches to a unified diff.
   In a narrow window, **Back to files** returns to the tree.
 - **Review changes** opens the outgoing sync preview in a drawer. Expand a
   group to inspect its files, or open a capture diff to see the proposed
@@ -14,11 +20,31 @@
   the app is using. The default theme is **AMOLED**. Choose **Light** for a
   light workspace or **System** to follow the desktop appearance.
 
+## See or change the sync destination
+
+Click the remote status beneath **File browser**, or open **Settings → Sync
+destination**, to see where Dotman fetches from and pushes to. If you push to a
+fork, choose **Open on GitHub** beside **Push to** to open that fork in your
+browser. A repository without an origin shows **Add destination…**.
+
+Choose **Edit destination…** to change the repository URL. Enable **Use a
+different URL for pushes** when you fetch upstream and push to a fork.
+Review the addresses and confirm **Save destination** to update local Git
+configuration. Sync contacts the new destination the next time you run it.
+Multiple destinations, rewritten URLs and credential-bearing addresses are
+read-only in this editor. Private address text stays hidden.
+
 ## Set up a repository
 
-If the repository cannot be opened, **Repository troubleshooting** shows the
-reported paths and offers **Check status again**. This reads status; it does
-not resolve a stopped operation. If the resolved destination is absent, you can create an empty repository,
+If the desktop cannot start its CLI or read its report, **Show installation
+folder** opens the directory containing the running desktop executable. The
+matching `dotman` CLI belongs beside it. After correcting the installation,
+choose **Retry status** to return to Files.
+
+For an interrupted operation, **Repository troubleshooting** shows the reported
+paths and offers **Check status again**. Use **Resolved paths → Show repository
+folder** to inspect the configured repository in your file manager. The same
+action is available in **Settings → Repository**. If the resolved destination is absent, you can create an empty repository,
 clone into it, or import a selected directory of ordinary static dotfiles.
 Each route shows the destination in a native confirmation.
 Clone also shows the exact source and stops at a checkout for review; it does
@@ -47,13 +73,40 @@ file. Variants requiring unsupported settings or mode edits need terminal
 review. Templates cannot be captured as host variants. System files are read-only.
 Directory and ignore standing grants and pending hook approval have separate native reviews.
 
+## Track files or a folder
+
+Open **Track…** in the file tree and choose **Choose files…** or **Choose folder…**.
+The chooser shows hidden dotfiles and supports selecting several files together.
+The review drawer lists new repository sources, held files and the reason for
+each hold. Existing sources keep their contents. Tracking a folder also approves
+capture of eligible new files beneath it on this machine during future syncs.
+
+Choose **Track selection…** and confirm to write the reviewed files locally.
+Use **Review changes** when you are ready to sync. A changed selection requires
+a fresh review. If the complete inventory is too large to display, choose a
+smaller folder or a group of files.
+
+In **Files**, expand a held file to see why Dotman held it. A guard finding can
+include the rule and its location. The row shows the actions available for that
+file. Choose an action to open its native review. The result appears above the
+file browser and can be dismissed after the review finishes.
+
+To keep a local copy and remove its repository sources, select a file and choose
+**Stop tracking…**. For a folder, focus its row and choose **Track… → Stop
+tracking this folder…**, or use **Stop tracking a folder…** to open the chooser.
+The review lists the affected repository sources, including other machine
+variants. A forgotten file beneath a still-tracked folder gets an ignore rule
+when needed to prevent its recapture.
+
 ## Edit a repository source
 
 In **Files**, select a managed text file and choose **Edit source**. The editor
 recognizes common dotfiles, including shell startup scripts, Git configuration,
 TOML, YAML, JSON and Lua. Other files open as plain text. The status bar shows
 the language, line ending and cursor position. Use its indentation selector to
-choose tabs or spaces for new edits.
+choose tabs or spaces for new edits. Closing the editor or quitting Dotman
+with unsaved edits lets you keep editing, discard the draft, or save it. Saving
+still asks for native confirmation. Cancelling that confirmation keeps the draft open.
 
 - **Find** or **Ctrl+F** opens search and replace, including whole-word,
   case-sensitive and regular-expression matching.
@@ -63,8 +116,8 @@ choose tabs or spaces for new edits.
   **Tab** indents. **Ctrl+M** toggles using Tab to move focus between controls.
 - **Save source** or **Ctrl+S** asks for native confirmation and reloads the
   comparison after saving. Applying changes to Home is a separate decision.
-  Closing a modified file offers to discard the draft. A stale save keeps the
-  draft available to copy.
+  If the repository source changed in another editor, the draft stays open.
+  **Copy draft** copies the full edited text so you can reopen the current source.
 
 The editor accepts eligible regular UTF-8 files and template sources up to
 1 MiB with LF or CRLF line endings.
@@ -102,7 +155,10 @@ and review again** to start a fresh review. If a copy changes during review,
 refresh and compare it again.
 
 **Review changes** opens the outgoing sync drawer. Expand a file group to
-inspect its contents. The branch counts describe the last fetch. Choose
+inspect its contents. Expand **Commit message** to edit the suggestion. **Use
+suggested message** restores it. Closing the drawer with an edited message
+or selected lines asks whether to discard them. Refreshing status with queued
+file decisions also asks before clearing them. The branch counts describe the last fetch. Choose
 **Continue to confirmation** to inspect the reviewed files and commit message
 in the native dialog. **Sync without hooks** starts the whole sync.
 The receipt lists file changes first. Expand **Sync activity** to see the

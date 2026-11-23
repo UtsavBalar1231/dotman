@@ -13,10 +13,32 @@ pub fn choose(
     cancelled: Arc<AtomicBool>,
     complete: impl FnOnce(Option<PathBuf>) + 'static,
 ) {
+    choose_paths(
+        parent,
+        cancelled,
+        "Choose a dotfiles directory",
+        true,
+        None,
+        move |paths| complete(paths.into_iter().next()),
+    );
+}
+
+pub fn choose_paths(
+    parent: &gtk::Window,
+    cancelled: Arc<AtomicBool>,
+    title: &'static str,
+    folder: bool,
+    home: Option<&std::path::Path>,
+    complete: impl FnOnce(Vec<PathBuf>) + 'static,
+) {
     let dialog = gtk::FileChooserDialog::with_buttons(
-        Some("Choose a dotfiles directory"),
+        Some(title),
         Some(parent),
-        gtk::FileChooserAction::SelectFolder,
+        if folder {
+            gtk::FileChooserAction::SelectFolder
+        } else {
+            gtk::FileChooserAction::Open
+        },
         &[
             ("Cancel", gtk::ResponseType::Cancel),
             ("Select", gtk::ResponseType::Accept),
@@ -25,21 +47,29 @@ pub fn choose(
     dialog.set_modal(true);
     dialog.set_destroy_with_parent(true);
     dialog.set_local_only(true);
-    dialog.set_select_multiple(false);
+    dialog.set_select_multiple(!folder);
+    if let Some(home) = home {
+        dialog.set_show_hidden(true);
+        dialog.set_current_folder(home);
+    }
     dialog.set_default_response(gtk::ResponseType::Cancel);
     let complete = Rc::new(RefCell::new(Some(complete)));
     let response = complete.clone();
     dialog.connect_response(move |dialog, answer| {
         let callback = response.borrow_mut().take();
         if let Some(callback) = callback {
-            let path = selected(answer, dialog.filename());
+            let path = dialog
+                .filenames()
+                .into_iter()
+                .filter_map(|p| selected(answer, Some(p)))
+                .collect();
             dialog.close();
             callback(path);
         }
     });
     dialog.connect_destroy(move |_| {
         if let Some(callback) = complete.borrow_mut().take() {
-            callback(None);
+            callback(Vec::new());
         }
     });
     let weak = dialog.downgrade();

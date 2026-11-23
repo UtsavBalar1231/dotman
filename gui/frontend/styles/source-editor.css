@@ -27,7 +27,10 @@ dialog#source-editor {
 #source-buffer { min-height:0; overflow:hidden; }
 .source-notice { min-height:2.1rem; flex-wrap:wrap; font-size:.82rem; color:var(--muted); }
 .source-notice p { flex:1; margin:.4rem 0; }
-.source-notice:has(.source-discard:not([hidden])) { color:var(--amber); }
+.source-notice:has(.source-exit:not([hidden])) { padding-block:.5rem; background:var(--paper); border-top:1px solid var(--divider); color:var(--ink); }
+.source-notice:has(.source-exit:not([hidden])) p { flex:1 1 13rem; }
+.source-exit { display:flex; flex-wrap:wrap; gap:.5rem; }
+.source-discard { color:var(--removed); }
 .source-status { min-height:2.6rem; flex-wrap:wrap; gap:.25rem .9rem; border-block-start:1px solid var(--divider); background:var(--navigation-surface); color:var(--muted); font-size:.76rem; }
 .source-status .source-language { color:var(--ink); }
 .source-position { margin-inline-start:auto; }

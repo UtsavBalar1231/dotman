@@ -78,7 +78,11 @@ pub struct HeldReview {
     snapshot: Snapshot,
 }
 
-fn records(bytes: &[u8], status: Option<i32>) -> Result<(&[u8], &[u8]), &'static str> {
+/// Validates the bounded two-record remedy envelope and its terminal exit code.
+///
+/// # Errors
+/// Returns an error for an incomplete or unsuccessful CLI response.
+pub fn records(bytes: &[u8], status: Option<i32>) -> Result<(&[u8], &[u8]), &'static str> {
     if status != Some(0) || bytes.len() > 65_536 {
         return Err("Remedy receipt could not be verified");
     }

@@ -16,6 +16,7 @@ dotman compares both copies with their last recorded state to tell which side ch
 Open **dotman** from your application launcher if you installed a desktop package. Configured repositories open in **Files**. For a new setup, you can create a repository, clone one for review, or import a directory of static dotfiles once its destination is ready.
 
 - In **Files**, select a file to compare the two copies. **Edit source** opens the repository copy in the built-in editor.
+- In **Settings → Sync destination**, open the push repository on GitHub or configure separate fetch and push URLs.
 - Open **Review changes** to inspect outgoing files or select individual edits for a commit. The confirmation shows what you are about to sync.
 
 The published Linux tarballs contain the CLI. To build the desktop app from a checkout, install Rust 1.90 or newer, Git, and the GTK 3 and WebKitGTK 4.1 development packages. Build the matching CLI and GUI side by side from the repository root. The checkout includes the frontend bundle.

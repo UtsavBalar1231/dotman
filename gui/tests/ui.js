@@ -34,7 +34,12 @@ class Element {
     };
     return visit(this);
   }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   focus() { document.activeElement = this; }
+  contains(node) { return node === this || this.children.some(child => child.contains(node)); }
+  get lastElementChild() { return this.children.at(-1); }
+  getClientRects() { return this.hidden ? [] : [{}]; }
   scrollIntoView(options) { this.scrolled = options; }
   click() { return this.listeners.click(); }
 }
@@ -43,22 +48,28 @@ const ids = ["refresh", "cancel", "diff", "comparison-body", "diff-key", "diff-m
   "rows", "search", "entries", "context", "paths", "message", "notice",
   "cancel-review", "remote", "clean", "held-counts", "close-diff", "review", "review-items", "review-message",
   "review-remote", "close-review", "sync-reviewed", "sync-mass-delete", "sync-lines", "leave-lines", "line-summary", "selected-effect", "selected-lines", "line-edits", "line-edit-list",
-  "commit-editor", "commit-message", "commit-error",
+  "commit-editor", "commit-preview", "restore-commit-message", "commit-message", "commit-error",
   "recovery", "recovery-message", "recovery-steps", "decisions", "decision-message",
   "decision-items", "decision-results", "clear-decisions", "apply-decisions", "diff-actions", "diff-selection",
   "setup", "machine-files", "machine-file-details", "review-identity", "identity-result", "identity-message", "review-hooks", "hooks-result", "hooks-message",
   "age-controls", "create-age", "import-age", "age-message",
   "start-fresh", "start-import", "setup-result", "setup-message", "setup-retry", "clone-controls", "clone-source", "start-clone",
   "repository-path", "diff-context", "group-folders", "group-status",
-  "guide-title", "guide-description", "attention-list", "next-undecided", "reader-tools"];
+  "guide-title", "guide-description", "attention-list", "more-comparisons", "search-count", "clear-search", "next-undecided", "reader-tools"];
 ids.push("policy-controls", "policy-directories", "policy-ignores", "policy-message");
-ids.push("variant-result", "variant-message");
+ids.push("discard-review-work", "discard-work-title", "discard-work-description", "discard-review-work-confirm", "keep-review-work");
+ids.push("open-destination", "held-result", "held-title", "held-message", "dismiss-held", "variant-result", "variant-message");
 ids.push("replacement-review", "replacement-title", "replacement-source", "replacement-target", "replacement-back", "replacement-batch", "decisions-title");
 ids.push("nav-files", "nav-review", "nav-settings", "settings", "page-heading", "paths-unavailable", "age-unavailable");
+ids.push("open-repository", "open-recovery-repository", "repository-folder-feedback", "recovery-folder-feedback");
+ids.push("status-issue", "status-issue-title", "status-issue-description", "retry-status", "open-installation", "installation-feedback", "recovery-retry-feedback");
 ids.push("recovery-check", "recovery-paths", "recovery-finding", "recovery-details", "setup-check", "setup-paths", "setup-finding", "setup-guidance");
 ids.push("review-decisions", "close-decisions", "retry-decisions");
 ids.push("review-body", "source-edit-details", "review-title", "review-icon", "review-return", "review-footnote");
+ids.push("track-menu","tracking-drawer","tracking-apply","tracking-close","tracking-message","tracking-groups","track-files","track-folder","untrack-folder","tracking-file-action");
 const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
+elements["status-issue"].hidden = true;
+elements["held-result"].hidden = true;
 elements["variant-result"].hidden = true;
 elements["variant-message"].setAttribute("role", "status");
 elements["variant-message"].setAttribute("aria-live", "polite");
@@ -177,7 +188,7 @@ const invoke = (command, args) => {
   throw new Error(command);
 };
 class Channel {}
-const window = { __TAURI__: { core: { invoke, Channel } }, scrollX: 0, scrollY: 1234, addEventListener() {},
+const window = { requestAnimationFrame: callback => setTimeout(() => callback(performance.now()), 0), __TAURI__: { core: { invoke, Channel } }, scrollX: 0, scrollY: 1234, addEventListener() {},
   navigator: { clipboard: { writeText: text => {
     copies.push(text);
     return copyFails ? Promise.reject(new Error("denied")) : Promise.resolve();
@@ -195,7 +206,7 @@ async function main() {
   await tick();
   elements["group-status"].click();
   assert.equal(elements["guide-title"].textContent, "File comparison");
-  assert.equal(elements["attention-list"].children.length, 0);
+  assert.equal(elements["attention-list"].children.length, 1);
   elements["nav-settings"].click();
   assert.equal(getWorkspaceView().page, "settings");
   assert.equal(document.activeElement, elements["page-heading"]);
@@ -404,6 +415,11 @@ async function main() {
   assert.equal(reopened[0].checked, true);
   assert.equal(reopened[1].checked, true);
   elements["close-diff"].click();
+  elements["close-review"].click();
+  assert.match(elements["discard-work-description"].textContent, /2 selected edits/);
+  assert.doesNotMatch(elements["discard-work-description"].textContent, /edited commit message/);
+  elements["keep-review-work"].click();
+  assert.equal(elements["selected-lines"].children.length, 2);
   capture.click();
   resolveDiff({ success: true, outcome: "ready", message: "", text: "", line_edits: [{ ...edits[0], id: "changed" }, edits[1], edits[2]] });
   await tick();
@@ -574,8 +590,8 @@ async function main() {
   await tick();
   assert.equal(elements.diff.hidden, true);
   assert.equal(elements["diff-text"].textContent, "");
-  assert.equal(document.activeElement, elements.message);
-  assert.equal(elements.entries.hidden, true);
+  assert.equal(document.activeElement, elements.rows.children[0].children[1].children[0].children[0]);
+  assert.equal(elements.entries.hidden, false);
   elements.refresh.click();
   await tick();
   elements["nav-review"].click();
@@ -646,7 +662,16 @@ async function main() {
   resolveReview({ id: "clear-id", outcome: "review", message: "loaded", items: [], commit_message: "original" });
   await tick();
   elements["commit-message"].value = "discard me";
+  const discardCount = discards.length;
   elements["close-review"].click();
+  assert.equal(document.activeElement, elements["keep-review-work"]);
+  assert.match(elements["discard-work-description"].textContent, /edited commit message/);
+  elements["keep-review-work"].click();
+  assert.equal(elements["commit-message"].value, "discard me");
+  assert.equal(discards.length, discardCount);
+  elements["close-review"].click();
+  elements["discard-review-work-confirm"].click();
+  assert.equal(discards.length, discardCount + 1);
   assert.equal(elements["commit-message"].value, "");
   elements["nav-review"].click();
   resolveReview({ id: "next-id", outcome: "review", message: "loaded", items: [], commit_message: "" });
@@ -810,6 +835,8 @@ async function main() {
   elements.refresh.click();
   await tick();
   assert.equal(elements.recovery.hidden, false);
+  assert.equal(elements["status-issue"].hidden, true);
+  assert.match(elements["recovery-retry-feedback"].textContent, /verify/);
   assert.equal(elements["recovery-steps"].children[1].children[1].textContent, "dotman git 'one <two>'");
   statusResponse = { ...status, success: false, repo_unavailable: true, entries: [] };
   elements.refresh.click();
@@ -884,6 +911,7 @@ async function main() {
   assert.equal(elements["commit-message"].value, "unsent draft");
   assert.equal(document.activeElement, captureButton);
   elements["close-review"].click();
+  elements["discard-review-work-confirm"].click();
   assert.equal(document.activeElement, elements["nav-review"]);
   assert.deepEqual(window.restored, [0, 1234]);
   captureRows = await captureReview();
@@ -944,8 +972,8 @@ async function main() {
   elements.refresh.click();
   await tick();
   assert.equal(elements["guide-title"].textContent, "File decisions");
-  assert.match(elements["guide-description"].textContent, /2 to inspect/);
-  assert.equal(elements["attention-list"].children.length, 1);
+  assert.match(elements["guide-description"].textContent, /2 files need a choice/);
+  assert.equal(elements["attention-list"].children.length, 2);
   const beforeNavigationCalls = calls.length;
   const beforeNavigationWrites = fileWrites.length;
   elements["attention-list"].children[0].children[0].click();
@@ -958,11 +986,14 @@ async function main() {
   assert.equal(elements["next-undecided"].hidden, false);
   elements["next-undecided"].click();
   assert.equal(diffRequests.at(-1).id, "second");
+  elements["close-diff"].click();
+  assert.equal(elements["close-diff"].disabled, true);
   resolveDiff({ outcome: "ready", message: "ready", text: "", file_actions: [] });
   await tick();
   assert.equal(elements["next-undecided"].hidden, true);
-  elements["close-diff"].click();
-  assert.equal(document.activeElement, elements.search);
+  assert.equal(elements.diff.hidden, true);
+  assert.equal(document.activeElement, elements["attention-list"].children[1].children[0]);
+  assert.match(elements["guide-description"].textContent, /1 to inspect · 1 queued/);
   elements["clear-decisions"].click();
   elements.search.value = "";
   elements.search.listeners.input();
@@ -1104,7 +1135,14 @@ async function main() {
   await tick();
   const staleChoice = elements["diff-actions"].children[0];
   staleChoice.click();
+  const readsBeforeDiscard = refreshes;
   elements.refresh.click();
+  assert.match(elements["discard-work-description"].textContent, /1 queued file decision/);
+  elements["keep-review-work"].click();
+  assert.equal(refreshes, readsBeforeDiscard);
+  assert.equal(elements["decision-items"].children.length, 1);
+  elements.refresh.click();
+  elements["discard-review-work-confirm"].click();
   await tick();
   staleChoice.click();
   assert.equal(elements["decision-items"].children.length, 0);
@@ -1113,7 +1151,7 @@ async function main() {
   assert.equal(heldRow.className, "held-row");
   heldRow.open = true;
   heldRow.listeners.toggle();
-  assert.equal(heldRow.children[1].textContent, "Origin: Unknown");
+  assert.ok(allText(heldRow).includes("Held for review"));
   assert.equal(elements["diff-actions"].children.length, 0);
   const currentRow = elements.rows.children[0].children[1].children[0].children[0];
   currentRow.click();
@@ -1160,9 +1198,9 @@ async function main() {
   assert.equal(elements["decision-message"].textContent, "recover");
   statusResponse = { ...status, held_counts: { new_files: 2, home_edits: 1, repo_edits: 1 }, entries: [
     { id: "new1", key: "<redacted>", status: "held", group: "held", supported: true,
-      hold: { origin: "new_file", reason: "<reason>", rule: "<rule>", location: "line 7", guidance: "<terminal guidance>" } },
+      hold: { origin: "new_file", reason: "<reason>", rule: "<rule>", location: "line 7", guidance: "Matching contents are hidden." } },
     { id: "new2", key: "<redacted>", status: "held", group: "held", supported: true,
-      hold: { origin: "new_file", reason: "second", guidance: "Use a terminal." } },
+      hold: { origin: "new_file", reason: "second" } },
     { id: "home", key: "home", status: "held", group: "held", hold: { origin: "home_edit", reason: "home reason" } },
     { id: "repo", key: "repo", status: "held", group: "held", hold: { origin: "repo_edit", reason: "repo reason" } },
     { id: "unknown", key: "unknown", status: "held", group: "held", supported: true, hold: { origin: "toString", reason: 42, rule: {}, location: null } },
@@ -1172,9 +1210,11 @@ async function main() {
   elements.refresh.click();
   await tick();
   assert.equal(elements["held-counts"].hidden, false);
-  assert.equal(elements["held-counts"].textContent, "Held in full report: new files 2 · home edits 1 · repository edits 1");
+  assert.equal(elements["held-counts"].textContent, "Held across repository · 2 new files · 1 home edit · 1 repository edit");
   let holds = elements.rows.children[1].children[1].children.map(item => item.children[0]);
   assert.equal(holds.length, 6);
+  const beforeHeldCalls = calls.length;
+  const beforeHeldCopies = copies.length;
   for (const hold of holds) {
     assert.equal(hold.children.length, 1);
     hold.open = true;
@@ -1183,30 +1223,29 @@ async function main() {
   }
   assert.equal(holds[0].children[0].children[1].children[0].textContent, "<redacted>");
   assert.equal(holds[1].children[0].children[1].children[0].textContent, "<redacted>");
-  assert.deepEqual(holds[0].children.slice(1).map(item => item.textContent), [
-    "Origin: New file", "Reason: <reason>", "Rule: <rule>", "Location: line 7", "Terminal guidance: <terminal guidance>",
+  const detailText = hold => allText(hold.children[1]).filter(Boolean);
+  assert.deepEqual(detailText(holds[0]), [
+    "<reason>", "Origin", "New file", "Rule", "<rule>", "Location", "line 7", "Matching contents are hidden.",
+    "No action available for this hold.",
   ]);
-  assert.equal(holds[1].children[2].textContent, "Reason: second");
-  assert.equal(holds[2].children[1].textContent, "Origin: Home edit");
-  assert.equal(holds[3].children[1].textContent, "Origin: Repository edit");
-  assert.deepEqual(holds[4].children.slice(1).map(item => item.textContent), ["Origin: Unknown", "Reason: Unavailable"]);
-  assert.deepEqual(holds[5].children.slice(1).map(item => item.textContent), ["Origin: Unknown", "Reason: Unavailable"]);
-  const beforeHeldCalls = calls.length;
-  const beforeHeldCopies = copies.length;
+  assert.ok(detailText(holds[1]).includes("second"));
+  assert.ok(detailText(holds[2]).includes("Home edit"));
+  assert.ok(detailText(holds[3]).includes("Repository edit"));
+  for (const hold of holds.slice(4)) assert.deepEqual(detailText(hold), ["Held for review", "No action available for this hold."]);
   for (const hold of holds) {
     assert.equal(hold.children[0].listeners.click, undefined);
-    assert.equal(hold.children.slice(1).every(item => item.children.length === 0), true);
+    assert.ok(descendants(hold).every(child => child.tag !== "button"));
   }
   assert.equal(calls.length, beforeHeldCalls);
   assert.equal(copies.length, beforeHeldCopies);
   elements.search.value = "home";
   elements.search.listeners.input();
-  assert.equal(elements["held-counts"].textContent, "Held in full report: new files 2 · home edits 1 · repository edits 1");
+  assert.equal(elements["held-counts"].textContent, "Held across repository · 2 new files · 1 home edit · 1 repository edit");
   holds = elements.rows.children[0].children[1].children.map(item => item.children[0]);
   assert.equal(holds.length, 1);
   holds[0].open = true;
   holds[0].listeners.toggle();
-  assert.equal(holds[0].children[1].textContent, "Origin: Home edit");
+  assert.ok(detailText(holds[0]).includes("Home edit"));
   elements.search.value = "";
   elements.search.listeners.input();
   elements.rows.children[0].children[1].children[0].children[0].click();
@@ -1218,7 +1257,7 @@ async function main() {
   statusResponse = { ...status, held_counts: { new_files: 1 }, entries: [] };
   elements.refresh.click();
   await tick();
-  assert.equal(elements["held-counts"].textContent, "Held in full report: new files 1 · home edits unknown · repository edits unknown");
+  assert.equal(elements["held-counts"].textContent, "Held across repository · 1 new file");
   statusResponse = status;
   elements.refresh.click();
   await tick();
@@ -1231,10 +1270,10 @@ async function main() {
   await tick();
   const actionHolds = elements.rows.children[0].children[1].children.map(item => item.children[0]);
   for (const hold of actionHolds) { hold.open = true; hold.listeners.toggle(); }
-  const buttons = actionHolds[0].children.filter(child => child.tag === "button");
-  assert.deepEqual(buttons.map(button => button.textContent), ["Encrypt", "Forget"]);
+  const buttons = descendants(actionHolds[0]).filter(child => child.tag === "button");
+  assert.deepEqual(buttons.map(button => button.textContent), ["Encrypt…", "Stop tracking…"]);
   assert.ok(buttons.every(button => button.type === "button"));
-  assert.equal(actionHolds[1].children.some(child => child.tag === "button"), false);
+  assert.equal(descendants(actionHolds[1]).some(child => child.tag === "button"), false);
   buttons[0].focus();
   assert.equal(document.activeElement, buttons[0]);
   buttons[0].click();
@@ -1243,10 +1282,16 @@ async function main() {
   assert.equal(heldWrites.length, 1);
   resolveWriter({ outcome: "declined", message: "Not approved", refresh: true });
   await tick();
-  assert.equal(elements["identity-message"].textContent, "declined: Not approved");
+  assert.equal(elements["held-title"].textContent, "Held file · safe");
+  assert.equal(elements["held-message"].textContent, "Not approved");
+  assert.equal(elements["held-result"].hidden, false);
+  elements["dismiss-held"].click();
+  assert.equal(elements["held-result"].hidden, true);
   statusResponse = status;
   elements.refresh.click();
   await tick();
+  buttons[0].click();
+  assert.equal(heldWrites.length, 1);
   const readOnlyCalls = calls.length;
   const readOnlyCopies = copies.length;
   const readOnlyWrites = writes.length;
@@ -1772,7 +1817,7 @@ async function main() {
   elements["recovery-check"].click();
   await tick();
   assert.equal(elements.recovery.hidden, true);
-  assert.equal(document.activeElement, elements.message);
+  assert.equal(document.activeElement, elements.search);
   statusResponse = { ...status, success: false, finding: "in_progress", message: "An operation requires terminal recovery.", entries: [] };
   elements.refresh.click();
   await tick();

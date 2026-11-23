@@ -1,6 +1,10 @@
+import { DestinationSettings } from "./destination-settings.js";
+import { useSyncExternalStore } from "react";
+import { getWorkspaceView, subscribeToWorkspace } from "../workspace-view.js";
 import { ThemeSelect } from "./theme-select.js";
 import { Icon } from "./symbols.js";
 export function Settings() {
+const {page, repository} = useSyncExternalStore(subscribeToWorkspace, getWorkspaceView);
 return (
     <section id="settings" hidden aria-labelledby="page-heading">
       <div className="settings-section">
@@ -13,9 +17,12 @@ return (
           <span id="repository-path"></span>
           <span className="paths-label with-glyph"><span>Resolved paths</span><Icon name="chevron-right" className="disclosure-glyph" /></span>
         </summary>
+        <button id="open-repository" type="button">Show repository folder</button>
+        <p id="repository-folder-feedback" role="status"></p>
         <dl id="paths"></dl>
       </details>
       <p id="paths-unavailable">Resolved paths are unavailable. Refresh status to try again.</p>
+      {page === "settings" && repository && <DestinationSettings key={repository} />}
       <details id="policy-controls">
         <summary><Icon name="chevron-right" className="disclosure-glyph" />Local capture policy</summary>
         <p>Review directory or retained-ignore trust for future sync. Nothing is captured now.</p>

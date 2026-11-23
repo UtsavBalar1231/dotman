@@ -25,6 +25,27 @@ async function check({ page, evaluate, waitFor, resize, key }) {
 
   await waitFor(visible("#rows [role=tree]"));
   await resize(1440, 900);
+  const brand = await evaluate(`(() => {
+    const rect = document.getElementById("nav-files").getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`);
+  await page("Input.dispatchMouseEvent", { type: "mouseMoved", ...brand });
+  await waitFor("document.querySelector('#brand-hint')?.textContent === 'File browser'");
+  await key("Escape");
+  await waitFor("!document.getElementById('brand-hint')");
+  await click("#nav-settings");
+  await page("Input.dispatchMouseEvent", { type: "mouseMoved", x: 320, y: 250 });
+  await page("Input.dispatchMouseEvent", { type: "mouseMoved", ...brand });
+  await waitFor("document.querySelector('#brand-hint')?.textContent === 'Back to files'");
+  await click("#nav-files");
+  await waitFor("document.body.dataset.page === 'files' && !document.getElementById('brand-hint')");
+  await page("Input.dispatchMouseEvent", { type: "mouseMoved", x: 320, y: 250 });
+  await evaluate("document.getElementById('refresh').focus()");
+  await key("Tab", 8);
+  assert.equal(await evaluate("document.activeElement.id"), "nav-files");
+  await waitFor("document.getElementById('nav-files').matches(':focus-visible') && document.getElementById('brand-hint') !== null");
+  await key("Escape");
+  await waitFor("!document.getElementById('brand-hint') && document.activeElement.id === 'nav-files'");
   await waitFor("document.querySelector('.tree-divider').ariaValueMax === '1060'");
   const point = await evaluate(`(() => {
     const box = document.querySelector(".tree-divider").getBoundingClientRect();
@@ -40,6 +61,12 @@ async function check({ page, evaluate, waitFor, resize, key }) {
   await waitFor("document.querySelector('#entries')?.offsetWidth === 434");
   await evaluate("document.querySelector('.tree-divider').focus()");
   await key("ArrowLeft");
+  await key("Home");
+  assert.equal(await evaluate("document.querySelector('#entries').offsetWidth"), 220);
+  await key("End");
+  assert.equal(await evaluate("document.querySelector('#entries').offsetWidth"), 1060);
+  await key("Enter");
+  assert.equal(await evaluate("document.querySelector('#entries').offsetWidth"), 320);
   await click("#group-status");
   await waitFor(visible(incoming));
   assert.equal(await evaluate(`document.fonts.ready.then(() => {
@@ -209,7 +236,7 @@ async function check({ page, evaluate, waitFor, resize, key }) {
       await click("#close-diff");
     }
     await click("#nav-review");
-    await waitFor(visible("#commit-message"));
+    await waitFor(visible("#commit-editor summary"));
     for (const [width, height] of layoutCases) {
       await resize(width, height);
       assert.equal(await fits(), true, `Review ${width}px ${theme}`);
@@ -291,7 +318,9 @@ async function check({ page, evaluate, waitFor, resize, key }) {
   assert.equal(await evaluate(visible("#decisions")), false);
 
   await click("#nav-review");
-  await waitFor(visible("#commit-message"));
+  await waitFor(visible("#commit-editor summary"));
+  assert.equal(await evaluate("document.querySelector('#commit-editor').open"), false);
+  await click("#commit-editor summary");
   await resize(1440, 900);
   assert.equal(await evaluate(`(() => {
     const drawer = document.querySelector("#review");
@@ -313,6 +342,18 @@ async function check({ page, evaluate, waitFor, resize, key }) {
       fits: document.documentElement.scrollWidth <= innerWidth,
     })`), { focus: "commit-message", draft: "Edited draft", fits: true }, `Review ${width}px`);
   }
+  await click("#close-review");
+  await waitFor("document.querySelector('#discard-review-work').matches(':modal')");
+  assert.equal(await evaluate("document.activeElement.id"), "keep-review-work");
+  await resize(320, 450);
+  assert.equal(await evaluate("document.getElementById('discard-review-work').scrollWidth <= innerWidth"), true);
+  await key("Escape");
+  assert.equal(await evaluate("document.querySelector('#review').matches(':modal')"), true);
+  assert.equal(await evaluate("document.getElementById('commit-message').value"), "Edited draft");
+  assert.equal(await evaluate("document.activeElement.id"), "commit-message");
+  await click("#restore-commit-message");
+  assert.equal(await evaluate("document.activeElement.id"), "commit-message");
+  assert.equal(await evaluate("document.getElementById('commit-message').value"), "draft");
   await click("#close-review");
 
   await evaluate('document.documentElement.style.fontSize = "200%"');
@@ -426,14 +467,31 @@ async function checkSourceEditor({ page, evaluate, waitFor, key, resize }) {
   await resize(360, 430);
   assert.equal(await evaluate("document.querySelector('#source-editor').scrollWidth <= innerWidth"), true);
   await key("Escape");
-  await waitFor("document.querySelector('.source-discard').hidden === false");
+  await waitFor("document.querySelector('.source-exit').hidden === false");
   assert.equal(await evaluate("document.querySelector('#source-editor').matches(':modal')"), true);
-  await click(".source-save");
+  assert.equal(await evaluate("document.activeElement.className"), "source-continue");
+  await key("Escape");
+  await waitFor(`${shadow}.activeElement?.matches('.cm-content')`);
+  assert.equal(await evaluate(code), "replaced\n");
+  await evaluate("window.requestQuit()");
+  assert.equal(await evaluate("window.quitCount"), 0);
+  assert.equal(await evaluate("document.activeElement.className"), "source-continue");
+  assert.equal(await evaluate("document.querySelector('.source-discard').textContent"), "Discard and quit");
+  assert.equal(await evaluate("document.querySelector('.source-save-exit').textContent"), "Save and quit…");
+  await click(".source-continue");
+  await waitFor(`${shadow}.activeElement?.matches('.cm-content')`);
+  await evaluate("window.requestQuit()");
+  await click(".source-save-exit");
   await waitFor("document.querySelector('#source-editor [role=status]').textContent.includes('File changed')");
   assert.equal(await evaluate(code), "replaced\n");
-  await evaluate("window.failSave = false");
+  assert.equal(await evaluate("window.copiedDraft"), undefined);
+  await click(".source-copy");
+  assert.equal(await evaluate("window.copiedDraft"), "replaced\r\n");
+  await evaluate(`${shadow}.querySelector('.cm-content').focus(); window.failSave = false`);
   await key("s", 2);
   await waitFor("!document.querySelector('#source-editor').open && document.querySelector('#source-edit-details button:enabled')");
+  assert.equal(await evaluate("window.quitCount"), 0);
+  assert.equal(await evaluate("window.requestQuit"), undefined);
   assert.equal(await evaluate("window.sourceText"), "replaced\r\n");
   await click("#source-edit-details button");
   await waitFor(`${shadow}.activeElement?.matches('.cm-content')`);
@@ -456,6 +514,17 @@ async function checkSourceEditor({ page, evaluate, waitFor, key, resize }) {
   await click(".source-discard");
   assert.equal(await evaluate("window.sourceText"), "const width: number = 80;");
   assert.equal(await evaluate(`${shadow}.childElementCount`), 0);
+  await click("#source-edit-details button");
+  await waitFor(`${shadow}.activeElement?.matches('.cm-content')`);
+  await key("a", 2);
+  await insert("confirmed draft");
+  await evaluate("window.holdSave = true; window.requestQuit()");
+  await click(".source-save-exit");
+  await evaluate("window.requestQuit()");
+  assert.equal(await evaluate("window.quitCount"), 0, "Closing the window during confirmation keeps the draft open");
+  await evaluate("window.confirmSave()");
+  await waitFor("window.quitCount === 1");
+  assert.equal(await evaluate("window.sourceText"), "confirmed draft");
   assert.deepEqual(await evaluate("window.violations"), []);
 }
 
@@ -482,7 +551,250 @@ async function checkSyncReceipt({ evaluate, waitFor, resize, key }) {
   assert.deepEqual(await evaluate("window.violations"), []);
 }
 
+async function checkTracking({ evaluate, waitFor, resize, key }) {
+  await waitFor("document.querySelector('#rows [role=tree]')");
+  await evaluate("document.getElementById('group-status').click()");
+  const parents = await evaluate("Array.from(document.querySelectorAll('#rows .row-directory')).filter(el => el.getClientRects().length).map(el => el.textContent)");
+  assert.ok(parents.includes(".config/helix/") && parents.includes(".config/niri/"));
+  assert.equal(await evaluate("document.querySelector('#rows .row-status').hidden"), true);
+  for (const [width, height, theme] of [[1440, 900, "light"], [390, 580, "dark"], [640, 340, "light"]]) {
+    await resize(width, height);
+    await evaluate(`document.documentElement.dataset.theme = "${theme}"; document.querySelector('#track-menu summary').focus()`);
+    await key("ArrowDown");
+    await key("ArrowDown");
+    assert.equal(await evaluate("document.activeElement.id"), "track-folder");
+    await key(" ");
+    await waitFor("document.querySelector('#tracking-drawer[open]')");
+    assert.equal(await evaluate("document.querySelector('.tracking-reason').textContent"), "Protected filename");
+    assert.equal(await evaluate("document.querySelector('.tracking-holds .row-name').textContent"), ".env");
+    const layout = await evaluate(`(() => {
+      const dialog = document.getElementById("tracking-drawer");
+      const body = dialog.querySelector(".tracking-body");
+      body.scrollTop = body.scrollHeight;
+      const action = document.getElementById("tracking-apply").getBoundingClientRect();
+      return body.scrollWidth <= body.clientWidth && action.bottom <= innerHeight && action.left >= 0;
+    })()`);
+    assert.ok(layout, `tracking review fits ${width} × ${height}`);
+    await key("Escape");
+    await waitFor("!document.querySelector('#tracking-drawer').open && document.activeElement.matches('#track-menu summary')");
+  }
+  await evaluate("window.heldOnly = true; document.querySelector('#track-menu summary').click(); document.getElementById('track-files').click()");
+  await waitFor("document.getElementById('tracking-drawer').open");
+  assert.equal(await evaluate("document.querySelector('#tracking-drawer footer').getClientRects().length"), 0);
+  assert.match(await evaluate("document.getElementById('tracking-scope').textContent"), /no new files/i);
+  await key("Escape");
+
+}
+
+async function checkStatusIssue({ evaluate, waitFor, resize }) {
+  const click = id => evaluate(`document.getElementById(${JSON.stringify(id)}).click()`);
+  await waitFor("document.querySelector('#status-issue:not([hidden]) #status-issue-title')?.textContent.includes('Reading')");
+  assert.equal(await evaluate("document.getElementById('retry-status').hidden"), true);
+  await evaluate("window.finishInitialRead()");
+  await waitFor("!document.getElementById('open-installation').hidden");
+  assert.equal(await evaluate("document.getElementById('entries').hidden"), true);
+  assert.equal(await evaluate("document.getElementById('setup').hidden"), true);
+  for (const [width, height] of [[1280,800], [390,640], [320,320]]) {
+    await resize(width, height);
+    assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true);
+    assert.equal(await evaluate("document.getElementById('retry-status').getClientRects().length"), 1);
+  }
+  await click("open-installation");
+  await waitFor("document.getElementById('installation-feedback').textContent");
+  assert.deepEqual(await evaluate("window.lastFolder"), {folder:"installation"});
+  await evaluate("window.readIssue = 'timeout'; document.getElementById('retry-status').focus()");
+  await click("retry-status");
+  await waitFor("document.getElementById('status-issue-title').textContent.includes('timed out')");
+  assert.equal(await evaluate("document.getElementById('open-installation').hidden"), true);
+  assert.equal(await evaluate("document.activeElement.id"), "retry-status");
+  await evaluate("window.readIssue = null");
+  await click("retry-status");
+  await waitFor("!document.getElementById('entries').hidden");
+  assert.equal(await evaluate("document.getElementById('status-issue').hidden"), true);
+  assert.equal(await evaluate("document.activeElement.id"), "search");
+}
+
+async function checkRefreshOnReturn({ evaluate, waitFor }) {
+  const count = () => evaluate("window.fixtureCalls.filter(call => call.command === 'refresh').length");
+  const returnToWindow = () => evaluate("window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'))");
+  const refresh = async () => {
+    await evaluate("window.beforeRead = document.querySelector('#rows [role=tree]')");
+    await returnToWindow();
+    await waitFor("window.beforeRead !== document.querySelector('#rows [role=tree]')");
+  };
+  await waitFor("document.querySelector('#rows [role=tree]')");
+  assert.equal(await count(), 1, "fresh launch reads status");
+  await evaluate(`document.querySelector('#rows [title=plain]').focus();
+    window.fixtureStatus.entries[2].id = "new-generation";
+    window.fixtureStatus.entries[2].status = "changed-locally";
+    window.fixtureStatus.entries[2].group = "outgoing";`);
+  await refresh();
+  assert.equal(await evaluate("document.activeElement.title"), "plain", "Returning keeps the same file across fresh status IDs");
+  assert.match(await evaluate("document.activeElement.ariaLabel"), /Local change/);
+  await evaluate("document.querySelector('[data-folder-path]').focus()");
+  const folder = await evaluate("document.activeElement.dataset.folderPath");
+  await refresh();
+  assert.equal(await evaluate("document.activeElement.dataset.folderPath"), folder);
+  assert.equal(await evaluate("document.getElementById('untrack-folder').title"), folder);
+  await evaluate("document.querySelector('#rows [title=plain]').focus(); window.fixtureStatus.entries[2].key = 'external-edit'");
+  await refresh();
+  assert.equal(await evaluate("document.activeElement.id"), "search", "A removed file returns focus to search");
+  await evaluate("window.dispatchEvent(new Event('focus'))");
+  assert.equal(await count(), 4, "one read per return");
+  await evaluate("document.querySelector('#rows [title=external-edit]').click()");
+  await waitFor("!document.getElementById('diff').hidden && !document.getElementById('refresh').disabled");
+  await returnToWindow();
+  assert.equal(await count(), 4, "an open comparison survives returning to the app");
+  assert.equal(await evaluate("document.getElementById('diff').hidden"), false);
+}
+
+async function checkComparisons({ evaluate, waitFor, resize, key }) {
+  const read = selector => `document.querySelector(${JSON.stringify(selector)})`;
+  const click = selector => evaluate(`${read(selector)}.click()`);
+  await resize(1200, 780);
+  await waitFor("document.querySelectorAll('#attention-list button').length === 6");
+  await click("#more-comparisons");
+  assert.equal(await evaluate("document.activeElement.textContent.includes('app6/')"), true);
+  await click("#attention-list li:last-child button");
+  await waitFor("document.querySelector('#diff-actions button')?.textContent.includes('Keep')");
+  await click("#diff-actions button");
+  await click("#close-diff");
+  assert.equal(await evaluate("document.activeElement === document.querySelector('#attention-list li:last-child button')"), true);
+  assert.equal(await evaluate(`${read("#guide-description")}.textContent`), "7 to inspect · 1 queued for review");
+  assert.match(await evaluate(`${read("#attention-list li:last-child button")}.ariaLabel`), /app7.*Queued/);
+  assert.ok(await evaluate(`${read("#more-comparisons")}.hidden`));
+  await resize(390, 600);
+  assert.ok(await evaluate("document.querySelector('.desk-guide').getClientRects().length === 0"));
+  const search = async (value, count) => {
+    await evaluate(`{ const field = document.getElementById("search"); field.focus(); field.value = ${JSON.stringify(value)}; field.dispatchEvent(new Event("input")); }`);
+    assert.equal(await evaluate(`${read("#search-count")}.textContent`), count);
+  };
+  await search("queued", "1 match");
+  await search("both copies changed", "8 matches");
+  await click("#group-status");
+  assert.equal(await evaluate(`${read("#search-count")}.textContent`), "8 matches");
+  await search("app7", "1 match");
+  assert.equal(await evaluate("document.querySelector('#rows .row-status').textContent"), "Queued");
+  assert.match(await evaluate("document.querySelector('#rows .row').ariaLabel"), /Queued.*Keep/);
+  await key("Escape");
+  assert.equal(await evaluate(`${read("#search")}.value`), "");
+  assert.equal(await evaluate("document.activeElement.id"), "search");
+  await search("none", "0 matches");
+  await click("#clear-search");
+  assert.equal(await evaluate("document.activeElement.id"), "search");
+  assert.equal(await evaluate(`${read("#search-count")}.textContent`), "");
+  assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true);
+}
+
+async function checkHeldFile({ evaluate, waitFor, resize, key }) {
+  await waitFor("document.querySelector('.held-row')");
+  await evaluate("window.delayHeldRead = true; window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'))");
+  await evaluate("document.querySelector('.held-row').closest('[role=treeitem]').focus()");
+  await key("Enter");
+  await waitFor("document.querySelector('.held-actions button')");
+  await evaluate("window.delayHeldRead = false; window.finishHeldRead(window.fixtureStatus)");
+  await waitFor("!document.getElementById('refresh').disabled && document.querySelector('.held-row[open] button')");
+  for (const width of [1200, 390, 320]) {
+    await resize(width, 660);
+    assert.equal(await evaluate(`(() => {
+      const body = document.querySelector('.held-details');
+      return body.scrollWidth <= body.clientWidth && Array.from(body.querySelectorAll('button, dd'))
+        .every(element => element.getBoundingClientRect().right <= body.getBoundingClientRect().right + 1);
+    })()`), true);
+  }
+  await key("Tab");
+  assert.equal(await evaluate("document.activeElement.textContent"), "Encrypt…");
+  assert.equal(await evaluate("window.heldRequests"), 0);
+  await key(" ");
+  await waitFor("document.getElementById('held-message').textContent === 'Review cancelled.'");
+  assert.equal(await evaluate("document.getElementById('held-result').getClientRects().length"), 1);
+  assert.equal(await evaluate("window.heldRequests"), 1);
+  await evaluate("document.getElementById('dismiss-held').click()");
+  assert.equal(await evaluate("document.activeElement.id"), "search");
+}
+
+async function checkDestination({ evaluate, waitFor, resize }) {
+  const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  await waitFor("document.querySelector('#rows [role=tree]')");
+  await resize(390,640);
+  await click("#open-destination");
+  await waitFor("document.activeElement === document.querySelector('#destination-settings summary')");
+  await waitFor("document.querySelectorAll('.destination-link').length === 2");
+  await click(".destination-link:last-of-type[aria-label='Open example/fork on GitHub']");
+  assert.equal(await evaluate("window.openedRepository"), "example/fork");
+  await click("#destination-settings button:not(.destination-link)");
+  await waitFor("document.activeElement === document.querySelector('.destination-form input')");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.destination-form input:not([type=checkbox])'), e => e.value)"),
+    ["https://github.com:443/upstream/config.git","ssh://git@ssh.github.com:443/example/fork.git"]);
+  assert.equal(await evaluate("document.querySelector('.destination-form button[type=submit]').disabled"), true);
+  await click(".destination-form input[type=checkbox]");
+  await click(".destination-form button[type=submit]");
+  await waitFor("document.querySelector('#destination-settings [role=status]')?.textContent === 'Destination saved.'");
+  assert.deepEqual(await evaluate("window.savedChange"), {fetch:"https://github.com:443/upstream/config.git",push:null});
+  assert.equal(await evaluate("document.querySelectorAll('.destination-link').length"),1);
+  assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"),true);
+  await click("#nav-files");
+  assert.equal(await evaluate("document.getElementById('remote').textContent"), "Last fetched: 0 ahead · 0 behind");
+}
+
 async function main() {
+  await withDesktop(statusFixture + `
+    const invokeStatus = window.__TAURI__.core.invoke;
+    window.readIssue = "invalid_report";
+    window.__TAURI__.core.invoke = async (command, args) => {
+      if (command === "open_workspace_folder") { window.lastFolder = args; throw Error("private launch error"); }
+      if (command === "refresh" && !window.finishInitialRead) await new Promise(resolve => { window.finishInitialRead = resolve; });
+      if (command === "refresh" && window.readIssue) return {
+        ...window.fixtureStatus, success:false, finding:window.readIssue, entries:[], context:null,
+      };
+      return invokeStatus(command, args);
+    };
+  `, checkStatusIssue);
+
+  await withDesktop(statusFixture + `
+    window.fixtureStatus.entries = [{ id:"held", key:".config/app/file", group:"held", status:"held-in-home",
+      held_actions:["encrypt","forget"], hold:{ origin:"home_edit", reason:"Guard finding", rule:"github-fine-grained-pat", location:"line 51" }}];
+    window.heldRequests = 0;
+    const original = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = (command, args) => {
+      if (command === "refresh" && window.delayHeldRead) return new Promise(resolve => { window.finishHeldRead = resolve; });
+      if (command !== "run_held") return original(command, args);
+      window.heldRequests++;
+      return Promise.resolve({outcome:"declined",message:"Review cancelled.",refresh:true});
+    };
+  `, checkHeldFile);
+  await withDesktop(statusFixture + `
+    const prior = window.__TAURI__.core.invoke;
+    const state = {token:"initial", branch:"main", fetch:["https://github.com:443/upstream/config.git"],
+      push:["ssh://git@ssh.github.com:443/example/fork.git"], editable:true,separate_push:true};
+    window.__TAURI__.core.invoke = async (command,args) => {
+      if (command === "open_github_repository") { window.openedRepository = args.repository; return; }
+      if (command !== "sync_destination") return prior(command,args);
+      if (args.change) {
+        if (args.expected !== state.token) throw Error("Wrong destination review");
+        window.savedChange = args.change;
+        window.fixtureStatus.remote = "Last fetched: 0 ahead · 0 behind";
+        return {...state, token:"next", push:state.fetch, separate_push:false};
+      }
+      return state;
+    };
+  `, checkDestination);
+  await withDesktop(statusFixture + `
+    window.fixtureStatus.entries = Array.from({length: 8}, (_, i) => ({ id: "decision-" + i,
+      key: ".config/app" + i + "/config.toml", status: "both-changed", group: "decision", supported: true }));
+    const previousInvoke = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = (command, args) => command === "open_diff"
+      ? Promise.resolve({outcome:"ready",success:true,message:"different",text:patch,file_actions:["keep_local"]})
+      : previousInvoke(command, args);
+  `, checkComparisons);
+  await withDesktop(statusFixture + `
+    window.fixtureStatus.entries[0].key = ".config/niri/config.toml";
+    const invoke = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = async (command, args) => command === "preview_tracking" ?
+      ["test-review", { folders: window.heldOnly ? [] : [".config/app"], files: window.heldOnly ? [] : Array.from({ length: 18 }, (_, i) => ".config/app/" + "long-name-".repeat(12) + i),
+        existing: [], held: { ".config/app/.env": "Protected filename" } }] : invoke(command, args);
+  `, checkTracking);
+  await withDesktop(statusFixture, checkRefreshOnReturn);
   await withDesktop(statusFixture, check);
   await withDesktop(statusFixture + `
     const original = window.__TAURI__.core.invoke;
@@ -494,11 +806,25 @@ async function main() {
   await withDesktop(statusFixture + `
     window.fixtureStatus.entries[2].editable = true;
     window.sourceText = "initial\\r\\n";
+    Object.defineProperty(navigator, "clipboard", {value:{writeText: async text => { window.copiedDraft = text; }}});
+    window.quitCount = 0;
+    window.__TAURI__.window = {getCurrentWindow: () => ({
+      onCloseRequested: async handler => {
+        window.requestQuit = () => {
+          let prevented = false;
+          handler({preventDefault() { prevented = true; }});
+          if (!prevented) window.quitCount++;
+        };
+        return () => { delete window.requestQuit; };
+      },
+      destroy: async () => { window.quitCount++; },
+    })};
     window.failSave = true;
     const originalInvoke = window.__TAURI__.core.invoke;
     window.__TAURI__.core.invoke = async (command, args) => {
       if (command === "open_source") return window.sourceText;
       if (command === "save_source") {
+        if (window.holdSave) await new Promise(resolve => { window.confirmSave = resolve; });
         if (window.failSave) throw Error("File changed");
         window.sourceText = args.text;
         return;

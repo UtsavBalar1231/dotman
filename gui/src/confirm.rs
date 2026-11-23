@@ -46,7 +46,7 @@ pub fn ask_sync(
     )
 }
 
-fn sync_details(text: &str) -> gtk::TextView {
+fn sync_details(text: &str, accessible_title: &str) -> gtk::TextView {
     let buffer = gtk::TextBuffer::default();
     buffer.set_text(text);
     let field = gtk::TextTag::builder()
@@ -59,7 +59,12 @@ fn sync_details(text: &str) -> gtk::TextView {
         for (index, line) in text.lines().enumerate() {
             if matches!(
                 line,
-                "Repository"
+                "Capture future files in"
+                    | "Remove folder rules"
+                    | "Remove repository sources"
+                    | "Track files"
+                    | "Held back"
+                    | "Repository"
                     | "Capture from this computer"
                     | "Repository changes"
                     | "Local commits to publish"
@@ -89,7 +94,7 @@ fn sync_details(text: &str) -> gtk::TextView {
         .pixels_below_lines(3)
         .build();
     if let Some(accessible) = details.accessible() {
-        accessible.set_name("Reviewed sync details");
+        accessible.set_name(accessible_title);
     }
     details
 }
@@ -158,7 +163,7 @@ fn sync_dialog(parent: &gtk::Window, prompt: &SyncPrompt, text: &str) -> gtk::Di
     header.pack_start(&intro, true, true, 0);
     content.pack_start(&header, false, false, 0);
 
-    let details = sync_details(text);
+    let details = sync_details(text, prompt.title);
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .shadow_type(gtk::ShadowType::In)
