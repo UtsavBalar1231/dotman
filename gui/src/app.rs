@@ -18,6 +18,7 @@ pub mod destination;
 pub mod held;
 pub mod import_setup;
 pub mod keys;
+pub mod local_file;
 pub mod policy_trust;
 pub mod source;
 pub mod tracking;
@@ -158,6 +159,7 @@ pub struct View {
     message: &'static str,
     context: Option<ContextView>,
     entries: Vec<EntryView>,
+    kept_local: Vec<local_file::Saved>,
     key_stripped: bool,
     clean: usize,
     remote: String,
@@ -168,6 +170,8 @@ pub struct View {
     setup_review_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_review_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_counts: Option<protocol::PolicyCounts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hook_review_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -502,6 +506,8 @@ fn project(reply: &protocol::StatusReply, key_stripped: bool, generation: u64) -
                 .then(|| format!("identity:{generation}")),
                 setup_review_id: None,
                 policy_review_id: (generation != u64::MAX).then(|| format!("policy:{generation}")),
+                policy_counts: report.policy_counts,
+                kept_local: local_file::saved(report, generation),
                 hook_review_id: (generation != u64::MAX
                     && !report.entries.iter().any(redacted)
                     && HookReview::new(report).is_ok())
@@ -529,6 +535,8 @@ fn project(reply: &protocol::StatusReply, key_stripped: bool, generation: u64) -
             identity_review_id: None,
             setup_review_id: None,
             policy_review_id: None,
+            policy_counts: None,
+            kept_local: Vec::new(),
             hook_review_id: None,
             key_review_id: None,
         },
@@ -563,6 +571,8 @@ fn failure(message: &'static str, key_stripped: bool) -> View {
         identity_review_id: None,
         setup_review_id: None,
         policy_review_id: None,
+        policy_counts: None,
+        kept_local: Vec::new(),
         hook_review_id: None,
         key_review_id: None,
     }
@@ -743,7 +753,14 @@ impl Inner {
         &mut self,
         id: &str,
         message: Option<&runner::CommitMessage>,
-    ) -> Result<(protocol::SyncReview, protocol::StatusContext, String), &'static str> {
+    ) -> Result<
+        (
+            protocol::SyncReview,
+            protocol::StatusContext,
+            crate::confirm::OutgoingDetails,
+        ),
+        &'static str,
+    > {
         self.consume_review_mode(id, message, None)
     }
 
@@ -752,7 +769,14 @@ impl Inner {
         id: &str,
         message: Option<&runner::CommitMessage>,
         selected_text: Option<String>,
-    ) -> Result<(protocol::SyncReview, protocol::StatusContext, String), &'static str> {
+    ) -> Result<
+        (
+            protocol::SyncReview,
+            protocol::StatusContext,
+            crate::confirm::OutgoingDetails,
+        ),
+        &'static str,
+    > {
         if self.active.is_some() {
             return Err("Another operation is running");
         }
@@ -769,8 +793,11 @@ impl Inner {
             return Err("Commit message editing is unavailable");
         }
         let text = match selected_text {
-            Some(text) => text,
-            None => modal_text(review, message.or(suggested.as_ref()), message.is_some())?,
+            Some(text) => crate::confirm::OutgoingDetails {
+                selected: Some(text),
+                ..Default::default()
+            },
+            None => outgoing_details(review)?,
         };
         let context = status.context.clone();
         let review = self.review.take().ok_or("Review is unavailable")?.review;
@@ -1588,6 +1615,8 @@ struct ReviewItem {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     diff_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1685,9 +1714,55 @@ fn refusal_key<'a>(
     }
 }
 
+struct ReviewEntries<'a> {
+    generation: u64,
+    indexes: HashMap<(&'a str, &'a str), Option<usize>>,
+}
+
+impl<'a> ReviewEntries<'a> {
+    fn new(status: &'a protocol::StatusReport, generation: u64) -> Self {
+        let mut indexes = HashMap::new();
+        for (i, entry) in status.entries.iter().enumerate() {
+            let key = if entry.scope == "repo_source" {
+                let Some(path) = entry.path.as_ref().and_then(|p| p.path.to_str()) else {
+                    continue;
+                };
+                path
+            } else {
+                entry.key.raw.as_str()
+            };
+            indexes
+                .entry((entry.scope.as_str(), key))
+                .and_modify(|index| *index = None)
+                .or_insert(Some(i));
+        }
+        Self {
+            generation,
+            indexes,
+        }
+    }
+
+    fn decision(&self, record: &protocol::SyncRecord) -> Option<String> {
+        let protocol::SyncRecord::Undecided {
+            scope,
+            key: Some(key),
+            ..
+        } = record
+        else {
+            return None;
+        };
+        let index = self
+            .indexes
+            .get(&(scope.as_str(), key.raw.as_str()))?
+            .as_ref()?;
+        Some(format!("{}:{index}", self.generation))
+    }
+}
+
 fn project_review(
     review: &protocol::SyncReview,
     links: Option<(&str, &[Option<usize>])>,
+    entries: Option<&ReviewEntries<'_>>,
     paths: &HeldPaths<'_>,
 ) -> ReviewView {
     let mut items = Vec::new();
@@ -1783,6 +1858,7 @@ fn project_review(
             group,
             text,
             diff_id,
+            entry_id: entries.and_then(|entries| entries.decision(record)),
         });
     }
     review_view(review, items)
@@ -1825,6 +1901,7 @@ fn append_hooks(
             "Current hook table not approved".into()
         },
         diff_id: None,
+        entry_id: None,
     });
     for (group, values) in [
         ("Hooks due", commands),
@@ -1840,6 +1917,7 @@ fn append_hooks(
                     value.shown.clone()
                 },
                 diff_id: None,
+                entry_id: None,
             });
         }
     }
@@ -1931,6 +2009,14 @@ fn finish_review(
                 Some(protocol::StatusReply::Report(status)) => HeldPaths::new(status),
                 _ => HeldPaths::default(),
             };
+            let entries = match &inner.reply {
+                Some(protocol::StatusReply::Report(status))
+                    if variant::same_context(&review.context, &status.context) =>
+                {
+                    Some(ReviewEntries::new(status, inner.generation))
+                }
+                _ => None,
+            };
             if let Some(protocol::StatusReply::Report(status)) = &inner.reply
                 && CompleteReview::new(&review, &status.context).is_ok()
             {
@@ -1941,7 +2027,12 @@ fn finish_review(
                 inner.review_sequence = sequence;
                 let id = format!("{}:{sequence}", inner.generation);
                 let capture_status = capture_status_index(&review, status);
-                let mut view = project_review(&review, Some((&id, &capture_status)), &paths);
+                let mut view = project_review(
+                    &review,
+                    Some((&id, &capture_status)),
+                    entries.as_ref(),
+                    &paths,
+                );
                 if review.error_kind.as_deref() == Some("mass_delete") {
                     view.outcome = "mass_delete";
                     view.message = "Mass deletion requires separate explicit approval.";
@@ -1957,7 +2048,7 @@ fn finish_review(
                 });
                 return Ok(view);
             }
-            Ok(project_review(&review, None, &paths))
+            Ok(project_review(&review, None, entries.as_ref(), &paths))
         }
         Ok(protocol::SyncReply::Error {
             exit_code,
@@ -2044,93 +2135,69 @@ const fn writer_view(outcome: &'static str, message: &'static str, refresh: bool
     }
 }
 
-fn modal_text(
+fn outgoing_details(
     review: &protocol::SyncReview,
-    message: Option<&runner::CommitMessage>,
-    edited: bool,
-) -> Result<String, &'static str> {
-    const LIMIT: usize = 32 * 1024;
-    fn add(text: &mut String, label: &str, value: &str) -> Result<(), &'static str> {
-        text.push_str(label);
+) -> Result<crate::confirm::OutgoingDetails, &'static str> {
+    use crate::confirm::OutgoingDetails;
+    let mut bytes = 0usize;
+    let mut display = |value: &str| -> Result<String, &'static str> {
+        if bytes.saturating_add(value.len()).saturating_add(8) > 32 * 1024 {
+            return Err("Review is too large for confirmation");
+        }
+        let mut text = String::new();
         for c in value.chars() {
             if runner::unsafe_display_char(c) {
                 text.extend(c.escape_unicode());
             } else {
                 text.push(c);
             }
-            if text.len() > LIMIT {
-                return Err("Review is too large for confirmation");
-            }
         }
-        text.push('\n');
-        Ok(())
-    }
-    let mut text = String::from("Repository\n");
-    add(&mut text, "  ", &review.context.repo.shown)?;
-    if let Some(message) = message {
-        text.push_str(if edited {
-            "\nEdited commit message\n"
-        } else {
-            "\nSuggested commit message (may be regenerated)\n"
-        });
-        for line in message.as_str().split('\n') {
-            add(&mut text, "│ ", line)?;
+        bytes = bytes.saturating_add(text.len()).saturating_add(8);
+        if bytes > 32 * 1024 {
+            return Err("Review is too large for confirmation");
         }
-    }
-    let mut previous = "";
+        Ok(text)
+    };
+    let mut details = OutgoingDetails {
+        repository: display(&review.context.repo.shown)?,
+        ..Default::default()
+    };
     for record in &review.records {
-        let (heading, value) = match record {
+        match record {
             protocol::SyncRecord::Capture(capture) => {
-                ("Capture from this computer", &capture.key.shown)
+                details.captures.push(display(&capture.key.shown)?);
             }
             protocol::SyncRecord::RepoEdit(edit) | protocol::SyncRecord::Own(edit) => {
-                ("Repository changes", &edit.path.shown)
+                details.changes.push(display(&edit.path.shown)?);
             }
-            protocol::SyncRecord::AheadCommit { subject, .. } => {
-                ("Local commits to publish", &subject.shown)
+            protocol::SyncRecord::AheadCommit { subject, paths, .. } => {
+                let mut commit = display(&subject.shown)?;
+                for path in paths {
+                    commit.push_str("\n    · ");
+                    commit.push_str(&display(&path.shown)?);
+                }
+                details.commits.push(commit);
             }
-            _ => continue,
-        };
-        if previous != heading {
-            writeln!(text, "\n{heading}").map_err(|_| "Review is too large for confirmation")?;
-            previous = heading;
-        }
-        add(&mut text, "  ", value)?;
-        if let protocol::SyncRecord::AheadCommit { paths, .. } = record {
-            for path in paths {
-                add(&mut text, "    · ", &path.shown)?;
-            }
+            _ => {}
         }
     }
-    text.push_str("\nSync scope\nUses the locally configured origin. Incoming changes and the origin URL are unverified. System files are excluded and hooks stay off.");
-    if text.len() > LIMIT {
-        return Err("Review is too large for confirmation");
-    }
-    Ok(text)
+    details.bytes = bytes;
+    Ok(details)
 }
 
 fn mass_delete_modal(
-    mut text: String,
+    details: &mut crate::confirm::OutgoingDetails,
     review: &CompleteReview<'_>,
-) -> Result<String, &'static str> {
-    text.push_str("\n\nApprove these exact repository deletions:\n");
+) -> Result<(), &'static str> {
     for path in review.mass_delete_paths().ok_or("Missing deletion set")? {
-        text.push_str("  ");
-        for byte in path.path.as_os_str().as_bytes() {
-            for escaped in std::ascii::escape_default(*byte) {
-                text.push(char::from(escaped));
-            }
-        }
-        text.push('\n');
-        if text.len() > 32 * 1024 {
+        let value = path.path.as_os_str().as_bytes().escape_ascii().to_string();
+        details.bytes = details.bytes.saturating_add(value.len()).saturating_add(8);
+        if details.bytes > 32 * 1024 {
             return Err("Review is too large for confirmation");
         }
+        details.deletions.push(value);
     }
-    text.push_str("\nApprove all listed deletions?");
-    if text.len() > 32 * 1024 {
-        return Err("Review is too large for confirmation");
-    }
-    Ok(text)
+    Ok(())
 }
 
 struct SelectedReview {
@@ -2139,15 +2206,10 @@ struct SelectedReview {
     target: writer_outcome::SelectedTarget,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Selection validation and its native confirmation stay together."
-)]
 fn selected_review(
     inner: &Inner,
     id: &str,
     tokens: &[String],
-    message: Option<&runner::CommitMessage>,
 ) -> Result<SelectedReview, &'static str> {
     if inner.active.is_some() || tokens.is_empty() || tokens.len() > 4096 {
         return Err("Invalid selected lines");
@@ -2230,17 +2292,6 @@ fn selected_review(
     text.push_str(&details);
     writeln!(text, "Selected edits: {}", tokens.len())
         .map_err(|_| "Review is too large for confirmation")?;
-    if let Some(message) = message {
-        text.push_str("Commit message:\n");
-        for c in message.as_str().chars() {
-            if runner::unsafe_display_char(c) {
-                text.extend(c.escape_unicode());
-            } else {
-                text.push(c);
-            }
-        }
-        text.push('\n');
-    }
     writeln!(text, "Reviewed target binding: {binding}")
         .map_err(|_| "Review is too large for confirmation")?;
     match target {
@@ -2294,6 +2345,7 @@ fn actual_items(events: &[writer_outcome::WriterEvent]) -> Vec<ReviewItem> {
                 group,
                 text,
                 diff_id: None,
+                entry_id: None,
             })
         })
         .collect()
@@ -3027,7 +3079,7 @@ pub async fn run_reviewed_sync(
         let mut inner = inner_state.lock().map_err(|_| "Status state unavailable")?;
         let selected = selected_lines
             .as_ref()
-            .map(|tokens| selected_review(&inner, &id, tokens, commit_message.as_ref()))
+            .map(|tokens| selected_review(&inner, &id, tokens))
             .transpose()?;
         let (selected, selected_text, selected_target) =
             selected.map_or((None, None, None), |selected| {
@@ -3047,14 +3099,12 @@ pub async fn run_reviewed_sync(
         if is_mass != approve_mass || (approve_mass && selected.is_some()) {
             return Err("Mass deletion requires its own review and explicit approval".into());
         }
-        let (review, context, text) =
+        let (review, context, mut text) =
             inner.consume_review_mode(&id, commit_message.as_ref(), selected_text)?;
-        let text = if approve_mass {
+        if approve_mass {
             let complete = CompleteReview::new(&review, &context)?;
-            mass_delete_modal(text, &complete)?
-        } else {
-            text
-        };
+            mass_delete_modal(&mut text, &complete)?;
+        }
         inner.active = Some(cancelled.clone());
         drop(inner);
         (review, context, text, selected, selected_target)
@@ -3075,18 +3125,22 @@ pub async fn run_reviewed_sync(
         } else {
             crate::confirm::SyncPrompt { title: "Confirm outgoing sync", action: "Sync without hooks", scope: "Sync can capture files, commit, pull and push. Hooks stay off.", destructive: false, dark }
         };
-        let approved = crate::confirm::ask_sync(&window, prompt, text, flag.clone())?;
+        let editor = editable_message(&review).map(|suggested| crate::confirm::MessageDraft {
+            suggested: if selected_target.is_some() { "sync: selected edits".into() } else { suggested.as_str().into() },
+            initial: commit_message,
+        });
+        let approval = crate::confirm::ask_outgoing(&window, prompt, text, editor, flag.clone())?;
         let mut run = {
             let mut inner = shared.lock().map_err(|_| "Status state unavailable")?;
             if flag.load(Ordering::Acquire) { return Ok(writer_view("cancelled", "Sync cancelled before starting.", false)); }
-            if !approved { return Ok(writer_view("declined", "Sync declined.", false)); }
+            let Some(approval) = approval else { return Ok(writer_view("declined", "Sync declined.", false)); };
             let complete = CompleteReview::new(&review, &context)?;
             inner.reply = None;
             inner.review = None;
             inner.diff_receipts.clear();
             inner.recovery = None;
             inner.generation = inner.generation.saturating_add(1);
-            let run = runner::start_reviewed_sync(complete, commit_message.as_ref(), selected.as_ref(), mass_delete.unwrap_or(false)).map_err(|_| {
+            let run = runner::start_reviewed_sync(complete, approval.message.as_ref(), selected.as_ref(), mass_delete.unwrap_or(false)).map_err(|_| {
                 worker_uncertain.store(true, Ordering::Release);
                 "Could not start reviewed sync; check the terminal before continuing"
             })?;
@@ -3986,10 +4040,11 @@ mod tests {
             return Err("missing review".into());
         };
         let complete = CompleteReview::new(&review, &status.context)?;
-        let text = mass_delete_modal("review".into(), &complete)?;
-        assert!(text.contains("\n  private-path\n"));
-        assert!(!text.contains("wrong-path"));
-        assert!(mass_delete_modal("x".repeat(32 * 1024), &complete).is_err());
+        let mut details = outgoing_details(&review)?;
+        mass_delete_modal(&mut details, &complete)?;
+        assert_eq!(details.deletions, ["private-path"]);
+        details.bytes = 32 * 1024;
+        assert!(mass_delete_modal(&mut details, &complete).is_err());
         Ok(())
     }
 
@@ -4027,6 +4082,46 @@ mod tests {
             },
             review,
         ))
+    }
+
+    #[test]
+    fn partial_decisions_link_only_to_unique_scoped_status_rows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for case in ["unique", "duplicate", "scope mismatch", "context mismatch"] {
+            let (mut inner, mut review) = capture_fixture()?;
+            review.exit_code = 3;
+            let Some(protocol::StatusReply::Report(status)) = &mut inner.reply else {
+                return Err("missing status".into());
+            };
+            let entry = status.entries.first_mut().ok_or("missing entry")?;
+            entry.status = "held".into();
+            entry.hold = Some(protocol::Hold::SecretName);
+            if case == "scope mismatch" {
+                entry.scope = "system".into();
+            }
+            if case == "duplicate" {
+                let duplicate = entry.clone();
+                status.entries.push(duplicate);
+            }
+            if case == "context mismatch" {
+                review.context.repo.path = "/another-repo".into();
+            }
+            let record = serde_json::from_str(
+                r#"{"record":"undecided","key":{"raw":"private-key","shown":"hidden-name"},"scope":"home","reason":"new_held","pass":"capture","attention":true,"skip_next_pass":false}"#,
+            )?;
+            review.records = vec![record];
+            let view = finish_review(&mut inner, Ok(protocol::SyncReply::Review(review)))?;
+            assert!(view.id.is_none());
+            let item = view.items.first().ok_or("missing decision")?;
+            assert_eq!(
+                item.entry_id.as_deref(),
+                (case == "unique").then_some("7:0")
+            );
+            if case == "unique" {
+                assert!(item.text.starts_with("[redacted filename]"));
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -4630,7 +4725,7 @@ mod tests {
         assert!(line.after.as_ref().is_some_and(|s| s.contains("\\u{202e}")));
         let token = line.id.clone();
         inner.active = Some(Arc::new(AtomicBool::new(false)));
-        assert!(selected_review(&inner, &review_id, std::slice::from_ref(&token), None).is_err());
+        assert!(selected_review(&inner, &review_id, std::slice::from_ref(&token)).is_err());
         inner.active = None;
         let reopened = finish_diff(&mut inner, &diff_id, Ok(make()));
         assert_eq!(
@@ -4641,18 +4736,16 @@ mod tests {
                 .map(|line| &line.id),
             Some(&token)
         );
-        let selected = selected_review(&inner, &review_id, std::slice::from_ref(&token), None)?;
+        let selected = selected_review(&inner, &review_id, std::slice::from_ref(&token))?;
         assert_eq!(selected.lines.get("private-key"), Some(&vec![7]));
         assert_eq!(selected.target, writer_outcome::SelectedTarget::Local);
         assert!(selected.text.contains("replacement"));
         assert!(selected.text.contains("local commit only"));
         assert!(!selected.text.contains("branch ancestry"));
         assert_eq!(result.selected_push, Some(false));
-        assert!(selected_review(&inner, &review_id, &[], None).is_err());
-        assert!(
-            selected_review(&inner, &review_id, &[token.clone(), token.clone()], None).is_err()
-        );
-        assert!(selected_review(&inner, &review_id, &["forged".into()], None).is_err());
+        assert!(selected_review(&inner, &review_id, &[]).is_err());
+        assert!(selected_review(&inner, &review_id, &[token.clone(), token.clone()]).is_err());
+        assert!(selected_review(&inner, &review_id, &["forged".into()]).is_err());
         finish_diff(&mut inner, &diff_id, Err("changed"));
         let reopened = finish_diff(&mut inner, &diff_id, Ok(make()));
         let new_token = reopened
@@ -4662,7 +4755,7 @@ mod tests {
             .map(|line| line.id.clone())
             .ok_or("missing reopened line")?;
         assert_ne!(new_token, token);
-        assert!(selected_review(&inner, &review_id, std::slice::from_ref(&token), None).is_err());
+        assert!(selected_review(&inner, &review_id, std::slice::from_ref(&token)).is_err());
         let protocol::DiffReply::Report(mut changed) = make() else {
             return Err("missing diff".into());
         };
@@ -4692,22 +4785,14 @@ mod tests {
         {
             *selected_target = None;
         }
-        assert!(
-            selected_review(
-                &inner,
-                &review_id,
-                std::slice::from_ref(&changed_token),
-                None
-            )
-            .is_err()
-        );
+        assert!(selected_review(&inner, &review_id, std::slice::from_ref(&changed_token)).is_err());
         assert!(
             finish_diff(&mut inner, &diff_id, Ok(make()))
                 .line_edits
                 .is_none()
         );
         finish_diff(&mut inner, &diff_id, Err("changed"));
-        assert!(selected_review(&inner, &review_id, &[token], None).is_err());
+        assert!(selected_review(&inner, &review_id, &[token]).is_err());
         Ok(())
     }
 
@@ -4750,11 +4835,15 @@ mod tests {
                 capture.key.shown = "x".repeat(33 * 1024);
             }
         }
-        assert!(modal_text(&review.review, None, false).is_err());
-        let selected = selected_review(&inner, &review_id, std::slice::from_ref(&token), None)?;
+        assert!(outgoing_details(&review.review).is_err());
+        let selected = selected_review(&inner, &review_id, std::slice::from_ref(&token))?;
         assert!(selected.text.contains("local commit only"));
         let (_, _, text) = inner.consume_review_mode(&review_id, None, Some(selected.text))?;
-        assert!(text.contains("local commit only"));
+        assert!(
+            text.selected
+                .as_deref()
+                .is_some_and(|scope| scope.contains("local commit only"))
+        );
         Ok(())
     }
 
@@ -4796,7 +4885,7 @@ mod tests {
             .and_then(|lines| lines.into_iter().next())
             .ok_or("line")?
             .id;
-        let selected = selected_review(&inner, &review_id, &[token], None)?;
+        let selected = selected_review(&inner, &review_id, &[token])?;
         assert!(selected.text.contains("existing local branch ancestry"));
         assert!(
             selected
@@ -4844,7 +4933,7 @@ mod tests {
                     .id,
             );
         }
-        assert!(selected_review(&inner, &review_id, &tokens, None).is_err());
+        assert!(selected_review(&inner, &review_id, &tokens).is_err());
         assert!(inner.review.is_some());
         Ok(())
     }
@@ -5002,13 +5091,15 @@ mod tests {
         let second_id = second.id.ok_or("review not retained")?;
         assert_ne!(first_id, second_id);
         assert!(inner.consume_review(&first_id, None).is_err());
-        let (_, _, modal) = inner.consume_review(&second_id, None)?;
-        assert!(modal.contains("Repository\n  /repo"));
-        assert!(
-            modal.contains("Suggested commit message (may be regenerated)\n│ private-message\n")
+        let (review, _, modal) = inner.consume_review(&second_id, None)?;
+        assert_eq!(modal.repository, "/repo");
+        assert_eq!(modal.changes, ["shown path"]);
+        assert_eq!(
+            editable_message(&review)
+                .as_ref()
+                .map(runner::CommitMessage::as_str),
+            Some("private-message")
         );
-        assert!(modal.contains("Repository changes\n  shown path"));
-        assert!(!modal.contains("private-path"));
         assert!(inner.consume_review(&second_id, None).is_err());
         assert_oversized_review_is_not_consumed(&mut inner, &input, &selected.context)?;
         let second = finish_review(
@@ -5116,10 +5207,7 @@ mod tests {
         let draft = runner::CommitMessage::new("--approve-hooks <é> \"\nnext".into())?;
         assert!(inner.consume_review("stale", Some(&draft)).is_err());
         let (_, _, modal) = inner.consume_review(&id, Some(&draft))?;
-        assert!(modal.contains(
-            "Edited commit message\n│ --approve-hooks <é> \"\n│ next\n\nRepository changes\n"
-        ));
-        assert!(!modal.contains("private-message"));
+        assert_eq!(modal.changes, ["shown path"]);
         assert!(inner.consume_review(&id, Some(&draft)).is_err());
 
         for case in 0..3 {
@@ -5364,7 +5452,8 @@ mod tests {
     }
 
     fn assert_review_projection(review: &protocol::SyncReview) -> Result<(), serde_json::Error> {
-        let json = serde_json::to_string(&project_review(review, None, &HeldPaths::default()))?;
+        let json =
+            serde_json::to_string(&project_review(review, None, None, &HeldPaths::default()))?;
         assert!(json.contains("<script>"));
         assert!(json.contains("shown message"));
         assert!(json.contains("shown path"));

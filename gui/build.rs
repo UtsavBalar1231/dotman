@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "run_import_setup",
             "run_key",
             "run_held",
+            "set_local_file",
             "run_host_variant",
         ]),
     ))?;

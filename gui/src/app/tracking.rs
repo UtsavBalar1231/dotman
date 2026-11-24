@@ -1,8 +1,7 @@
 use super::{AppState, protocol, runner, wait_apply};
 use gtk::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -35,6 +34,46 @@ pub(super) struct Pending {
     action: Action,
     paths: Vec<String>,
     preview: Preview,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selection {
+    excluded: BTreeSet<usize>,
+    keep_folder_rule: bool,
+}
+
+impl Pending {
+    fn restrict_selection(&mut self, selection: &Selection) -> Result<Vec<String>, String> {
+        let excluded = &selection.excluded;
+        if selection.keep_folder_rule && (self.action != Action::TrackFolder || excluded.is_empty())
+        {
+            return Err("Reopen the folder review.".into());
+        }
+        let mut omitted = Vec::new();
+        if !excluded.is_empty() {
+            if self.action == Action::StopTracking
+                || excluded.len() >= self.preview.files.len()
+                || excluded
+                    .last()
+                    .is_some_and(|index| *index >= self.preview.files.len())
+            {
+                return Err("Select at least one file from the current review.".into());
+            }
+            let files = std::mem::take(&mut self.preview.files);
+            for (index, file) in files.into_iter().enumerate() {
+                if excluded.contains(&index) {
+                    omitted.push(file);
+                } else {
+                    self.preview.files.push(file);
+                }
+            }
+            if !selection.keep_folder_rule {
+                self.preview.folders.clear();
+            }
+        }
+        Ok(omitted)
+    }
 }
 
 fn choose(
@@ -78,9 +117,11 @@ fn call(
     action: Action,
     paths: &[String],
     expected: Option<&str>,
+    selection: &Selection,
     flag: &AtomicBool,
 ) -> Result<Preview, String> {
     let request = serde_json::json!({"schema_version":1,"operation":action,"paths":paths,"expected":expected,
+        "excluded":selection.excluded, "keep_folder_rule":selection.keep_folder_rule,
         "repo_id":context.repo_id.as_ref().ok_or("Repository identity unavailable.")?.raw});
     let bytes = serde_json::to_vec(&request).map_err(|_| "Selection could not be encoded.")?;
     let mut run = runner::start_remedy(&context.home.path, bytes)
@@ -174,7 +215,14 @@ pub async fn preview_tracking(
                 .map(|p| relative(home, p))
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let preview = call(&context, action, &paths, None, &flag_worker)?;
+        let preview = call(
+            &context,
+            action,
+            &paths,
+            None,
+            &Selection::default(),
+            &flag_worker,
+        )?;
         Ok(Some(Pending {
             id,
             context,
@@ -214,6 +262,7 @@ fn relative(home: &Path, path: &Path) -> Result<String, String> {
 pub async fn apply_tracking(
     id: String,
     dark: Option<bool>,
+    selection: Option<Selection>,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
@@ -232,8 +281,10 @@ pub async fn apply_tracking(
         p
     };
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let p = pending;
+        let mut p = pending;
         let stop = p.action == Action::StopTracking;
+        let selection = selection.unwrap_or_default();
+        let omitted = p.restrict_selection(&selection)?;
         let prompt = crate::confirm::SyncPrompt {
             title: if stop {
                 "Stop tracking?"
@@ -246,36 +297,24 @@ pub async fn apply_tracking(
                 "Track selection"
             },
             scope: if stop {
-                "Repository sources will be removed. Local copies stay in Home."
+                "Your local copies stay in Home."
             } else {
-                "Eligible files will be added to the repository on this computer."
+                "Files are added to your local repository. You can sync them later."
             },
             destructive: stop,
             dark,
         };
-        let mut text = format!("Repository\n{}\n\n", p.context.repo.shown);
-        if !p.preview.folders.is_empty() {
-            text.push_str(if stop {
-                "Remove folder rules\n"
-            } else {
-                "Capture future files in\n"
-            });
-            text.push_str(&p.preview.folders.join("\n"));
-            text.push_str("\n\n");
-        }
-        text.push_str(if stop {
-            "Remove repository sources\n"
-        } else {
-            "Track files\n"
-        });
-        text.push_str(&p.preview.files.join("\n"));
-        if !p.preview.held.is_empty() {
-            text.push_str("\n\nHeld back\n");
-            for (key, why) in &p.preview.held {
-                let _ = writeln!(text, "{key} — {why}");
-            }
-        }
-        if !crate::confirm::ask_sync(&window, prompt, text, flag.clone())?
+        let details = crate::confirm::TrackingDetails {
+            repository: p.context.repo.shown.clone(),
+            root: (p.action == Action::TrackFolder)
+                .then(|| p.paths.first().cloned())
+                .flatten(),
+            folders: p.preview.folders.clone(),
+            files: p.preview.files.clone(),
+            omitted,
+            held: p.preview.held.clone(),
+        };
+        if !crate::confirm::ask_tracking(&window, prompt, details, flag.clone())?
             || flag.load(Ordering::Acquire)
         {
             return Ok(false);
@@ -285,6 +324,7 @@ pub async fn apply_tracking(
             p.action,
             &p.paths,
             Some(&p.preview.token),
+            &selection,
             &flag,
         )?;
         if result.files != p.preview.files

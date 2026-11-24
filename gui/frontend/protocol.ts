@@ -7,7 +7,7 @@ export interface EntryView {
   group: string;
   supported: boolean;
   system: boolean;
-  held_actions?: ("add" | "plain" | "encrypt" | "forget")[];
+  held_actions?: ("add" | "plain" | "encrypt" | "forget" | "keep_local")[];
   host_variant?: boolean;
   editable?: boolean;
   hold?: {
@@ -60,6 +60,8 @@ interface StatusView {
   setup_review_id?: string;
   key_review_id?: string;
   policy_review_id?: string;
+  kept_local?: { id: string; label: string }[];
+  policy_counts?: { directories: number; ignores: number };
 }
 
 interface DiffView {
@@ -84,6 +86,7 @@ export interface ReviewItem {
   group: string;
   text: string;
   diff_id?: string;
+  entry_id?: string;
 }
 
 interface ReviewView {
@@ -134,7 +137,7 @@ export interface Commands {
   open_workspace_folder: { args: {folder: "installation" | "repository"}; result: void };
   open_github_repository: { args: {repository: string}; result: void };
   preview_tracking: { args: {action: TrackingAction; key: string | null}; result: [string,TrackingPreview] | null };
-  apply_tracking: { args: {id: string; dark: boolean}; result: boolean };
+  apply_tracking: { args: {id: string; dark: boolean; selection: {excluded: number[]; keep_folder_rule: boolean}}; result: boolean };
   open_source: { args: { id: string }; result: string };
   save_source: { args: { id: string; text: string }; result: void };
   refresh: { args: undefined; result: StatusView };
@@ -150,6 +153,7 @@ export interface Commands {
   run_clone_setup: { args: { id: string; source: string }; result: WriterView };
   run_import_setup: { args: { id: string; action: "import" }; result: WriterView };
   run_key: { args: { id: string; action: "create" | "import" }; result: WriterView };
+  set_local_file: { args: { id: string }; result: WriterView };
   run_held: { args: { id: string; action: "add" | "plain" | "encrypt" | "forget" }; result: WriterView };
   run_host_variant: { args: { id: string }; result: WriterView };
   review_policy: { args: { id: string; action: "directories" | "ignores" }; result: WriterView };

@@ -19,10 +19,12 @@ export function TrackingDrawer() {
     <header><h2 id="tracking-title">Review tracking</h2>
       <button type="button" id="tracking-close" title="Close tracking review" aria-label="Close tracking review"><Icon name="close" /></button></header>
     <section className="tracking-body">
+      <p id="tracking-location" hidden><Icon name="folder" /><bdi id="tracking-root" /></p>
       <p id="tracking-scope"></p>
+      <label id="tracking-future" hidden><input id="tracking-future-input" type="checkbox" />Track future files in this folder</label>
       <div id="tracking-groups"></div>
       <p id="tracking-message" role="status" aria-live="polite"></p>
     </section>
-    <footer><span className="tracking-locality"><Icon name="desktop" />Local change</span><button type="button" id="tracking-apply" className="review-action">Track selection</button></footer>
+    <footer><span className="tracking-locality"><Icon name="desktop" /><span id="tracking-count-label" role="status">Local change</span></span><button type="button" id="tracking-apply" className="review-action">Track selection</button></footer>
   </dialog>;
 }

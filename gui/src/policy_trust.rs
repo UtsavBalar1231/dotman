@@ -8,9 +8,8 @@ use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-const RENDER_LIMIT: usize = 4096;
 const DOCUMENT_LIMIT: usize = 1024 * 1024;
-const MAX_ITEMS: usize = 16;
+const RENDER_LIMIT: usize = 128 * 1024;
 
 /// A fixed local trust action.
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -171,7 +170,7 @@ fn path_value(path: &Path) -> Value {
 }
 
 fn safe_value(value: &str) -> bool {
-    value.len() <= 96 && !value.chars().any(crate::runner::unsafe_display_char)
+    value.len() <= 4096 && !value.chars().any(crate::runner::unsafe_display_char)
 }
 
 fn validate_snapshot(snapshot: &Snapshot, action: Action) -> Result<(), &'static str> {
@@ -181,19 +180,11 @@ fn validate_snapshot(snapshot: &Snapshot, action: Action) -> Result<(), &'static
             .inventory_hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || snapshot
-            .directories
-            .len()
-            .saturating_add(snapshot.retained.len())
-            .saturating_add(snapshot.current.len())
-            .saturating_add(snapshot.candidates.len())
-            > MAX_ITEMS
         || ![&snapshot.state, &snapshot.config, &snapshot.machine_config]
             .iter()
             .all(|t| t.valid())
-        || snapshot.state.kind != "file"
-        || snapshot.state.mode != 0o600
-        || snapshot.state.nlink != 1
+        || (snapshot.state.kind == "file"
+            && (snapshot.state.mode != 0o600 || snapshot.state.nlink != 1))
     {
         return Err("Unsupported policy review");
     }
@@ -661,6 +652,40 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn rejects_partial_displays_and_invalid_state_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (status, text) = fixture()?;
+        let mut lines = text.lines();
+        let context = lines.next().ok_or("context")?;
+        let original: Value = serde_json::from_str(lines.next().ok_or("review")?)?;
+        let result = lines.next().ok_or("result")?;
+        for (path, invalid) in [
+            ("/review/current", json!(vec!["a".repeat(1024); 130])),
+            ("/review/current", json!(["private\u{202e}name"])),
+            ("/review/state/kind", json!("missing")),
+            ("/review/state/mode", json!(0o644)),
+            ("/review/state/nlink", json!(2)),
+        ] {
+            let mut record = original.clone();
+            *record.pointer_mut(path).ok_or("review field")? = invalid;
+            let response = format!("{context}\n{record}\n{result}\n");
+            assert!(response.len() < DOCUMENT_LIMIT);
+            assert!(
+                PolicyReview::parse(
+                    response.as_bytes(),
+                    Some(0),
+                    &status,
+                    Action::Ignores,
+                    &BTreeSet::new()
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
+        Ok(())
+    }
+
     struct Fixture(std::path::PathBuf);
 
     impl Drop for Fixture {
@@ -764,6 +789,24 @@ mod tests {
             })
         }
 
+        fn submit(
+            &self,
+            action: Action,
+            review: &PolicyReview,
+        ) -> Result<Output, Box<dyn std::error::Error>> {
+            self.run(
+                &[
+                    "apply",
+                    "--review-trust",
+                    action.argument(),
+                    "--decide-from",
+                    "-",
+                    "--json",
+                ],
+                Some(&review.encode()?),
+            )
+        }
+
         fn prepare_policy(&self, action: Action) -> Result<(), Box<dyn std::error::Error>> {
             let repo = self.0.join("data/dotman");
             let dir = self.0.join("home/.config/app");
@@ -804,22 +847,36 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&init.stderr)
             );
-            let baseline = fixture.run(&["sync"], None)?;
-            assert!(
-                baseline.status.success(),
-                "{}",
-                String::from_utf8_lossy(&baseline.stderr)
-            );
             let home = fixture.0.join("home");
             let repo = fixture.0.join("data/dotman");
             let dir = home.join(".config/app");
+            std::fs::write(repo.join("unrecorded"), "ordinary file")?;
+            let counts = fixture.status()?.policy_counts.ok_or("policy counts")?;
+            assert_eq!((counts.directories, counts.ignores), (0, 0));
+            std::fs::remove_file(repo.join("unrecorded"))?;
             fixture.prepare_policy(action)?;
+            if action == Action::Directories {
+                for index in 0..24 {
+                    std::fs::write(dir.join(format!("candidate-{index:02}")), "more")?;
+                }
+            }
             let status = fixture.status()?;
+            let counts = status.policy_counts.ok_or("pending counts")?;
             let review = fixture.preview(&status, action)?;
+            assert_eq!(counts.directories, review.snapshot.directories.len());
+            assert_eq!(counts.ignores, review.snapshot.retained.len());
             assert!(review.eligible());
-            let _modal = review.modal()?;
+            let modal = review.modal()?;
+            if action == Action::Directories {
+                for index in 0..24 {
+                    assert!(modal.contains(&format!("candidate-{index:02}")));
+                }
+            }
             let state_file = fixture.0.join("state/dotman/state.toml");
             let state_before = std::fs::read(&state_file).ok();
+            if action == Action::Directories {
+                assert!(state_before.is_none());
+            }
             let config_before = std::fs::read(repo.join(".dotman.toml"))?;
             let index_before = std::fs::read(repo.join(".git/index")).ok();
             // A declined confirmation never invokes the writer.
@@ -830,17 +887,7 @@ mod tests {
                 "two"
             };
             std::fs::write(dir.join(added), "two")?;
-            let stale = fixture.run(
-                &[
-                    "apply",
-                    "--review-trust",
-                    action.argument(),
-                    "--decide-from",
-                    "-",
-                    "--json",
-                ],
-                Some(&review.encode()?),
-            )?;
+            let stale = fixture.submit(action, &review)?;
             assert_eq!(
                 stale.status.code(),
                 Some(3),
@@ -857,17 +904,7 @@ mod tests {
             std::fs::remove_file(dir.join(added))?;
             let status = fixture.status()?;
             let review = fixture.preview(&status, action)?;
-            let receipt = fixture.run(
-                &[
-                    "apply",
-                    "--review-trust",
-                    action.argument(),
-                    "--decide-from",
-                    "-",
-                    "--json",
-                ],
-                Some(&review.encode()?),
-            )?;
+            let receipt = fixture.submit(action, &review)?;
             assert!(
                 review.receipt_matches(
                     &receipt.stdout,
@@ -879,6 +916,8 @@ mod tests {
                 String::from_utf8_lossy(&receipt.stderr)
             );
             let after = fixture.status()?;
+            let counts = after.policy_counts.ok_or("updated counts")?;
+            assert_eq!((counts.directories, counts.ignores), (0, 0));
             let next = fixture.preview(&after, action)?;
             assert!(review.verified(&after, &next));
             assert_eq!(std::fs::read(repo.join(".dotman.toml"))?, config_before);

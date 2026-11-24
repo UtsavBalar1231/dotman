@@ -1,7 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 
 const minWidth = 220;
-const defaultWidth = 320;
 const storageKey = "dotman.treeWidth";
 
 export function TreeDivider() {
@@ -9,7 +8,8 @@ export function TreeDivider() {
   useLayoutEffect(() => {
     const divider = ref.current!;
     const desk = divider.closest<HTMLElement>(".desk")!;
-    let preferred = defaultWidth;
+    const pane = divider.parentElement!;
+    let preferred: number | undefined;
     try {
       const saved = Number(localStorage.getItem(storageKey));
       if (Number.isFinite(saved) && saved >= minWidth) preferred = saved;
@@ -17,16 +17,19 @@ export function TreeDivider() {
 
     function resize() {
       const max = Math.max(minWidth, desk.clientWidth - 380);
-      const width = Math.min(max, Math.max(minWidth, preferred));
-      desk.style.setProperty("--tree-width", width + "px");
+      if (preferred === undefined) desk.style.removeProperty("--tree-width");
+      else desk.style.setProperty("--tree-width", preferred + "px");
+      const width = Math.min(max, Math.max(minWidth, pane.offsetWidth));
       divider.setAttribute("aria-valuenow", String(width));
       divider.setAttribute("aria-valuemax", String(max));
     }
     function remember() {
-      try { localStorage.setItem(storageKey, String(preferred)); }
-      catch { /* Keep the width for this window. */ }
+      try {
+        if (preferred === undefined) localStorage.removeItem(storageKey);
+        else localStorage.setItem(storageKey, String(preferred));
+      } catch { /* Keep the width for this window. */ }
     }
-    function setWidth(width: number) {
+    function setWidth(width?: number) {
       preferred = width;
       resize();
       remember();
@@ -42,7 +45,8 @@ export function TreeDivider() {
     };
     const drag = (event: PointerEvent) => {
       if (event.pointerId !== dragging || !event.buttons) return;
-      preferred = Math.round(event.clientX - desk.getBoundingClientRect().left);
+      const pointer = Math.round(event.clientX - desk.getBoundingClientRect().left);
+      preferred = Math.max(minWidth, Math.min(Number(divider.getAttribute("aria-valuemax")), pointer));
       resize();
     };
     const finish = (event: PointerEvent) => {
@@ -51,22 +55,23 @@ export function TreeDivider() {
       delete divider.dataset.dragging;
       remember();
     };
-    divider.ondblclick = () => setWidth(defaultWidth);
+    divider.ondblclick = () => setWidth();
     window.addEventListener("pointermove", drag);
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
     divider.onlostpointercapture = finish;
     divider.onkeydown = event => {
+      resize();
       const current = Number(divider.getAttribute("aria-valuenow"));
       const maximum = Number(divider.getAttribute("aria-valuemax"));
       const step = event.shiftKey ? 64 : 16;
-      let width: number;
+      let width: number | undefined;
       switch (event.key) {
         case "ArrowLeft": width = Math.max(minWidth, current - step); break;
         case "ArrowRight": width = Math.min(maximum, current + step); break;
         case "Home": width = minWidth; break;
         case "End": width = maximum; break;
-        case "Enter": width = defaultWidth; break;
+        case "Enter": break;
         default: return;
       }
       event.preventDefault();
@@ -74,6 +79,7 @@ export function TreeDivider() {
     };
     const observer = new ResizeObserver(resize);
     observer.observe(desk);
+    observer.observe(pane);
     resize();
     return () => {
       observer.disconnect();

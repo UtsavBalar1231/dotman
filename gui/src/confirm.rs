@@ -1,4 +1,8 @@
+mod outgoing;
+mod tracking;
+use dotman_gui::runner::CommitMessage;
 use gtk::prelude::*;
+pub use outgoing::{MessageDraft, OutgoingDetails};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{
@@ -7,6 +11,7 @@ use std::sync::{
     mpsc,
 };
 use std::time::Duration;
+pub use tracking::TrackingDetails;
 
 fn approved(response: gtk::ResponseType, cancelled: bool) -> bool {
     response == gtk::ResponseType::Yes && !cancelled
@@ -19,7 +24,7 @@ pub fn ask(
     text: String,
     cancelled: Arc<AtomicBool>,
 ) -> Result<bool, &'static str> {
-    show(window, title, action, text, cancelled, None)
+    show(window, title, action, Content::Message(text), cancelled).map(|reply| reply.is_some())
 }
 
 pub struct SyncPrompt {
@@ -40,10 +45,74 @@ pub fn ask_sync(
         window,
         prompt.title,
         prompt.action,
-        text,
+        Content::Sync(prompt, text),
         cancelled,
-        Some(prompt),
     )
+    .map(|reply| reply.is_some())
+}
+
+enum Content {
+    Message(String),
+    Outgoing(SyncPrompt, OutgoingDetails, Option<MessageDraft>),
+    Sync(SyncPrompt, String),
+    Tracking(SyncPrompt, TrackingDetails),
+}
+
+impl Content {
+    fn build(&self, parent: &gtk::Window) -> (gtk::Dialog, Option<outgoing::Editor>) {
+        let dialog = match self {
+            Self::Outgoing(prompt, details, draft) => {
+                return outgoing::dialog(parent, prompt, details, draft.as_ref());
+            }
+            Self::Message(text) => gtk::MessageDialog::new(
+                Some(parent),
+                gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+                gtk::MessageType::Question,
+                gtk::ButtonsType::None,
+                text,
+            )
+            .upcast(),
+            Self::Sync(prompt, text) => sync_dialog(parent, prompt, text),
+            Self::Tracking(prompt, details) => tracking::dialog(parent, prompt, details),
+        };
+        (dialog, None)
+    }
+}
+
+pub struct Approval {
+    pub message: Option<CommitMessage>,
+}
+
+pub fn ask_outgoing(
+    window: &tauri::WebviewWindow,
+    prompt: SyncPrompt,
+    details: OutgoingDetails,
+    draft: Option<MessageDraft>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Option<Approval>, &'static str> {
+    show(
+        window,
+        prompt.title,
+        prompt.action,
+        Content::Outgoing(prompt, details, draft),
+        cancelled,
+    )
+}
+
+pub fn ask_tracking(
+    window: &tauri::WebviewWindow,
+    prompt: SyncPrompt,
+    details: TrackingDetails,
+    cancelled: Arc<AtomicBool>,
+) -> Result<bool, &'static str> {
+    show(
+        window,
+        prompt.title,
+        prompt.action,
+        Content::Tracking(prompt, details),
+        cancelled,
+    )
+    .map(|reply| reply.is_some())
 }
 
 fn sync_details(text: &str, accessible_title: &str) -> gtk::TextView {
@@ -59,12 +128,7 @@ fn sync_details(text: &str, accessible_title: &str) -> gtk::TextView {
         for (index, line) in text.lines().enumerate() {
             if matches!(
                 line,
-                "Capture future files in"
-                    | "Remove folder rules"
-                    | "Remove repository sources"
-                    | "Track files"
-                    | "Held back"
-                    | "Repository"
+                "Repository"
                     | "Capture from this computer"
                     | "Repository changes"
                     | "Local commits to publish"
@@ -99,13 +163,15 @@ fn sync_details(text: &str, accessible_title: &str) -> gtk::TextView {
     details
 }
 
-fn sync_dialog(parent: &gtk::Window, prompt: &SyncPrompt, text: &str) -> gtk::Dialog {
+fn styled_dialog(parent: &gtk::Window, prompt: &SyncPrompt) -> gtk::Dialog {
     let dialog = gtk::Dialog::with_buttons(
         Some(prompt.title),
         Some(parent),
         gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
         &[],
     );
+    let (width, height) = parent.size();
+    let wide = width >= 1920 && height >= 720;
     if let Some(dark) = prompt.dark
         && let Some(screen) = gtk::prelude::WidgetExt::screen(&dialog)
     {
@@ -116,6 +182,9 @@ fn sync_dialog(parent: &gtk::Window, prompt: &SyncPrompt, text: &str) -> gtk::Di
         {
             let context = dialog.style_context();
             context.add_class("dotman-sync");
+            if wide {
+                context.add_class("wide");
+            }
             if dark {
                 context.add_class("amoled");
             }
@@ -129,8 +198,15 @@ fn sync_dialog(parent: &gtk::Window, prompt: &SyncPrompt, text: &str) -> gtk::Di
             });
         }
     }
+    dialog
+}
+
+fn sync_dialog(parent: &gtk::Window, prompt: &SyncPrompt, text: &str) -> gtk::Dialog {
+    let dialog = styled_dialog(parent, prompt);
     let (width, height) = parent.size();
-    dialog.set_default_size(width.clamp(260, 580), height.clamp(240, 460));
+    let wide = width >= 1920 && height >= 720;
+    let (max_width, max_height) = if wide { (870, 690) } else { (580, 460) };
+    dialog.set_default_size(width.clamp(260, max_width), height.clamp(240, max_height));
     let content = dialog.content_area();
     content.set_border_width(18);
     content.set_spacing(12);
@@ -173,14 +249,38 @@ fn sync_dialog(parent: &gtk::Window, prompt: &SyncPrompt, text: &str) -> gtk::Di
     dialog
 }
 
+fn configure_actions(dialog: &gtk::Dialog, title: &str, action: &str, content: &Content) {
+    dialog.set_title(title);
+    let cancel = dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    let accept = dialog.add_button(action, gtk::ResponseType::Yes);
+    if matches!(content, Content::Tracking(_, _) | Content::Outgoing(..))
+        && let Some(actions) = accept
+            .parent()
+            .and_then(|p| p.downcast::<gtk::ButtonBox>().ok())
+    {
+        actions.set_child_non_homogeneous(&cancel, true);
+        actions.set_child_non_homogeneous(&accept, true);
+        actions.set_spacing(8);
+    }
+    if let Content::Sync(prompt, _) | Content::Tracking(prompt, _) | Content::Outgoing(prompt, ..) =
+        content
+    {
+        accept.style_context().add_class(if prompt.destructive {
+            "destructive-action"
+        } else {
+            "suggested-action"
+        });
+    }
+    dialog.set_default_response(gtk::ResponseType::Cancel);
+}
+
 fn show(
     window: &tauri::WebviewWindow,
     title: &str,
     action: &'static str,
-    text: String,
+    content: Content,
     cancelled: Arc<AtomicBool>,
-    sync: Option<SyncPrompt>,
-) -> Result<bool, &'static str> {
+) -> Result<Option<Approval>, &'static str> {
     if window.label() != "main" {
         return Err("Could not show confirmation");
     }
@@ -189,7 +289,7 @@ fn show(
     window
         .with_webview(move |platform| {
             if cancelled.load(Ordering::Acquire) {
-                let _ = sender.send(false);
+                let _ = sender.send(None);
                 return;
             }
             let webview = platform.inner();
@@ -199,46 +299,34 @@ fn show(
             else {
                 return;
             };
-            let dialog = sync.as_ref().map_or_else(
-                || {
-                    gtk::MessageDialog::new(
-                        Some(&parent),
-                        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
-                        gtk::MessageType::Question,
-                        gtk::ButtonsType::None,
-                        &text,
-                    )
-                    .upcast()
-                },
-                |prompt| sync_dialog(&parent, prompt, &text),
-            );
-            dialog.set_title(&title);
-            dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-            let accept = dialog.add_button(action, gtk::ResponseType::Yes);
-            if let Some(prompt) = &sync {
-                accept.style_context().add_class(if prompt.destructive {
-                    "destructive-action"
-                } else {
-                    "suggested-action"
-                });
+            let (dialog, editor) = content.build(&parent);
+            configure_actions(&dialog, &title, action, &content);
+            if let Some(editor) = &editor {
+                editor.bind(&dialog);
             }
-            dialog.set_default_response(gtk::ResponseType::Cancel);
             let completion = Rc::new(RefCell::new(Some(sender)));
             let on_response = completion.clone();
             let response_cancelled = cancelled.clone();
             let handler = Rc::new(RefCell::new(None));
             let response_handler = handler.clone();
             let signal = dialog.connect_response(move |dialog, response| {
+                let result = if approved(response, response_cancelled.load(Ordering::Acquire)) {
+                    match editor.as_ref().map(outgoing::Editor::message).transpose() {
+                        Ok(message) => Some(Approval {
+                            message: message.flatten(),
+                        }),
+                        Err(_) => return,
+                    }
+                } else {
+                    None
+                };
                 let sender = on_response.borrow_mut().take();
                 if let Some(sender) = sender {
                     let handler = response_handler.borrow_mut().take();
                     if let Some(handler) = handler {
                         dialog.disconnect(handler);
                     }
-                    let _ = sender.send(approved(
-                        response,
-                        response_cancelled.load(Ordering::Acquire),
-                    ));
+                    let _ = sender.send(result);
                     dialog.close();
                 }
             });
@@ -249,7 +337,7 @@ fn show(
             dialog.connect_destroy(move |_| {
                 let sender = on_destroy.borrow_mut().take();
                 if let Some(sender) = sender {
-                    let _ = sender.send(false);
+                    let _ = sender.send(None);
                 }
                 let parent = parent_weak.clone();
                 let webview = webview_weak.clone();

@@ -377,12 +377,25 @@ pub struct StatusSummary {
 
 #[derive(Debug, Deserialize)]
 struct ReviewMarker {
+    #[serde(default)]
+    kept_local: std::collections::BTreeMap<String, String>,
     hooks: ReviewHooks,
     remote: ReviewRemote,
+    unapproved_dirs: Option<Vec<serde::de::IgnoredAny>>,
+    retained_ignore_patterns: Option<Vec<serde::de::IgnoredAny>>,
     #[serde(default)]
     current_identity: Option<StatusIdentity>,
     #[serde(default)]
     recorded_identity: Option<StatusIdentity>,
+}
+
+/// Counts of standing grants awaiting local approval in the last status report.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct PolicyCounts {
+    /// Configured directories awaiting approval.
+    pub directories: usize,
+    /// Removed ignore rules still enforced locally.
+    pub ignores: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -531,12 +544,16 @@ pub fn parse_recovery(input: &[u8]) -> Result<Vec<RecoveryStep>, String> {
 /// Typed records retained in the core, not an IPC payload.
 #[derive(Debug)]
 pub struct StatusReport {
+    /// Remembered local path digests and their safe display labels.
+    pub kept_local: std::collections::BTreeMap<String, String>,
     /// Versioned resolved context.
     pub context: StatusContext,
     /// Entries in wire order, including duplicate keys.
     pub entries: Vec<StatusEntry>,
     /// Counts supplied by the CLI.
     pub summary: StatusSummary,
+    /// Pending grants when the companion reported both sets.
+    pub policy_counts: Option<PolicyCounts>,
     /// Last observed remote position.
     pub remote: ReviewRemote,
     /// Hook standing and projection, if the complete projection is supported.
@@ -650,9 +667,17 @@ pub fn parse_status(stdout: &[u8], exit_code: Option<i32>) -> Result<StatusReply
         return Err("review identity does not match context".into());
     }
     Ok(StatusReply::Report(StatusReport {
+        kept_local: review.kept_local,
         context,
         entries,
         summary: summary.ok_or("missing summary")?,
+        policy_counts: review
+            .unapproved_dirs
+            .zip(review.retained_ignore_patterns)
+            .map(|(dirs, rules)| PolicyCounts {
+                directories: dirs.len(),
+                ignores: rules.len(),
+            }),
         remote: review.remote,
         hooks: serde_json::from_value(serde_json::Value::Object(review.hooks.projection))
             .ok()

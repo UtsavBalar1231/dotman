@@ -52,8 +52,6 @@ return <>
         <div className="sync-heading"><h2 id="review-title" aria-live="polite">Outgoing sync</h2><p id="review-remote"></p></div><button id="close-review" className="icon-button" aria-label="Close review" title="Close review"><Icon name="close" /></button></div>
       <div id="review-body">
       <p id="review-message" role="status" aria-live="polite" tabIndex={-1}></p>
-      <div id="review-items"></div>
-      <div id="line-summary" hidden><p id="selected-effect"></p><ul id="selected-lines"></ul><button id="leave-lines" type="button">Leave selected-only mode</button></div>
       <details id="commit-editor" hidden>
         <summary title="View or edit the commit message"><Icon name="chevron-right" className="disclosure-glyph" />
           <span>Commit message</span><span id="commit-preview"></span></summary>
@@ -62,6 +60,8 @@ return <>
         <p id="commit-error" role="status" aria-live="polite"></p>
         <button id="restore-commit-message" type="button" hidden>Use suggested message</button>
       </details>
+      <div id="review-items"></div>
+      <div id="line-summary" hidden><p id="selected-effect"></p><ul id="selected-lines"></ul><button id="leave-lines" type="button">Leave selected-only mode</button></div>
       </div>
       <div className="review-action-strip">
       <p id="review-footnote" hidden>Hooks require separate approval.</p>

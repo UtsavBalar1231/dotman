@@ -1,10 +1,38 @@
-//! Process primitives confined to the GUI's Linux child runner.
+//! Linux primitives for the desktop process.
 
-use std::io;
+use std::io::{self, Write as _};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
+
+#[link(name = "fontconfig")]
+unsafe extern "C" {
+    fn FcConfigAppFontAddFile(config: *mut libc::c_void, file: *const u8) -> libc::c_int;
+}
+
+/// Registers the bundled web font for native dialogs in this process.
+/// Keep the returned file open while Pango can request its glyphs.
+///
+/// # Errors
+/// Returns an error if the private font file cannot be created or loaded.
+pub fn native_ui_font() -> io::Result<std::fs::File> {
+    // SAFETY: the name is NUL-terminated and the call returns a new owned descriptor.
+    let fd = unsafe { libc::memfd_create(c"dotman-font".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: memfd_create succeeded and ownership is transferred exactly once.
+    let mut font = unsafe { std::fs::File::from_raw_fd(fd) };
+    font.write_all(include_bytes!("../assets/departure-mono.otf"))?;
+    let path = std::ffi::CString::new(format!("/proc/self/fd/{fd}"))?;
+    // SAFETY: null selects the process configuration. The path is valid for the call
+    // and the returned File retains the underlying font for subsequent Pango reads.
+    if unsafe { FcConfigAppFontAddFile(std::ptr::null_mut(), path.as_ptr().cast()) } == 0 {
+        return Err(io::Error::other("could not register the desktop font"));
+    }
+    Ok(font)
+}
 
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments and has no preconditions.

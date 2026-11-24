@@ -3,6 +3,9 @@ build of Departure Mono) that github.com/UtsavBalar1231/UtsavBalar serves, witho
 its two icon glyphs: U+0020-007E, U+00A0-017F, punctuation, arrows, box drawing,
 blocks and geometric shapes.
 
+The native dialog uses the same subset in an uncompressed OpenType container
+(gui/assets/departure-mono.otf).
+
 Departure Mono: Copyright 2022-2024 Helena Zhang, SIL Open Font License 1.1, below.
 
 Copyright 2022–2024 Helena Zhang (helenazhang.com).

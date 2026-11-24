@@ -12,6 +12,8 @@ class Element {
     this.listeners = {};
     this.attributes = {};
   }
+  get textContent() { return (this.text ?? "") + this.children.map(child => child.textContent).join(""); }
+  set textContent(value) { this.text = value; this.children = []; }
   append(...children) {
     for (const child of children) child.parentElement = this;
     this.children.push(...children);

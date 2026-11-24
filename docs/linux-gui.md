@@ -73,13 +73,26 @@ file. Variants requiring unsupported settings or mode edits need terminal
 review. Templates cannot be captured as host variants. System files are read-only.
 Directory and ignore standing grants and pending hook approval have separate native reviews.
 
+In **Settings → Local capture policy**, each review reports whether the latest
+status has directories or retained ignore rules awaiting approval. For pending
+grants, the confirmation shows the rules and affected files. Approval changes
+the local capture policy. The next sync handles the files.
+
 ## Track files or a folder
 
 Open **Track…** in the file tree and choose **Choose files…** or **Choose folder…**.
 The chooser shows hidden dotfiles and supports selecting several files together.
 The review drawer lists new repository sources, held files and the reason for
-each hold. Existing sources keep their contents. Tracking a folder also approves
-capture of eligible new files beneath it on this machine during future syncs.
+each hold. Uncheck files to leave them out. For longer lists, filter by part of
+a path, such as `patches/`, and clear **Select matching files** to omit the
+matches together. Clearing the filter preserves your choices.
+
+Folder discovery honors nested `.gitignore` files and skips generated tool caches, Claude agent memory and agent instruction files. A skipped directory has one entry in **Held back**. To track an individual instruction file, use **Choose files…**.
+
+Tracking the full folder also enables capture of new eligible files beneath it.
+A partial selection tracks only the checked files by default. Choose **Track
+future files in this folder** to keep capturing new files. If a new or existing
+folder rule covers an omitted file, Dotman adds an exact ignore pattern for it.
 
 Choose **Track selection…** and confirm to write the reviewed files locally.
 Use **Review changes** when you are ready to sync. A changed selection requires
@@ -90,6 +103,17 @@ In **Files**, expand a held file to see why Dotman held it. A guard finding can
 include the rule and its location. The row shows the actions available for that
 file. Choose an action to open its native review. The result appears above the
 file browser and can be dismissed after the review finishes.
+
+In **Review changes → Needs a decision**, expand a held file to see its reason
+and available actions. **Review tracking…** opens native approval for an
+eligible binary or large file. The drawer refreshes after the decision.
+Choose **Keep local** for a new held binary, large file, or sensitive file to skip
+its exact path during folder tracking on this computer. This choice survives
+restarts and content changes. To undo it, open **Settings → Kept local** and
+choose **Review again**. Other machines keep their own choices. For a held
+change to an already tracked file, **Keep held for this preview** acknowledges
+the current preview. Select **Review file** on a comparison row to inspect
+both copies and choose how to resolve the change.
 
 To keep a local copy and remove its repository sources, select a file and choose
 **Stop tracking…**. For a folder, focus its row and choose **Track… → Stop
@@ -155,12 +179,12 @@ and review again** to start a fresh review. If a copy changes during review,
 refresh and compare it again.
 
 **Review changes** opens the outgoing sync drawer. Expand a file group to
-inspect its contents. Expand **Commit message** to edit the suggestion. **Use
+inspect its contents. The **Commit message** editor opens above the file groups when a new commit has a suggested message. **Use
 suggested message** restores it. Closing the drawer with an edited message
 or selected lines asks whether to discard them. Refreshing status with queued
 file decisions also asks before clearing them. The branch counts describe the last fetch. Choose
 **Continue to confirmation** to inspect the reviewed files and commit message
-in the native dialog. **Sync without hooks** starts the whole sync.
+in the native dialog. You can edit the message directly there or choose **Use suggestion** to restore the default. The message applies to the new commit created by this sync. **Sync without hooks** starts the whole sync.
 The receipt lists file changes first. Expand **Sync activity** to see the
 stages reached, or **Hook activity** for the reported hook outcome.
 

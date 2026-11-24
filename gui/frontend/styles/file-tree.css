@@ -1,25 +1,37 @@
+/* GTK overlay scrollbars can cover content inside the scrollport. */
+#rows > .file-tree { padding-inline-end: .75rem; }
+.file-tree {
+  --tree-toggle: .85em;
+  --tree-symbol: 1em;
+  --tree-gap: .35em;
+  --tree-inset: .5em;
+  --tree-label-start: calc(var(--tree-inset) + var(--tree-toggle) + var(--tree-symbol) + 2 * var(--tree-gap));
+}
 .file-tree-branch {
   display: flex;
   align-items: center;
-  gap: .35rem;
-  min-height: 44px;
-  padding: .35rem .5rem;
+  gap: .35em;
+  min-height: var(--tree-row-height);
+  padding: .35em var(--tree-inset);
   color: var(--muted);
-  font-size: .85rem;
   font-weight: normal;
   border-radius: var(--control-radius);
   cursor: pointer;
 }
-.file-tree li.row { cursor: pointer; }
+.file-tree li.row { cursor: pointer; padding-inline-start: var(--tree-label-start); }
 .file-tree-branch:hover { background: var(--hover); }
 .file-tree-folder:focus-visible { outline: none; }
 .file-tree-folder:focus-visible > .file-tree-branch { outline: 2px solid var(--accent); outline-offset: -2px; }
 .file-tree-folder[aria-expanded="true"] > .file-tree-branch .disclosure-glyph { transform: rotate(90deg); color: var(--accent); }
 .file-tree li:has(> .held-row):focus-visible { outline-offset: -2px; }
-.file-tree-name { display: flex; align-items: flex-start; gap: .35rem; overflow-wrap: anywhere; min-width: 0; }
+.file-tree-label,.file-tree-count { font-size: .85em; }
+.file-tree-name .workspace-glyph { width: var(--tree-symbol); height: var(--tree-symbol); }
+.file-tree-name .disclosure-glyph { width: var(--tree-toggle); height: var(--tree-toggle); }
+.file-tree-name { display: flex; align-items: center; gap: var(--tree-gap); overflow-wrap: anywhere; min-width: 0; }
 .file-tree li { border-top: 0; }
-.file-tree .row { flex-wrap: wrap; gap: .1rem .5rem; min-height: 44px; }
-.file-tree summary.row { display: grid; grid-template-columns: auto minmax(0,1fr); }
+.file-tree .row { flex-wrap: wrap; gap: .1rem .5rem; min-height: var(--tree-row-height); }
+.file-tree summary.row { display: grid; grid-template-columns: var(--tree-toggle) minmax(0,1fr); padding-inline-start: var(--tree-inset); column-gap: calc(var(--tree-symbol) + 2 * var(--tree-gap)); }
+.file-tree summary.row > .disclosure-glyph { width: var(--tree-toggle); height: var(--tree-toggle); }
 .file-tree summary.row .row-status { grid-column: 2; padding-inline-start: 0; }
 .file-tree-folder summary.row .row-key::before { display: none; }
 .file-tree .row-key { display: flex; flex: 1 1 100%; max-inline-size: 100%; gap: .5rem; }
@@ -27,5 +39,11 @@
 .file-tree .row-status { flex: 1 1 100%; min-width: 0; text-align: left; }
 .file-tree-folder .row-status { padding-left: 1.15rem; }
 .file-tree-count { margin-left: auto; font-variant-numeric: tabular-nums; }
-.file-tree-folder > ul { padding-left: .5rem; }
-.file-tree ul ul ul ul .file-tree-folder > ul { padding-left: 0; }
+.file-tree-folder > ul { margin-inline-start: .375em; border-inline-start: 1px solid var(--divider); padding-inline-start: .375em; }
+.file-tree ul ul ul ul .file-tree-folder > ul { margin-inline-start: 0; border: 0; padding-inline-start: 0; }
+@container navigator (max-width: 20rem) {
+  .file-tree { --tree-label-start: calc(var(--tree-inset) + var(--tree-toggle) + var(--tree-gap)); }
+  .file-tree-name .workspace-glyph:not(.disclosure-glyph) { display: none; }
+  .file-tree .row { column-gap: var(--tree-gap); }
+  .file-tree-folder > ul { margin-inline-start: .25em; padding-inline-start: .25em; }
+}

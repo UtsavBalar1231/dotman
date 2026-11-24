@@ -224,11 +224,12 @@ export function render<T extends TreeEntry>(
       const label = names.join("/");
       const path = current.prefix ? `${current.prefix}/${label}` : label;
       li.setAttribute("data-folder-path", path);
-      name.textContent = label;
+      const folderLabel = document.createElement("span");
+      folderLabel.className = "file-tree-label";
+      folderLabel.textContent = label;
       li.setAttribute("data-tree-label", label);
       li.setAttribute("aria-label", `${label} (${item.count})`);
-      name.prepend(icon("folder"));
-      name.prepend(icon("chevron-right", "disclosure-glyph"));
+      name.append(icon("chevron-right", "disclosure-glyph"), icon("folder"), folderLabel);
       const total = document.createElement("span");
       total.className = "file-tree-count";
       total.textContent = String(item.count);

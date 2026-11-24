@@ -1,5 +1,5 @@
 dialog#source-editor {
-  width: min(68rem, 94vw);
+  width: min(calc(68 * var(--workspace-unit)), 94vw);
   padding: 0;
 }
 #source-editor[open] {
@@ -18,7 +18,7 @@ dialog#source-editor {
 .source-location span, .source-location h2 { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .source-location h2 { font-size:clamp(1.12rem,2.2vw,1.55rem); }
 .source-heading button { flex:none; }
-.source-heading .source-save { min-height:40px; padding-inline:1rem; }
+.source-heading .source-save { min-height:2.5rem; padding-inline:1rem; }
 .source-tools { margin:0; min-width:0; flex-wrap:wrap; gap:.2rem; padding-block:.4rem; border:0; border-block:1px solid var(--divider); background:var(--navigation-surface); }
 .source-tools button,.source-status button,.source-status select { color:var(--muted); font-size:.82rem; background:transparent; border:1px solid transparent; border-radius:.45rem; }
 .source-tools button { display:inline-flex; align-items:center; gap:.45rem; }

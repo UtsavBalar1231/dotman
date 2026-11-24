@@ -17,6 +17,74 @@ function reviewDescription(preview: TrackingPreview, stop: boolean, actionable: 
     : "Add the listed files to this repository. You can sync them later.";
 }
 
+function fileChoices(paths: string[], folder: string | undefined, excluded: Set<number>, changed: () => void) {
+  const container = document.createElement("div");
+  container.className = "tracking-choices";
+  const filter = document.createElement("input");
+  filter.type = "search";
+  filter.placeholder = "Filter by name or path";
+  filter.setAttribute("aria-label", "Filter files to track");
+  if (paths.length > 7) container.append(filter);
+
+  const bulk = document.createElement("label");
+  bulk.className = "tracking-bulk";
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  const caption = document.createElement("span");
+  bulk.append(toggle, caption);
+  if (paths.length > 1) container.append(bulk);
+  const list = document.createElement("ul");
+  const empty = document.createElement("p");
+  empty.textContent = "No matching files.";
+  container.append(list, empty);
+  const rows = paths.map((path, index) => {
+    const row = document.createElement("li");
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = true;
+    box.setAttribute("aria-label", path);
+    const relative = folder && path.startsWith(folder + "/") ? path.slice(folder.length + 1) : path;
+    label.title = path;
+    label.append(box, pathLabel(relative));
+    row.append(label);
+    list.append(row);
+    box.addEventListener("change", () => {
+      if (box.checked) excluded.delete(index); else excluded.add(index);
+      update();
+    });
+    return { row, box, index, path: path.toLowerCase() };
+  });
+  function update() {
+    const query = filter.value.trim().toLowerCase();
+    let visible = 0;
+    let checked = 0;
+    for (const item of rows) {
+      item.row.hidden = !item.path.includes(query);
+      if (item.row.hidden) continue;
+      visible++;
+      if (item.box.checked) checked++;
+    }
+    toggle.checked = visible > 0 && checked === visible;
+    toggle.indeterminate = checked > 0 && checked < visible;
+    toggle.disabled = !visible;
+    caption.textContent = query ? `Select matching files (${visible})` : "Select all files";
+    empty.hidden = visible > 0;
+    changed();
+  }
+  toggle.addEventListener("change", () => {
+    for (const { row, box, index } of rows) {
+      if (row.hidden) continue;
+      box.checked = toggle.checked;
+      if (box.checked) excluded.delete(index); else excluded.add(index);
+    }
+    update();
+  });
+  filter.addEventListener("input", update);
+  update();
+  return container;
+}
+
 export function trackingFlow(invoke: TauriCore["invoke"], available: () => boolean, setBusy: (working: boolean) => Promise<void>,
   refresh: (message: string, focusKey?: string) => Promise<void>, selectedFolder: () => string | null) {
   function element<T extends HTMLElement>(id: string) {
@@ -31,6 +99,7 @@ export function trackingFlow(invoke: TauriCore["invoke"], available: () => boole
   const status = element("tracking-message");
   const groups = element("tracking-groups");
   let pending: { id: string; action: TrackingAction; preview: TrackingPreview } | null = null;
+  const excluded = new Set<number>();
   let working = false;
   let launcher: HTMLElement | null = null;
 
@@ -41,7 +110,7 @@ export function trackingFlow(invoke: TauriCore["invoke"], available: () => boole
   }
 
   function group(label: string, glyph: IconName, paths: readonly string[], expanded: boolean,
-    reasons?: Readonly<Record<string, string>>) {
+    reasons?: Readonly<Record<string, string>>, choices?: HTMLElement) {
     if (!paths.length) return;
     const details = document.createElement("details");
     details.open = expanded;
@@ -52,6 +121,11 @@ export function trackingFlow(invoke: TauriCore["invoke"], available: () => boole
     count.textContent = String(paths.length);
     summary.setAttribute("aria-label", `${label} (${paths.length})`);
     summary.append(icon(glyph), label, count, icon("chevron-right", "disclosure-glyph"));
+    if (choices) {
+      details.append(summary, choices);
+      groups.append(details);
+      return;
+    }
     const list = document.createElement("ul");
     for (const path of paths) {
       const item = document.createElement("li");
@@ -91,15 +165,35 @@ export function trackingFlow(invoke: TauriCore["invoke"], available: () => boole
       element("tracking-title").textContent = stop ? "Stop tracking" : "Review tracking";
       drawer.dataset.action = action;
       const actionable = preview.files.length + preview.folders.length + (stop ? preview.existing.length : 0) > 0;
-      element("tracking-scope").textContent = reviewDescription(preview, stop, actionable);
       groups.replaceChildren();
-      group(stop ? "Folder rules to remove" : "Track folder", "folder", preview.folders, true);
+      excluded.clear();
       const held = Object.keys(preview.held);
-      group("Held back", "warning", held, true, preview.held);
-      group(stop ? "Repository sources to remove" : "Files to track", "repository", preview.files, true);
+      const selectionCount = element("tracking-count-label");
+      const future = element<HTMLInputElement>("tracking-future-input");
+      future.checked = false;
+      element("tracking-location").hidden = stop || !preview.folders.length;
+      element("tracking-root").textContent = preview.folders.join(", ");
+      const update = () => {
+        const count = preview.files.length - excluded.size;
+        apply.disabled = excluded.size > 0 && !count;
+        const optionalRule = action === "track_folder" && excluded.size > 0;
+        element("tracking-future").hidden = !optionalRule;
+        if (!optionalRule) future.checked = false;
+        selectionCount.textContent = stop || !preview.files.length ? "Local change" : `${count} of ${preview.files.length} selected`;
+        const scope = element("tracking-scope");
+        if (excluded.size && future.checked) scope.textContent = "New files will be eligible for future syncs. Unchecked paths will be ignored.";
+        else if (excluded.size) scope.textContent = "Only checked files will be added. Unchecked files stay untracked. No new folder capture rule will be added.";
+        else scope.textContent = reviewDescription(preview, stop, actionable);
+      };
+      future.onchange = update;
+      const choices = !stop && preview.files.length
+        ? fileChoices(preview.files, preview.folders[0], excluded, update) : undefined;
+      update();
+      if (stop) group("Folder rules to remove", "folder", preview.folders, true);
+      group(stop ? "Repository sources to remove" : "Files to track", "repository", preview.files, true, undefined, choices);
+      group("Held back", "warning", held, !actionable, preview.held);
       group(stop ? "Home paths kept" : "Already tracked", "home", preview.existing, !actionable && !held.length);
       apply.hidden = !actionable;
-      apply.disabled = false;
       apply.textContent = stop ? "Stop tracking…" : "Track selection…";
       status.textContent = "";
       drawer.showModal();
@@ -116,7 +210,7 @@ export function trackingFlow(invoke: TauriCore["invoke"], available: () => boole
   close.addEventListener("click", leave);
   drawer.addEventListener("cancel", event => { event.preventDefault(); leave(); });
   apply.addEventListener("click", async () => {
-    if (!pending || working || apply.hidden) return;
+    if (!pending || working || apply.hidden || apply.disabled) return;
     const {id, action, preview} = pending;
     pending = null;
     working = true;
@@ -128,14 +222,15 @@ export function trackingFlow(invoke: TauriCore["invoke"], available: () => boole
     try {
       const theme = document.documentElement.dataset.theme;
       const dark = theme === "dark" || (theme !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-      const done = await invoke("apply_tracking", {id,dark});
+      const keepRule = action === "track_folder" && excluded.size > 0 && element<HTMLInputElement>("tracking-future-input").checked;
+      const done = await invoke("apply_tracking", {id, dark, selection: {excluded: [...excluded], keep_folder_rule: keepRule}});
       if (!done) message = "Tracking change cancelled.";
       else if (action === "stop_tracking") message = "Stopped tracking. Local copies kept.";
       else {
-        focusKey = preview.files[0];
-        const count = preview.files.length;
+        focusKey = preview.files.find((_, i) => !excluded.has(i));
+        const count = preview.files.length - excluded.size;
         const held = Object.keys(preview.held).length;
-        message = `Tracked ${count} ${count === 1 ? "file" : "files"}${preview.folders.length ? " and enabled folder capture" : ""}.${held ? ` ${held} held back.` : ""}`;
+        message = `Tracked ${count} ${count === 1 ? "file" : "files"}${(!excluded.size || keepRule) && preview.folders.length ? " and enabled folder capture" : ""}.${held ? ` ${held} held back.` : ""}`;
       }
     } catch (cause) {
       message = typeof cause === "string" ? cause : "Tracking result unavailable. Check the refreshed file tree.";

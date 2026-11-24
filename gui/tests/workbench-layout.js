@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { statusFixture, withDesktop } = require("./desktop-browser");
+const checkTreeLayout = require("./tree-layout");
 
 const evidence = process.env.DOTMAN_GUI_EVIDENCE;
 const layoutCases = [[1000, 720], [1440, 900], [390, 600]];
@@ -319,8 +320,7 @@ async function check({ page, evaluate, waitFor, resize, key }) {
 
   await click("#nav-review");
   await waitFor(visible("#commit-editor summary"));
-  assert.equal(await evaluate("document.querySelector('#commit-editor').open"), false);
-  await click("#commit-editor summary");
+  assert.equal(await evaluate("document.querySelector('#commit-editor').open"), true);
   await resize(1440, 900);
   assert.equal(await evaluate(`(() => {
     const drawer = document.querySelector("#review");
@@ -583,7 +583,24 @@ async function checkTracking({ evaluate, waitFor, resize, key }) {
   assert.equal(await evaluate("document.querySelector('#tracking-drawer footer').getClientRects().length"), 0);
   assert.match(await evaluate("document.getElementById('tracking-scope').textContent"), /no new files/i);
   await key("Escape");
-
+  await evaluate("window.heldOnly = false; document.querySelector('#track-menu summary').click(); document.getElementById('track-folder').click()");
+  await waitFor("document.getElementById('tracking-drawer').open");
+  const bulk = ".tracking-bulk input";
+  const filter = ".tracking-choices input[type=search]";
+  const setFilter = value => evaluate(`(() => {const input = document.querySelector('${filter}'); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input'));})()`);
+  await evaluate(`document.querySelector('${bulk}').click()`);
+  assert.equal(await evaluate("document.getElementById('tracking-apply').disabled"), true);
+  await setFilter("name-17");
+  await evaluate(`document.querySelector('${bulk}').click()`);
+  await setFilter("");
+  assert.equal(await evaluate(`document.querySelector('${bulk}').indeterminate`), true);
+  assert.equal(await evaluate("document.getElementById('tracking-count-label').textContent"), "1 of 18 selected");
+  assert.match(await evaluate("document.getElementById('tracking-scope').textContent"), /No new folder capture rule/);
+  await evaluate("document.getElementById('tracking-future-input').click()");
+  assert.match(await evaluate("document.getElementById('tracking-scope').textContent"), /Unchecked paths will be ignored/);
+  await evaluate("document.getElementById('tracking-apply').click()");
+  await waitFor("!document.getElementById('tracking-drawer').open");
+  assert.deepEqual(await evaluate("window.trackingSelection"), {excluded: Array.from({length:17}, (_, i) => i), keep_folder_rule:true});
 }
 
 async function checkStatusIssue({ evaluate, waitFor, resize }) {
@@ -734,10 +751,120 @@ async function checkDestination({ evaluate, waitFor, resize }) {
   assert.equal(await evaluate("document.querySelectorAll('.destination-link').length"),1);
   assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"),true);
   await click("#nav-files");
-  assert.equal(await evaluate("document.getElementById('remote').textContent"), "Last fetched: 0 ahead · 0 behind");
+  assert.equal(await evaluate("document.getElementById('remote').textContent"), "Matched at fetch");
+  assert.match(await evaluate("document.getElementById('open-destination').title"), /0 ahead · 0 behind/);
+}
+
+async function checkWideWorkbench({ evaluate, waitFor, resize, key }) {
+  await waitFor("document.querySelector('#rows [role=tree]')");
+  const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const geometry = [];
+  for (const [width, height, treeWidth, controlHeight] of [
+    [1440, 900, 320, 44], [1920, 1080, 400, 47], [3440, 1374, 480, 52], [390, 640, 390, 44],
+  ]) {
+    await resize(width, height);
+    await waitFor(`document.getElementById('entries').offsetWidth === ${treeWidth}`);
+    await click("#track-menu summary");
+    const metrics = await evaluate(`(() => {
+      const rect = selector => document.querySelector(selector).getBoundingClientRect();
+      const font = selector => parseFloat(getComputedStyle(document.querySelector(selector)).fontSize);
+      return {
+        width: innerWidth, tree: rect('#entries').width, refresh: rect('#refresh').height,
+        menuItem: rect('#track-files').height, menuFits: rect('.track-options').left >= 0,
+        treeFont: font('#rows .row-name'), folderIcon: rect('.file-tree-name .workspace-glyph:not(.disclosure-glyph)').height,
+        folderHeight: rect('.file-tree-branch').height, searchHeight: rect('#search').height, titleFont: font('#guide-title'), diffFont: font('#diff-text'),
+        horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
+      };
+    })()`);
+    assert.equal(Math.round(metrics.refresh), controlHeight);
+    assert.equal(Math.round(metrics.menuItem), controlHeight);
+    assert.equal(metrics.menuFits, true);
+    assert.equal(Math.round(metrics.searchHeight), controlHeight);
+    assert.ok(metrics.folderIcon <= metrics.treeFont * 1.2);
+    assert.equal(metrics.folderHeight, 40);
+    assert.equal(metrics.horizontalOverflow, false);
+    if (geometry.length) assert.equal(metrics.treeFont, geometry[0].treeFont);
+    await click("#track-menu summary");
+    await click("#nav-settings");
+    metrics.settings = await evaluate("document.getElementById('settings').offsetWidth");
+    await click("#nav-files");
+    await click("#nav-review");
+    await waitFor("document.getElementById('review').matches(':modal')");
+    metrics.review = await evaluate("document.getElementById('review').offsetWidth");
+    await key("Escape");
+    await waitFor("!document.getElementById('review').open");
+    geometry.push(metrics);
+  }
+  assert.deepEqual(geometry.map(row => row.settings), [1024, 1280, 1536, 390]);
+  assert.deepEqual(geometry.map(row => row.review), [624, 780, 936, 390]);
+  assert.ok(Math.abs(geometry[2].titleFont / geometry[0].titleFont - 1.25) < .001);
+  assert.ok(Math.abs(geometry[2].diffFont / geometry[0].diffFont - 1.5) < .001);
+  await resize(1920, 1080);
+  await waitFor("document.getElementById('entries').offsetWidth === 400");
+  await evaluate("document.querySelector('.tree-divider').focus()");
+  await key("ArrowRight");
+  await resize(3440, 1374);
+  await waitFor("document.querySelector('.tree-divider').ariaValueMax === '3060'");
+  assert.equal(await evaluate("document.getElementById('entries').offsetWidth"), 416);
+  await key("Enter");
+  assert.equal(await evaluate("document.getElementById('entries').offsetWidth"), 480);
+  assert.equal(await evaluate("localStorage.getItem('dotman.treeWidth')"), null);
+  await key("Home");
+  await click("#track-menu summary");
+  assert.equal(await evaluate(`(() => {
+    const pane = document.getElementById("entries");
+    const menu = document.querySelector(".track-options").getBoundingClientRect();
+    return pane.scrollWidth === pane.clientWidth && menu.left >= 0 && menu.right <= pane.offsetWidth;
+  })()`), true, "Toolbar and menu fit a manually narrowed ultrawide sidebar");
+  if (evidence) {
+    fs.mkdirSync(evidence, { recursive: true });
+    fs.writeFileSync(path.join(evidence, "wide-geometry.json"), JSON.stringify(geometry, null, 2));
+  }
+}
+
+async function checkCleanBrowser({ evaluate, waitFor, resize, key }) {
+  await resize(1000, 720);
+  await waitFor("document.querySelector('#rows [role=tree]')");
+  await waitFor("document.querySelector('#entries').offsetWidth === 320");
+  assert.equal(await evaluate("document.querySelector('#guide-title').textContent"), "152 files match the repository");
+  await evaluate("document.fonts.ready.then(() => document.querySelector('#group-status').click())");
+  assert.equal(await evaluate("document.querySelector('.file-list-empty button').textContent"), "Browse all files");
+  assert.equal(await evaluate(`(() => {
+    const label = document.querySelector('#remote').getBoundingClientRect();
+    const clean = document.querySelector('#clean').getBoundingClientRect();
+    return label.bottom > clean.top && clean.bottom > label.top && label.right < clean.left;
+  })()`), true, "The last fetch and clean count share a line in the default 320px tree");
+  await evaluate("document.querySelector('.tree-divider').focus()");
+  await key("Home");
+  assert.equal(await evaluate(`(() => {
+    const pane = document.querySelector('#entries');
+    return pane.offsetWidth === 220 && pane.scrollWidth === pane.clientWidth;
+  })()`), true, "The sidebar fits at its minimum width");
+  await evaluate("document.querySelector('.file-list-empty button').focus()");
+  await key(" ");
+  assert.equal(await evaluate("document.activeElement.id"), "group-folders");
+  assert.equal(await evaluate("document.querySelectorAll('#rows [role=treeitem]').length"), 152);
+  await evaluate(`(() => {
+    const search = document.querySelector('#search');
+    search.value = 'absent';
+    search.dispatchEvent(new Event('input'));
+  })()`);
+  assert.equal(await evaluate("document.querySelector('.file-list-empty button').textContent"), "Clear search");
+  await evaluate("document.querySelector('.file-list-empty button').click()");
+  assert.equal(await evaluate("document.activeElement.id"), "search");
+  assert.equal(await evaluate("document.querySelectorAll('#rows [role=treeitem]').length"), 152);
 }
 
 async function main() {
+  await withDesktop(statusFixture, checkWideWorkbench);
+  await checkTreeLayout();
+  await withDesktop(statusFixture + `
+    window.fixtureStatus.remote = "Last fetched: 0 ahead · 0 behind";
+    window.fixtureStatus.clean = 152;
+    window.fixtureStatus.entries = Array.from({length: 152}, (_, i) => ({
+      ...window.fixtureStatus.entries[2], id: "clean-" + i, key: "file-" + i
+    }));
+  `, checkCleanBrowser);
   await withDesktop(statusFixture + `
     const invokeStatus = window.__TAURI__.core.invoke;
     window.readIssue = "invalid_report";
@@ -790,7 +917,8 @@ async function main() {
   await withDesktop(statusFixture + `
     window.fixtureStatus.entries[0].key = ".config/niri/config.toml";
     const invoke = window.__TAURI__.core.invoke;
-    window.__TAURI__.core.invoke = async (command, args) => command === "preview_tracking" ?
+    window.__TAURI__.core.invoke = async (command, args) => command === "apply_tracking"
+      ? (window.trackingSelection = args.selection, true) : command === "preview_tracking" ?
       ["test-review", { folders: window.heldOnly ? [] : [".config/app"], files: window.heldOnly ? [] : Array.from({ length: 18 }, (_, i) => ".config/app/" + "long-name-".repeat(12) + i),
         existing: [], held: { ".config/app/.env": "Protected filename" } }] : invoke(command, args);
   `, checkTracking);

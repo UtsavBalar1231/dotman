@@ -60,19 +60,35 @@ fn preflight(
     let mut run = runner::start_policy_preflight(&report.context, action)
         .map_err(|_| writer_view("error", "Could not start policy review.", true))?;
     let receipt = wait_apply(&mut run, flag)?;
+    let private_keys = redacted(report);
+    if !private_keys.is_empty() {
+        return Err(writer_view(
+            "attention",
+            "A protected filename prevents capture policy review. Open Files and inspect the held entries before trying again.",
+            true,
+        ));
+    }
+    if !receipt.status.success() {
+        return Err(writer_view(
+            "attention",
+            "Dotman could not verify the capture inventory. Check Files for held or unrecorded changes and Settings → Repository for the configured paths. The current capture policy is still in effect.",
+            true,
+        ));
+    }
     PolicyReview::parse(
         &receipt.stdout,
         receipt.status.code(),
         report,
         action,
-        &redacted(report),
+        &private_keys,
     )
-    .map_err(|_| {
-        writer_view(
-            "attention",
-            "Policy review is unavailable or cannot be shown safely. Refresh or use a terminal.",
-            true,
-        )
+    .map_err(|reason| {
+        let message = match reason {
+            "Policy review too large" | "Policy path too large" => "The full policy exceeds the desktop review limit. Review a smaller set of capture folders or ignore rules in the repository settings.",
+            "Policy context changed" | "Policy paths changed" => "The repository or its paths changed during review. Refresh status and review the current capture policy.",
+            _ => "Dotman could not verify the complete policy preview. Refresh status and check the repository paths in Settings before reviewing again.",
+        };
+        writer_view("attention", message, true)
     })
 }
 
@@ -113,13 +129,14 @@ pub async fn review_policy(
             Err(view) => return Ok(view),
         };
         let text = review.modal()?;
-        let approved = crate::confirm::ask(
-            &window,
-            "Approve local capture policy?",
-            "Approve capture policy",
-            text,
-            cancelled.clone(),
-        )?;
+        let prompt = crate::confirm::SyncPrompt {
+            title: "Approve local capture policy?",
+            action: "Approve capture policy",
+            scope: "Review the rules and files affected on this computer.",
+            destructive: false,
+            dark: None,
+        };
+        let approved = crate::confirm::ask_sync(&window, prompt, text, cancelled.clone())?;
         let mut run = {
             let guard = shared.lock().map_err(|_| "Status state unavailable")?;
             let run = after_confirmation(&cancelled, approved, || {

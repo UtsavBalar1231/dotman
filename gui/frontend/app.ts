@@ -37,6 +37,7 @@ let hookReviewId: string | null = null;
 let setupReviewId: string | null = null;
 let keyReviewId: string | null = null;
 let policyReviewId: string | null = null;
+let policyCounts: { directories: number; ignores: number } | undefined;
 let busy = false;
 let serial = 0;
 let cancelPending = false;
@@ -310,6 +311,7 @@ function controls() {
   const edit = el("source-edit-details").querySelector("button");
   if (edit) edit.disabled = busy || cancelPending;
   el("open-destination").disabled = busy || cancelPending || !statusLoaded || !getWorkspaceView().repository;
+  el("kept-local-files").inert = busy || cancelPending || !statusLoaded;
   el("dismiss-held").disabled = writerKind === "held";
   el("close-decisions").disabled = busy || cancelPending;
   el("retry-decisions").hidden = !retryDecisions;
@@ -400,11 +402,11 @@ function renderHeldCounts(counts: { new_files: number; home_edits: number; repo_
 
 const heldActions = [
   ["add", "Review tracking…"], ["plain", "Store unencrypted…"],
-  ["encrypt", "Encrypt…"], ["forget", "Stop tracking…"],
+  ["encrypt", "Encrypt…"], ["forget", "Stop tracking…"], ["keep_local", "Keep local"],
 ] as const;
 type HeldAction = typeof heldActions[number][0];
 
-function heldRow(entry: EntryView, displayName: string) {
+function heldRow(entry: EntryView, displayName: string, inReview = false) {
   const details = document.createElement("details");
   details.className = "held-row";
   details.setAttribute("data-held-key", fileFocusKey(entry));
@@ -412,20 +414,20 @@ function heldRow(entry: EntryView, displayName: string) {
   summary.className = "row";
   const status = document.createElement("span");
   status.className = "row-status";
-  status.textContent = displayStatus(entry.status);
+  status.textContent = inReview ? entry.hold?.reason || "Held for review" : displayStatus(entry.status);
   summary.setAttribute("aria-label", `${entry.key}. ${status.textContent}. Hold details.`);
   summary.title = entry.key;
   summary.append(icon("chevron-right", "disclosure-glyph"), pathLabel(displayName), status);
   details.append(summary);
   details.addEventListener("toggle", () => {
-    if (details.open) clearVariantResult();
+    if (details.open && !inReview) clearVariantResult();
     if (!details.open || details.children.length > 1) return;
     const hold = entry.hold;
     const body = document.createElement("div");
     body.className = "held-details";
     const reason = document.createElement("strong");
     reason.textContent = typeof hold?.reason === "string" && hold.reason ? hold.reason : "Held for review";
-    body.append(reason);
+    if (!inReview) body.append(reason);
     const metadata = document.createElement("dl");
     for (const [label, value] of [
       ["Origin", holdOrigins.get(hold?.origin ?? "")], ["Rule", hold?.rule], ["Location", hold?.location],
@@ -450,8 +452,35 @@ function heldRow(entry: EntryView, displayName: string) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = label;
-      button.addEventListener("click", () => runHeld(entry, action));
+      if (action === "keep_local") button.title = "Remember this path on this computer";
+      button.addEventListener("click", () => {
+        if (inReview) reviewHeldAction(entry, action);
+        else void runHeld(entry, action);
+      });
       actions.append(button);
+    }
+    if (inReview) {
+      const note = document.createElement("p");
+      note.textContent = entry.hold?.origin === "new_file"
+        ? "This file stays on this computer while held."
+        : "Sync skips this change while it is held.";
+      body.append(note);
+      if (!entry.held_actions?.includes("keep_local")) {
+        const keep = document.createElement("button");
+        keep.type = "button";
+        keep.className = "keep-held";
+        keep.textContent = "Keep held for this preview";
+        keep.addEventListener("click", () => {
+          body.prepend(reason);
+          status.textContent = "Reviewed · still held";
+          summary.setAttribute("aria-label", `${entry.key}. Reviewed, still held. Hold details.`);
+          note.textContent = "Reviewed for this preview. The hold stays in effect.";
+          keep.remove();
+          details.open = false;
+          summary.focus();
+        });
+        actions.append(keep);
+      }
     }
     if (actions.children.length) body.append(actions);
     else {
@@ -467,6 +496,12 @@ function heldRow(entry: EntryView, displayName: string) {
 async function runHeld(entry: EntryView, action: HeldAction) {
   if (busy || cancelPending || !statusLoaded || !el("recovery").hidden) return;
   if (!entries.includes(entry) || !entry.held_actions?.includes(action)) return;
+  await writeHeldChoice(entry.key, () => action === "keep_local"
+    ? invoke("set_local_file", { id: entry.id })
+    : invoke("run_held", { id: entry.id, action }));
+}
+
+async function writeHeldChoice(key: string, write: () => Promise<{ message: string; refresh: boolean }>) {
   clearDecisions();
   clearCommitEditor();
   reviewId = null;
@@ -477,17 +512,18 @@ async function runHeld(entry: EntryView, action: HeldAction) {
   statusLoaded = false;
   el("held-result").hidden = false;
   el("held-message").textContent = "Waiting for your review…";
-  el("held-title").textContent = `Held file · ${entry.key}`;
+  el("held-title").textContent = `Held file · ${key}`;
   el("held-message").focus();
   controls();
   let shouldRefresh = false;
   try {
-    const result = await invoke("run_held", { id: entry.id, action });
+    const result = await write();
     if (writerCancel) await writerCancel;
     el("held-message").textContent = result.message;
     shouldRefresh = result.refresh === true;
   } catch {
     el("held-message").textContent = "Could not verify the result. Refresh status before trying again.";
+    shouldRefresh = true;
   } finally {
     writerActive = false;
     writerKind = null;
@@ -621,6 +657,32 @@ function clearSearch() {
   el("search").focus();
 }
 
+function renderEmptyFiles(root: HTMLElement, query: string) {
+  const message = document.createElement("p");
+  const action = document.createElement("button");
+  action.type = "button";
+  if (query) {
+    message.textContent = folderMode ? "No files match this search." : "No changed files match this search.";
+    action.textContent = "Clear search";
+    action.addEventListener("click", clearSearch);
+  } else if (!entries.length) {
+    message.textContent = "No files tracked yet.";
+    action.textContent = "Track your first file…";
+    action.addEventListener("click", () => void startTracking("track_files"));
+  } else {
+    message.textContent = "No files need attention.";
+    action.textContent = "Browse all files";
+    action.addEventListener("click", () => {
+      el("group-folders").click();
+      el("group-folders").focus();
+    });
+  }
+  const empty = document.createElement("div");
+  empty.className = "file-list-empty";
+  empty.append(message, action);
+  root.append(empty);
+}
+
 function renderRows(focused?: EntryView) {
   selectTreeFolder(null);
   const root = el("rows");
@@ -631,16 +693,7 @@ function renderRows(focused?: EntryView) {
     const count = render(root, entries, query, fileLeaf, matchesFile);
     root.setAttribute("tabindex", count ? "-1" : "0");
     showSearchCount(query, count);
-    if (!count) {
-      root.textContent = query ? "No files match this search." : "No files tracked yet.";
-      if (!query) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = "Track your first file…";
-        button.addEventListener("click", () => void startTracking("track_files"));
-        root.append(button);
-      }
-    }
+    if (!count) renderEmptyFiles(root, query);
     return;
   }
   root.setAttribute("tabindex", "0");
@@ -665,11 +718,7 @@ function renderRows(focused?: EntryView) {
     populateRows(list, found, root, focused);
   }
   showSearchCount(query, visible);
-  if (!visible) {
-    const empty = document.createElement("p");
-    empty.textContent = query ? "No files match this search." : "No files need attention.";
-    root.append(empty);
-  }
+  if (!visible) renderEmptyFiles(root, query);
 }
 
 function needsChoice(entry: EntryView) {
@@ -741,23 +790,59 @@ function renderWorklist(count = comparisonPageSize, focused?: EntryView) {
   if (!decisionOverview) {
     comparisonEntries = entries.filter(entry => entry.supported && (entry.group === "incoming" || entry.group === "outgoing"));
   }
-  el("guide-title").textContent = decisionOverview ? "File decisions" : "File comparison";
-  if (!decisionOverview) {
+  const hasChanges = entries.some(entry => entry.group !== "clean") || !el("held-counts").hidden;
+  const clean = entries.length > 0 && !hasChanges;
+  el("comparison-guide").setAttribute("data-clean", String(clean));
+  if (clean) {
+    el("guide-title").textContent = entries.length === 1 ? "1 file matches the repository" : `${entries.length} files match the repository`;
+    el("guide-description").textContent = "Select a file in the browser to compare the two copies.";
+  } else if (decisionOverview) {
+    el("guide-title").textContent = "File decisions";
+  } else {
+    el("guide-title").textContent = "File comparison";
     el("guide-description").textContent = comparisonEntries.length
       ? `${comparisonEntries.length} changed ${comparisonEntries.length === 1 ? "file" : "files"} to compare.`
-      : entries.some(entry => entry.group !== "clean") || !el("held-counts").hidden
+      : hasChanges
         ? "Select a file in the tree to see its details."
         : "No files need attention.";
   }
   appendComparisons(false, focused ? Math.max(count, comparisonEntries.indexOf(focused) + 1) : count);
 }
 
+function renderKeptLocal(files: { id: string; label: string }[]) {
+  const list = el("kept-local-files");
+  list.replaceChildren();
+  el("kept-local-settings").hidden = files.length === 0;
+  for (const file of files) {
+    const row = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = file.label;
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.textContent = "Review again";
+    undo.setAttribute("aria-label", `Review again: ${file.label}`);
+    undo.addEventListener("click", () => {
+      if (busy || cancelPending || !statusLoaded || !list.contains(row)) return;
+      confirmReviewExit(true, async () => {
+        await writeHeldChoice(file.label, () => invoke("set_local_file", { id: file.id }));
+        el("local-choice-message").textContent = el("held-message").textContent;
+        if (el("kept-local-settings").hidden) el("local-choice-message").focus();
+      });
+    });
+    row.append(name, undo);
+    list.append(row);
+  }
+}
+
 function clearMachineFiles() {
+  renderKeptLocal([]);
+  el("local-choice-message").textContent = "";
   machineDetails = null;
   identityReviewId = null;
   hookReviewId = null;
   setupReviewId = null;
   policyReviewId = null;
+  policyCounts = undefined;
   keyReviewId = null;
   el("start-fresh").hidden = true;
   el("start-import").hidden = true;
@@ -934,11 +1019,13 @@ async function refresh({ preserveReview = false, preserveVariantResult = false, 
       ? browserPosition(el("rows"), el("comparison-guide")) : null;
     const shown = position ? Math.max(comparisonPageSize, comparisonRows.size) : comparisonPageSize;
     entries = view.entries;
+    renderKeptLocal(view.success ? view.kept_local ?? [] : []);
     statusLoaded = view.success;
     statusLocations = view.success && view.context ? { home: view.context.home, repo: view.context.repo } : null;
     machineDetails = view.success ? view.context?.machine_details ?? null : null;
     identityReviewId = view.success && typeof view.identity_review_id === "string" && view.identity_review_id.length ? view.identity_review_id : null;
     policyReviewId = view.success && typeof view.policy_review_id === "string" && view.policy_review_id.length ? view.policy_review_id : null;
+    policyCounts = view.success ? view.policy_counts : undefined;
     keyReviewId = view.success && typeof view.key_review_id === "string" && view.key_review_id.length ? view.key_review_id : null;
     hookReviewId = view.success && typeof view.hook_review_id === "string" && view.hook_review_id.length ? view.hook_review_id : null;
     el("setup").hidden = !(!view.success && view.repo_unavailable === true && view.context && !preserveReview && el("recovery").hidden);
@@ -953,8 +1040,10 @@ async function refresh({ preserveReview = false, preserveVariantResult = false, 
       : "Choose Create, Clone, or Import to review a setup. No files are changed until you confirm.";
     el("machine-files").hidden = !view.success || (identityReviewId === null && !entries.some(entry => entry.machine_file));
     if (!el("machine-files").hidden) renderMachineFiles();
-    el("remote").textContent = view.remote;
-    el("open-destination").setAttribute("aria-label", `View sync destination. ${view.remote}`);
+    const remote = view.remote === "Last fetched: 0 ahead · 0 behind" ? "Matched at fetch" : view.remote;
+    el("remote").textContent = remote;
+    el("open-destination").setAttribute("aria-label", `${remote}. View sync destination.`);
+    el("open-destination").title = `View or change sync destination. ${view.remote}`;
     el("clean").textContent = `${view.clean} clean`;
     renderHeldCounts(view.held_counts);
     const focused = position?.file ? entries.find(entry => fileFocusKey(entry) === position.file) : undefined;
@@ -1287,7 +1376,7 @@ function reviewHeading(title: string, phase: "preview" | "running" | "success" |
   el("review-return").hidden = phase === "preview" || phase === "running";
 }
 
-async function openReview() {
+async function openReview(actionResult?: string) {
   if (busy || cancelPending || !statusLoaded) return;
   clearLines();
   previousScroll = [window.scrollX, window.scrollY];
@@ -1297,8 +1386,7 @@ async function openReview() {
   clearCommitEditor();
   reviewId = null;
   controls();
-  const remote = el("remote").textContent;
-  el("review-remote").textContent = remote === "Last fetched: 0 ahead · 0 behind" ? "Branches matched at last fetch" : remote;
+  el("review-remote").textContent = el("remote").textContent;
   el("review-message").textContent = "Loading outgoing preview…";
   el("close-review").focus();
   const token = ++serial;
@@ -1312,14 +1400,19 @@ async function openReview() {
     }
     reviewId = view.id ?? null;
     massDeleteReview = view.outcome === "mass_delete";
-    if (view.outcome === "review" && typeof reviewId === "string" && reviewId.length && typeof view.commit_message === "string" && view.commit_message.length) {
+    if ((view.outcome === "review" || view.outcome === "mass_delete") && typeof reviewId === "string" && reviewId.length && typeof view.commit_message === "string" && view.commit_message.length) {
       suggestedMessage = view.commit_message;
       el("commit-message").value = suggestedMessage;
       el("commit-editor").hidden = false;
+      el("commit-editor").open = true;
     }
     el("review-footnote").hidden = !reviewId;
     el("review-message").textContent = view.outcome === "review" && view.message === "Outgoing preview loaded."
       ? (view.items.length ? "" : "No outgoing changes to review.") : view.message;
+    if (view.outcome === "partial" && view.items.some(item => item.entry_id)) {
+      el("review-message").textContent = "This preview is incomplete. Expand a file to review your options.";
+    }
+    if (actionResult) el("review-message").textContent = [actionResult, el("review-message").textContent].filter(Boolean).join(" ");
     if (view.outcome === "terminal_recovery") {
       showRecovery(view.message);
       clearDecisions();
@@ -1337,12 +1430,34 @@ async function openReview() {
   }
 }
 
+function leaveReviewForEntry(entry: EntryView, follow: () => Promise<void>, clearsQueue = false) {
+  if (busy || cancelPending || !statusLoaded || el("review").hidden || !entries.includes(entry)) return;
+  confirmReviewExit(clearsQueue && decisions.size > 0, async () => {
+    await closeReview();
+    if (statusLoaded && !busy && !cancelPending && entries.includes(entry)) await follow();
+  });
+}
+
+function reviewHeldAction(entry: EntryView, action: HeldAction) {
+  leaveReviewForEntry(entry, async () => {
+    await runHeld(entry, action);
+    if (statusLoaded && el("recovery").hidden) {
+      setPage("review");
+      await openReview(el("held-message").textContent || undefined);
+    }
+  }, true);
+}
+
 function renderReviewItems(items: ReviewItem[], captureDiffs = false) {
   el("review-items").replaceChildren();
+  const entriesById = new Map(entries.map(entry => [entry.id, entry]));
   const groups = new Map<string, ReviewItem[]>();
   for (const item of items) {
-    if (!groups.has(item.group)) groups.set(item.group, []);
-    groups.get(item.group)?.push(item);
+    const entry = item.entry_id ? entriesById.get(item.entry_id) : undefined;
+    const group = item.group === "Held or undecided" && !(entry?.group === "held" || entry?.supported)
+      ? "Planning notes" : item.group;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)?.push(item);
   }
   const order = ["Attention", "Refusals", "Held or undecided", "Changes", "Captures", "Repository changes", "Hypothetical effects", "Already-ahead commits", "Hooks", "Reached stages"];
   const labels = [...order.filter(label => groups.has(label)), ...[...groups.keys()].filter(label => !order.includes(label))];
@@ -1356,7 +1471,7 @@ function renderReviewItems(items: ReviewItem[], captureDiffs = false) {
     if (!items || (label === "Suggested message" && !el("commit-editor").hidden)) continue;
     const section = document.createElement("details");
     section.className = label === "Reached stages" ? "sync-activity" : "sync-group";
-    section.open = ["Changes", "Attention", "Refusals", "Captures", "Held or undecided"].includes(label) || labels.length === 1;
+    section.open = ["Changes", "Attention", "Refusals", "Captures", "Held or undecided", "Planning notes"].includes(label) || labels.length === 1;
     const heading = document.createElement("summary");
     heading.textContent = titles.get(label) ?? label;
     const count = document.createElement("span");
@@ -1366,6 +1481,22 @@ function renderReviewItems(items: ReviewItem[], captureDiffs = false) {
     const list = document.createElement("ul");
     for (const item of items) {
       const row = document.createElement("li");
+      const entry = item.entry_id && entriesById.get(item.entry_id);
+      if (label === "Held or undecided" && entry && (entry.group === "held" || entry.supported)) {
+        row.className = "sync-decision";
+        if (entry.group === "held") {
+          row.append(heldRow(entry, entry.key, true));
+        } else {
+          const compare = document.createElement("button");
+          compare.type = "button";
+          compare.className = "row";
+          compare.append(pathLabel(entry.key), document.createTextNode("Review file"), icon("chevron-right"));
+          compare.addEventListener("click", () => leaveReviewForEntry(entry, () => openDiff(entry, rowNodes.get(entry.id))));
+          row.append(compare);
+        }
+        list.append(row);
+        continue;
+      }
       const description = label === "Reached stages" ? stageNames.get(item.text) : label === "Hooks" ? hookNames.get(item.text) : undefined;
       const separator = label === "Changes" || label === "Hypothetical effects" ? item.text.lastIndexOf(" · ") : -1;
       if (separator >= 0) {
@@ -2102,6 +2233,7 @@ el("start-clone").addEventListener("click", () => runSetup("clone"));
 policyControls({
   invoke,
   getId: () => policyReviewId,
+  pending: action => policyCounts?.[action],
   canStart: () => !busy && !cancelPending && statusLoaded && getWorkspaceView().page === "settings",
   begin: () => {
     policyReviewId = null;

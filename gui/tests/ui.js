@@ -55,8 +55,8 @@ const ids = ["refresh", "cancel", "diff", "comparison-body", "diff-key", "diff-m
   "age-controls", "create-age", "import-age", "age-message",
   "start-fresh", "start-import", "setup-result", "setup-message", "setup-retry", "clone-controls", "clone-source", "start-clone",
   "repository-path", "diff-context", "group-folders", "group-status",
-  "guide-title", "guide-description", "attention-list", "more-comparisons", "search-count", "clear-search", "next-undecided", "reader-tools"];
-ids.push("policy-controls", "policy-directories", "policy-ignores", "policy-message");
+  "comparison-guide", "guide-title", "guide-description", "attention-list", "more-comparisons", "search-count", "clear-search", "next-undecided", "reader-tools"];
+ids.push("kept-local-settings", "kept-local-files", "local-choice-message", "policy-controls", "policy-directories", "policy-ignores", "policy-message");
 ids.push("discard-review-work", "discard-work-title", "discard-work-description", "discard-review-work-confirm", "keep-review-work");
 ids.push("open-destination", "held-result", "held-title", "held-message", "dismiss-held", "variant-result", "variant-message");
 ids.push("replacement-review", "replacement-title", "replacement-source", "replacement-target", "replacement-back", "replacement-batch", "decisions-title");
@@ -112,6 +112,7 @@ const importWrites = [];
 const policyWrites = [];
 const variantWrites = [];
 const heldWrites = [];
+const localChoices = [];
 const discards = [];
 let rejectDiscard;
 const status = {
@@ -160,6 +161,10 @@ const invoke = (command, args) => {
   if (command === "run_held") {
     heldWrites.push(args);
     return new Promise((resolve, reject) => { resolveWriter = resolve; rejectWriter = reject; });
+  }
+  if (command === "set_local_file") {
+    localChoices.push(args);
+    return new Promise(resolve => { resolveWriter = resolve; });
   }
   if (command === "run_host_variant") {
     variantWrites.push(args);
@@ -249,7 +254,16 @@ async function main() {
   resolveWriter({ outcome: "declined", message: "Identity installation was not approved.", refresh: true });
   await tick();
   assert.match(elements["identity-message"].textContent, /not approved/);
-  statusResponse = { ...status, policy_review_id: "policy:4" };
+  statusResponse = { ...status, policy_review_id: "policy:4", policy_counts: { directories: 0, ignores: 0 } };
+  elements.refresh.click();
+  await tick();
+  elements["policy-directories"].click();
+  assert.equal(elements["policy-message"].textContent, "No directories are waiting for capture approval.");
+  elements["policy-ignores"].click();
+  assert.equal(elements["policy-message"].textContent, "No retained ignore rules are waiting for release.");
+  assert.deepEqual(policyWrites, []);
+  assert.equal(getWorkspaceView().busy, false);
+  statusResponse.policy_counts.ignores = 1;
   elements.refresh.click();
   await tick();
   elements["policy-ignores"].click();
@@ -257,7 +271,7 @@ async function main() {
   assert.deepEqual(policyWrites, [{ id: "policy:4", action: "ignores" }]);
   resolveWriter({ outcome: "declined", message: "No changes.", refresh: true });
   await tick();
-  assert.equal(elements["policy-message"].textContent, "declined: No changes.");
+  assert.equal(elements["policy-message"].textContent, "No changes.");
   elements["nav-files"].click();
   statusResponse = null;
   elements.refresh.click();
@@ -509,7 +523,7 @@ async function main() {
   await tick();
   const folder = elements.rows.children[0].children[0];
   assert.equal(folder.attributes.role, "treeitem");
-  assert.equal(folder.children[0].children[0].textContent, "config");
+  assert.equal(folder.children[0].children[0].children.at(-1).textContent, "config");
   assert.equal(folder.attributes["aria-expanded"], "true");
   folder.listeners.click({ target: folder });
   assert.equal(folder.children[1].hidden, true);
@@ -1238,6 +1252,26 @@ async function main() {
   }
   assert.equal(calls.length, beforeHeldCalls);
   assert.equal(copies.length, beforeHeldCopies);
+  elements["nav-review"].click();
+  resolveReview({ outcome: "partial", message: "Incomplete", id: null, items: [
+    { group: "Held or undecided", text: "<redacted> · new_held", entry_id: "new2" },
+    { group: "Held or undecided", text: "<redacted> · new_held", entry_id: "stale" },
+  ] });
+  await tick();
+  const [decisionsGroup, notesGroup] = elements["review-items"].children;
+  const linked = decisionsGroup.children[1].children[0].children[0];
+  assert.equal(linked.tag, "details");
+  linked.open = true;
+  linked.listeners.toggle();
+  assert.ok(allText(linked).includes("second"));
+  assert.ok(allText(linked).includes("Keep held for this preview"));
+  assert.ok(!allText(linked).includes("<reason>"));
+  assert.equal(notesGroup.children[0].textContent, "Planning notes");
+  assert.ok(descendants(notesGroup.children[1]).every(child => child.tag !== "button"));
+  assert.equal(elements["sync-reviewed"].hidden || elements["sync-reviewed"].disabled, true);
+  elements["close-review"].click();
+  await tick();
+
   elements.search.value = "home";
   elements.search.listeners.input();
   assert.equal(elements["held-counts"].textContent, "Held across repository · 2 new files · 1 home edit · 1 repository edit");
@@ -1292,6 +1326,30 @@ async function main() {
   await tick();
   buttons[0].click();
   assert.equal(heldWrites.length, 1);
+  const hiddenLabel = "[redacted filename]";
+  statusResponse = { ...status, entries: [
+    { id: "8:0", key: hiddenLabel, status: "held", group: "held", held_actions: ["keep_local"] },
+  ] };
+  elements.refresh.click();
+  await tick();
+  const localHold = descendants(elements.rows).find(node => node.tag === "details");
+  localHold.open = true;
+  localHold.listeners.toggle();
+  descendants(localHold).find(node => node.textContent === "Keep local").click();
+  assert.deepEqual(localChoices, [{ id: "8:0" }]);
+  statusResponse = { ...status, kept_local: [{ id: "local:9:0", label: hiddenLabel }] };
+  resolveWriter({ outcome: "done", message: "Kept local on this computer.", refresh: true });
+  await tick();
+  assert.equal(elements["kept-local-settings"].hidden, false);
+  const savedRow = elements["kept-local-files"].children[0];
+  assert.equal(savedRow.children[0].textContent, hiddenLabel);
+  savedRow.children[1].click();
+  assert.deepEqual(localChoices.at(-1), { id: "local:9:0" });
+  statusResponse = status;
+  resolveWriter({ outcome: "done", message: "Local choice removed.", refresh: true });
+  await tick();
+  assert.equal(elements["kept-local-settings"].hidden, true);
+  assert.equal(elements["local-choice-message"].textContent, "Local choice removed.");
   const readOnlyCalls = calls.length;
   const readOnlyCopies = copies.length;
   const readOnlyWrites = writes.length;

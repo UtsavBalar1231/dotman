@@ -31,4 +31,4 @@ pub mod setup;
 mod sys;
 
 /// Exchanges the existing source and its prepared replacement atomically.
-pub use sys::exchange_files;
+pub use sys::{exchange_files, native_ui_font};

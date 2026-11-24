@@ -20,12 +20,17 @@ impl CommitMessage {
     /// # Errors
     /// Returns an error if the draft cannot be safely confirmed.
     pub fn new(value: String) -> Result<Self, &'static str> {
-        if value.len() > 1024
-            || value.split('\n').count() > 6
-            || value.trim().is_empty()
-            || value.chars().any(|c| c != '\n' && unsafe_display_char(c))
-        {
-            return Err("Invalid commit message");
+        if value.trim().is_empty() {
+            return Err("Enter a commit message.");
+        }
+        if value.len() > 1024 {
+            return Err("Use at most 1,024 UTF-8 bytes.");
+        }
+        if value.split('\n').count() > 6 {
+            return Err("Use at most six lines.");
+        }
+        if value.chars().any(|c| c != '\n' && unsafe_display_char(c)) {
+            return Err("Remove control or invisible formatting characters.");
         }
         Ok(Self(value))
     }

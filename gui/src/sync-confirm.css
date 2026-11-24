@@ -16,3 +16,67 @@
 .dotman-sync button.destructive-action { background-color: #a82b3a; border-color: #a82b3a; color: white; }
 .dotman-sync button:hover { box-shadow: inset 0 0 0 2px alpha(currentColor,.4); }
 .dotman-sync button:focus { outline: 2px solid currentColor; outline-offset: -5px; }
+.dotman-sync.wide { font-size: 1.25em; }
+.dotman-sync.wide button { min-height: 44px; padding: 3px 20px; }
+
+.dotman-sync.tracking-confirm {
+  font-family: "DepartureMono Nerd Font Mono", "Departure Mono", monospace;
+  font-size: 14px;
+  background-color: #fff;
+}
+.dotman-sync.tracking-confirm.amoled { background-color: #000; }
+.dotman-sync.tracking-confirm.wide { font-size: 16px; }
+.tracking-confirm .tracking-title { font-size: 1.45em; margin-bottom: 6px; }
+.tracking-confirm .tracking-scope { margin-bottom: 15px; }
+.tracking-confirm .tracking-caption, .tracking-confirm .tracking-scope { color: #606775; }
+.tracking-confirm.amoled .tracking-caption, .tracking-confirm.amoled .tracking-scope { color: #aab1bf; }
+.tracking-confirm .tracking-caption { font-size: .88em; }
+.tracking-confirm .tracking-facts {
+  background-color: #f4f5f7;
+  border-radius: 8px;
+  padding: 6px 14px;
+  margin-bottom: 6px;
+}
+.tracking-confirm.amoled .tracking-facts { background-color: #101113; }
+.tracking-confirm .tracking-fact { padding: 6px 0; }
+.tracking-confirm scrolledwindow { border: 0; background-color: transparent; }
+.dotman-sync.tracking-confirm button.tracking-disclosure {
+  background: transparent;
+  color: inherit;
+  border: 0;
+  border-top: 1px solid #ccd4df;
+  border-radius: 0;
+  min-height: 36px;
+  margin-top: 4px;
+  padding: 2px 6px;
+}
+.dotman-sync.tracking-confirm.amoled button.tracking-disclosure { border-color: #343a46; }
+.dotman-sync.tracking-confirm button.tracking-disclosure:hover { background-color: #eef1f5; }
+.dotman-sync.tracking-confirm.amoled button.tracking-disclosure:hover { background-color: #262b35; }
+.tracking-confirm .tracking-disclosure image { color: #513eab; }
+.tracking-confirm.amoled .tracking-disclosure image { color: #bbb6ff; }
+.tracking-confirm .tracking-path { padding: 5px 12px; }
+.tracking-confirm .dialog-action-area { border-top: 1px solid #ccd4df; padding-top: 12px; }
+.tracking-confirm.amoled .dialog-action-area { border-color: #343a46; }
+.tracking-confirm button { min-width: 0; border-radius: 999px; }
+.dotman-sync.tracking-confirm button:focus {
+  outline-style: none;
+  box-shadow: inset 0 0 0 2px #513eab;
+}
+.dotman-sync.tracking-confirm.amoled button:focus { box-shadow: inset 0 0 0 2px #bbb6ff; }
+.dotman-sync.tracking-confirm button.suggested-action:focus,
+.dotman-sync.tracking-confirm button.destructive-action:focus { box-shadow: inset 0 0 0 2px currentColor; }
+
+.outgoing-confirm .compose-title { font-weight: bold; }
+.dotman-sync.outgoing-confirm button.compose-restore {
+  min-height: 28px; padding: 1px 10px; font-size: .88em;
+}
+.dotman-sync.outgoing-confirm button.compose-restore:disabled { opacity: .5; }
+.dotman-sync.outgoing-confirm .compose-input { border: 1px solid #747d89; }
+.dotman-sync.outgoing-confirm textview { font-family: inherit; }
+.outgoing-confirm .tracking-facts { padding: 10px 12px; margin-top: 6px; }
+.outgoing-confirm .outgoing-group { border-top: 1px solid #ccd4df; padding-top: 6px; }
+.outgoing-confirm.amoled .outgoing-group { border-color: #343a46; }
+.outgoing-confirm .outgoing-paths { padding: 8px; }
+.dotman-sync.outgoing-confirm textview text selection { background-color: #d8d3ff; color: #141124; }
+.dotman-sync.outgoing-confirm.amoled textview text selection { background-color: #494467; color: #f5f3ff; }

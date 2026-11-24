@@ -44,7 +44,7 @@ const syntax = HighlightStyle.define([
 ]);
 
 const theme = EditorView.theme({
-  "&": { height: "100%", background: "var(--surface)", color: "var(--ink)", fontSize: "0.95rem" },
+  "&": { height: "100%", background: "var(--surface)", color: "var(--ink)", fontSize: "var(--code-size)" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "var(--font-workbench)", lineHeight: "1.75", overflow: "auto" },
   ".cm-content": { padding: "1rem 0", caretColor: "var(--accent)" },

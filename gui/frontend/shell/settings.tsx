@@ -32,6 +32,12 @@ return (
         </div>
         <p id="policy-message" role="status" aria-live="polite"></p>
       </details>
+      <details id="kept-local-settings" hidden>
+        <summary><Icon name="chevron-right" className="disclosure-glyph" />Kept local</summary>
+        <p>Folder tracking skips these paths on this computer.</p>
+        <ul id="kept-local-files"></ul>
+      </details>
+      <p id="local-choice-message" role="status" tabIndex={-1}></p>
       <details id="machine-files" hidden>
         <summary><Icon name="chevron-right" className="disclosure-glyph" />Machine files</summary>
         <div id="machine-file-details"></div>

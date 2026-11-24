@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(error.into());
     }
     let stripped = std::env::var_os("DOTMAN_GUI_KEY_STRIPPED").is_some();
+    let _native_font = dotman_gui::native_ui_font().ok();
     tauri::Builder::default()
         .manage(app::AppState::new(stripped))
         .invoke_handler(tauri::generate_handler![
@@ -51,12 +52,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app::import_setup::run_import_setup,
             app::keys::run_key,
             app::held::run_held,
+            app::local_file::set_local_file,
             app::variant::run_host_variant
         ])
         .setup(|app| {
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 .title("dotman")
-                .inner_size(1000.0, 720.0)
+                .inner_size(1500.0, 1080.0)
+                .prevent_overflow_with_margin(tauri::LogicalSize::new(32.0, 64.0))
                 .min_inner_size(320.0, 320.0)
                 .devtools(false)
                 .on_navigation(|url| bundled_document(url.as_str()))

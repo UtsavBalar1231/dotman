@@ -135,10 +135,16 @@ pub(super) fn actions(
     generation: u64,
     report: &protocol::StatusReport,
 ) -> Vec<&'static str> {
-    if generation == u64::MAX || paths.matches(entry, true) {
+    if generation == u64::MAX {
         return Vec::new();
     }
     let mut actions = Vec::new();
+    if super::local_file::eligible(entry) {
+        actions.push("keep_local");
+    }
+    if paths.matches(entry, true) {
+        return actions;
+    }
     if add_eligible(entry) {
         actions.push("add");
     }
@@ -719,7 +725,7 @@ fn modal(
                 String::new()
             };
             Ok(format!(
-                "Add this held file?\n\nSource: {source}\nRepository target: {target}\nState: {state}\nMode: {:04o}{mode_change}\nRecipients: none (unencrypted)\n\nThe file is copied unencrypted into the repository and recorded in local state. It may be published by a later sync. Home is unchanged; no backup is created. Existing history is not removed. No hooks, commit, or sync will run.\n\nContinue?",
+                "Add this held file?\n\nSource: {source}\nRepository target: {target}\nState: {state}\nMode: {:04o}{mode_change}\nRecipients: none (unencrypted)\n\nThe file is copied unencrypted into the repository and recorded in local state. Missing repository folders are created for the file. It may be published by a later sync. Home is unchanged; no backup is created. Existing history is not removed. No hooks, commit, or sync will run.\n\nContinue?",
                 review.mode()
             ))
         }
