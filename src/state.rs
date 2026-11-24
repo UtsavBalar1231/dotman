@@ -36,6 +36,9 @@ pub struct State {
     /// applying one after the file drops it, until `sync --drop-unlisted-ignores` drops it here.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub ignore_seen: BTreeSet<String>,
+    /// Exact paths excluded from folder capture here, keyed by path digest. Sensitive names have an empty label.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub kept_local: BTreeMap<String, String>,
     /// Machine identity recorded on the first run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentitySnapshot>,
@@ -128,6 +131,7 @@ impl Default for State {
             remote_checked_at: None,
             capture_dirs: None,
             ignore_seen: BTreeSet::new(),
+            kept_local: BTreeMap::new(),
             identity: None,
             hooks: Hooks::default(),
             files: BTreeMap::new(),
@@ -137,6 +141,14 @@ impl Default for State {
 }
 
 impl State {
+    pub(crate) fn local_file_id(key: &str) -> String {
+        format!("{:032x}", xxhash_rust::xxh3::xxh3_128(key.as_bytes()))
+    }
+
+    pub(crate) fn keeps_local(&self, key: &str) -> bool {
+        !self.kept_local.is_empty() && self.kept_local.contains_key(&Self::local_file_id(key))
+    }
+
     /// Loads the state for the repo whose `.git/dotman-id` is `repo_id` (already trimmed).
     ///
     /// A missing file gives an empty state. A file that is empty or does not parse is an error and

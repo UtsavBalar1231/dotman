@@ -13,6 +13,7 @@ e2e_write a .config/app/.env $'API_URL=https://example.invalid\n'
 e2e_write a .config/app/remote.conf "url = https://example.invalid
 token = $token
 "
+e2e_write a .config/app/.ruff_cache/CACHEDIR.TAG 'cache metadata'
 e2e_init a alpha
 e2e_dm_rc 0 a key init
 e2e_identity_known "$(e2e_config a)/age-identity.txt"
@@ -27,10 +28,12 @@ e2e_check "sync ends on the line that says something is left" test \
     "$(tail -n 1 "$E2E_ROOT/last.err")" = \
     'not everything was synced; the warnings above say what is left and what to run'
 e2e_remote_tracks .config/app/app.conf
+e2e_remote_lacks .config/app/.ruff_cache/CACHEDIR.TAG
 e2e_remote_lacks .config/app/.env
 e2e_remote_lacks .config/app/remote.conf
 
 # New files under a managed dir go through the same guards at sync.
+e2e_write a .config/app/.ruff_cache/new-entry scratch
 e2e_write a .config/app/deploy.conf "deploy_token = $token
 "
 e2e_dm_rc 3 a sync
@@ -38,6 +41,7 @@ e2e_err_has '.config/app/deploy.conf (line 1 holds a github-token'
 e2e_err_line_lacks deploy.conf --allow-plain
 e2e_err_line_lacks remote.conf --allow-plain
 e2e_remote_lacks .config/app/deploy.conf
+e2e_remote_lacks .config/app/.ruff_cache/new-entry
 e2e_dm_rc 0 a status
 e2e_err_has '3 held back'
 

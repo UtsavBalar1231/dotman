@@ -139,6 +139,7 @@ pub(crate) fn warn_still_ignored(home: &Path, found: &BTreeMap<String, StillIgno
 pub(crate) struct DirPlan {
     pub(crate) key: String,
     pub(crate) items: BTreeMap<String, Leaf>,
+    pub(crate) discovery_ignored: BTreeMap<String, &'static str>,
     pub(crate) skipped: Vec<String>,
     pub(crate) still_ignored: BTreeMap<String, StillIgnored>,
     pub(crate) dangling: Vec<String>,
@@ -411,8 +412,11 @@ fn adopt_dirs(
     dirs: &[DirPlan],
 ) -> Result<()> {
     let mut modes = BTreeMap::new();
-    state.approve_dirs(dirs.iter().map(|dir| &dir.key));
-    for dir in dirs {
+    let adopted = dirs
+        .iter()
+        .filter(|dir| !dir.discovery_ignored.contains_key(&dir.key));
+    state.approve_dirs(adopted.clone().map(|dir| &dir.key));
+    for dir in adopted {
         if !repo_config.dirs.paths.contains(&dir.key) {
             repo_config.dirs.paths.push(dir.key.clone());
         }
@@ -1381,7 +1385,7 @@ pub(crate) fn scan_dirs(
     let mut found: BTreeMap<String, Leaf> = BTreeMap::new();
     let mut dangling = BTreeSet::new();
     let mut scan = Scan::default();
-    let mut covered: Vec<&str> = Vec::new();
+    let mut covered = BTreeSet::new();
     for dir in &repo_config.dirs.paths {
         let ok = approved.contains(dir);
         if !ok && !scan.unapproved.contains(dir) {
@@ -1395,17 +1399,16 @@ pub(crate) fn scan_dirs(
         if !plain {
             continue;
         }
-        let walked = planner.walk(dir);
-        found.extend(walked.items);
+        let walked = planner.walk(dir)?;
         if ok {
-            covered.push(dir);
+            covered.extend(walked.items.keys().cloned());
             dangling.extend(walked.dangling);
             scan.held.extend(walked.held);
             scan.notes.extend(walked.notes);
             scan.still_ignored.extend(walked.still_ignored);
         }
+        found.extend(walked.items);
     }
-    let is_covered = |key: &str| covered.iter().any(|dir| is_under(key, dir));
     found.retain(|key, _| !known.contains(key));
     dangling.retain(|key| !known.contains(key));
     scan.held.retain(|key, _| !known.contains(key));
@@ -1422,7 +1425,7 @@ pub(crate) fn scan_dirs(
             .chain(found.keys().map(String::as_str)),
     );
     for key in colliding.iter().flat_map(|(a, b)| [a, b]) {
-        if found.remove(key).is_some() && is_covered(key) {
+        if found.remove(key).is_some() && covered.contains(key) {
             scan.held.insert(key.clone(), Hold::Collision);
         }
     }
@@ -1450,7 +1453,7 @@ pub(crate) fn scan_dirs(
                         .then_some(Hold::SecretName)
                 }),
         };
-        match (hold, is_covered(&key)) {
+        match (hold, covered.contains(&key)) {
             (Some(hold), true) => {
                 scan.held.insert(key, hold);
             }
@@ -1468,6 +1471,7 @@ pub(crate) fn scan_dirs(
 }
 
 struct Planner<'a> {
+    state: &'a State,
     ctx: &'a Context,
     ignore: Ignore,
     /// The patterns this machine has seen in `[ignore]` that `.dotman.toml` no longer lists: an
@@ -1481,12 +1485,13 @@ impl<'a> Planner<'a> {
     fn new(
         ctx: &'a Context,
         repo_config: &RepoConfig,
-        state: &State,
+        state: &'a State,
         cwd: PathBuf,
     ) -> Result<Self> {
         let listed = &repo_config.ignore.patterns;
         Ok(Self {
             ctx,
+            state,
             ignore: Ignore::compile(listed)?,
             unlisted: Ignore::compile(&state.unlisted_ignores(listed))?,
             cwd,
@@ -1548,7 +1553,7 @@ impl<'a> Planner<'a> {
             }
             Found::Dir => {
                 self.warn_ignored(&key, true);
-                let dir = self.walk(&key);
+                let dir = self.walk(&key)?;
                 self.out.dirs.push(dir);
             }
             Found::Dangling => bail!("{key}: {DANGLING}, which dotman does not store"),
@@ -1631,13 +1636,73 @@ impl<'a> Planner<'a> {
         }
     }
 
-    fn walk(&self, dir_key: &str) -> DirPlan {
+    fn walk(&self, dir_key: &str) -> Result<DirPlan> {
         let paths = &self.ctx.paths;
         let mut dir = DirPlan {
             key: dir_key.to_owned(),
             ..DirPlan::default()
         };
-        let mut walk = WalkDir::new(paths.home.join(dir_key))
+        if let Some(reason) = local_tool_reason(dir_key, true) {
+            dir.discovery_ignored.insert(dir_key.to_owned(), reason);
+            dir.skipped.push(format!("{dir_key}: {reason}"));
+            return Ok(dir);
+        }
+        let candidates = self.discovery_candidates(&mut dir);
+        let root = Path::new(dir_key);
+        let relative = candidates.iter().filter_map(|(key, &is_dir)| {
+            Path::new(key)
+                .strip_prefix(root)
+                .ok()
+                .map(|path| (path, is_dir))
+        });
+        let ignored = self.ctx.git.folder_ignores(&paths.home, root, relative)?;
+        for (key, is_dir) in candidates {
+            let path = Path::new(&key).strip_prefix(root)?;
+            if ignored.contains(path) {
+                if !path
+                    .ancestors()
+                    .skip(1)
+                    .any(|parent| ignored.contains(parent))
+                {
+                    dir.discovery_ignored
+                        .insert(key, "Excluded by a folder .gitignore rule");
+                }
+                continue;
+            }
+            if is_dir {
+                continue;
+            }
+            match self.inspect(&key) {
+                Found::Leaf(leaf) => {
+                    dir.items.insert(key, leaf);
+                }
+                Found::Dangling => {
+                    dir.skipped.push(format!("{key}: {DANGLING}"));
+                    dir.dangling.push(key);
+                }
+                Found::Held(hold, reason) => {
+                    dir.skipped.push(format!("{key}: {reason}"));
+                    dir.held.insert(key, hold);
+                }
+                Found::Skip(reason) => {
+                    let line = format!("{key}: {reason}");
+                    dir.notes.push(line.clone());
+                    dir.skipped.push(line);
+                }
+                Found::Dir => {}
+            }
+        }
+        dir.skipped.extend(
+            dir.discovery_ignored
+                .iter()
+                .map(|(key, reason)| format!("{key}: {reason}")),
+        );
+        Ok(dir)
+    }
+
+    fn discovery_candidates(&self, dir: &mut DirPlan) -> BTreeMap<String, bool> {
+        let mut candidates = BTreeMap::new();
+        let mut walk = WalkDir::new(self.ctx.paths.home.join(&dir.key))
             .follow_links(false)
             .min_depth(1)
             .sort_by_file_name()
@@ -1684,29 +1749,19 @@ impl<'a> Planner<'a> {
                         walk.skip_current_dir();
                     }
                 }
-                Ok(_) if is_dir => {}
-                Ok(key) => match self.inspect(&key) {
-                    Found::Leaf(leaf) => {
-                        dir.items.insert(key, leaf);
+                Ok(key) => {
+                    if let Some(reason) = local_tool_reason(&key, is_dir) {
+                        dir.discovery_ignored.insert(key, reason);
+                        if is_dir {
+                            walk.skip_current_dir();
+                        }
+                    } else {
+                        candidates.insert(key, is_dir);
                     }
-                    Found::Dangling => {
-                        dir.skipped.push(format!("{key}: {DANGLING}"));
-                        dir.dangling.push(key);
-                    }
-                    Found::Held(hold, reason) => {
-                        dir.skipped.push(format!("{key}: {reason}"));
-                        dir.held.insert(key, hold);
-                    }
-                    Found::Skip(reason) => {
-                        let line = format!("{key}: {reason}");
-                        dir.notes.push(line.clone());
-                        dir.skipped.push(line);
-                    }
-                    Found::Dir => {}
-                },
+                }
             }
         }
-        dir
+        candidates
     }
 
     fn entry_key(&self, path: &Path, is_dir: bool) -> std::result::Result<String, Left> {
@@ -1717,7 +1772,9 @@ impl<'a> Planner<'a> {
         // Before the name checks, so an ignored entry is never reported, whatever its name; a
         // name that is not UTF-8 matches in its lossy form.
         let lossy = rel.to_string_lossy();
-        if self.ignore.matches(&lossy, is_dir) {
+        if (!is_dir && rel.to_str().is_some_and(|key| self.state.keeps_local(key)))
+            || self.ignore.matches(&lossy, is_dir)
+        {
             return Err(Left::Quiet);
         }
         let unlisted = self.unlisted.matching(&lossy, is_dir);
@@ -1754,6 +1811,40 @@ impl<'a> Planner<'a> {
         }
         Ok(key.to_owned())
     }
+}
+
+fn local_tool_reason(key: &str, is_dir: bool) -> Option<&'static str> {
+    let path = Path::new(key);
+    let directory = if is_dir { path } else { path.parent()? };
+    for ancestor in directory.ancestors() {
+        let name = ancestor.file_name().and_then(|name| name.to_str());
+        if matches!(
+            name,
+            Some(".ruff_cache" | ".pytest_cache" | ".mypy_cache" | "__pycache__")
+        ) {
+            return Some("Generated tool cache");
+        }
+        if ["state", "metrics", "notepads", "evidence"]
+            .iter()
+            .any(|area| {
+                ancestor.file_name().is_some_and(|name| name == *area)
+                    && ancestor
+                        .parent()
+                        .is_some_and(|parent| parent.ends_with(".omca"))
+            })
+        {
+            return Some("Local agent session data");
+        }
+        if ancestor.ends_with(".claude/agent-memory")
+            || ancestor.ends_with(".claude/agent-memory-local")
+        {
+            return Some("Local agent memory");
+        }
+    }
+    if !is_dir && matches!(path.file_name()?.to_str(), Some("AGENTS.md" | "CLAUDE.md")) {
+        return Some("Agent instructions; choose the file directly to track it");
+    }
+    None
 }
 
 /// Scan notes reach the terminal, so a name's control characters are escaped: a newline would

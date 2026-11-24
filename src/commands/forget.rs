@@ -198,8 +198,18 @@ pub(crate) fn remove_metadata(
         }
         repo_config.modes.remove(key);
         state.files.remove(key);
-        if under_dirs(repo_config, key) {
-            ignore_forgotten(repo_config, &Pattern::escape(key), key, false)?;
+    }
+    exclude_from_capture(repo_config, keys.iter().map(String::as_str))
+}
+
+pub(super) fn exclude_from_capture<'a>(
+    repo_config: &mut RepoConfig,
+    keys: impl Iterator<Item = &'a str>,
+) -> Result<()> {
+    let ignored = Ignore::compile(&repo_config.ignore.patterns)?;
+    for key in keys {
+        if under_dirs(repo_config, key) && !ignored.matches(key, false) {
+            repo_config.ignore.patterns.push(Pattern::escape(key));
         }
     }
     Ok(())

@@ -15,6 +15,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 mod host_variant;
+mod local_file;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -174,6 +175,7 @@ impl std::error::Error for EncryptFailure {}
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Input {
+    Local(local_file::Request),
     Held(Request),
     Tracking(add::tracking::Request),
     #[cfg(target_os = "linux")]
@@ -194,6 +196,7 @@ pub fn run(_args: &RemedyArgs) -> Result<()> {
     {
         #[cfg(target_os = "linux")]
         Input::Destination(request) => return crate::git::origin::run(&request),
+        Input::Local(request) => return local_file::run(request),
         Input::Held(request) => request,
         Input::Tracking(request) => return add::tracking::run(&request),
     };
@@ -537,16 +540,7 @@ fn new_occurrence(ctx: &Context, key: &str) -> Result<Occurrence> {
     })
 }
 
-fn candidate(ctx: &Context, key: &str, action: PlainAction) -> Result<Candidate> {
-    ctx.check_key(key, true)?;
-    ensure!(
-        ctx.keys().alias(&ctx.paths.home, key, true).is_none(),
-        "file aliases a protected path"
-    );
-    let repo_id = ctx.repo_id()?;
-    let config = ctx.repo_config()?;
-    let state = ctx.state(&repo_id)?;
-    let sources = ctx.sources()?;
+fn ensure_unmanaged(ctx: &Context, key: &str) -> Result<()> {
     let git = ctx.git.staging_review(&[], &[])?;
     let indexed = crate::variant::Sources::group(
         git.head
@@ -558,6 +552,20 @@ fn candidate(ctx: &Context, key: &str, action: PlainAction) -> Result<Candidate>
         indexed.sources_of(key).next().is_none(),
         "file is already managed"
     );
+    Ok(())
+}
+
+fn candidate(ctx: &Context, key: &str, action: PlainAction) -> Result<Candidate> {
+    ctx.check_key(key, true)?;
+    ensure!(
+        ctx.keys().alias(&ctx.paths.home, key, true).is_none(),
+        "file aliases a protected path"
+    );
+    let repo_id = ctx.repo_id()?;
+    let config = ctx.repo_config()?;
+    let state = ctx.state(&repo_id)?;
+    let sources = ctx.sources()?;
+    ensure_unmanaged(ctx, key)?;
     let mut known: BTreeSet<String> = sources.keys().map(str::to_owned).collect();
     known.extend(state.files.keys().cloned());
     let scan = add::scan_dirs(ctx, &config, &known, &state)?;
@@ -583,9 +591,13 @@ fn candidate(ctx: &Context, key: &str, action: PlainAction) -> Result<Candidate>
         ),
         "destination is not absent"
     );
-    let repo_parent = parent_identity(ctx, key);
+    let repo_parent = capture_parent_stamp(ctx, key);
     let (ready, prepare_mode) = mode_plan(ctx, &config, key, mode, action)?;
-    let executable = repo_parent.is_some() && safe_mode(mode) == mode && (ready || prepare_mode);
+    let executable = repo_parent
+        .as_ref()
+        .is_some_and(|(_, suffix)| action == PlainAction::Held || !suffix.contains('/'))
+        && safe_mode(mode) == mode
+        && (ready || prepare_mode);
     ensure!(
         crate::config::Config::load(&ctx.paths.config_file)? == ctx.machine,
         "machine config changed; review again"
@@ -1262,6 +1274,92 @@ fn parent_identity(_ctx: &Context, _key: &str) -> Option<(u64, u64)> {
 }
 
 #[cfg(target_os = "linux")]
+fn capture_parent<'a>(ctx: &Context, key: &'a str) -> Result<(std::fs::File, &'a str)> {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&ctx.paths.repo)?;
+    let mut suffix = key;
+    while let Some((component, rest)) = suffix.split_once('/') {
+        let name = std::ffi::CString::new(component)?;
+        match crate::sys::openat_dir(directory.as_fd(), &name) {
+            Ok(child) => directory = child.into(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+            Err(err) => return Err(err.into()),
+        }
+        suffix = rest;
+    }
+    Ok((directory, suffix))
+}
+
+#[cfg(target_os = "linux")]
+fn capture_parent_stamp<'a>(ctx: &Context, key: &'a str) -> Option<((u64, u64), &'a str)> {
+    let (directory, suffix) = capture_parent(ctx, key).ok()?;
+    Some((identity(&directory).ok()?, suffix))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn capture_parent_stamp<'a>(_ctx: &Context, _key: &'a str) -> Option<((u64, u64), &'a str)> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn install_capture(
+    ctx: &Context,
+    key: &str,
+    anchor: &std::fs::File,
+    temp: &std::ffi::CStr,
+    suffix: &str,
+) -> Result<()> {
+    use crate::sys;
+    use std::ffi::CString;
+    use std::os::fd::AsFd;
+    ensure!(
+        capture_parent_stamp(ctx, key) == Some((identity(anchor)?, suffix)),
+        "destination directory changed; review again"
+    );
+    let mut directory = anchor.try_clone()?;
+    let mut remaining = suffix;
+    let mut created = false;
+    let result = (|| -> Result<()> {
+        while let Some((component, rest)) = remaining.split_once('/') {
+            let name = CString::new(component)?;
+            sys::mkdirat(directory.as_fd(), &name, 0o700)?;
+            created = true;
+            sys::fsync_dir(directory.as_fd())?;
+            directory = sys::openat_dir(directory.as_fd(), &name)?.into();
+            remaining = rest;
+        }
+        ensure!(
+            parent_identity(ctx, key) == Some(identity(&directory)?),
+            "destination directory changed; review again"
+        );
+        sys::rename_noreplace(
+            anchor.as_fd(),
+            temp,
+            directory.as_fd(),
+            &CString::new(remaining)?,
+        )?;
+        sys::fsync_dir(directory.as_fd()).context(Partial(
+            "file was installed but directory sync failed; refresh status",
+        ))?;
+        Ok(())
+    })();
+    if created
+        && result
+            .as_ref()
+            .is_err_and(|e| e.downcast_ref::<Partial>().is_none())
+    {
+        return result.context(Partial(
+            "repository directories were created; refresh status before retrying",
+        ));
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
 fn read_home(ctx: &Context, key: &str) -> Result<(Vec<u8>, u32, (u64, u64))> {
     use std::fs::File;
     use std::os::fd::{AsFd, AsRawFd};
@@ -1310,11 +1408,7 @@ fn execute(ctx: &Context, expected: &Snapshot) -> Result<()> {
         initial.executable && initial.snapshot == *expected,
         "review changed; review again"
     );
-    let (directory, leaf) = parent(&ctx.paths.repo, &expected.key, true)?;
-    ensure!(
-        sys::kind_at(directory.as_fd(), &leaf)?.is_none(),
-        "destination is occupied"
-    );
+    let (directory, suffix) = capture_parent(ctx, &expected.key)?;
     let temp = CString::new(format!(".dotman-tmp-remedy-{}", std::process::id()))?;
     let mut file = sys::create_excl(directory.as_fd(), &temp, 0o600)?;
     let mut prepared = false;
@@ -1328,17 +1422,14 @@ fn execute(ctx: &Context, expected: &Snapshot) -> Result<()> {
             "review changed; review again"
         );
         ensure!(
-            parent_identity(ctx, &expected.key) == Some(identity(&directory)?),
+            capture_parent_stamp(ctx, &expected.key) == Some((identity(&directory)?, suffix)),
             "destination directory changed; review again"
         );
         if expected.prepare_mode {
             prepared = true;
             prepare_private_mode(ctx, expected)?;
         }
-        sys::rename_noreplace(directory.as_fd(), &temp, directory.as_fd(), &leaf)?;
-        sys::fsync_dir(directory.as_fd()).context(Partial(
-            "file was installed but directory sync failed; refresh status",
-        ))?;
+        install_capture(ctx, &expected.key, &directory, &temp, suffix)?;
         let mut state = ctx.state(&expected.repo_id).context(Partial(
             "file was installed but state could not be read; refresh status",
         ))?;

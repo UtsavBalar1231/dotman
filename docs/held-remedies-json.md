@@ -26,7 +26,10 @@ snapshot out of the renderer and pass it unchanged in a second request:
 
 The abbreviated snapshot above is not valid input: use the complete object
 returned by review. Execution checks it again under the lock and installs one
-file without replacing an existing destination. It does not run hooks, commit,
+file without replacing an existing destination. For a binary or large file, the
+review binds the nearest existing repository directory and the missing path
+beneath it. Execution can create those directories with private permissions.
+A changed parent requires a fresh review. It does not run hooks, commit,
 or sync. If state cannot be saved after installation, the command reports that
 the file was installed and status needs refreshing. A mode that needs a
 metadata change remains read-only.
@@ -104,6 +107,13 @@ containing `files`, `folders`, `held` (path to reason), `existing`, and a token.
 The token binds the action, selection, effective settings, state and inventory.
 Execution takes `expected` from that review, rebuilds the plan under the
 repository lock, and returns `tracking_done` followed by the terminal result.
+For an add operation, execution can include `excluded`, the zero-based indices
+to omit from the reviewed `files` array. Dotman checks the original inventory
+token before resolving the indices. Partial selections require at least one
+eligible file. A held path can identify a whole excluded directory. Folder discovery uses the same local ignore rules during preview and future capture. A partial folder request adds a new capture rule only if it
+sets `keep_folder_rule` to true. A capture rule covering an omitted file gets
+an exact ignore pattern. The completion record
+lists the files and folder rules applied.
 The native caller requires both records and a successful exit. On failure,
 refresh status to inspect the current repository before retrying.
 
@@ -121,3 +131,14 @@ The projection lists effective fetch and push addresses, indicates whether a
 push override exists, and marks simple local configurations as editable.
 Private or unsupported addresses appear as null. Multiple destinations and
 rewritten origins are available for inspection.
+
+## Machine-local file choices
+
+A `keep_local` request carries `schema_version: 1`, the exact Home-relative
+`key`, `repo_id`, and the resolved `home`, `repo` and `state` paths from status.
+The CLI checks the context and current unmanaged hold under the repository
+lock and saves a path digest in the machine's state file. The status review
+context exposes `kept_local` as a map from digest to display name. A protected
+name has an empty label. A client can also request redaction using `hide_name`.
+A `review_again` request uses the digest as its key and the same context.
+Removing a preference re-enables normal discovery on the next scan.

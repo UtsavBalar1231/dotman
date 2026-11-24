@@ -24,6 +24,10 @@ pub struct Request {
     paths: Vec<String>,
     repo_id: String,
     expected: Option<String>,
+    #[serde(default)]
+    excluded: BTreeSet<usize>,
+    #[serde(default)]
+    keep_folder_rule: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,7 +139,12 @@ impl Inventory {
         refuse_collisions(&sources, &plan)?;
         let patterns = secret_patterns(config)?;
         for dir in &plan.dirs {
-            result.folders.insert(dir.key.clone());
+            if !dir.discovery_ignored.contains_key(&dir.key) {
+                result.folders.insert(dir.key.clone());
+            }
+            for (key, reason) in &dir.discovery_ignored {
+                result.held.insert(key.clone(), (*reason).to_owned());
+            }
             for (key, hold) in &dir.held {
                 result.held.insert(key.clone(), tracking_reason(*hold));
             }
@@ -229,7 +238,48 @@ impl Inventory {
         })
     }
 
-    fn track(&self, ctx: &Context, config: &mut RepoConfig, state: &mut State) -> Result<()> {
+    fn restrict(&mut self, req: &Request) -> Result<Vec<String>> {
+        ensure!(
+            !req.keep_folder_rule
+                || (req.operation == Action::TrackFolder && !req.excluded.is_empty()),
+            "invalid folder selection"
+        );
+        let mut omitted = Vec::new();
+        if !req.excluded.is_empty() {
+            ensure!(
+                req.expected.is_some()
+                    && req.operation != Action::StopTracking
+                    && req.excluded.len() < self.files.len()
+                    && req
+                        .excluded
+                        .last()
+                        .is_some_and(|index| *index < self.files.len()),
+                "invalid file selection"
+            );
+            omitted = self
+                .files
+                .keys()
+                .enumerate()
+                .filter(|(index, _)| req.excluded.contains(index))
+                .map(|(_, key)| key.clone())
+                .collect();
+            for key in &omitted {
+                self.files.remove(key);
+            }
+            if !req.keep_folder_rule {
+                self.folders.clear();
+            }
+        }
+        Ok(omitted)
+    }
+
+    fn track(
+        &self,
+        ctx: &Context,
+        config: &mut RepoConfig,
+        state: &mut State,
+        omitted: &[String],
+    ) -> Result<()> {
         let mut modes = BTreeMap::new();
         for (key, (kind, identity)) in &self.files {
             let entry = commit_stored(
@@ -252,6 +302,7 @@ impl Inventory {
             })
             .collect::<Vec<_>>();
         adopt_dirs(ctx, config, state, &dirs)?;
+        forget::exclude_from_capture(config, omitted.iter().map(String::as_str))?;
         state.identity.get_or_insert_with(|| ctx.identity().clone());
         config.save(&ctx.repo_config_file(), false)?;
         state.save(&ctx.paths.state_file(), false)?;
@@ -325,7 +376,7 @@ pub fn run(req: &Request) -> Result<()> {
     }
     let mut config = ctx.repo_config()?;
     let mut state = ctx.state(&repo_id)?;
-    let inventory = match req.operation {
+    let mut inventory = match req.operation {
         Action::TrackFiles | Action::TrackFolder => Inventory::add(&ctx, req, &config, &state)?,
         Action::StopTracking => Inventory::forget(&ctx, req, &config, &state)?,
     };
@@ -345,14 +396,17 @@ pub fn run(req: &Request) -> Result<()> {
     );
     let token = ctx.git.hash_object(&serde_json::to_vec(&binding)?, false)?;
     let execute = req.expected.is_some();
+    if let Some(expected) = &req.expected {
+        ensure!(lock.is_held(), "repository lock is unavailable");
+        ensure!(expected == &token, crate::context::ReviewChanged);
+    }
+    let omitted = inventory.restrict(req)?;
     let bytes = serde_json::to_vec(&inventory.receipt(&token, execute))?;
     ensure!(
         bytes.len() < 65_400,
         "the review is too large; select a smaller folder or fewer files"
     );
-    if let Some(expected) = &req.expected {
-        ensure!(lock.is_held(), "repository lock is unavailable");
-        ensure!(expected == &token, crate::context::ReviewChanged);
+    if execute {
         ensure!(
             !inventory.files.is_empty()
                 || !inventory.folders.is_empty()
@@ -370,7 +424,7 @@ pub fn run(req: &Request) -> Result<()> {
                 &inventory.removal,
             )?,
             Action::TrackFiles | Action::TrackFolder => {
-                inventory.track(&ctx, &mut config, &mut state)?;
+                inventory.track(&ctx, &mut config, &mut state, &omitted)?;
             }
         }
     }

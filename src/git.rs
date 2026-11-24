@@ -2,6 +2,7 @@
 //!
 //! Every fallible method returns an error naming the failing git arguments and its stderr.
 
+mod folder_ignore;
 #[cfg(target_os = "linux")]
 pub mod origin;
 

@@ -137,6 +137,14 @@ pub(crate) fn openat_dir(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd
     owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) })
 }
 
+/// Opens a child for reading without following links or waiting on a FIFO.
+pub(crate) fn openat_read(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<File> {
+    let flags =
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY;
+    // SAFETY: the open directory descriptor and NUL-terminated name outlive this call.
+    owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) }).map(File::from)
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn openat_path(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
     // SAFETY: `open_how` contains only integer fields, and zero leaves `mode` unset.

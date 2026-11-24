@@ -5649,3 +5649,36 @@ fn desktop_origin_refuses_a_symlinked_configuration() -> R {
     assert!(config.is_symlink());
     Ok(())
 }
+
+/// Replacing a missing repository ancestor with a symlink after review must leave its target untouched.
+#[test]
+#[cfg(target_os = "linux")]
+fn held_capture_refuses_a_substituted_parent() -> anyhow::Result<()> {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    env.write(".config/app/seed", b"seed", 0o644);
+    env.ok(&["add", ".config/app"]);
+    let key = ".config/app/assets/icons/blank.png";
+    env.write(key, b"binary\0image", 0o644);
+    let send = |request: serde_json::Value| {
+        env.run_stdin(
+            &[],
+            request.to_string().as_bytes(),
+            &["remedy", "--from", "-", "--json"],
+        )
+    };
+    let preview = send(serde_json::json!({"schema_version":1,"operation":"review","key":key}));
+    assert!(preview.status.success());
+    let record: serde_json::Value =
+        serde_json::from_slice(preview.stdout.split(|b| *b == b'\n').next().unwrap())?;
+    assert_eq!(record.get("executable"), Some(&serde_json::json!(true)));
+    let elsewhere = env.home().join("elsewhere");
+    fs::create_dir(&elsewhere)?;
+    symlink(&elsewhere, env.repo().join(".config/app/assets"))?;
+    let result = send(
+        serde_json::json!({"schema_version":1,"operation":"execute","key":key,"snapshot":record.get("snapshot")}),
+    );
+    assert!(!result.status.success());
+    assert!(fs::read_dir(elsewhere)?.next().is_none());
+    Ok(())
+}

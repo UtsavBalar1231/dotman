@@ -19,7 +19,7 @@ use crate::system::{self, Verdict};
 use crate::variant::{Flag, Sources};
 use anyhow::{Context as _, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 #[derive(Clone, Serialize)]
@@ -506,7 +506,9 @@ struct WarningValue {
 }
 
 #[derive(Serialize)]
-struct ReviewContext {
+struct ReviewContext<'a> {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    kept_local: &'a BTreeMap<String, String>,
     record: &'static str,
     hooks: HookReview,
     unapproved_dirs: Vec<DirectoryReview>,
@@ -689,6 +691,7 @@ impl Report<'_> {
         json::write(
             out,
             &ReviewContext {
+                kept_local: &self.state.kept_local,
                 record: "review_context",
                 hooks: HookReview::new(self.ctx, self.config, self.state)?,
                 unapproved_dirs: self

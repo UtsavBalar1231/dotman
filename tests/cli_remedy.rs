@@ -199,6 +199,23 @@ fn captures_reviewed_leaf_without_touching_siblings() {
 
 #[test]
 #[cfg(target_os = "linux")]
+fn nested_held_capture_binds_missing_directories_to_the_review() {
+    let env = fixture();
+    let key = ".config/app/assets/nested/blank.png";
+    env.write(key, b"image\0data", 0o644);
+    let assets = env.repo().join(".config/app/assets");
+    let snap = snapshot(&env, key).unwrap();
+    assert!(!assets.exists());
+    std::fs::create_dir(&assets).unwrap();
+    assert!(!execute(&env, key, &snap).status.success());
+    assert!(!assets.join("nested").exists());
+    let snap = snapshot(&env, key).unwrap();
+    assert!(execute(&env, key, &snap).status.success());
+    assert_eq!(std::fs::read(env.repo().join(key)).unwrap(), b"image\0data");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn refuses_stale_content_and_occupied_destination() {
     for occupied in [false, true] {
         let env = fixture();
@@ -1129,6 +1146,68 @@ fn tracking_multiple_files_reports_holds_and_redacts_sensitive_names() {
 }
 
 #[test]
+fn partial_tracking_keeps_omitted_home_files_out_of_sync() {
+    for (already_captured, keep_new_rule) in [(false, false), (true, false), (false, true)] {
+        let env = TestEnv::new();
+        env.ok(&["init", "--no-remote"]);
+        env.write("widgets/base", b"base", 0o644);
+        if already_captured {
+            env.ok(&["add", "widgets"]);
+        }
+        let keep = "widgets/eww/main.yuck";
+        let omit = "widgets/eww/debug[1].log";
+        env.write(keep, b"widget", 0o644);
+        env.write(omit, b"local", 0o644);
+        let id = std::fs::read_to_string(env.repo().join(".git/dotman-id")).unwrap();
+        let folder = ["widgets/eww"];
+        let files = [keep, omit];
+        let (action, paths) = if already_captured {
+            ("track_files", files.as_slice())
+        } else {
+            ("track_folder", folder.as_slice())
+        };
+        let read =
+            || first_tracking_record(&tracking_request(&env, &id, action, paths, None)).unwrap();
+        let apply = |preview: &Value, excluded: &[usize]| {
+            let input = json!({"schema_version":1,"repo_id":id.trim(),"operation":action,
+                "paths":paths,"expected":preview.get("token"),"excluded":excluded,"keep_folder_rule":keep_new_rule});
+            env.run_stdin(
+                &[],
+                input.to_string().as_bytes(),
+                &["remedy", "--from", "-", "--json"],
+            )
+        };
+        let preview = read();
+        assert_eq!(preview.get("files"), Some(&json!([omit, keep])));
+        assert!(!apply(&preview, &[0, 1]).status.success());
+        assert!(!apply(&preview, &[2]).status.success());
+        env.write(omit, b"local change", 0o644);
+        assert_eq!(apply(&preview, &[0]).status.code(), Some(3));
+        assert!(!env.repo().join(keep).exists());
+        let done = first_tracking_record(&apply(&read(), &[0])).unwrap();
+        assert_eq!(done.get("files"), Some(&json!([keep])));
+        let rules = if keep_new_rule {
+            folder.as_slice()
+        } else {
+            &[]
+        };
+        assert_eq!(done.get("folders"), Some(&json!(rules)));
+        env.write("widgets/eww/debug1.log", b"another file", 0o644);
+        env.ok(&["sync"]);
+        assert_eq!(std::fs::read(env.repo().join(keep)).unwrap(), b"widget");
+        assert!(!env.repo().join(omit).exists());
+        assert_eq!(
+            std::fs::read(env.home().join(omit)).unwrap(),
+            b"local change"
+        );
+        assert_eq!(
+            env.repo().join("widgets/eww/debug1.log").exists(),
+            already_captured || keep_new_rule
+        );
+    }
+}
+
+#[test]
 fn tracking_binds_the_folder_inventory_and_keeps_local_files_on_forget() {
     let parsed_tracking = |output: &std::process::Output| first_tracking_record(output).unwrap();
     let env = TestEnv::new();
@@ -1316,4 +1395,143 @@ fn desktop_origin_reads_effective_routes_and_reviews_local_config() {
             .status
             .success()
     );
+}
+
+#[test]
+fn folder_review_and_later_sync_respect_local_discovery_rules() {
+    let env = TestEnv::new();
+    env.ok(&["init"]);
+    let id = std::fs::read_to_string(env.repo().join(".git/dotman-id")).unwrap();
+    let folder = [".config/eww"];
+    let write = |key: &str, data: &[u8]| env.write(format!(".config/eww/{key}"), data, 0o644);
+    for key in [
+        "eww.yuck",
+        ".omca/rules/keep.md",
+        ".claude/settings.json",
+        "README.md",
+        ".ruff_cache/CACHEDIR.TAG",
+        "scripts/.ruff_cache/.gitignore",
+        ".omca/work/local.json",
+        ".claude/agent-memory/a.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+    ] {
+        write(key, b"fixture");
+    }
+    write(".omca/.gitignore", b"*\n!/rules/\n!/rules/**\n");
+    let review = |expected| tracking_request(&env, &id, "track_folder", &folder, expected);
+    let before = first_tracking_record(&review(None)).unwrap();
+    assert_eq!(
+        before.get("files"),
+        Some(&json!([
+            ".config/eww/.claude/settings.json",
+            ".config/eww/.omca/rules/keep.md",
+            ".config/eww/README.md",
+            ".config/eww/eww.yuck"
+        ]))
+    );
+    for held in [
+        ".ruff_cache",
+        "scripts/.ruff_cache",
+        ".claude/agent-memory",
+        ".omca/work",
+        "CLAUDE.md",
+        "AGENTS.md",
+    ] {
+        assert!(
+            before
+                .get("held")
+                .and_then(|paths| paths.get(format!(".config/eww/{held}")))
+                .is_some(),
+            "{held}"
+        );
+    }
+    write(".omca/.gitignore", b"*\n");
+    assert_eq!(
+        review(before.get("token").and_then(Value::as_str))
+            .status
+            .code(),
+        Some(3)
+    );
+    let current = first_tracking_record(&review(None)).unwrap();
+    write(".ruff_cache/local", b"new scratch");
+    first_tracking_record(&review(current.get("token").and_then(Value::as_str))).unwrap();
+    write("scripts/.ruff_cache/later", b"new cache");
+    write(".omca/work/later", b"new agent state");
+    write("later.yuck", b"source");
+    env.ok(&["sync"]);
+    assert!(env.repo().join(".config/eww/later.yuck").exists());
+    for excluded in [
+        ".ruff_cache",
+        "scripts/.ruff_cache",
+        ".omca/work",
+        "AGENTS.md",
+        "CLAUDE.md",
+    ] {
+        assert!(!env.repo().join(".config/eww").join(excluded).exists());
+    }
+    env.ok(&["add", ".config/eww/AGENTS.md"]);
+    write("AGENTS.md", b"changed instructions");
+    env.ok(&["sync"]);
+    assert_eq!(
+        std::fs::read(env.repo().join(".config/eww/AGENTS.md")).unwrap(),
+        b"changed instructions"
+    );
+}
+
+#[test]
+fn kept_local_survives_content_changes_and_sync_until_released() -> anyhow::Result<()> {
+    let env = fixture();
+    let key = ".config/app/data";
+    let state = env.state_dir().join("state.toml");
+    let id = std::fs::read_to_string(env.repo().join(".git/dotman-id"))?;
+    let change = |operation: &str, key: &str, repo_id: &str| {
+        let request = json!({"schema_version":1, "operation":operation, "key":key,
+            "repo_id":repo_id,"repo":env.repo(),"home":env.home(),"state":state});
+        env.run_stdin(
+            &[],
+            request.to_string().as_bytes(),
+            &["remedy", "--from", "-", "--json"],
+        )
+    };
+    assert!(
+        !change("keep_local", key, "another-repository")
+            .status
+            .success()
+    );
+    assert!(change("keep_local", key, id.trim()).status.success());
+    let private = ".config/app/_tokens.scss";
+    env.write(private, b"local palette", 0o644);
+    assert!(change("keep_local", private, id.trim()).status.success());
+    assert!(!std::fs::read_to_string(&state)?.contains(private));
+    env.write(key, b"now eligible text", 0o644);
+    env.write(".config/app/other", b"sibling", 0o644);
+    env.ok(&["sync"]);
+    env.ok(&["sync"]);
+    assert!(!env.repo().join(key).exists());
+    assert!(!env.repo().join(private).exists());
+    assert_eq!(
+        std::fs::read(env.repo().join(".config/app/other"))?,
+        b"sibling"
+    );
+    let output = env.run(&["status", "--json"]);
+    assert!(output.status.success());
+    let records = std::str::from_utf8(&output.stdout)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()?;
+    let saved = records
+        .iter()
+        .find_map(|r| r.get("kept_local"))
+        .and_then(Value::as_object)
+        .unwrap();
+    let (digest, _) = saved
+        .iter()
+        .find(|(_, name)| name.as_str() == Some(key))
+        .unwrap();
+    assert!(change("review_again", digest, id.trim()).status.success());
+    env.ok(&["sync"]);
+    assert_eq!(std::fs::read(env.repo().join(key))?, b"now eligible text");
+    assert!(!env.repo().join(private).exists());
+    Ok(())
 }

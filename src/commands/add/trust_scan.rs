@@ -15,7 +15,7 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_ENTRIES: usize = 4096;
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -75,6 +75,7 @@ pub fn scan(
 }
 
 struct Scanner<'a> {
+    state: &'a State,
     ctx: &'a Context,
     known: &'a BTreeSet<String>,
     approved: BTreeSet<String>,
@@ -84,6 +85,7 @@ struct Scanner<'a> {
     count: usize,
     bytes: u64,
     result: TrustScan,
+    ignore_rules: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 fn scan_inner(
@@ -121,6 +123,7 @@ fn scan_inner(
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&ctx.paths.home)?;
     let mut scanner = Scanner {
+        state,
         ctx,
         known,
         approved: state
@@ -134,6 +137,7 @@ fn scan_inner(
         count: 0,
         bytes: 0,
         result: TrustScan::default(),
+        ignore_rules: BTreeMap::new(),
     };
     let mut ordered = BTreeSet::new();
     for root in roots {
@@ -172,6 +176,7 @@ fn scan_inner(
                 .all(|key| !known.contains(key)),
         "collision"
     );
+    scanner.apply_discovery_rules(&ordered)?;
     Ok(scanner.result)
 }
 
@@ -185,6 +190,59 @@ fn open_root(home: &File, root: &str) -> Result<File> {
 }
 
 impl Scanner<'_> {
+    fn apply_discovery_rules(&mut self, roots: &BTreeSet<&str>) -> Result<()> {
+        let mut permitted = BTreeSet::new();
+        let mut approved = BTreeSet::new();
+        for &root in roots {
+            let root_path = Path::new(root);
+            let rules = self
+                .ignore_rules
+                .iter()
+                .filter_map(|(path, bytes)| {
+                    Some((path.strip_prefix(root_path).ok()?.to_owned(), bytes.clone()))
+                })
+                .collect();
+            let candidates = self.result.leaves.iter().filter_map(|(key, leaf)| {
+                if !matches!(
+                    leaf.eligibility,
+                    Eligibility::Eligible | Eligibility::Unapproved
+                ) {
+                    return None;
+                }
+                Some((Path::new(key).strip_prefix(root_path).ok()?, false))
+            });
+            let ignored = self
+                .ctx
+                .git
+                .folder_ignores_from_rules(&rules, candidates.clone())?;
+            for (path, _) in candidates.filter(|(path, _)| !ignored.contains(*path)) {
+                let key = root_path.join(path);
+                if self.approved.contains(root) {
+                    approved.insert(key.clone());
+                }
+                permitted.insert(key);
+            }
+        }
+        for (key, leaf) in &mut self.result.leaves {
+            if matches!(
+                leaf.eligibility,
+                Eligibility::Eligible | Eligibility::Unapproved
+            ) {
+                let path = Path::new(key);
+                leaf.eligibility = if !permitted.contains(path)
+                    || super::local_tool_reason(key, false).is_some()
+                {
+                    Eligibility::Ignored
+                } else if approved.contains(path) {
+                    Eligibility::Eligible
+                } else {
+                    Eligibility::Unapproved
+                };
+            }
+        }
+        Ok(())
+    }
+
     fn validate_name(&self, key: &str, directory: bool) -> Result<()> {
         ensure!(!key.is_empty() && key.len() <= MAX_KEY, "name");
         validate_key(key)?;
@@ -239,6 +297,13 @@ impl Scanner<'_> {
             let component = CString::new(name)?;
             let pinned = File::from(sys::openat_path(dir.as_fd(), &component)?);
             let metadata = pinned.metadata()?;
+            if name != ".gitignore"
+                && !metadata.is_dir()
+                && !self.known.contains(&child)
+                && self.state.keeps_local(&child)
+            {
+                continue;
+            }
             self.validate_name(&child, metadata.is_dir())?;
             if metadata.is_dir() {
                 self.walk(&pinned, &child, depth.saturating_add(1), ignored, unlisted)?;
@@ -284,7 +349,10 @@ impl Scanner<'_> {
         let current = File::from(sys::openat_path(dir.as_fd(), name)?).metadata()?;
         ensure!(same(&before, &current), "changed");
         ensure!(hold_by_content(&bytes, key, &[]).is_none(), "held");
-        let eligibility = if parent_ignored || self.listed.matches(key, false) {
+        let eligibility = if parent_ignored
+            || self.listed.matches(key, false)
+            || (!self.known.contains(key) && self.state.keeps_local(key))
+        {
             Eligibility::Ignored
         } else if parent_unlisted || self.unlisted.matches(key, false) {
             Eligibility::UnlistedIgnore
@@ -296,6 +364,9 @@ impl Scanner<'_> {
             Eligibility::Unapproved
         };
         let tuple = Tuple::of_file(&bytes, before.mode());
+        if name.to_bytes() == b".gitignore" {
+            self.ignore_rules.insert(PathBuf::from(key), bytes);
+        }
         ensure!(
             self.result
                 .leaves
@@ -394,6 +465,32 @@ mod tests {
         fn home(&self) -> &Path {
             &self.ctx.paths.home
         }
+    }
+
+    #[test]
+    fn trust_uses_the_selected_roots_ignore_rules_and_keeps_known_files() -> Result<()> {
+        let mut f = Fixture::new()?;
+        f.config.dirs.paths = vec!["configs".into(), "configs/sub".into()];
+        f.state.approve_dirs(&["configs".to_owned()]);
+        fs::create_dir(f.home().join("configs/sub"))?;
+        fs::write(f.home().join("configs/.gitignore"), "sub/\n*.log\n")?;
+        for name in ["sub/only", "known.log", "scratch.log", "AGENTS.md"] {
+            fs::write(f.home().join("configs").join(name), "contents")?;
+        }
+        let known = BTreeSet::from(["configs/known.log".to_owned()]);
+        let reviewed = scan(&f.ctx, &f.config, &known, &f.state, &f.config.dirs.paths)?;
+        let disposition = |key| reviewed.leaves.get(key).map(|leaf| leaf.eligibility);
+        assert_eq!(disposition("configs/known.log"), Some(Eligibility::Known));
+        assert_eq!(
+            disposition("configs/scratch.log"),
+            Some(Eligibility::Ignored)
+        );
+        assert_eq!(disposition("configs/AGENTS.md"), Some(Eligibility::Ignored));
+        assert_eq!(
+            disposition("configs/sub/only"),
+            Some(Eligibility::Unapproved)
+        );
+        Ok(())
     }
 
     #[test]
